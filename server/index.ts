@@ -11,6 +11,11 @@ import {
   type TopicGraph,
 } from './curriculum.js';
 import { loadSeedBank, type LoadSeedBankResult } from './codex/seed-bank.js';
+import {
+  registerSessionRoutes,
+  registerUnavailableSession,
+  type SessionRoutesOptions,
+} from './routes/session.js';
 
 export { databasePath };
 
@@ -79,10 +84,14 @@ export function syncCurriculumState(
  * раз за старт, после того как темы заведены: без строк `topic_state` вставка
  * упала бы на внешнем ключе.
  */
-export function loadSeedTasks(path: string, graph: TopicGraph): LoadSeedBankResult {
+export function loadSeedTasks(
+  path: string,
+  graph: TopicGraph,
+  seedDir?: string,
+): LoadSeedBankResult {
   const db = openDatabase(path);
   try {
-    return loadSeedBank(db, graph);
+    return loadSeedBank(db, graph, seedDir === undefined ? {} : { dir: seedDir });
   } finally {
     db.close();
   }
@@ -113,7 +122,13 @@ export const HOST = '0.0.0.0';
 
 export type CurriculumStatus = 'ok' | 'error';
 
-export function buildServer(curriculumDir: string = CURRICULUM_DIR): FastifyInstance {
+/** Настройки занятия, которые тесты подменяют: разбирающий спор и запуск фона. */
+export type ServerOptions = Omit<SessionRoutesOptions, 'db' | 'graph'>;
+
+export function buildServer(
+  curriculumDir: string = CURRICULUM_DIR,
+  options: ServerOptions = {},
+): FastifyInstance {
   const app = Fastify({ logger: false });
   let curriculum: CurriculumStatus = 'ok';
   let graph: TopicGraph | undefined;
@@ -148,7 +163,7 @@ export function buildServer(curriculumDir: string = CURRICULUM_DIR): FastifyInst
   function trySeedBank(): void {
     if (graph === undefined) return;
     try {
-      const seeded = loadSeedTasks(databasePath(), graph);
+      const seeded = loadSeedTasks(databasePath(), graph, options.seedDir);
       if (seeded.loaded > 0) {
         process.stderr.write(`посевной банк: добавлено ${seeded.loaded} задани(й)\n`);
       }
@@ -157,7 +172,32 @@ export function buildServer(curriculumDir: string = CURRICULUM_DIR): FastifyInst
     }
   }
 
+  function tryOpenSession(): ReturnType<typeof openDatabase> | undefined {
+    try {
+      return openDatabase(databasePath());
+    } catch (error) {
+      process.stderr.write(`занятие не поднято: база недоступна: ${(error as Error).message}\n`);
+      return undefined;
+    }
+  }
+
   if (trySyncCurriculum()) trySeedBank();
+
+  // Занятию нужно живое соединение: выдача задания, приём ответа и разбор спора
+  // идут транзакциями, а открывать базу на каждый запрос значит терять WAL и
+  // получать чужой снимок посреди read-modify-write.
+  const sessionDb = graph !== undefined && curriculumSynchronized ? tryOpenSession() : undefined;
+  if (graph !== undefined && sessionDb !== undefined) {
+    registerSessionRoutes(app, { ...options, db: sessionDb, graph });
+    app.addHook('onClose', () => {
+      sessionDb.close();
+    });
+  } else {
+    registerUnavailableSession(
+      app,
+      graph === undefined ? 'карта тем не загружена' : 'база недоступна',
+    );
+  }
 
   // `status` выводится из проверки базы, а не из факта «маршрут ответил»:
   // здоровье читают ровно тогда, когда что-то сломалось, и зелёный статус над

@@ -40,8 +40,11 @@ interface TaskBatchJson {
  * Ключ для поиска повторов внутри `accept[]`. Берётся нормализация того же
  * формата, которым потом сверяется ответ ученика: две записи, неотличимые для
  * нормализатора, — мусор, а не варианты.
+ *
+ * Экспортируется ради разбора спора: подтверждённый ответ ученика дописывается
+ * в `accept[]`, и решать там, что считать повтором, надо ровно так же.
  */
-function duplicateKey(value: string, format: AnswerFormat): string {
+export function duplicateKey(value: string, format: AnswerFormat): string {
   return format === 'choice' ? normalizeChoice(value) : normalizeText(value);
 }
 

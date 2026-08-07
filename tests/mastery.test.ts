@@ -20,6 +20,7 @@ import {
   nextMastery,
   readTopicState,
   readTopicStates,
+  recomputeTopicState,
   recordAttempt,
   reviewIntervalDays,
   writeTopicState,
@@ -364,6 +365,74 @@ describe('модель знаний', () => {
     it('отдаёт пустую карту состояний на пустой базе', () => {
       db.prepare('DELETE FROM topic_state').run();
       expect(readTopicStates(db).size).toBe(0);
+    });
+  });
+
+  describe('пересчёт по истории попыток', () => {
+    let tempDir: string;
+    let db: Database;
+
+    /** Задание в банке: без него у попытки нет ни сложности, ни внешнего ключа. */
+    function addTask(difficulty: number): number {
+      const info = db
+        .prepare(
+          `INSERT INTO task_bank (topic_id, question, answer, difficulty)
+           VALUES ('math.fractions', 'вопрос', '45', ?)`,
+        )
+        .run(difficulty);
+      return Number(info.lastInsertRowid);
+    }
+
+    function addAttempt(correct: boolean, difficulty: number, day: number): void {
+      db.prepare(
+        `INSERT INTO attempts (task_id, topic_id, answer, is_correct, created_at)
+         VALUES (?, 'math.fractions', '45', ?, ?)`,
+      ).run(addTask(difficulty), correct ? 1 : 0, at(day).toISOString());
+    }
+
+    beforeEach(() => {
+      tempDir = mkdtempSync(join(tmpdir(), 'edukator-mastery-replay-'));
+      db = openDatabase(join(tempDir, 'test.db'));
+      db.prepare('INSERT INTO topic_state (topic_id) VALUES (?)').run('math.fractions');
+    });
+
+    afterEach(() => {
+      db.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it('повторяет цепочку попыток и совпадает с пошаговым применением', () => {
+      addAttempt(true, 2, 0);
+      addAttempt(false, 3, 1);
+      addAttempt(true, 1, 2);
+
+      const replayed = recomputeTopicState(db, 'math.fractions');
+
+      let expected = newTopicState('math.fractions');
+      expected = applyAttempt(expected, attempt({ correct: true, difficulty: 2, at: at(0) }));
+      expected = applyAttempt(expected, attempt({ correct: false, difficulty: 3, at: at(1) }));
+      expected = applyAttempt(expected, attempt({ correct: true, difficulty: 1, at: at(2) }));
+      expect(replayed).toEqual(expected);
+      expect(readTopicState(db, 'math.fractions')).toEqual(expected);
+    });
+
+    it('видит исправленный результат попытки: ради этого пересчёт и нужен', () => {
+      addAttempt(false, 2, 0);
+      const wrong = recomputeTopicState(db, 'math.fractions');
+
+      db.prepare('UPDATE attempts SET is_correct = 1').run();
+      const fixed = recomputeTopicState(db, 'math.fractions');
+
+      expect(wrong.mastery).toBe(0);
+      expect(fixed.mastery).toBeGreaterThan(0);
+      expect(fixed.attempts).toBe(1);
+    });
+
+    it('обнуляет состояние темы без попыток и падает на теме вне topic_state', () => {
+      writeTopicState(db, applyAttempt(newTopicState('math.fractions'), attempt()));
+
+      expect(recomputeTopicState(db, 'math.fractions')).toEqual(newTopicState('math.fractions'));
+      expect(() => recomputeTopicState(db, 'math.unknown')).toThrow(/math\.unknown/);
     });
   });
 });

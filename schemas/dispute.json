@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edukator.local/schemas/dispute.json",
+  "title": "Разбор спорного ответа",
+  "description": "Ответ модели, разбирающей спор «я всё-таки прав»: означает ли ответ ученика то же самое, что эталон задания. Ограничения, которые структурированный вывод не принимает, повторены словами в description: модель их видит, а проверяет server/codex/dispute.ts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["student_correct", "note"],
+  "properties": {
+    "student_correct": {
+      "description": "true, если ответ ученика — правильный ответ на это задание: та же величина или та же мысль другими словами. Похожий, близкий или частично верный ответ — это false.",
+      "type": "boolean"
+    },
+    "note": {
+      "description": "Одна фраза с обоснованием: почему ответ ученика значит то же самое, что эталон, или чем он от него отличается.",
+      "type": "string"
+    }
+  }
+}

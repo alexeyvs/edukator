@@ -297,3 +297,51 @@ export function recordAttempt(db: Database, topicId: string, attempt: Attempt): 
     return next;
   }).immediate();
 }
+
+interface HistoryRow {
+  is_correct: number;
+  hint_used: number;
+  difficulty: number;
+  created_at: string;
+}
+
+/**
+ * Пересчитывает состояние темы, проигрывая все её попытки заново от нулевого
+ * состояния. Нужно разбору спора: подтверждённая правота ученика меняет
+ * результат уже записанной попытки, а сдвиги `mastery` считаются по цепочке —
+ * задним числом её иначе не поправить.
+ *
+ * Источник истины здесь — таблица `attempts`: состояние, накопленное помимо
+ * попыток, пересчёт не сохраняет. Другого способа получить историю у модели нет,
+ * а расхождение всё равно означало бы, что `mastery` разошёлся с тем, что ученик
+ * реально нарешал.
+ */
+export function recomputeTopicState(db: Database, topicId: string): TopicState {
+  return db.transaction((): TopicState => {
+    // Отметки времени внутри батча совпадают до миллисекунды, поэтому порядок
+    // добивается по `id`: `applyAttempt` требует неубывающего времени, а при
+    // неустойчивом порядке пересчёт то падал бы, то нет.
+    const rows = db
+      .prepare<[string], HistoryRow>(
+        `SELECT attempts.is_correct, attempts.hint_used, task_bank.difficulty, attempts.created_at
+           FROM attempts
+           JOIN task_bank ON task_bank.id = attempts.task_id
+          WHERE attempts.topic_id = ?
+          ORDER BY attempts.created_at, attempts.id`,
+      )
+      .all(topicId);
+
+    let state = newTopicState(topicId);
+    for (const row of rows) {
+      state = applyAttempt(state, {
+        correct: row.is_correct === 1,
+        difficulty: row.difficulty,
+        hintUsed: row.hint_used === 1,
+        at: new Date(row.created_at),
+      });
+    }
+
+    writeTopicState(db, state);
+    return state;
+  }).immediate();
+}
