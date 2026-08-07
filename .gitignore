@@ -5,3 +5,4 @@ node_modules/
 .env
 content/cache/
 coverage/
+.tmp/

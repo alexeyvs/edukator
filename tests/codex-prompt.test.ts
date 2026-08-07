@@ -98,6 +98,20 @@ describe('buildGenerationPrompt: состав промпта', () => {
     expect(textual).not.toContain('ровно одно число');
   });
 
+  // Сверка выбора идёт посимвольно, а метку варианта ученик наберёт как придётся:
+  // без обеих записей в accept правильный ответ «Work in pairs» на задании с
+  // ответом «A) Work in pairs» считался бы ошибкой.
+  it('требует для выбора и голый вариант, и вариант с меткой', () => {
+    const prompt = buildGenerationPrompt({
+      topic: topic({ answerFormat: 'choice' }),
+      difficulty: 1,
+      persona: PERSONA,
+    });
+
+    expect(prompt).toContain('обе записи');
+    expect(prompt).toContain('сама метка отдельно');
+  });
+
   it('приводит целевую сложность к диапазону 1..3', () => {
     const base = { topic: topic(), persona: PERSONA };
 
@@ -263,6 +277,9 @@ describe('buildValidationPrompt', () => {
 
     expect(numeric).toContain('одно число');
     expect(choice).toContain('буква в букву');
+    // Метку варианта проверяющий не пишет: генератор кладёт в accept голый текст,
+    // и разнобой в этом месте отбраковывал бы верные задания как расхождение.
+    expect(choice).toContain('без буквенной метки');
   });
 
   it('не даёт условию переопределить инструкции промпта', () => {

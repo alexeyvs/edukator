@@ -10,6 +10,7 @@ import {
   type SyncResult,
   type TopicGraph,
 } from './curriculum.js';
+import { loadSeedBank, type LoadSeedBankResult } from './codex/seed-bank.js';
 
 export { databasePath };
 
@@ -72,6 +73,21 @@ export function syncCurriculumState(
   return syncLoadedCurriculum(path, loadCurriculum(curriculumDir));
 }
 
+/**
+ * Заливает посевной банк в `task_bank`. Идемпотентна: повторный запуск ничего
+ * не добавляет — задания отсекаются по отпечатку формулировки. Вызывается один
+ * раз за старт, после того как темы заведены: без строк `topic_state` вставка
+ * упала бы на внешнем ключе.
+ */
+export function loadSeedTasks(path: string, graph: TopicGraph): LoadSeedBankResult {
+  const db = openDatabase(path);
+  try {
+    return loadSeedBank(db, graph);
+  } finally {
+    db.close();
+  }
+}
+
 function syncLoadedCurriculum(path: string, graph: TopicGraph): SyncResult {
   const db = openDatabase(path);
   try {
@@ -125,7 +141,23 @@ export function buildServer(curriculumDir: string = CURRICULUM_DIR): FastifyInst
     }
   }
 
-  trySyncCurriculum();
+  // Посев заливается один раз за старт, а не на каждом /api/health: он
+  // идемпотентен, но разбирать три файла и биться об уникальный индекс на
+  // каждом опросе здоровья незачем. Отсутствие или порча посева сервер не
+  // роняет — без него приложение работает, просто первая тема холодная.
+  function trySeedBank(): void {
+    if (graph === undefined) return;
+    try {
+      const seeded = loadSeedTasks(databasePath(), graph);
+      if (seeded.loaded > 0) {
+        process.stderr.write(`посевной банк: добавлено ${seeded.loaded} задани(й)\n`);
+      }
+    } catch (error) {
+      process.stderr.write(`посевной банк не загружен: ${(error as Error).message}\n`);
+    }
+  }
+
+  if (trySyncCurriculum()) trySeedBank();
 
   // `status` выводится из проверки базы, а не из факта «маршрут ответил»:
   // здоровье читают ровно тогда, когда что-то сломалось, и зелёный статус над

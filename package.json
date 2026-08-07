@@ -12,6 +12,7 @@
     "start": "tsx server/index.ts",
     "extract-toc": "tsx scripts/extract-toc.ts",
     "build-curriculum": "tsx scripts/build-curriculum.ts",
+    "prefetch": "tsx scripts/prefetch.ts",
     "test": "vitest run",
     "coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
