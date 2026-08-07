@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "tsx watch server/index.ts",
     "start": "tsx server/index.ts",
+    "extract-toc": "tsx scripts/extract-toc.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint ."
@@ -24,6 +25,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.7.0",
     "eslint": "^9.37.0",
+    "pdf-parse": "^2.4.5",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.0",
