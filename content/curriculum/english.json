@@ -1,0 +1,277 @@
+{
+  "subject": "english",
+  "topics": [
+    {
+      "id": "english.classroom-language",
+      "subject": "english",
+      "title": "Понимание школьных инструкций на английском",
+      "exam_weight": 1,
+      "difficulty": 1,
+      "prereqs": [],
+      "answer_format": "choice",
+      "prompt_seed": "Генерируй короткие школьные инструкции и реплики учителя: open, read, write, listen, match, choose, work in pairs. Предлагай выбрать верное действие или ответ. Примеры: «What should you do? — Listen and circle the correct word.»; «Choose the instruction for работу в парах.»; «Match the teacher's instruction with its meaning.»"
+    },
+    {
+      "id": "english.basic-vocabulary",
+      "subject": "english",
+      "title": "Основные слова по повседневным темам",
+      "exam_weight": 3,
+      "difficulty": 1,
+      "prereqs": [],
+      "answer_format": "text",
+      "prompt_seed": "Проверяй лексику по темам семья, школа, дом, еда, одежда, животные, город, погода, хобби. Используй знакомые слова уровня 6 класса, задания на перевод, выбор слова по определению и заполнение пропуска. Примеры: «Choose the word: A place where you can borrow books is a ___.»; «Complete: My brother likes playing ___.»; «Write the English word for «зонт».»"
+    },
+    {
+      "id": "english.present-simple",
+      "subject": "english",
+      "title": "Настоящее простое время",
+      "exam_weight": 3,
+      "difficulty": 1,
+      "prereqs": [
+        "english.basic-vocabulary"
+      ],
+      "answer_format": "text",
+      "prompt_seed": "Генерируй предложения о привычках, расписании, хобби и фактах; чередуй утверждения, отрицания и вопросы с do/does. Используй he, she, it и частотные наречия. Примеры: «Complete: Kate ___ (go) to school by bus.»; «Make a question: Tom plays tennis on Fridays.»; «Choose: My parents don't / doesn't work on Sundays.»"
+    },
+    {
+      "id": "english.present-continuous",
+      "subject": "english",
+      "title": "Настоящее длительное время",
+      "exam_weight": 3,
+      "difficulty": 2,
+      "prereqs": [
+        "english.present-simple"
+      ],
+      "answer_format": "text",
+      "prompt_seed": "Генерируй задания на действия, происходящие сейчас, с am/is/are и глаголом с -ing; сопоставляй с Present Simple. Берись за лексику дома, в классе, на улице. Примеры: «Look at the picture and complete: The children ___ (run).»; «Choose: We usually read / are reading after dinner.»; «Make a negative sentence: She is doing her homework.»"
+    },
+    {
+      "id": "english.past-simple-regular",
+      "subject": "english",
+      "title": "Прошедшее время: правильные глаголы",
+      "exam_weight": 3,
+      "difficulty": 2,
+      "prereqs": [
+        "english.present-simple"
+      ],
+      "answer_format": "text",
+      "prompt_seed": "Составляй задания о вчерашнем дне, выходных, каникулах и путешествии. Проверяй -ed, did/didn't и вопросы. Примеры: «Complete: We ___ (visit) our grandparents last Sunday.»; «Put the verb in the negative: Ann watched a film.»; «Ask a question about: They played football yesterday.»"
+    },
+    {
+      "id": "english.past-simple-irregular",
+      "subject": "english",
+      "title": "Прошедшее время: неправильные глаголы",
+      "exam_weight": 3,
+      "difficulty": 2,
+      "prereqs": [
+        "english.past-simple-regular"
+      ],
+      "answer_format": "text",
+      "prompt_seed": "Проверяй частотные формы went, saw, had, did, made, took, came, ate, bought, was/were в коротких рассказах. Примеры: «Complete: I ___ (go) to the zoo last Saturday.»; «Choose the correct form: They ___ a cake yesterday: make / made / making.»; «Write the past form of “see”.»"
+    },
+    {
+      "id": "english.future-plans",
+      "subject": "english",
+      "title": "Будущие планы и договорённости",
+      "exam_weight": 2,
+      "difficulty": 2,
+      "prereqs": [
+        "english.present-continuous"
+      ],
+      "answer_format": "text",
+      "prompt_seed": "Генерируй задания на be going to, will для простых прогнозов и Present Continuous для договорённостей. Темы: каникулы, встречи, погода, планы семьи. Примеры: «Complete: We are going to ___ (travel) in July.»; «Choose: I think it will / is going to rain tomorrow.»; «Make a question about Tom's plans for Saturday.»"
+    },
+    {
+      "id": "english.question-words",
+      "subject": "english",
+      "title": "Специальные вопросы",
+      "exam_weight": 3,
+      "difficulty": 2,
+      "prereqs": [
+        "english.present-simple",
+        "english.past-simple-regular"
+      ],
+      "answer_format": "text",
+      "prompt_seed": "Тренируй what, where, when, why, who, whose, which, how often, how much, how many. Давай ответы, к которым нужно составить вопрос, и предложения с пропуском вопросительного слова. Примеры: «___ do you go to school? — By bus.»; «Make a question: I visited my aunt because she was ill.»; «Choose: How much / How many milk do we need?»"
+    },
+    {
+      "id": "english.nouns-and-articles",
+      "subject": "english",
+      "title": "Существительные, артикли и множественное число",
+      "exam_weight": 3,
+      "difficulty": 2,
+      "prereqs": [
+        "english.basic-vocabulary"
+      ],
+      "answer_format": "text",
+      "prompt_seed": "Проверяй a/an/the, нулевой артикль в простых случаях, исчисляемые и неисчисляемые существительные, regular и частые irregular plurals. Примеры: «Choose: I have got a / an orange.»; «Complete: There are three ___ (child) in the garden.»; «Put in a, an, the or —: ___ London is a big city.»"
+    },
+    {
+      "id": "english.some-any-much-many",
+      "subject": "english",
+      "title": "Количество: some, any, much, many, a few и a little",
+      "exam_weight": 3,
+      "difficulty": 2,
+      "prereqs": [
+        "english.nouns-and-articles"
+      ],
+      "answer_format": "text",
+      "prompt_seed": "Генерируй ситуации про покупки, еду и дом; проверяй вопросительные, отрицательные и утвердительные предложения. Примеры: «Complete: Are there ___ eggs in the fridge?»; «Choose: We haven't got much / many juice.»; «Write a sentence with a few and books.»"
+    },
+    {
+      "id": "english.pronouns-and-possessives",
+      "subject": "english",
+      "title": "Местоимения и притяжательные формы",
+      "exam_weight": 2,
+      "difficulty": 2,
+      "prereqs": [
+        "english.basic-vocabulary"
+      ],
+      "answer_format": "text",
+      "prompt_seed": "Проверяй subject/object pronouns, possessive adjectives, possessive pronouns, 's и whose. Используй предметы, семью и школьные вещи. Примеры: «Complete: This is my sister. ___ name is Lucy.»; «Choose: The red bag is her / hers.»; «Whose bike is this? — It is ___.»"
+    },
+    {
+      "id": "english.adjectives-comparison",
+      "subject": "english",
+      "title": "Прилагательные и сравнение предметов",
+      "exam_weight": 3,
+      "difficulty": 2,
+      "prereqs": [
+        "english.basic-vocabulary"
+      ],
+      "answer_format": "text",
+      "prompt_seed": "Генерируй сравнение людей, городов, животных и вещей; проверяй comparative, superlative, than, the, а также good-better-best и bad-worse-worst. Примеры: «Complete: A cheetah is ___ (fast) than a horse.»; «Choose: This is the most / more interesting book.»; «Write a sentence comparing winter and summer.»"
+    },
+    {
+      "id": "english.adverbs-frequency-manner",
+      "subject": "english",
+      "title": "Наречия частоты и образа действия",
+      "exam_weight": 2,
+      "difficulty": 2,
+      "prereqs": [
+        "english.present-simple",
+        "english.adjectives-comparison"
+      ],
+      "answer_format": "text",
+      "prompt_seed": "Проверяй always, usually, often, sometimes, never и наречия на -ly; спрашивай о порядке слов и выборе adjective/adverb. Примеры: «Put the adverb in the right place: I am late. (never)»; «Choose: She sings beautiful / beautifully.»; «Complete: How ___ do you play computer games?»"
+    },
+    {
+      "id": "english.prepositions-place-time",
+      "subject": "english",
+      "title": "Предлоги места и времени",
+      "exam_weight": 3,
+      "difficulty": 2,
+      "prereqs": [
+        "english.basic-vocabulary"
+      ],
+      "answer_format": "text",
+      "prompt_seed": "Создавай задания по картинкам комнаты и расписанию: in, on, at, under, behind, between, next to, opposite, from...to. Примеры: «The cat is ___ the table.»; «Choose: Our lesson starts in / on / at 9 o'clock.»; «Describe where the library is: it is next to the bank.»"
+    },
+    {
+      "id": "english.modal-verbs",
+      "subject": "english",
+      "title": "Модальные глаголы: can, must, should и have to",
+      "exam_weight": 3,
+      "difficulty": 2,
+      "prereqs": [
+        "english.present-simple"
+      ],
+      "answer_format": "text",
+      "prompt_seed": "Генерируй правила школы, советы о здоровье, разрешения и способности. Проверяй форму после модального глагола и различие mustn't/don't have to в понятных контекстах. Примеры: «Complete: You ___ wear a helmet when cycling.»; «Choose: Can she to swim / swim?»; «Give advice: I have a toothache.»"
+    },
+    {
+      "id": "english.imperatives-and-rules",
+      "subject": "english",
+      "title": "Инструкции, запреты и правила",
+      "exam_weight": 2,
+      "difficulty": 1,
+      "prereqs": [
+        "english.classroom-language",
+        "english.modal-verbs"
+      ],
+      "answer_format": "choice",
+      "prompt_seed": "Генерируй таблички, инструкции и правила с imperative, don't и mustn't. Проси выбрать подходящую надпись или преобразовать фразу в правило. Примеры: «Choose the sign for: Do not feed the animals.»; «Make an instruction: you / open / your books.»; «Complete: ___ late for class!»"
+    },
+    {
+      "id": "english.reading-comprehension",
+      "subject": "english",
+      "title": "Чтение и понимание короткого текста",
+      "exam_weight": 3,
+      "difficulty": 2,
+      "prereqs": [
+        "english.present-simple",
+        "english.past-simple-irregular",
+        "english.basic-vocabulary"
+      ],
+      "answer_format": "choice",
+      "prompt_seed": "Пиши адаптированные тексты на 80–140 слов о школьной жизни, каникулах, книгах, здоровом образе жизни и поездках. После текста задавай вопросы на основную мысль, детали, true/false/not stated и подбор заголовка. Примеры: «Read the text and choose the best title.»; «Is the statement true, false or not stated: Ben travelled by plane?»; «Why did Mia join the school club?»"
+    },
+    {
+      "id": "english.writing-message-letter",
+      "subject": "english",
+      "title": "Короткое личное письмо или сообщение",
+      "exam_weight": 2,
+      "difficulty": 2,
+      "prereqs": [
+        "english.present-simple",
+        "english.past-simple-regular",
+        "english.future-plans"
+      ],
+      "answer_format": "text",
+      "prompt_seed": "Предлагай написать 50–80 слов другу: ответить на 2–3 вопроса, рассказать о каникулах, хобби, планах или поездке. Проверяй обращение, связки, времена и завершающую фразу. Примеры: «Write an email to Sam about your weekend.»; «Answer: What do you usually do after school? What are you going to do this summer?»; «Write a message inviting your friend to your birthday party.»"
+    },
+    {
+      "id": "english.listening-dialogues",
+      "subject": "english",
+      "title": "Понимание коротких диалогов на слух",
+      "exam_weight": 2,
+      "difficulty": 2,
+      "prereqs": [
+        "english.question-words",
+        "english.basic-vocabulary"
+      ],
+      "answer_format": "choice",
+      "prompt_seed": "Создавай короткие диалоги для мысленного прослушивания о покупках, расписании, дороге, здоровье и договорённостях; спрашивай ключевую деталь. Избегай редкой лексики. Примеры: «Listen and choose: What does the girl want to buy?»; «Listen to the dialogue. When will they meet?»; «Choose the place the boy is looking for.»"
+    },
+    {
+      "id": "english.travel-and-directions",
+      "subject": "english",
+      "title": "Поездки, транспорт и дорога в городе",
+      "exam_weight": 2,
+      "difficulty": 2,
+      "prereqs": [
+        "english.prepositions-place-time",
+        "english.question-words",
+        "english.future-plans"
+      ],
+      "answer_format": "text",
+      "prompt_seed": "Генерируй диалоги и задания о билетах, видах транспорта, маршрутах и указании пути: turn left, go straight, get on/off, ticket, platform. Примеры: «How can I get to the museum?»; «Complete: Take the bus and get ___ at the next stop.»; «Choose the correct direction from the map description.»"
+    },
+    {
+      "id": "english.health-and-lifestyle",
+      "subject": "english",
+      "title": "Здоровый образ жизни и самочувствие",
+      "exam_weight": 2,
+      "difficulty": 2,
+      "prereqs": [
+        "english.modal-verbs",
+        "english.some-any-much-many"
+      ],
+      "answer_format": "text",
+      "prompt_seed": "Строй задания на лексику еды, спорта и болезней, советах с should и правилах здорового образа жизни. Примеры: «Complete: You should ___ more water.»; «Choose the healthy lunch.»; «Write two pieces of advice for a child with a cold.»"
+    },
+    {
+      "id": "english.culture-holidays-nature",
+      "subject": "english",
+      "title": "Праздники, англоязычные страны и природа",
+      "exam_weight": 1,
+      "difficulty": 2,
+      "prereqs": [
+        "english.reading-comprehension",
+        "english.adjectives-comparison"
+      ],
+      "answer_format": "choice",
+      "prompt_seed": "Генерируй короткие тексты и викторины о Christmas, New Year, Великобритании, США, животных и заботе о природе. Проверяй лексику, понимание текста и простые экологические правила, не требуя редких дат. Примеры: «Choose the British holiday described in the text.»; «What can people do to protect nature?»; «Read and choose the country where people speak English.»"
+    }
+  ]
+}

@@ -11,6 +11,7 @@
     "dev": "tsx watch server/index.ts",
     "start": "tsx server/index.ts",
     "extract-toc": "tsx scripts/extract-toc.ts",
+    "build-curriculum": "tsx scripts/build-curriculum.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint ."
