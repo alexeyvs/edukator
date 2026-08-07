@@ -1,0 +1,381 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Database } from 'better-sqlite3';
+import { openDatabase, writeProfile, type Subject } from '../server/db.js';
+import { buildTopicGraph, type Topic, type TopicGraph } from '../server/curriculum.js';
+import { newTopicState, type TopicState } from '../server/mastery.js';
+import {
+  EXAM_HORIZON_DAYS,
+  OVERDUE_CAP,
+  PREREQ_MASTERY,
+  examUrgency,
+  planFromDatabase,
+  planRuns,
+  prereqsReady,
+  rankTopics,
+  reviewUrgency,
+  selectSubject,
+  selectTopic,
+  subjectDeficit,
+  topicPriority,
+} from '../server/scheduler.js';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function at(day: number): Date {
+  return new Date(Date.UTC(2026, 7, 7, 12) + day * DAY_MS);
+}
+
+function topic(id: string, patch: Partial<Topic> = {}): Topic {
+  return {
+    id,
+    subject: 'math',
+    title: id,
+    examWeight: 2,
+    difficulty: 2,
+    prereqs: [],
+    answerFormat: 'number',
+    promptSeed: 'seed',
+    ...patch,
+  };
+}
+
+function state(id: string, patch: Partial<TopicState> = {}): TopicState {
+  return { ...newTopicState(id), ...patch };
+}
+
+function stateMap(...states: TopicState[]): Map<string, TopicState> {
+  return new Map(states.map((item) => [item.topicId, item]));
+}
+
+/** Ровные темы одного предмета: фикстура для выбора предмета дня. */
+function subjectTopics(subject: Subject, count: number): Topic[] {
+  return Array.from({ length: count }, (_, index) => topic(`${subject}.t${index}`, { subject }));
+}
+
+function graphOf(topics: Topic[]): TopicGraph {
+  return buildTopicGraph(topics);
+}
+
+describe('планировщик', () => {
+  describe('предпосылки', () => {
+    const topics = [topic('math.base'), topic('math.next', { prereqs: ['math.base'] })];
+    const graph = graphOf(topics);
+
+    it('не предлагает тему, пока предпосылка не освоена', () => {
+      const states = stateMap(
+        state('math.base', { mastery: PREREQ_MASTERY - 0.01 }),
+        state('math.next'),
+      );
+
+      expect(prereqsReady(topics[1] as Topic, states)).toBe(false);
+      expect(topicPriority(topics[1] as Topic, states, { now: at(0) })).toBe(0);
+      expect(selectTopic(graph, states, 'math', { now: at(0) })?.topic.id).toBe('math.base');
+    });
+
+    it('открывает тему, когда предпосылка перевалила порог', () => {
+      const states = stateMap(state('math.base', { mastery: PREREQ_MASTERY }), state('math.next'));
+
+      expect(prereqsReady(topics[1] as Topic, states)).toBe(true);
+      expect(topicPriority(topics[1] as Topic, states, { now: at(0) })).toBeGreaterThan(0);
+      // Предпосылка освоена наполовину, зависимая тема не тронута — берём вторую.
+      expect(selectTopic(graph, states, 'math', { now: at(0) })?.topic.id).toBe('math.next');
+    });
+
+    it('считает недостающую строку состояния нулевой темой, а не ошибкой', () => {
+      expect(prereqsReady(topics[1] as Topic, new Map())).toBe(false);
+      expect(topicPriority(topics[0] as Topic, new Map(), { now: at(0) })).toBeGreaterThan(0);
+    });
+  });
+
+  describe('приоритет темы', () => {
+    it('при прочих равных выбирает тему с большим exam_weight', () => {
+      const topics = [
+        topic('math.light', { examWeight: 1 }),
+        topic('math.heavy', { examWeight: 3 }),
+      ];
+      const graph = graphOf(topics);
+      const states = stateMap(state('math.light'), state('math.heavy'));
+
+      const ranked = rankTopics(graph, states, { now: at(0) });
+      expect(ranked.map((item) => item.topic.id)).toEqual(['math.heavy', 'math.light']);
+      expect(selectTopic(graph, states, 'math', { now: at(0) })?.topic.id).toBe('math.heavy');
+    });
+
+    it('при прочих равных выбирает менее освоенную тему', () => {
+      const topics = [topic('math.weak'), topic('math.strong')];
+      const graph = graphOf(topics);
+      const states = stateMap(
+        state('math.weak', { mastery: 0.2 }),
+        state('math.strong', { mastery: 0.8 }),
+      );
+
+      expect(selectTopic(graph, states, 'math', { now: at(0) })?.topic.id).toBe('math.weak');
+    });
+
+    it('не предлагает тему вне экзамена и тему, освоенную полностью', () => {
+      const topics = [topic('math.offexam', { examWeight: 0 }), topic('math.done')];
+      const graph = graphOf(topics);
+      const states = stateMap(state('math.offexam'), state('math.done', { mastery: 1 }));
+
+      expect(topicPriority(topics[0] as Topic, states, { now: at(0) })).toBe(0);
+      expect(topicPriority(topics[1] as Topic, states, { now: at(0) })).toBe(0);
+      expect(selectTopic(graph, states, 'math', { now: at(0) })).toBeNull();
+    });
+  });
+
+  describe('срочность повторения', () => {
+    const seen = state('math.fractions', {
+      mastery: 0.5,
+      confidence: 0.5,
+      attempts: 3,
+      lastSeen: at(-5).toISOString(),
+      nextReview: at(5).toISOString(),
+    });
+
+    it('растёт по мере приближения к next_review', () => {
+      expect(reviewUrgency(seen, at(-5))).toBeCloseTo(1, 12);
+      expect(reviewUrgency(seen, at(0))).toBeCloseTo(1.5, 12);
+      expect(reviewUrgency(seen, at(5))).toBeCloseTo(2, 12);
+    });
+
+    it('продолжает расти на просрочке, но упирается в потолок', () => {
+      expect(reviewUrgency(seen, at(15))).toBeCloseTo(1 + OVERDUE_CAP, 12);
+      expect(reviewUrgency(seen, at(500))).toBeCloseTo(1 + OVERDUE_CAP, 12);
+    });
+
+    it('считает непроверенную тему подошедшей к повторению', () => {
+      expect(reviewUrgency(state('math.fractions'), at(0))).toBeCloseTo(2, 12);
+    });
+
+    it('поднимает подошедшую к повторению тему над только что пройденной', () => {
+      const topics = [topic('math.due'), topic('math.fresh')];
+      const graph = graphOf(topics);
+      const states = stateMap(
+        { ...seen, topicId: 'math.due' },
+        { ...seen, topicId: 'math.fresh', lastSeen: at(0).toISOString(), nextReview: at(10).toISOString() },
+      );
+
+      expect(selectTopic(graph, states, 'math', { now: at(5) })?.topic.id).toBe('math.due');
+    });
+  });
+
+  describe('срочность к дате экзамена', () => {
+    const heavy = topic('math.heavy', { examWeight: 3 });
+    const light = topic('math.light', { examWeight: 1 });
+
+    it('без даты экзамена срочность не растёт', () => {
+      expect(examUrgency(heavy, at(0), null)).toBe(1);
+      expect(examUrgency(heavy, at(0), undefined)).toBe(1);
+    });
+
+    it('за горизонтом планирования срочность ещё не растёт', () => {
+      const examDate = new Date(at(0).getTime() + (EXAM_HORIZON_DAYS + 5) * DAY_MS)
+        .toISOString()
+        .slice(0, 10);
+      expect(examUrgency(heavy, at(0), examDate)).toBeCloseTo(1, 12);
+    });
+
+    it('поднимает тяжёлые темы сильнее лёгких по мере приближения экзамена', () => {
+      const examDate = new Date(at(0).getTime() + EXAM_HORIZON_DAYS * DAY_MS)
+        .toISOString()
+        .slice(0, 10);
+      const states = stateMap(state('math.heavy'), state('math.light'));
+      const far = { now: at(0), examDate };
+      const near = { now: at(EXAM_HORIZON_DAYS - 3), examDate };
+
+      const ratioFar =
+        topicPriority(heavy, states, far) / topicPriority(light, states, far);
+      const ratioNear =
+        topicPriority(heavy, states, near) / topicPriority(light, states, near);
+
+      expect(examUrgency(heavy, near.now, examDate)).toBeGreaterThan(
+        examUrgency(heavy, far.now, examDate),
+      );
+      expect(ratioNear).toBeGreaterThan(ratioFar);
+    });
+
+    it('на прошедшей дате экзамена срочность остаётся максимальной', () => {
+      const examDate = at(-10).toISOString().slice(0, 10);
+      expect(examUrgency(heavy, at(0), examDate)).toBeCloseTo(3, 12);
+      expect(examUrgency(light, at(0), examDate)).toBeCloseTo(1 + 2 / 3, 12);
+    });
+
+    it('отвергает некорректную дату экзамена внятной ошибкой', () => {
+      expect(() => examUrgency(heavy, at(0), 'когда-нибудь')).toThrow(/дата экзамена/i);
+    });
+  });
+
+  describe('план дня', () => {
+    const topics = [
+      ...subjectTopics('math', 4),
+      ...subjectTopics('russian', 4),
+      ...subjectTopics('english', 4),
+    ];
+    const graph = graphOf(topics);
+    const states = stateMap(
+      ...topics.map((item) =>
+        state(item.id, { mastery: { math: 0, russian: 0.5, english: 0.8 }[item.subject] }),
+      ),
+    );
+
+    it('считает отставание предмета по взвешенной освоенности', () => {
+      expect(subjectDeficit(graph, states, 'math')).toBeCloseTo(1, 12);
+      expect(subjectDeficit(graph, states, 'russian')).toBeCloseTo(0.5, 12);
+      expect(subjectDeficit(graph, states, 'english')).toBeCloseTo(0.2, 12);
+    });
+
+    it('начинает с самого отстающего предмета', () => {
+      expect(selectSubject(graph, states, { now: at(0) })).toBe('math');
+    });
+
+    it('не ставит два забега подряд по одному предмету', () => {
+      const plan = planRuns(graph, states, 6, { now: at(0) });
+
+      expect(plan).toHaveLength(6);
+      for (let index = 1; index < plan.length; index += 1) {
+        expect(plan[index]?.subject).not.toBe(plan[index - 1]?.subject);
+      }
+      // Предмет предыдущего забега известен снаружи — первый забег его не повторяет.
+      expect(planRuns(graph, states, 1, { now: at(0), lastSubject: 'math' })[0]?.subject).toBe(
+        'russian',
+      );
+      expect(selectSubject(graph, states, { now: at(0), lastSubject: 'math' })).toBe('russian');
+    });
+
+    it('даёт отстающему предмету больше забегов, не выбрасывая остальные', () => {
+      const plan = planRuns(graph, states, 6, { now: at(0) });
+      const count = (subject: Subject): number =>
+        plan.filter((run) => run.subject === subject).length;
+
+      expect(count('math')).toBeGreaterThan(count('russian'));
+      expect(count('russian')).toBeGreaterThan(count('english'));
+      expect(count('english')).toBeGreaterThanOrEqual(1);
+    });
+
+    it('не повторяет тему внутри одного плана', () => {
+      const plan = planRuns(graph, states, 9, { now: at(0) });
+      const ids = plan.map((run) => run.topic.id);
+
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(plan.every((run) => run.priority > 0)).toBe(true);
+    });
+
+    it('повторяет предмет, если кандидаты остались только в нём', () => {
+      const single = graphOf(subjectTopics('math', 3));
+      const plan = planRuns(single, stateMap(), 3, { now: at(0) });
+
+      expect(plan.map((run) => run.subject)).toEqual(['math', 'math', 'math']);
+    });
+
+    it('укорачивает план, когда кандидаты кончились', () => {
+      const single = graphOf(subjectTopics('math', 2));
+      expect(planRuns(single, stateMap(), 5, { now: at(0) })).toHaveLength(2);
+      expect(planRuns(single, stateMap(), 0, { now: at(0) })).toEqual([]);
+    });
+
+    it('отвергает некорректное число забегов', () => {
+      expect(() => planRuns(graph, states, -1, { now: at(0) })).toThrow(/забег/i);
+      expect(() => planRuns(graph, states, 1.5, { now: at(0) })).toThrow(/забег/i);
+    });
+  });
+
+  describe('ошибочные сценарии', () => {
+    it('пустая карта тем не даёт ни предмета, ни плана', () => {
+      const empty = graphOf([]);
+
+      expect(rankTopics(empty, stateMap(), { now: at(0) })).toEqual([]);
+      expect(selectSubject(empty, stateMap(), { now: at(0) })).toBeNull();
+      expect(selectTopic(empty, stateMap(), 'math', { now: at(0) })).toBeNull();
+      expect(planRuns(empty, stateMap(), 3, { now: at(0) })).toEqual([]);
+    });
+
+    it('все темы освоены — предлагать нечего', () => {
+      const topics = subjectTopics('math', 3);
+      const graph = graphOf(topics);
+      const states = stateMap(...topics.map((item) => state(item.id, { mastery: 1 })));
+
+      expect(selectTopic(graph, states, 'math', { now: at(0) })).toBeNull();
+      expect(selectSubject(graph, states, { now: at(0) })).toBeNull();
+      expect(planRuns(graph, states, 3, { now: at(0) })).toEqual([]);
+    });
+
+    it('все темы заблокированы предпосылками — предлагать нечего', () => {
+      // Корень вне экзамена (вес 0) в план не попадает, а всё остальное висит на нём.
+      const topics = [
+        topic('math.root', { examWeight: 0 }),
+        topic('math.a', { prereqs: ['math.root'] }),
+        topic('math.b', { prereqs: ['math.a'] }),
+      ];
+      const graph = graphOf(topics);
+      const states = stateMap(...topics.map((item) => state(item.id)));
+
+      const ranked = rankTopics(graph, states, { now: at(0) });
+      expect(ranked.filter((item) => item.ready).map((item) => item.topic.id)).toEqual([
+        'math.root',
+      ]);
+      expect(ranked.every((item) => item.priority === 0)).toBe(true);
+      expect(selectTopic(graph, states, 'math', { now: at(0) })).toBeNull();
+      expect(planRuns(graph, states, 3, { now: at(0) })).toEqual([]);
+    });
+
+    it('предмет без единой темы в карте не выбирается', () => {
+      const graph = graphOf(subjectTopics('math', 2));
+      expect(selectTopic(graph, stateMap(), 'russian', { now: at(0) })).toBeNull();
+      expect(subjectDeficit(graph, stateMap(), 'russian')).toBe(0);
+    });
+  });
+
+  describe('план из базы', () => {
+    let tempDir: string;
+    let db: Database;
+    const topics = [...subjectTopics('math', 3), ...subjectTopics('russian', 3)];
+    const graph = graphOf(topics);
+
+    beforeEach(() => {
+      tempDir = mkdtempSync(join(tmpdir(), 'edukator-scheduler-'));
+      db = openDatabase(join(tempDir, 'test.db'));
+      const insert = db.prepare('INSERT INTO topic_state (topic_id) VALUES (?)');
+      for (const item of topics) insert.run(item.id);
+    });
+
+    afterEach(() => {
+      db.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it('строит план по состояниям и профилю из базы', () => {
+      const plan = planFromDatabase(db, graph, 4, at(0));
+
+      expect(plan).toHaveLength(4);
+      expect(new Set(plan.map((run) => run.topic.id)).size).toBe(4);
+      for (let index = 1; index < plan.length; index += 1) {
+        expect(plan[index]?.subject).not.toBe(plan[index - 1]?.subject);
+      }
+    });
+
+    it('не начинает с предмета последнего забега', () => {
+      db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)').run(
+        'math',
+        'math.t0',
+        at(-1).toISOString(),
+      );
+
+      expect(planFromDatabase(db, graph, 1, at(0))[0]?.subject).toBe('russian');
+    });
+
+    it('учитывает дату экзамена из профиля', () => {
+      const examDate = new Date(at(0).getTime() + 2 * DAY_MS).toISOString().slice(0, 10);
+      writeProfile(db, { examDate });
+      db.prepare('UPDATE topic_state SET mastery = 0.5 WHERE topic_id = ?').run('math.t0');
+
+      const withExam = planFromDatabase(db, graph, 1, at(0))[0]?.priority as number;
+      writeProfile(db, { examDate: null });
+      const withoutExam = planFromDatabase(db, graph, 1, at(0))[0]?.priority as number;
+
+      expect(withExam).toBeGreaterThan(withoutExam);
+    });
+  });
+});
