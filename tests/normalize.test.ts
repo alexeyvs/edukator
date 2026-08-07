@@ -28,11 +28,56 @@ describe('нормализатор ответов', () => {
       expect(checkAnswer('−0,25', expected({ answer: '-0.25' }), 'number').correct).toBe(true);
     });
 
+    it('читает десятичную дробь без нуля: «,5» равно 0,5', () => {
+      expect(findNumbers('.5')).toEqual([0.5]);
+      expect(findNumbers(',5')).toEqual([0.5]);
+      expect(findNumbers('-.5')).toEqual([-0.5]);
+      expect(findNumbers('− ,25')).toEqual([-0.25]);
+      expect(checkAnswer(',5', expected({ answer: '0.5' }), 'number')).toMatchObject({
+        correct: true,
+        normalized: '0.5',
+      });
+      // Без нуля впереди «.5» читалось как 5, и неверный ответ засчитывался верным.
+      expect(checkAnswer('.5', expected({ answer: '5' }), 'number').correct).toBe(false);
+      // Внутри фразы точка — конец предложения, а не запись числа.
+      expect(findNumbers('Ответ.5')).toEqual([5]);
+    });
+
     it('считает дробь a/b числом: «3/4» равно 0.75', () => {
       expect(checkAnswer('3/4', expected({ answer: '0.75' }), 'number').correct).toBe(true);
       expect(checkAnswer('0,75', expected({ answer: '3/4' }), 'number').correct).toBe(true);
       expect(checkAnswer('18/24', expected({ answer: '3/4' }), 'number').correct).toBe(true);
       expect(checkAnswer('-1/2', expected({ answer: '−0,5' }), 'number').correct).toBe(true);
+    });
+
+    it('читает смешанное число: «1 2/3» — одно число, а не два', () => {
+      expect(findNumbers('1 2/3')).toEqual([1 + 2 / 3]);
+      expect(checkAnswer('1 1/6', expected({ answer: '7/6' }), 'number').correct).toBe(true);
+      expect(checkAnswer('2 1/2', expected({ answer: '2,5' }), 'number').correct).toBe(true);
+      expect(checkAnswer('-3 3/4', expected({ answer: '−3,75' }), 'number').correct).toBe(true);
+      expect(checkAnswer('1 1/6 часть', expected({ answer: '7/6' }), 'number').correct).toBe(true);
+      // Смешанное число как эталон тоже читается однозначно.
+      expect(checkAnswer('1,5', expected({ answer: '1 1/2' }), 'number').correct).toBe(true);
+    });
+
+    it('не принимает числитель смешанного числа за разряды: «1 200/3»', () => {
+      // Пробел перед трёхзначной группой — разделитель разрядов только тогда,
+      // когда за группой не идёт дробная черта. Иначе «1 200/3» схлопывалось в
+      // «1200/3» = 400, то есть верный ответ молча превращался в другое число.
+      expect(findNumbers('1 200/3')).toEqual([1 + 200 / 3]);
+      expect(checkAnswer('1 200/3', expected({ answer: '400' }), 'number').correct).toBe(false);
+      expect(checkAnswer('1 125/1000', expected({ answer: '1,125' }), 'number').correct).toBe(true);
+    });
+
+    it('не принимает пунктуационное тире за знак числа', () => {
+      // «Ответ – 5» — тире между словом и числом, а не минус. Прочитав его как
+      // знак, нормализатор засчитывал бы верный ответ неверным.
+      expect(findNumbers('Ответ – 5')).toEqual([5]);
+      expect(findNumbers('Ответ - 5')).toEqual([5]);
+      expect(checkAnswer('Ответ – 5', expected({ answer: '5' }), 'number').correct).toBe(true);
+      // Знак в начале ответа отделённым пробелом остаётся знаком.
+      expect(findNumbers('− 45')).toEqual([-45]);
+      expect(findNumbers('  − 45  ')).toEqual([-45]);
     });
 
     it('не считает пробел внутри числа вторым числом: «45 000» равно 45000', () => {
@@ -47,6 +92,9 @@ describe('нормализатор ответов', () => {
       expect(checkAnswer('1/2', task, 'number').correct).toBe(true);
       expect(checkAnswer('50%', task, 'number').correct).toBe(true);
       expect(checkAnswer('0,5', task, 'number').correct).toBe(true);
+      expect(checkAnswer('50', task, 'number').correct).toBe(false);
+      expect(findNumbers('50%')).toEqual([0.5]);
+      expect(checkAnswer('0.5', expected({ answer: '50%' }), 'number').correct).toBe(true);
     });
 
     it('отвергает другое число', () => {
@@ -82,9 +130,37 @@ describe('нормализатор ответов', () => {
       expect(() => checkAnswer('45', expected({ answer: 'сорок пять' }), 'number')).toThrow(
         /эталонный ответ.*сорок пять.*не содержит одного числа/i,
       );
-      expect(() =>
-        checkAnswer('45', expected({ answer: '45', accept: ['примерно 45 или 46'] }), 'number'),
-      ).toThrow(/примерно 45 или 46/);
+    });
+
+    it('сверяет нечисловую запись из accept как текст, а не падает на ней', () => {
+      // `accept[]` пополняется разбором спора на ходу, поэтому нечисловая запись
+      // в нём — не дефект банка, а живой вариант. Падение на ней ломало бы
+      // задание навсегда после первого же подтверждённого спора.
+      const task = expected({ answer: '45', accept: ['сорок пять'] });
+      expect(checkAnswer('45', task, 'number').correct).toBe(true);
+      expect(checkAnswer('Сорок  пять', task, 'number')).toEqual({
+        correct: true,
+        normalized: 'сорок пять',
+      });
+      expect(checkAnswer('46', task, 'number')).toEqual({
+        correct: false,
+        normalized: '46',
+        reason: 'mismatch',
+      });
+      // Двусмысленная запись в accept тоже не мешает сверке с самим answer.
+      expect(
+        checkAnswer('45', expected({ answer: '45', accept: ['примерно 45 или 46'] }), 'number')
+          .correct,
+      ).toBe(true);
+    });
+
+    it('на пустой ответ отдаёт empty, даже если эталон задания испорчен', () => {
+      // Ученик ничего не ввёл — разбирать нечего, и дефект банка тут ни при чём.
+      expect(checkAnswer('  ', expected({ answer: 'сорок пять' }), 'number')).toEqual({
+        correct: false,
+        normalized: '',
+        reason: 'empty',
+      });
     });
   });
 

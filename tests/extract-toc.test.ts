@@ -1,10 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   assertReadablePdf,
   extractToc,
+  ocrPdfPages,
   pageRange,
   parseArgs,
   readPdfPages,
@@ -81,6 +83,9 @@ const CONTENTS = [
 ];
 
 let dir: string;
+const projectRoot = resolve('.');
+const tsxCli = join(projectRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+const extractCli = join(projectRoot, 'scripts', 'extract-toc.ts');
 
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), 'edukator-toc-'));
@@ -161,6 +166,53 @@ describe('extractToc', () => {
     expect(written).not.toContain('quick brown fox');
   });
 
+  it('не отправляет в OCR редкое, но найденное текстовое оглавление', async () => {
+    const path = join(dir, 'sparse-toc.pdf');
+    writeFileSync(path, buildPdf([CONTENTS, ...Array.from({ length: 14 }, () => [''])]));
+    const result = await extractToc({ pdfPath: path, subject: 'english', outDir: dir, ocr: 'never' });
+    expect(result.extraction).toBe('text');
+    expect(result.selection.from).toBe(1);
+  });
+
+  it('распознаёт скан оглавления рядом с богатым текстовым слоем', async () => {
+    const path = join(dir, 'hybrid-auto.pdf');
+    const richText = Array.from({ length: 12 }, () =>
+      'This ordinary paragraph has enough characters to mask a scanned neighbouring page.',
+    );
+    writeFileSync(path, buildPdf([richText, ['Page 2']]));
+    const bin = join(dir, 'hybrid-auto-ocr.sh');
+    writeFileSync(
+      bin,
+      [
+        '#!/bin/sh',
+        `printf '%s' '${JSON.stringify([
+          { num: 1, text: richText.join('\n') },
+          {
+            num: 2,
+            text: [
+              'Contents',
+              'Unit 1 Hello .......... 5',
+              'Unit 2 Family ......... 18',
+              'Unit 3 School ......... 32',
+            ].join('\n'),
+          },
+        ])}'`,
+      ].join('\n'),
+    );
+    chmodSync(bin, 0o755);
+
+    const result = await extractToc({
+      pdfPath: path,
+      subject: 'english',
+      outDir: dir,
+      ocrBin: bin,
+    });
+
+    expect(result.extraction).toBe('ocr');
+    expect(result.selection.from).toBe(2);
+    expect(readFileSync(result.outPath, 'utf8')).toContain('Unit 3 School');
+  });
+
   it('берёт заданный вручную диапазон, не спрашивая эвристику', async () => {
     const path = join(dir, 'manual.pdf');
     writeFileSync(path, buildPdf([PROSE, CONTENTS]));
@@ -175,6 +227,78 @@ describe('extractToc', () => {
 
     expect(result.selection.from).toBe(1);
     expect(readFileSync(result.outPath, 'utf8')).toContain('quick brown fox');
+  });
+
+  it('не принимает короткий ручной диапазон с текстом за скан', async () => {
+    const path = join(dir, 'manual-sparse.pdf');
+    writeFileSync(path, buildPdf([['Unit 1']]));
+
+    const result = await extractToc({
+      pdfPath: path,
+      subject: 'english',
+      outDir: dir,
+      pages: { from: 1, to: 1 },
+      ocr: 'never',
+    });
+
+    expect(result.extraction).toBe('text');
+    expect(readFileSync(result.outPath, 'utf8')).toContain('Unit 1');
+  });
+
+  it('распознаёт ручной диапазон со штампом вместо молчаливого неполного результата', async () => {
+    const path = join(dir, 'manual-stamped-scan.pdf');
+    writeFileSync(path, buildPdf([['Page 12'], ['']]));
+    const bin = join(dir, 'manual-range-ocr.sh');
+    writeFileSync(
+      bin,
+      [
+        '#!/bin/sh',
+        "printf '%s' '[{\"num\":1,\"text\":\"Contents\\nUnit 1 Hello .......... 5\"},{\"num\":2,\"text\":\"Unit 2 Family ......... 18\"}]'",
+      ].join('\n'),
+    );
+    chmodSync(bin, 0o755);
+
+    const result = await extractToc({
+      pdfPath: path,
+      subject: 'english',
+      outDir: dir,
+      pages: { from: 1, to: 2 },
+      ocrBin: bin,
+    });
+
+    expect(result.extraction).toBe('ocr');
+    expect(readFileSync(result.outPath, 'utf8')).toContain('Unit 2 Family');
+  });
+
+  it('распознаёт пустую страницу ручного диапазона рядом с богатым текстовым слоем', async () => {
+    const path = join(dir, 'manual-hybrid.pdf');
+    const richText = Array.from({ length: 12 }, () =>
+      'This ordinary paragraph has enough characters to mask a scanned neighbouring page.',
+    );
+    writeFileSync(path, buildPdf([richText, ['Page 2']]));
+    const bin = join(dir, 'manual-hybrid-ocr.sh');
+    writeFileSync(
+      bin,
+      [
+        '#!/bin/sh',
+        `printf '%s' '${JSON.stringify([
+          { num: 1, text: richText.join('\n') },
+          { num: 2, text: 'Unit 2 Family ......... 18' },
+        ])}'`,
+      ].join('\n'),
+    );
+    chmodSync(bin, 0o755);
+
+    const result = await extractToc({
+      pdfPath: path,
+      subject: 'english',
+      outDir: dir,
+      pages: { from: 1, to: 2 },
+      ocrBin: bin,
+    });
+
+    expect(result.extraction).toBe('ocr');
+    expect(readFileSync(result.outPath, 'utf8')).toContain('Unit 2 Family');
   });
 
   it('отвергает диапазон за пределами книги', async () => {
@@ -201,10 +325,152 @@ describe('extractToc', () => {
     ).rejects.toThrow(/нет текстового слоя/);
   });
 
+  it('считает сканом книгу, где на страницу приходятся единицы символов', async () => {
+    // У скана текстового слоя нет, но штампованный колонтитул на каждой
+    // странице есть. По сумме окна просмотра такая книга легко перебирает
+    // порог и уходит мимо распознавания — считать надо на страницу.
+    const path = join(dir, 'stamped-scan.pdf');
+    const stamped = Array.from({ length: 12 }, (_, index) => [
+      `Merzlyak Mathematics grade 6 workbook page ${index + 1}`,
+    ]);
+    writeFileSync(path, buildPdf(stamped));
+
+    await expect(
+      extractToc({ pdfPath: path, subject: 'math', outDir: dir, ocr: 'never' }),
+    ).rejects.toThrow(/нет текстового слоя/);
+  });
+
   it('не трогает несуществующий файл дальше проверки', async () => {
     await expect(
       extractToc({ pdfPath: join(dir, 'nope.pdf'), subject: 'math', outDir: dir }),
     ).rejects.toThrow(/не найден/);
+  });
+});
+
+describe('ocrPdfPages', () => {
+  /**
+   * Исполняемая заглушка вместо swift: в реальности работает именно эта ветка
+   * (все три учебника — сканы), а настоящий Vision в тестах не запустить.
+   */
+  function fakeOcrBin(name: string, body: string): string {
+    const path = join(dir, name);
+    writeFileSync(path, `#!/bin/sh\n${body}\n`);
+    chmodSync(path, 0o755);
+    return path;
+  }
+
+  it('передаёт страницы одним вызовом и разбирает ответ', async () => {
+    const bin = fakeOcrBin(
+      'ocr-ok.sh',
+      // $1 — путь к swift-скрипту, $2 — PDF, $3 — список страниц.
+      `printf '[{"num":3,"text":"страницы %s"},{"num":4,"text":""},{"num":5,"text":""}]' "$3"`,
+    );
+
+    const pages = await ocrPdfPages('/tmp/book.pdf', [3, 4, 5], bin);
+
+    expect(pages).toEqual([
+      { num: 3, text: 'страницы 3,4,5' },
+      { num: 4, text: '' },
+      { num: 5, text: '' },
+    ]);
+  });
+
+  it('сообщает о недостающих страницах, а не отдаёт укороченный ответ', async () => {
+    // Vision может не отрисовать отдельную страницу. Молча выпавшая середина
+    // оглавления выглядит ровно как полное оглавление — и уходит в карту тем.
+    const bin = fakeOcrBin('ocr-partial.sh', `printf '[{"num":3,"text":"а"},{"num":5,"text":"б"}]'`);
+
+    await expect(ocrPdfPages('/tmp/book.pdf', [3, 4, 5], bin)).rejects.toThrow(
+      /не вернул страницы: 4/,
+    );
+  });
+
+  it('отвергает повторённые и лишние страницы', async () => {
+    const duplicate = fakeOcrBin(
+      'ocr-duplicate.sh',
+      `printf '[{"num":3,"text":"а"},{"num":3,"text":"б"},{"num":4,"text":"в"}]'`,
+    );
+    await expect(ocrPdfPages('/tmp/book.pdf', [3, 4], duplicate)).rejects.toThrow(/повторил страницы: 3/);
+
+    const extra = fakeOcrBin(
+      'ocr-extra.sh',
+      `printf '[{"num":3,"text":"а"},{"num":4,"text":"б"},{"num":99,"text":"в"}]'`,
+    );
+    await expect(ocrPdfPages('/tmp/book.pdf', [3, 4], extra)).rejects.toThrow(/лишние страницы: 99/);
+
+    const reordered = fakeOcrBin(
+      'ocr-reordered.sh',
+      `printf '[{"num":4,"text":"б"},{"num":3,"text":"а"}]'`,
+    );
+    await expect(ocrPdfPages('/tmp/book.pdf', [3, 4], reordered)).rejects.toThrow(
+      /не в запрошенном порядке/,
+    );
+  });
+
+  it('сообщает о неразбираемом ответе распознавания', async () => {
+    const bin = fakeOcrBin('ocr-junk.sh', `printf 'не json'`);
+
+    await expect(ocrPdfPages('/tmp/book.pdf', [1], bin)).rejects.toThrow(/неразбираемый ответ/);
+  });
+
+  it('отвергает разбираемый ответ не той формы', async () => {
+    // `null` и `{}` — законный JSON, разбор их пропускает. Без проверки формы
+    // проверка состава страниц падала на них голым TypeError.
+    for (const [name, body] of [
+      ['ocr-null.sh', 'null'],
+      ['ocr-object.sh', '{}'],
+      ['ocr-shape.sh', '[{"num":"3"}]'],
+    ]) {
+      const bin = fakeOcrBin(name ?? '', `printf '${body ?? ''}'`);
+
+      await expect(ocrPdfPages('/tmp/book.pdf', [3], bin)).rejects.toThrow(
+        /не в виде списка страниц/,
+      );
+    }
+  });
+
+  it('поднимает код возврата и stderr распознавания', async () => {
+    const bin = fakeOcrBin('ocr-fail.sh', 'echo "страница не рендерится" >&2\nexit 3');
+
+    await expect(ocrPdfPages('/tmp/book.pdf', [1], bin)).rejects.toThrow(
+      /OCR не удался \(код 3\).*страница не рендерится/s,
+    );
+  });
+
+  it('объясняет отсутствие swift, а не отдаёт голый ENOENT', async () => {
+    await expect(ocrPdfPages('/tmp/book.pdf', [1], join(dir, 'нет-такого-swift'))).rejects.toThrow(
+      /OCR недоступен.*macOS/s,
+    );
+  });
+
+  it('останавливает зависший OCR по сроку', async () => {
+    const bin = fakeOcrBin('ocr-hang.sh', "trap '' TERM\nwhile :; do sleep 1; done");
+    await expect(ocrPdfPages('/tmp/book.pdf', [1], bin, 30)).rejects.toThrow(/превышен срок/);
+  });
+
+  it('подхватывается extractToc, когда текстового слоя нет', async () => {
+    const path = join(dir, 'scan-ocr.pdf');
+    writeFileSync(path, buildPdf([['x']]));
+    // Кавычки у метки heredoc отключают подстановки: `\n` доходит до JSON.parse
+    // как escape-последовательность, а не как настоящий перевод строки.
+    const bin = fakeOcrBin(
+      'ocr-toc.sh',
+      [
+        "cat <<'JSON'",
+        '[{"num":1,"text":"Contents\\nUnit 1 Hello .......... 5\\nUnit 2 Family ......... 18\\nUnit 3 School ......... 32"}]',
+        'JSON',
+      ].join('\n'),
+    );
+
+    const result = await extractToc({
+      pdfPath: path,
+      subject: 'english',
+      outDir: dir,
+      ocrBin: bin,
+    });
+
+    expect(result.extraction).toBe('ocr');
+    expect(readFileSync(result.outPath, 'utf8')).toContain('Unit 2 Family');
   });
 });
 
@@ -241,7 +507,66 @@ describe('parseArgs', () => {
     );
   });
 
+  it('разбирает --scan', () => {
+    expect(parseArgs(['--subject', 'math', '--pdf', 'b.pdf', '--scan', '25']).scanEdge).toBe(25);
+  });
+
+  it('отвергает битый --scan, а не считает окно от NaN', () => {
+    // Number('весь') даёт NaN, окно просмотра выходит пустым, и скрипт
+    // жаловался бы на ненайденное оглавление вместо битого аргумента.
+    for (const broken of ['весь', '0', '-5', '3.5']) {
+      expect(() => parseArgs(['--subject', 'math', '--pdf', 'b.pdf', '--scan', broken]), broken)
+        .toThrow(/--scan/);
+    }
+  });
+
   it('отвергает флаг без значения', () => {
     expect(() => parseArgs(['--subject'])).toThrow(/нет значения/);
+  });
+
+  it('отвергает неизвестный и повторный флаг', () => {
+    expect(() => parseArgs(['--subject', 'math', '--pdf', 'b.pdf', '--ouut', 'x']))
+      .toThrow(/Неизвестный флаг/);
+    expect(() => parseArgs(['--subject', 'math', '--pdf', 'b.pdf', '--pdf', 'c.pdf']))
+      .toThrow(/дважды/);
+  });
+});
+
+describe('extract-toc CLI', () => {
+  it('возвращает код 1 и диагностику при ошибочных аргументах', () => {
+    const result = spawnSync(process.execPath, [tsxCli, extractCli, '--subject', 'math'], {
+      encoding: 'utf8',
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/extract-toc:.*--pdf/s);
+  });
+
+  it('извлекает заданную страницу через настоящий CLI-вход', () => {
+    const pdfPath = join(dir, 'cli-book.pdf');
+    const outDir = join(dir, 'cli-out');
+    writeFileSync(pdfPath, buildPdf([CONTENTS]));
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        tsxCli,
+        extractCli,
+        '--subject',
+        'english',
+        '--pdf',
+        pdfPath,
+        '--pages',
+        '1',
+        '--no-ocr',
+        '--out',
+        outDir,
+      ],
+      { encoding: 'utf8' },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toMatch(/english: страницы 1 из 1 \(text\).*english\.txt/s);
+    expect(readFileSync(join(outDir, 'english.txt'), 'utf8')).toContain('Unit 1 Getting to know you');
   });
 });

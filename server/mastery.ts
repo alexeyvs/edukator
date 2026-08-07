@@ -78,7 +78,17 @@ export function newTopicState(topicId: string): TopicState {
   };
 }
 
-function clamp01(value: number): number {
+/**
+ * Состояние темы из карты. Недостающая строка — это ещё не выполненная
+ * синхронизация, а не опечатка: состав тем задаёт карта, поэтому здесь
+ * (в отличие от `readTopicState`) отсутствие строки равно нулевому состоянию.
+ */
+export function stateOf(states: Map<string, TopicState>, topicId: string): TopicState {
+  return states.get(topicId) ?? newTopicState(topicId);
+}
+
+/** Прижимает значение к 0..1. Общий для модели, планировщика и прогноза. */
+export function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
 
@@ -122,6 +132,9 @@ export function computeConfidence(attempts: number, days: number): number {
   if (!Number.isInteger(attempts) || attempts < 0) {
     throw new Error(`Модель знаний: число попыток должно быть неотрицательным целым (${attempts})`);
   }
+  if (!Number.isFinite(days)) {
+    throw new Error(`Модель знаний: число дней должно быть конечным (${days})`);
+  }
   const idle = Math.max(0, days);
   return clamp01((1 - CONFIDENCE_BASE ** attempts) * CONFIDENCE_DECAY ** idle);
 }
@@ -161,6 +174,20 @@ export function reviewIntervalDays(mastery: number): number {
  */
 export function applyAttempt(state: TopicState, attempt: Attempt): TopicState {
   const at = attempt.at ?? new Date();
+  if (!Number.isFinite(at.getTime())) {
+    throw new Error(`Модель знаний: некорректное время попытки (${String(at)})`);
+  }
+  if (state.lastSeen !== null) {
+    const lastSeen = Date.parse(state.lastSeen);
+    if (!Number.isFinite(lastSeen)) {
+      throw new Error(`Модель знаний: некорректное время последней попытки (${state.lastSeen})`);
+    }
+    if (at.getTime() < lastSeen) {
+      throw new Error(
+        `Модель знаний: попытка ${at.toISOString()} старше последней ${state.lastSeen}; импортируйте историю по порядку`,
+      );
+    }
+  }
   const mastery = nextMastery(state.mastery, attempt);
   const attempts = state.attempts + 1;
 
@@ -251,13 +278,22 @@ export function writeTopicState(db: Database, state: TopicState): void {
 
 /**
  * Читает состояние темы, применяет попытку и сохраняет результат одной
- * транзакцией — забег пишет попытку и состояние вместе, половинчатая запись
- * означала бы засчитанный ответ без сдвига модели.
+ * транзакцией: чтение и запись обязаны видеть один и тот же снимок, иначе два
+ * ответа подряд посчитались бы от одного и того же `mastery`.
+ *
+ * Транзакция именно `immediate`: под WAL отложенная берёт снимок на чтении и
+ * запрашивает запись только в конце, так что чужая фиксация между ними роняет
+ * её `SQLITE_BUSY_SNAPSHOT` — и попытка ученика теряется вместе с ошибкой.
+ *
+ * Строку в `attempts` эта функция **не** пишет: для неё нужен `task_id` из
+ * `task_bank`, а банк заданий появляется на этапе 2. Тогда же вставка попытки
+ * заедет внутрь этой транзакции — засчитанный ответ без сдвига модели (или
+ * наоборот) недопустим.
  */
 export function recordAttempt(db: Database, topicId: string, attempt: Attempt): TopicState {
   return db.transaction((): TopicState => {
     const next = applyAttempt(readTopicState(db, topicId), attempt);
     writeTopicState(db, next);
     return next;
-  })();
+  }).immediate();
 }

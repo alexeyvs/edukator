@@ -1,6 +1,7 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   buildCurriculum,
@@ -15,6 +16,7 @@ import {
   runCodexCli,
   TOPIC_LIMITS,
   writeCodexSchema,
+  writeCurriculumAtomic,
   type CodexRequest,
   type CodexRunner,
 } from '../scripts/build-curriculum.js';
@@ -22,6 +24,9 @@ import { CURRICULUM_SCHEMA_PATH } from '../server/curriculum.js';
 import type { Subject } from '../server/db.js';
 
 let dir: string;
+const projectRoot = resolve('.');
+const tsxCli = join(projectRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+const buildCli = join(projectRoot, 'scripts', 'build-curriculum.ts');
 
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), 'edukator-curriculum-'));
@@ -31,13 +36,17 @@ afterAll(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** Карта из `count` тем, где каждая опирается на предыдущую: валидна и по схеме, и по графу. */
+/**
+ * Карта из `count` тем, где каждая опирается на предыдущую: валидна и по схеме,
+ * и по графу. Вес идёт от 1, а не от 0: тема вне экзамена не может быть
+ * предпосылкой, а здесь предпосылкой оказывается каждая, кроме последней.
+ */
 function curriculum(subject: Subject, count: number): string {
   const topics = Array.from({ length: count }, (_, index) => ({
     id: `${subject}.topic-${index + 1}`,
     subject,
     title: `Тема номер ${index + 1}`,
-    exam_weight: index % 4,
+    exam_weight: (index % 3) + 1,
     difficulty: (index % 3) + 1,
     prereqs: index === 0 ? [] : [`${subject}.topic-${index}`],
     answer_format: 'number',
@@ -94,6 +103,7 @@ describe('buildPrompt', () => {
 
   it('называет предмет и формат id так же, как схема', () => {
     expect(buildPrompt('english', 'Contents')).toContain('«english»');
+    expect(buildPrompt('english', 'Contents')).toMatch(/аудирование.*exam_weight 0/i);
     expect(buildPrompt('russian', 'Оглавление')).toContain('«russian.<латиницей-через-дефис>»');
   });
 
@@ -136,7 +146,7 @@ describe('parseCurriculumAnswer', () => {
 
   it('отвергает ответ с чужим предметом', () => {
     expect(() => parseCurriculumAnswer(curriculum('russian', 20), 'math')).toThrow(
-      /ожидалась карта предмета «math».*«russian»/s,
+      /предмет «russian».*«math\.json»/s,
     );
   });
 
@@ -247,6 +257,9 @@ describe('buildCurriculum', () => {
 
   it('исчерпав попытки, падает с отчётом по каждой и не пишет файл', async () => {
     const outDir = join(dir, 'out-exhausted');
+    const oldPath = join(outDir, 'math.json');
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(oldPath, 'старая рабочая карта', { flag: 'w' });
     const run = fakeRunner(['не json', '{"subject":"math"}', curriculum('math', 2)]);
 
     await expect(
@@ -259,7 +272,7 @@ describe('buildCurriculum', () => {
     ).rejects.toThrow(/не собрана за 3 попыт.*попытка 1.*попытка 2.*попытка 3/s);
 
     expect(run.requests).toHaveLength(3);
-    expect(existsSync(join(outDir, 'math.json'))).toBe(false);
+    expect(readFileSync(oldPath, 'utf8')).toBe('старая рабочая карта');
   });
 
   it('уважает заданное число попыток', async () => {
@@ -318,16 +331,18 @@ describe('buildCurriculum', () => {
     ).rejects.toThrow(/пусто/);
   });
 
-  it('отвергает нулевое число попыток', async () => {
-    await expect(
-      buildCurriculum({
-        subject: 'math',
-        tocPath: writeToc('math-zero.txt'),
-        outDir: dir,
-        attempts: 0,
-        run: fakeRunner([]),
-      }),
-    ).rejects.toThrow(/не меньше 1/);
+  it('отвергает некорректное число попыток', async () => {
+    for (const attempts of [0, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(
+        buildCurriculum({
+          subject: 'math',
+          tocPath: writeToc(`math-${String(attempts)}.txt`),
+          outDir: dir,
+          attempts,
+          run: fakeRunner([]),
+        }),
+      ).rejects.toThrow(/положительным целым/);
+    }
   });
 });
 
@@ -366,6 +381,30 @@ describe('codexOutputSchema', () => {
   });
 });
 
+describe('writeCurriculumAtomic', () => {
+  it('заменяет существующую карту целиком', () => {
+    const path = join(dir, 'atomic.json');
+    writeFileSync(path, 'старая карта');
+
+    writeCurriculumAtomic(path, 'новая карта');
+
+    expect(readFileSync(path, 'utf8')).toBe('новая карта');
+  });
+
+  it('убирает временный файл, если публикация не удалась', () => {
+    const target = join(dir, 'atomic-target');
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(target, 'sentinel'), 'не трогать');
+
+    expect(() => writeCurriculumAtomic(target, 'карта')).toThrow();
+
+    expect(readFileSync(join(target, 'sentinel'), 'utf8')).toBe('не трогать');
+    expect(
+      readdirSync(dir).filter((name) => name.startsWith('atomic-target.') && name.endsWith('.tmp')),
+    ).toEqual([]);
+  });
+});
+
 describe('writeCodexSchema', () => {
   it('кладёт очищенную схему в рабочий каталог', () => {
     const path = writeCodexSchema(dir);
@@ -391,7 +430,17 @@ describe('codexArgs', () => {
     expect(args).toEqual([
       'exec',
       '--ephemeral',
+      '--ignore-user-config',
+      '--ignore-rules',
       '--skip-git-repo-check',
+      '--disable',
+      'shell_tool',
+      '--disable',
+      'unified_exec',
+      '--sandbox',
+      'read-only',
+      '--cd',
+      '/',
       '-m',
       'gpt-5.6-terra',
       '--output-schema',
@@ -407,7 +456,13 @@ describe('runCodexCli', () => {
   it('возвращает записанный моделью ответ и не ждёт stdin', async () => {
     // `cat` прочитал бы стандартный ввод до конца: если stdin не закрыт,
     // заглушка повиснет и тест упадёт по таймауту.
-    const bin = fakeCodexBin('codex-ok', 'cat > /dev/null\nshift 8\necho "{\\"ok\\":true}" > "$1"');
+    const bin = fakeCodexBin(
+      'codex-ok',
+      'cat > /dev/null\nwhile [ "$#" -gt 0 ]; do\n' +
+        '  if [ "$1" = "-o" ]; then echo "{\\"ok\\":true}" > "$2"; exit; fi\n' +
+        '  shift\n' +
+        'done\nexit 2',
+    );
     const outPath = join(dir, 'answer-ok.json');
 
     await expect(
@@ -463,6 +518,80 @@ describe('runCodexCli', () => {
       }),
     ).rejects.toThrow(CodexUnavailableError);
   });
+
+  it('останавливает зависший codex по сроку', async () => {
+    const bin = fakeCodexBin('codex-hang', "trap '' TERM\nwhile :; do sleep 1; done");
+    await expect(
+      runCodexCli({
+        prompt: 'p',
+        schemaPath: '/s.json',
+        outPath: join(dir, 'answer-timeout.json'),
+        model: 'm',
+        bin,
+        timeoutMs: 30,
+      }),
+    ).rejects.toThrow(/превышен срок/);
+  });
+
+  it('останавливает codex, который льёт слишком много вывода', async () => {
+    const bin = fakeCodexBin('codex-noisy', 'yes x | head -c 200');
+    await expect(
+      runCodexCli({
+        prompt: 'p',
+        schemaPath: '/s.json',
+        outPath: join(dir, 'answer-noisy.json'),
+        model: 'm',
+        bin,
+        maxOutputBytes: 64,
+      }),
+    ).rejects.toThrow(/вывод превысил 64 байт/);
+  });
+});
+
+describe('build-curriculum CLI', () => {
+  it('возвращает код 1 и диагностику при ошибочных аргументах', () => {
+    const result = spawnSync(process.execPath, [tsxCli, buildCli, '--subject', 'physics'], {
+      encoding: 'utf8',
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/build-curriculum:.*--subject/s);
+  });
+
+  it('собирает карту через настоящий CLI-вход и исполняемую заглушку codex', () => {
+    const binDir = join(dir, 'cli-bin');
+    const outDir = join(dir, 'cli-out');
+    mkdirSync(binDir, { recursive: true });
+    const answerPath = join(dir, 'cli-answer.json');
+    writeFileSync(answerPath, VALID_MATH);
+    const codex = join(binDir, 'codex');
+    writeFileSync(
+      codex,
+      '#!/bin/sh\nout=""\nwhile [ "$#" -gt 0 ]; do\n' +
+        '  if [ "$1" = "-o" ]; then out="$2"; shift 2; else shift; fi\n' +
+        'done\ncp "$FAKE_CURRICULUM" "$out"\n',
+    );
+    chmodSync(codex, 0o755);
+
+    const result = spawnSync(
+      process.execPath,
+      [tsxCli, buildCli, '--subject', 'math', '--toc', writeToc('cli-toc.txt'), '--out', outDir],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${binDir}:${process.env['PATH'] ?? ''}`,
+          FAKE_CURRICULUM: answerPath,
+        },
+      },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toMatch(/math: 20 тем.*math\.json/s);
+    expect(JSON.parse(readFileSync(join(outDir, 'math.json'), 'utf8'))).toMatchObject({
+      subject: 'math',
+    });
+  });
 });
 
 describe('parseArgs', () => {
@@ -508,5 +637,10 @@ describe('parseArgs', () => {
 
   it('отвергает непонятный аргумент', () => {
     expect(() => parseArgs(['math'])).toThrow(/Непонятный аргумент/);
+  });
+
+  it('отвергает неизвестный и повторный флаг', () => {
+    expect(() => parseArgs(['--subject', 'math', '--ouut', 'x'])).toThrow(/Неизвестный флаг/);
+    expect(() => parseArgs(['--subject', 'math', '--subject', 'math'])).toThrow(/дважды/);
   });
 });

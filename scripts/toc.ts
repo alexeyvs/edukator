@@ -30,14 +30,6 @@ export interface TocSelection {
   pages: PdfPage[];
   from: number;
   to: number;
-  scores: TocPageScore[];
-}
-
-export interface FindTocOptions {
-  /** Сколько пунктов должно быть на странице без заголовка. */
-  minEntries?: number;
-  /** Какая доля строк должна быть пунктами. */
-  minDensity?: number;
 }
 
 const DEFAULT_MIN_ENTRIES = 6;
@@ -105,9 +97,9 @@ export function scoreTocPage(page: PdfPage): TocPageScore {
   };
 }
 
-function qualifies(score: TocPageScore, options: Required<FindTocOptions>): boolean {
+function qualifies(score: TocPageScore): boolean {
   if (score.heading && score.entries >= 3) return true;
-  return score.entries >= options.minEntries && score.density >= options.minDensity;
+  return score.entries >= DEFAULT_MIN_ENTRIES && score.density >= DEFAULT_MIN_DENSITY;
 }
 
 /**
@@ -115,21 +107,16 @@ function qualifies(score: TocPageScore, options: Required<FindTocOptions>): bool
  * номерам страниц, а не по позициям в массиве: при OCR просматриваются только
  * начало и конец книги, и между ними в списке зияет дыра.
  */
-export function findTocPages(pages: PdfPage[], options: FindTocOptions = {}): TocSelection {
+export function findTocPages(pages: PdfPage[]): TocSelection {
   if (pages.length === 0) {
     throw new Error('Оглавление не найдено: не разобрано ни одной страницы PDF');
   }
-
-  const limits: Required<FindTocOptions> = {
-    minEntries: options.minEntries ?? DEFAULT_MIN_ENTRIES,
-    minDensity: options.minDensity ?? DEFAULT_MIN_DENSITY,
-  };
 
   const sorted = [...pages].sort((left, right) => left.num - right.num);
   const runs: PdfPage[][] = [];
   let previous: PdfPage | undefined;
   for (const page of sorted) {
-    if (!qualifies(scoreTocPage(page), limits)) {
+    if (!qualifies(scoreTocPage(page))) {
       previous = undefined;
       continue;
     }
@@ -158,7 +145,6 @@ export function findTocPages(pages: PdfPage[], options: FindTocOptions = {}): To
     pages: best,
     from: best[0]?.num ?? 0,
     to: best[best.length - 1]?.num ?? 0,
-    scores: best.map(scoreTocPage),
   };
 }
 

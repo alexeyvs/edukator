@@ -27,17 +27,48 @@ export interface CheckResult {
 const MINUS = '-−–';
 
 /**
- * Число: знак (возможно отделённый пробелом), целая часть, дробная через точку
- * или запятую и необязательный знаменатель через `/` — «3/4» в теме про
- * обыкновенные дроби такой же законный ответ, как «0,75».
+ * Смешанное число: целая часть, пробел, правильная дробь — «1 2/3». Отдельная
+ * ветвь и обязательно раньше обычной: иначе пробел читается как граница двух
+ * чисел, и естественная запись ответа в теме про обыкновенные дроби уходит в
+ * `ambiguous-number`, то есть верный ответ считается ошибкой.
+ */
+const MIXED_BODY = String.raw`\d+\s+\d+\s*/\s*\d+`;
+
+/**
+ * Число: целая часть, дробная через точку или запятую и необязательный
+ * знаменатель через `/` — «3/4» в теме про обыкновенные дроби такой же
+ * законный ответ, как «0,75».
+ */
+const PLAIN_BODY = String.raw`\d+(?:[.,]\d+)?(?:\s*/\s*\d+(?:[.,]\d+)?)?`;
+
+/**
+ * Знак плюс одна из двух записей числа. Отделённым пробелом знак читается
+ * только в начале ответа: внутри фразы «Ответ – 5» тире — пунктуация, и приняв
+ * его за минус, нормализатор засчитывал бы верный ответ неверным.
  */
 const NUMBER = new RegExp(
-  `[${MINUS}]?\\s*\\d+(?:[.,]\\d+)?(?:\\s*/\\s*\\d+(?:[.,]\\d+)?)?`,
+  `(?:^[${MINUS}]\\s*|[${MINUS}]?)(?:${MIXED_BODY}|${PLAIN_BODY})%?`,
   'g',
 );
 
-/** Пробел внутри числа как разделитель разрядов: «45 000» — одно число, а не два. */
-const GROUPING_SPACE = /(\d)[ \u00a0\u202f](?=\d{3}(?!\d))/g;
+/**
+ * Десятичная дробь без целой части: «,5» — обычное сокращение при вводе.
+ * Восстанавливается ноль, потому что иначе `PLAIN_BODY` требует цифру перед
+ * разделителем, пропускает его и читает «,5» как 5 — то есть засчитывает
+ * неверный ответ верным. Только в начале строки: внутри фразы «Ответ.5» точка
+ * заканчивает предложение, а не открывает число.
+ */
+const LEADING_FRACTION = new RegExp(`^(?<sign>[${MINUS}]?\\s*)(?=[.,]\\d)`);
+
+const MIXED = /^(\d+)\s+(\d+)\s*\/\s*(\d+)$/;
+
+/**
+ * Пробел внутри числа как разделитель разрядов: «45 000» — одно число, а не два.
+ * За группой не должно идти дробной черты: в «1 200/3» тот же пробел отделяет
+ * целую часть смешанного числа, и схлопывание давало 1200/3 = 400 вместо
+ * 1 + 200/3 — верный ответ молча превращался в другое число.
+ */
+const GROUPING_SPACE = /(\d)[ \u00a0\u202f](?=\d{3}(?!\d)(?!\s*\/))/g;
 
 /** Типографские апострофы: «don’t» с телефона и «don't» с клавиатуры — один ответ. */
 const APOSTROPHES = /[‘’ʼ`´]/g;
@@ -48,13 +79,24 @@ function sameNumber(a: number, b: number): boolean {
 }
 
 function toNumber(token: string): number {
-  const cleaned = token.replace(/\s+/g, '').replace(new RegExp(`^[${MINUS}]`), '-');
-  const [numerator, denominator] = cleaned.split('/');
+  const percent = token.trimEnd().endsWith('%');
+  const withoutPercent = percent ? token.trimEnd().slice(0, -1) : token;
+  const signed = withoutPercent.replace(new RegExp(`^[${MINUS}]\\s*`), '-');
+  const sign = signed.startsWith('-') ? -1 : 1;
+  const body = signed.replace(/^-/, '').trim();
+
+  const mixed = MIXED.exec(body);
+  if (mixed !== null) {
+    const [whole = NaN, numerator = NaN, denominator = NaN] = mixed.slice(1).map(Number);
+    return sign * (whole + numerator / denominator);
+  }
+
+  const [numerator, denominator] = body.replace(/\s+/g, '').split('/');
   const value =
     denominator === undefined
       ? Number(numerator?.replace(',', '.'))
       : Number(numerator?.replace(',', '.')) / Number(denominator.replace(',', '.'));
-  return value;
+  return (sign * value) / (percent ? 100 : 1);
 }
 
 /**
@@ -62,7 +104,14 @@ function toNumber(token: string): number {
  * по длине списка видно, ответ ли это без числа или с двумя числами сразу.
  */
 export function findNumbers(text: string): number[] {
-  return [...text.replace(GROUPING_SPACE, '$1').matchAll(NUMBER)]
+  // Краевые пробелы снимаются до разбора: иначе знак в «  − 45» уже не в начале
+  // строки и перестаёт читаться как знак.
+  const prepared = text
+    .trim()
+    .replace(LEADING_FRACTION, '$<sign>0')
+    .replace(GROUPING_SPACE, '$1');
+
+  return [...prepared.matchAll(NUMBER)]
     .map((match) => toNumber(match[0]))
     .filter((value) => Number.isFinite(value));
 }
@@ -107,11 +156,40 @@ function expectedNumber(raw: string): number {
   return only;
 }
 
-function checkNumber(given: string, expected: ExpectedAnswer): CheckResult {
-  const trimmed = given.trim();
-  const wanted = candidates(expected).map(expectedNumber);
+/**
+ * Разбирает эталоны для числовой сверки. `answer` обязан читаться однозначно,
+ * а вот `accept[]` пополняется разбором спора уже на ходу: нечисловая запись в
+ * нём — не дефект банка, а подтверждённый живой вариант, и падать на ней
+ * значило бы ломать задание навсегда после первого же спора. Такие записи
+ * сверяются как текст.
+ */
+function numberExpectations(expected: ExpectedAnswer): { numbers: number[]; texts: string[] } {
+  const numbers = [expectedNumber(expected.answer)];
+  const texts: string[] = [];
 
+  for (const raw of expected.accept ?? []) {
+    const found = findNumbers(raw);
+    const only = found[0];
+    if (found.length === 1 && only !== undefined) numbers.push(only);
+    else texts.push(normalizeText(raw));
+  }
+
+  return { numbers, texts };
+}
+
+function checkNumber(given: string, expected: ExpectedAnswer): CheckResult {
+  // Пустой ответ разбирается до эталона: ученик ничего не ввёл, и это его
+  // случай, а не дефект банка — падать здесь значило бы прятать «empty» за
+  // ошибкой задания, до которой ученику дела нет.
+  const trimmed = given.trim();
   if (trimmed === '') return reject('', 'empty');
+
+  const { numbers: wanted, texts } = numberExpectations(expected);
+
+  // Словесный вариант сверяется до чисел: «сорок пять» числа не содержит, и
+  // числовая ветвь отвергла бы его как no-number, не дойдя до accept.
+  const asText = normalizeText(trimmed);
+  if (texts.includes(asText)) return { correct: true, normalized: asText };
 
   const numbers = findNumbers(trimmed);
   const only = numbers[0];

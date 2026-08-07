@@ -91,6 +91,13 @@ describe('masteryRatio', () => {
 });
 
 describe('scoreFromRatio', () => {
+  it('держит калибровочные константы спеки', () => {
+    expect(MAX_BAND).toBe(1);
+    expect(MIN_SCORE).toBe(2);
+    expect(MAX_SCORE).toBe(5);
+    expect(SCORE_ANCHORS.map((anchor) => anchor.score)).toEqual([2, 3, 4, 5]);
+  });
+
   it('отображает опорные точки ровно в 2.0 / 3.0 / 4.0 / 5.0', () => {
     expect(SCORE_ANCHORS.map((anchor) => anchor.ratio)).toEqual([0.3, 0.45, 0.6, 0.8]);
     for (const anchor of SCORE_ANCHORS) {
@@ -302,6 +309,19 @@ describe('снимки прогноза', () => {
     expect(window.map((row) => row.createdAt)).toEqual([at(5).toISOString()]);
   });
 
+  it('включает границы периода, а не отсекает их', () => {
+    snapshot('math', 0.3, 0);
+    snapshot('math', 0.45, 5);
+
+    expect(readSnapshots(db, 'math', { since: at(0), until: at(5) })).toHaveLength(2);
+    expect(readSnapshots(db, 'math', { since: at(5) }).map((row) => row.createdAt)).toEqual([
+      at(5).toISOString(),
+    ]);
+    expect(readSnapshots(db, 'math', { until: at(0) }).map((row) => row.createdAt)).toEqual([
+      at(0).toISOString(),
+    ]);
+  });
+
   it('считает тренд как разницу между первым и последним снимком', () => {
     snapshot('math', 0.3, 0);
     snapshot('math', 0.6, 10);
@@ -345,7 +365,23 @@ describe('снимки прогноза', () => {
     expect(readSnapshots(db, 'overall')).toHaveLength(0);
   });
 
-  it('отвергает снимок с отметкой времени вне шкалы оценок', () => {
+  it('откатывает весь пакет, если один из предметных снимков не записался', () => {
+    db.exec(`
+      CREATE TRIGGER fail_math_forecast
+      BEFORE INSERT ON forecast_snapshots
+      WHEN NEW.subject = 'math'
+      BEGIN
+        SELECT RAISE(ABORT, 'test failure');
+      END;
+    `);
+
+    expect(() => recordForecasts(db, graph, at(0))).toThrow(/test failure/);
+    expect(readSnapshots(db, 'overall')).toEqual([]);
+    expect(readSnapshots(db, 'math')).toEqual([]);
+    expect(readSnapshots(db, 'russian')).toEqual([]);
+  });
+
+  it('отвергает снимок с оценкой вне шкалы 2..5', () => {
     const broken = { ratio: 0.6, score: 7, band: 0, low: 7, high: 7, weight: 2, untestedWeight: 0 };
 
     expect(() => writeForecastSnapshot(db, 'math', broken, at(0))).toThrow(/2\.\.5/);
@@ -354,13 +390,16 @@ describe('снимки прогноза', () => {
     );
   });
 
-  it('отвергает снимок с отрицательной полосой погрешности', () => {
+  it('отвергает снимок с полосой погрешности вне диапазона 0..1', () => {
     expect(() => writeForecastSnapshot(db, 'math', { score: 4, band: -0.1 }, at(0))).toThrow(
       /полос/i,
     );
     expect(() =>
       writeForecastSnapshot(db, 'math', { score: 4, band: Number.NaN }, at(0)),
     ).toThrow(/полос/i);
+    expect(() => writeForecastSnapshot(db, 'math', { score: 4, band: 1.1 }, at(0))).toThrow(
+      /полос/i,
+    );
     expect(readSnapshots(db, 'math')).toHaveLength(0);
   });
 });

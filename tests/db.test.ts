@@ -1,17 +1,31 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
+import BetterSqlite3 from 'better-sqlite3';
 import {
   DEFAULT_PROFILE,
   SCHEMA_VERSION,
   TABLES,
   databasePath,
+  migrate,
   openDatabase,
   readProfile,
   writeProfile,
 } from '../server/db.js';
+
+/** Формат, в котором отметки времени пишет код: сравнение по колонке — строковое. */
+const ISO_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+/**
+ * Число открытых процессом дескрипторов. Утечку соединения иначе не увидеть:
+ * объект базы наружу не возвращается. На системах без `/dev/fd` (не macOS и не
+ * Linux) отдаёт 0 — проверка вырождается в «не выросло», но не ломается.
+ */
+function openDescriptors(): number {
+  return existsSync('/dev/fd') ? readdirSync('/dev/fd').length : 0;
+}
 
 function tableNames(db: Database): string[] {
   const rows = db
@@ -36,6 +50,66 @@ function seedTask(db: Database, topicId: string): number {
     )
     .run(topicId, 'Сколько будет 2 + 2?', '4', '["4","четыре"]', 2);
   return Number(info.lastInsertRowid);
+}
+
+/** Реальная DDL версии 1: прежний тест лишь менял номер у уже новой схемы. */
+function createVersionOneDatabase(path: string): Database {
+  const legacy = new BetterSqlite3(path);
+  legacy.pragma('foreign_keys = ON');
+  legacy.exec(`
+    CREATE TABLE profile (
+      id INTEGER PRIMARY KEY CHECK (id = 1), name TEXT NOT NULL DEFAULT '',
+      interests TEXT NOT NULL DEFAULT '[]', exam_date TEXT, partner_name TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE topic_state (
+      topic_id TEXT PRIMARY KEY, mastery REAL NOT NULL DEFAULT 0 CHECK (mastery BETWEEN 0 AND 1),
+      confidence REAL NOT NULL DEFAULT 0 CHECK (confidence BETWEEN 0 AND 1),
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0), last_seen TEXT, next_review TEXT
+    );
+    CREATE TABLE task_bank (
+      id INTEGER PRIMARY KEY,
+      topic_id TEXT NOT NULL REFERENCES topic_state (topic_id) ON DELETE CASCADE,
+      question TEXT NOT NULL, answer TEXT NOT NULL, accept TEXT NOT NULL DEFAULT '[]',
+      hint TEXT, explain TEXT, joke TEXT,
+      difficulty INTEGER NOT NULL CHECK (difficulty BETWEEN 1 AND 3),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'valid', 'rejected', 'used')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX task_bank_queue ON task_bank (topic_id, status, difficulty);
+    CREATE TABLE runs (
+      id INTEGER PRIMARY KEY, subject TEXT NOT NULL CHECK (subject IN ('math', 'russian', 'english')),
+      topic_id TEXT NOT NULL REFERENCES topic_state (topic_id) ON DELETE CASCADE,
+      started_at TEXT NOT NULL, finished_at TEXT,
+      total INTEGER NOT NULL DEFAULT 0 CHECK (total >= 0),
+      correct INTEGER NOT NULL DEFAULT 0 CHECK (correct >= 0)
+    );
+    CREATE TABLE attempts (
+      id INTEGER PRIMARY KEY,
+      task_id INTEGER NOT NULL REFERENCES task_bank (id) ON DELETE CASCADE,
+      topic_id TEXT NOT NULL REFERENCES topic_state (topic_id) ON DELETE CASCADE,
+      run_id INTEGER REFERENCES runs (id) ON DELETE SET NULL,
+      answer TEXT NOT NULL, is_correct INTEGER NOT NULL CHECK (is_correct IN (0, 1)),
+      hint_used INTEGER NOT NULL DEFAULT 0 CHECK (hint_used IN (0, 1)),
+      duration_ms INTEGER NOT NULL DEFAULT 0 CHECK (duration_ms >= 0),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX attempts_by_topic ON attempts (topic_id, created_at);
+    CREATE TABLE disputes (
+      id INTEGER PRIMARY KEY, attempt_id INTEGER NOT NULL REFERENCES attempts (id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'upheld', 'rejected')),
+      resolution TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), resolved_at TEXT
+    );
+    CREATE TABLE forecast_snapshots (
+      id INTEGER PRIMARY KEY,
+      subject TEXT NOT NULL CHECK (subject IN ('math', 'russian', 'english', 'overall')),
+      score REAL NOT NULL CHECK (score BETWEEN 2 AND 5),
+      band REAL NOT NULL DEFAULT 0 CHECK (band >= 0),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX forecast_by_subject ON forecast_snapshots (subject, created_at);
+    PRAGMA user_version = 1;
+  `);
+  return legacy;
 }
 
 describe('база данных', () => {
@@ -88,6 +162,186 @@ describe('база данных', () => {
       expect(state?.mastery).toBeCloseTo(0.42);
       expect(readProfile(db).name).toBe('Тимофей');
       expect(readProfile(db).interests).toEqual(['Minecraft']);
+    });
+
+    it('обновляет схему версии 1 до текущей и ставит ограничения целостности', () => {
+      db.exec(`
+        DROP TRIGGER runs_correct_not_above_total_insert;
+        DROP TRIGGER runs_correct_not_above_total_update;
+        DROP TRIGGER attempts_topic_consistency_insert;
+        DROP TRIGGER attempts_topic_consistency_update;
+      `);
+      db.pragma('user_version = 1');
+      db.close();
+
+      db = openDatabase(dbFile);
+
+      const [version] = db.pragma('user_version') as [{ user_version: number }];
+      const triggers = db.prepare<[], { n: number }>(
+        "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger'",
+      ).get();
+      expect(version.user_version).toBe(SCHEMA_VERSION);
+      expect(triggers?.n).toBe(4);
+    });
+
+    it('обновляет ISO-умолчания реальной схемы версии 1 и сохраняет данные', () => {
+      const path = join(tempDir, 'версия-1.db');
+      const legacy = createVersionOneDatabase(path);
+      const topicId = seedTopic(legacy);
+      const taskId = seedTask(legacy, topicId);
+      const attemptId = Number(
+        legacy
+          .prepare(
+            `INSERT INTO attempts (task_id, topic_id, answer, is_correct)
+             VALUES (?, ?, ?, ?)`,
+          )
+          .run(taskId, topicId, '4', 1).lastInsertRowid,
+      );
+      legacy
+        .prepare('INSERT INTO disputes (attempt_id, status, resolved_at) VALUES (?, ?, ?)')
+        .run(attemptId, 'upheld', '2026-08-07 12:34:56');
+      legacy.close();
+
+      const migrated = openDatabase(path);
+      try {
+        const newTaskId = seedTask(migrated, topicId);
+        const newAttemptId = Number(
+          migrated
+            .prepare(
+              `INSERT INTO attempts (task_id, topic_id, answer, is_correct)
+               VALUES (?, ?, ?, ?)`,
+            )
+            .run(newTaskId, topicId, '4', 1).lastInsertRowid,
+        );
+        migrated.prepare('INSERT INTO disputes (attempt_id) VALUES (?)').run(newAttemptId);
+
+        for (const table of ['task_bank', 'attempts', 'disputes']) {
+          const rows = migrated
+            .prepare<[], { created_at: string }>(`SELECT created_at FROM ${table} ORDER BY id`)
+            .all();
+          expect(rows).toHaveLength(2);
+          for (const row of rows) expect(row.created_at).toMatch(ISO_STAMP);
+        }
+        const resolved = migrated
+          .prepare<[], { resolved_at: string }>('SELECT resolved_at FROM disputes WHERE id = 1')
+          .get();
+        expect(resolved?.resolved_at).toBe('2026-08-07T12:34:56.000Z');
+        expect(migrated.pragma('foreign_key_check')).toEqual([]);
+      } finally {
+        migrated.close();
+      }
+    });
+
+    it('откатывает миграцию версии 1 с противоречивым забегом', () => {
+      const topicId = seedTopic(db);
+      db.exec(`
+        DROP TRIGGER runs_correct_not_above_total_insert;
+        DROP TRIGGER runs_correct_not_above_total_update;
+        DROP TRIGGER attempts_topic_consistency_insert;
+        DROP TRIGGER attempts_topic_consistency_update;
+        PRAGMA ignore_check_constraints = ON;
+      `);
+      db.prepare(
+        'INSERT INTO runs (subject, topic_id, started_at, total, correct) VALUES (?, ?, ?, ?, ?)',
+      ).run('math', topicId, '2026-08-07T10:00:00Z', 1, 2);
+      db.exec('PRAGMA ignore_check_constraints = OFF; PRAGMA user_version = 1;');
+      db.close();
+
+      expect(() => openDatabase(dbFile)).toThrow(/противоречивые забеги или попытки/);
+
+      db = new BetterSqlite3(dbFile);
+      const [version] = db.pragma('user_version') as [{ user_version: number }];
+      const triggers = db.prepare<[], { n: number }>(
+        "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger'",
+      ).get();
+      expect(version.user_version).toBe(1);
+      expect(triggers?.n).toBe(0);
+    });
+
+    it('откатывает миграцию версии 1 с несовпадающей темой попытки', () => {
+      const math = seedTopic(db, 'math.a');
+      const russian = seedTopic(db, 'russian.a');
+      const taskId = seedTask(db, math);
+      db.exec(`
+        DROP TRIGGER runs_correct_not_above_total_insert;
+        DROP TRIGGER runs_correct_not_above_total_update;
+        DROP TRIGGER attempts_topic_consistency_insert;
+        DROP TRIGGER attempts_topic_consistency_update;
+      `);
+      db.prepare(
+        `INSERT INTO attempts (task_id, topic_id, answer, is_correct)
+         VALUES (?, ?, ?, ?)`,
+      ).run(taskId, russian, '4', 1);
+      db.pragma('user_version = 1');
+      db.close();
+
+      expect(() => openDatabase(dbFile)).toThrow(/противоречивые забеги или попытки/);
+
+      db = new BetterSqlite3(dbFile);
+      const [version] = db.pragma('user_version') as [{ user_version: number }];
+      expect(version.user_version).toBe(1);
+    });
+
+    it('не объявляет текущей непустую базу без номера версии', () => {
+      const path = join(tempDir, 'неизвестная.db');
+      const unknown = new BetterSqlite3(path);
+      unknown.exec('CREATE TABLE alien (id INTEGER PRIMARY KEY)');
+      unknown.close();
+
+      expect(() => openDatabase(path)).toThrow(/без версии.*alien/);
+
+      const reopened = new BetterSqlite3(path);
+      const [version] = reopened.pragma('user_version') as [{ user_version: number }];
+      expect(version.user_version).toBe(0);
+      reopened.close();
+    });
+
+    it('отвергает базу, собранную более новой версией схемы', () => {
+      db.pragma(`user_version = ${SCHEMA_VERSION + 1}`);
+
+      expect(() => migrate(db)).toThrow(/более новой версией схемы/);
+    });
+
+    it('не оставляет открытое соединение, если миграция упала', () => {
+      // Соединение открыто раньше, чем миграция падает, а наружу уходит только
+      // исключение — закрыть его вызывающему нечем. /api/health открывает базу
+      // на каждый запрос, так что утечка упирается в предел дескрипторов.
+      const broken = join(tempDir, 'из-будущего.db');
+      const seed = openDatabase(broken);
+      seed.pragma(`user_version = ${SCHEMA_VERSION + 1}`);
+      seed.close();
+
+      const before = openDescriptors();
+      for (let index = 0; index < 40; index += 1) {
+        expect(() => openDatabase(broken)).toThrow(/более новой версией схемы/);
+      }
+
+      expect(openDescriptors() - before).toBeLessThan(10);
+    });
+
+    it('проставляет отметки времени по умолчанию в том же ISO, что и код', () => {
+      const topicId = seedTopic(db);
+      const taskId = seedTask(db, topicId);
+      db.prepare(
+        `INSERT INTO attempts (task_id, topic_id, answer, is_correct, hint_used, duration_ms)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(taskId, topicId, '4', 1, 0, 900);
+      db.prepare('INSERT INTO forecast_snapshots (subject, score, band) VALUES (?, ?, ?)')
+        .run('math', 4.0, 0.3);
+
+      const stamps = [
+        db.prepare<[], { created_at: string }>('SELECT created_at FROM task_bank').get(),
+        db.prepare<[], { created_at: string }>('SELECT created_at FROM attempts').get(),
+        db.prepare<[], { created_at: string }>('SELECT created_at FROM forecast_snapshots').get(),
+      ];
+
+      for (const row of stamps) {
+        expect(row?.created_at).toMatch(ISO_STAMP);
+      }
+      // Умолчание схемы и `toISOString()` обязаны сравниваться как строки:
+      // по этой колонке идут и сортировка, и выборка периода.
+      const written = stamps[2]?.created_at ?? '';
+      expect(written > '2026-01-01T00:00:00.000Z').toBe(true);
     });
   });
 
@@ -150,6 +404,31 @@ describe('база данных', () => {
       expect(() => writeProfile(db, { examDate: '20 мая' })).toThrow(/exam_date/);
     });
 
+    it('отвергает дату нужной формы, но несуществующую', () => {
+      // Форму такая дата проходит, а дальше Date.parse даёт NaN и планировщик
+      // перестаёт строить план вообще — чинить это можно только здесь.
+      for (const broken of ['2027-13-45', '2027-02-30', '2027-00-10']) {
+        expect(() => writeProfile(db, { examDate: broken }), broken).toThrow(/exam_date/);
+      }
+      expect(readProfile(db).examDate).toBeNull();
+      expect(writeProfile(db, { examDate: '2028-02-29' }).examDate).toBe('2028-02-29');
+    });
+
+    it('отвергает интересы, которые не массив строк, и оставляет профиль читаемым', () => {
+      writeProfile(db, { name: 'Тимофей', interests: ['Minecraft'] });
+
+      for (const broken of ['кино', 42, ['ok', 7], null]) {
+        expect(() =>
+          writeProfile(db, { interests: broken as unknown as string[] }),
+          JSON.stringify(broken),
+        ).toThrow(/interests/);
+      }
+      // Профиль после отказа читается: битая запись сделала бы его
+      // невосстановимым — writeProfile сам начинается с readProfile.
+      expect(readProfile(db).interests).toEqual(['Minecraft']);
+      expect(writeProfile(db, { interests: ['скейт'] }).interests).toEqual(['скейт']);
+    });
+
     it('принимает сброс даты экзамена в null', () => {
       writeProfile(db, { examDate: '2027-05-20' });
 
@@ -208,6 +487,75 @@ describe('база данных', () => {
       expect(() => db.prepare('INSERT INTO disputes (attempt_id) VALUES (?)').run(attemptId)).not.toThrow();
       const attempts = db.prepare<[], { n: number }>('SELECT COUNT(*) AS n FROM attempts').get();
       expect(attempts?.n).toBe(1);
+    });
+
+    it('отвергает верных ответов больше, чем заданий в забеге', () => {
+      const topicId = seedTopic(db);
+      expect(() =>
+        db.prepare(
+          'INSERT INTO runs (subject, topic_id, started_at, total, correct) VALUES (?, ?, ?, ?, ?)',
+        ).run('math', topicId, '2026-08-07T10:00:00Z', 2, 3),
+      ).toThrow(/correct|CHECK/);
+    });
+
+    it('требует совпадения темы попытки с заданием и забегом', () => {
+      const math = seedTopic(db, 'math.fractions');
+      const russian = seedTopic(db, 'russian.spelling');
+      const taskId = seedTask(db, math);
+      const runId = Number(
+        db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+          .run('russian', russian, '2026-08-07T10:00:00Z').lastInsertRowid,
+      );
+      const insert = db.prepare(
+        `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct)
+         VALUES (?, ?, ?, ?, ?)`,
+      );
+      expect(() => insert.run(taskId, russian, null, '4', 1)).toThrow(/attempt topic/);
+      expect(() => insert.run(taskId, math, runId, '4', 1)).toThrow(/attempt topic/);
+    });
+
+    it('не даёт испортить корректный забег обновлением', () => {
+      const topicId = seedTopic(db);
+      const runId = Number(
+        db.prepare(
+          'INSERT INTO runs (subject, topic_id, started_at, total, correct) VALUES (?, ?, ?, ?, ?)',
+        ).run('math', topicId, '2026-08-07T10:00:00Z', 2, 1).lastInsertRowid,
+      );
+
+      expect(() => db.prepare('UPDATE runs SET correct = 3 WHERE id = ?').run(runId)).toThrow(
+        /correct|CHECK/,
+      );
+      expect(() => db.prepare('UPDATE runs SET total = 0 WHERE id = ?').run(runId)).toThrow(
+        /correct|CHECK/,
+      );
+      expect(db.prepare<[number], { total: number; correct: number }>(
+        'SELECT total, correct FROM runs WHERE id = ?',
+      ).get(runId)).toEqual({ total: 2, correct: 1 });
+    });
+
+    it('не даёт поменять связи корректной попытки на другую тему', () => {
+      const math = seedTopic(db, 'math.a');
+      const russian = seedTopic(db, 'russian.a');
+      const mathTask = seedTask(db, math);
+      const russianTask = seedTask(db, russian);
+      const runId = Number(
+        db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+          .run('math', math, '2026-08-07T10:00:00Z').lastInsertRowid,
+      );
+      const attemptId = Number(
+        db.prepare(
+          `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct)
+           VALUES (?, ?, ?, ?, ?)`,
+        ).run(mathTask, math, runId, '4', 1).lastInsertRowid,
+      );
+
+      expect(() => db.prepare('UPDATE attempts SET topic_id = ? WHERE id = ?')
+        .run(russian, attemptId)).toThrow(/attempt topic/);
+      expect(() => db.prepare('UPDATE attempts SET task_id = ? WHERE id = ?')
+        .run(russianTask, attemptId)).toThrow(/attempt topic/);
+      expect(db.prepare<[number], { task_id: number; topic_id: string }>(
+        'SELECT task_id, topic_id FROM attempts WHERE id = ?',
+      ).get(attemptId)).toEqual({ task_id: mathTask, topic_id: math });
     });
 
     it('отвергает mastery вне 0..1 и difficulty вне 1..3', () => {

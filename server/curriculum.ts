@@ -15,6 +15,12 @@ export const CURRICULUM_DIR = resolve(projectRoot, 'content', 'curriculum');
 /** Схема одной карты тем. Она же уходит в codex через `--output-schema`. */
 export const CURRICULUM_SCHEMA_PATH = resolve(projectRoot, 'schemas', 'curriculum.json');
 
+/**
+ * Минимальный `exam_weight` темы, которую разрешено ставить в `prereqs`:
+ * тема вне экзамена в план не попадает, а значит и открыть собой ничего не может.
+ */
+export const MIN_PREREQ_WEIGHT = 1;
+
 export const ANSWER_FORMATS = ['number', 'text', 'choice'] as const;
 export type AnswerFormat = (typeof ANSWER_FORMATS)[number];
 
@@ -132,9 +138,20 @@ export function buildTopicGraph(topics: Topic[]): TopicGraph {
   const dependents = new Map<string, string[]>();
   for (const topic of topics) {
     for (const prereq of topic.prereqs) {
-      if (!byId.has(prereq)) {
+      const required = byId.get(prereq);
+      if (required === undefined) {
         throw new Error(
           `Карта тем: тема «${topic.id}» ссылается в prereqs на несуществующую тему «${prereq}»`,
+        );
+      }
+      // Приоритет умножается на `exam_weight`, поэтому тему с нулевым весом
+      // планировщик не предложит никогда — её `mastery` навсегда остаётся нулём,
+      // а всё, что стоит за ней, навсегда закрыто. Проявляется это не ошибкой, а
+      // молча выпавшим из плана куском карты, так что ловим при загрузке.
+      if (required.examWeight < MIN_PREREQ_WEIGHT) {
+        throw new Error(
+          `Карта тем: тема «${topic.id}» требует «${prereq}» с exam_weight ${required.examWeight}: ` +
+            'такая предпосылка не попадает в план и закрывает зависимые темы навсегда',
         );
       }
       dependents.set(prereq, [...(dependents.get(prereq) ?? []), topic.id]);
@@ -182,13 +199,29 @@ export function buildTopicGraph(topics: Topic[]): TopicGraph {
 /**
  * Проверяет содержимое одной карты тем по JSON Schema и строит граф.
  * `source` — имя файла или иной источник: попадает в текст ошибки, иначе
- * непонятно, какую из трёх карт чинить.
+ * непонятно, какую из трёх карт чинить. `expected` — предмет, который карта
+ * обязана объявлять (для файла это его имя).
+ *
+ * Схема требует и совпадения предмета с именем файла, и префикса `<subject>.`
+ * в `id`, но выразить это в JSON Schema нельзя, поэтому проверки здесь.
  */
-export function parseCurriculumFile(raw: unknown, source: string): TopicGraph {
+export function parseCurriculumFile(
+  raw: unknown,
+  source: string,
+  expected?: Subject,
+): TopicGraph {
   const validate = validator();
   if (!validate(raw)) {
     const details = (validate.errors ?? []).map(describeError).join('; ');
     throw new Error(`Карта тем ${source} не соответствует схеме: ${details}`);
+  }
+
+  // Иначе `math.json` с предметом «russian» проходит молча, и математика просто
+  // исчезает из планирования: в графе её нет, а старт лишь пишет предупреждение.
+  if (expected !== undefined && raw.subject !== expected) {
+    throw new Error(
+      `Карта тем ${source}: объявлен предмет «${raw.subject}», а файл называется «${expected}.json»`,
+    );
   }
 
   for (const topic of raw.topics) {
@@ -197,18 +230,27 @@ export function parseCurriculumFile(raw: unknown, source: string): TopicGraph {
         `Карта тем ${source}: у темы «${topic.id}» предмет «${topic.subject}», а файл объявлен как «${raw.subject}»`,
       );
     }
+    // Пространство имён `id` — единственное, что отличает темы разных карт при
+    // сшивании их в один граф: чужой префикс роняет тему в чужой неймспейс.
+    if (!topic.id.startsWith(`${raw.subject}.`)) {
+      throw new Error(
+        `Карта тем ${source}: id темы «${topic.id}» должен начинаться с «${raw.subject}.»`,
+      );
+    }
   }
 
   return buildTopicGraph(raw.topics.map(toTopic));
 }
 
-function readCurriculumFile(dir: string, subject: Subject): Topic[] | undefined {
+function readCurriculumFile(dir: string, subject: Subject): Topic[] {
   const path = join(dir, `${subject}.json`);
   let text: string;
   try {
     text = readFileSync(path, 'utf8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`Карта тем ${path} не найдена`);
+    }
     throw new Error(`Карта тем ${path} не читается: ${(error as Error).message}`);
   }
 
@@ -219,22 +261,18 @@ function readCurriculumFile(dir: string, subject: Subject): Topic[] | undefined 
     throw new Error(`Карта тем ${path} не разбирается как JSON: ${(error as Error).message}`);
   }
 
-  return [...parseCurriculumFile(parsed, path).byId.values()];
+  return [...parseCurriculumFile(parsed, path, subject).byId.values()];
 }
 
 /**
  * Загружает карты всех предметов из каталога и сшивает их в один граф.
- * Отсутствующий файл предмета пропускается — на этапе сборки карт (задача 5)
- * их появление растянуто во времени; пустой каталог считается ошибкой.
+ * После завершения сборки обязательны все три предмета: частичная карта молча
+ * исключила бы часть экзамена из плана и прогноза.
  */
 export function loadCurriculum(dir: string = CURRICULUM_DIR): TopicGraph {
   const topics: Topic[] = [];
   for (const subject of SUBJECTS) {
-    topics.push(...(readCurriculumFile(dir, subject) ?? []));
-  }
-
-  if (topics.length === 0) {
-    throw new Error(`Не найдено ни одной карты тем в ${dir}`);
+    topics.push(...readCurriculumFile(dir, subject));
   }
 
   return buildTopicGraph(topics);
@@ -254,18 +292,22 @@ export interface SyncResult {
  * удаление увело бы за собой задания и попытки по каскаду.
  */
 export function syncTopicState(db: Database, graph: TopicGraph): SyncResult {
-  const known = new Set(
-    db
-      .prepare<[], { topic_id: string }>('SELECT topic_id FROM topic_state')
-      .all()
-      .map((row) => row.topic_id),
-  );
-
-  const added = [...graph.byId.keys()].filter((id) => !known.has(id));
   const insert = db.prepare('INSERT INTO topic_state (topic_id) VALUES (?)');
-  db.transaction(() => {
-    for (const id of added) insert.run(id);
-  })();
+
+  // Чтение состава внутри той же транзакции, что и вставка, и `immediate`, а не
+  // отложенная: иначе два старта сервера подряд оба увидят пустой `topic_state`,
+  // оба соберут один и тот же `added` — и второй упадёт на первичном ключе.
+  const { known, added } = db.transaction((): { known: Set<string>; added: string[] } => {
+    const seen = new Set(
+      db
+        .prepare<[], { topic_id: string }>('SELECT topic_id FROM topic_state')
+        .all()
+        .map((row) => row.topic_id),
+    );
+    const fresh = [...graph.byId.keys()].filter((id) => !seen.has(id));
+    for (const id of fresh) insert.run(id);
+    return { known: seen, added: fresh };
+  }).immediate();
 
   return {
     added,

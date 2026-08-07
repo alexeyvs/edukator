@@ -41,17 +41,23 @@ guard let document = PDFDocument(url: URL(fileURLWithPath: path)) else {
 // оглавления тонкие, а номера страниц мелкие.
 let scale: CGFloat = 2.0
 
+// Пропущенная страница — это ошибка, а не повод продолжить: вызывающий сверяет
+// номера не сам, и укороченный ответ выглядит ровно как полный. Оглавление,
+// потерявшее середину, дошло бы до карты тем никак не помеченным.
 var pages: [Page] = []
 for number in requested {
-    guard number >= 1, number <= document.pageCount, let page = document.page(at: number - 1) else {
-        continue
+    guard number >= 1, number <= document.pageCount else {
+        fail("страница \(number) вне книги (страниц: \(document.pageCount))")
+    }
+    guard let page = document.page(at: number - 1) else {
+        fail("страница \(number) не читается")
     }
 
     let bounds = page.bounds(for: .mediaBox)
     let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
     let image = page.thumbnail(of: size, for: .mediaBox)
     guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-        continue
+        fail("страница \(number) не отрисовалась в растр")
     }
 
     let request = VNRecognizeTextRequest()

@@ -100,12 +100,16 @@ describe('карта тем', () => {
         'russian',
         file([topic({ id: 'russian.spelling', subject: 'russian', answer_format: 'text' })], 'russian'),
       );
+      writeSubject(
+        'english',
+        file([topic({ id: 'english.grammar', subject: 'english', answer_format: 'text' })], 'english'),
+      );
 
       const graph = loadCurriculum(tempDir);
 
-      expect(graph.byId.size).toBe(2);
+      expect(graph.byId.size).toBe(3);
       expect(graph.bySubject.get('russian')?.[0]?.id).toBe('russian.spelling');
-      expect(graph.subjects).toEqual(['math', 'russian']);
+      expect(graph.subjects).toEqual(['math', 'russian', 'english']);
     });
 
     it('загружает настоящую карту тем из content/curriculum', () => {
@@ -131,6 +135,7 @@ describe('карта тем', () => {
         // Есть на чём считать прогноз и что предлагать планировщику.
         expect(topics.some((item) => item.examWeight >= 2)).toBe(true);
       }
+      expect(graph.byId.get('english.listening-dialogues')?.examWeight).toBe(0);
       // Топологический порядок построен, значит циклов и висячих prereqs нет.
       expect(graph.order).toHaveLength(graph.byId.size);
     });
@@ -174,6 +179,21 @@ describe('карта тем', () => {
       ).toThrow(/russian\.spelling/);
     });
 
+    it('отвергает файл, чей предмет не совпадает с его именем', () => {
+      // Иначе математика молча исчезает из планирования: файл прочитан,
+      // а темы в нём чужие, и старт лишь пишет предупреждение о пропаже карты.
+      writeSubject('math', file([topic({ id: 'russian.spelling', subject: 'russian' })], 'russian'));
+
+      expect(() => loadCurriculum(tempDir)).toThrow(/math\.json/);
+      expect(() => loadCurriculum(tempDir)).toThrow(/russian/);
+    });
+
+    it('отвергает id темы с чужим пространством имён', () => {
+      expect(() =>
+        parseCurriculumFile(file([topic({ id: 'russian.wrong-namespace' })]), 'math.json'),
+      ).toThrow(/russian\.wrong-namespace/);
+    });
+
     it('отвергает лишние и отсутствующие поля темы', () => {
       expect(() => parseCurriculumFile(file([topic({ note: 'лишнее' })]), 'math.json')).toThrow(
         /note/,
@@ -202,6 +222,27 @@ describe('карта тем', () => {
       ).toThrow(/цикл/i);
     });
 
+    it('отвергает предпосылку с exam_weight 0: она навсегда закрыла бы зависимые темы', () => {
+      expect(() =>
+        parseCurriculumFile(
+          file([
+            topic({ id: 'math.listening', exam_weight: 0 }),
+            topic({ id: 'math.percent', prereqs: ['math.listening'] }),
+          ]),
+          'math.json',
+        ),
+      ).toThrow(/math\.listening/);
+    });
+
+    it('допускает тему с exam_weight 0, от которой ничего не зависит', () => {
+      const graph = parseCurriculumFile(
+        file([topic({ id: 'math.listening', exam_weight: 0 }), topic({ id: 'math.percent' })]),
+        'math.json',
+      );
+
+      expect([...graph.byId.keys()]).toEqual(['math.listening', 'math.percent']);
+    });
+
     it('обнаруживает тему, объявленную собственной предпосылкой', () => {
       expect(() =>
         parseCurriculumFile(file([topic({ prereqs: ['math.fractions-basic'] })]), 'math.json'),
@@ -222,6 +263,11 @@ describe('карта тем', () => {
     it('падает, если в каталоге нет ни одной карты тем', () => {
       expect(() => loadCurriculum(tempDir)).toThrow(/карт/i);
       expect(() => loadCurriculum(join(tempDir, 'нет-каталога'))).toThrow(/нет-каталога/);
+    });
+
+    it('отвергает частичную карту: обязательны все три предмета', () => {
+      writeSubject('math', file([topic()]));
+      expect(() => loadCurriculum(tempDir)).toThrow(/russian\.json.*не найдена/);
     });
   });
 

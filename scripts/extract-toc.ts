@@ -10,13 +10,13 @@
  *   npx tsx scripts/extract-toc.ts --subject math --pdf ~/Downloads/book.pdf
  *   npx tsx scripts/extract-toc.ts --subject math --pdf book.pdf --pages 333-334
  */
-import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PDFParse } from 'pdf-parse';
 import { SUBJECTS, type Subject } from '../server/db.js';
 import { findTocPages, formatToc, type PdfPage, type TocSelection } from './toc.js';
+import { runChild } from './run-child.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -30,10 +30,13 @@ const OCR_SCRIPT = resolve(projectRoot, 'scripts', 'ocr-pdf.swift');
 const DEFAULT_SCAN_EDGE = 15;
 
 /**
- * Ниже этого числа непробельных символов текстовый слой считается отсутствующим.
- * У скана на страницу приходится ноль символов, у настоящего PDF — сотни.
+ * Ниже этого числа непробельных символов на любой из запрошенных страниц
+ * текстовый слой считается неполным. У скана на страницу приходится ноль
+ * символов, у настоящего PDF — сотни. Проверять нужно каждую страницу: иначе
+ * богатый слой соседних страниц скрывает скан оглавления в гибридном PDF.
  */
-const MIN_TEXT_LAYER_CHARS = 200;
+const MIN_TEXT_LAYER_CHARS_PER_PAGE = 200;
+export const OCR_TIMEOUT_MS = 5 * 60 * 1000;
 
 export type Extraction = 'text' | 'ocr';
 
@@ -47,6 +50,9 @@ export interface ExtractTocOptions {
   outDir?: string;
   /** `never` запрещает откат в OCR: нужен тестам и не-macOS. */
   ocr?: 'auto' | 'never';
+  /** Исполняемый файл для OCR; тесты подставляют заглушку вместо `swift`. */
+  ocrBin?: string;
+  ocrTimeoutMs?: number;
 }
 
 export interface ExtractTocResult {
@@ -94,19 +100,23 @@ export function pageRange(from: number, to: number): number[] {
   return Array.from({ length: to - from + 1 }, (_, index) => from + index);
 }
 
-function nonSpaceChars(pages: PdfPage[]): number {
-  return pages.reduce((sum, page) => sum + page.text.replace(/\s/gu, '').length, 0);
+function hasUsableTextLayer(pages: PdfPage[]): boolean {
+  return pages.every(
+    (page) => page.text.replace(/\s/gu, '').length >= MIN_TEXT_LAYER_CHARS_PER_PAGE,
+  );
 }
 
 /** Читает текстовый слой указанных страниц (или всей книги, если страницы не заданы). */
-export async function readPdfPages(
+async function extractPdfPages(
   pdfPath: string,
-  pageNumbers?: number[],
+  choosePages: (total: number) => number[] | undefined,
 ): Promise<{ pages: PdfPage[]; total: number }> {
   const { readFile } = await import('node:fs/promises');
   const data = new Uint8Array(await readFile(pdfPath));
   const parser = new PDFParse({ data });
   try {
+    const total = (await parser.getInfo()).total;
+    const pageNumbers = choosePages(total);
     // pageJoiner по умолчанию дописывает «-- 3 of 334 --», а это лишние строки
     // в знаменателе плотности.
     const result = await parser.getText({
@@ -124,56 +134,93 @@ export async function readPdfPages(
   }
 }
 
-/** Считает число страниц, не вытягивая текст: нужно, чтобы посчитать окно просмотра. */
-export async function readPdfPageCount(pdfPath: string): Promise<number> {
-  const { readFile } = await import('node:fs/promises');
-  const data = new Uint8Array(await readFile(pdfPath));
-  const parser = new PDFParse({ data });
-  try {
-    return (await parser.getInfo()).total;
-  } catch (error) {
-    throw new Error(`PDF ${pdfPath} не разбирается: ${(error as Error).message}`);
-  } finally {
-    await parser.destroy();
-  }
+/** Читает текстовый слой указанных страниц (или всей книги). */
+export function readPdfPages(
+  pdfPath: string,
+  pageNumbers?: number[],
+): Promise<{ pages: PdfPage[]; total: number }> {
+  return extractPdfPages(pdfPath, () => pageNumbers);
 }
 
-/** Распознаёт страницы через `scripts/ocr-pdf.swift`. Одним вызовом на все страницы: swift компилирует скрипт при каждом запуске. */
-export async function ocrPdfPages(pdfPath: string, pageNumbers: number[]): Promise<PdfPage[]> {
-  const raw = await new Promise<string>((resolvePromise, rejectPromise) => {
-    const child = spawn('swift', [OCR_SCRIPT, pdfPath, pageNumbers.join(',')], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+function isPdfPage(value: unknown): value is PdfPage {
+  const page = value as PdfPage | null;
+  return page !== null && typeof page === 'object'
+    && typeof page.num === 'number' && typeof page.text === 'string';
+}
 
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => (stdout += chunk));
-    child.stderr.on('data', (chunk: string) => (stderr += chunk));
-
-    child.on('error', (error: NodeJS.ErrnoException) => {
-      rejectPromise(
-        error.code === 'ENOENT'
-          ? new Error(
-              'OCR недоступен: не найден swift. Распознавание сканов работает только на macOS ' +
-                'с установленными Command Line Tools; на другой системе задайте PDF с текстовым слоем',
-            )
-          : error,
-      );
-    });
-
-    child.on('close', (code) => {
-      if (code === 0) resolvePromise(stdout);
-      else rejectPromise(new Error(`OCR не удался (код ${code}): ${stderr.trim()}`));
-    });
-  });
-
+/**
+ * Распознаёт страницы через `scripts/ocr-pdf.swift`. Одним вызовом на все
+ * страницы: swift компилирует скрипт при каждом запуске.
+ *
+ * `bin` подменяется тестами на заглушку — иначе ветка, которая в реальности и
+ * работает (все три учебника — сканы), не проверялась бы вовсе.
+ */
+export async function ocrPdfPages(
+  pdfPath: string,
+  pageNumbers: number[],
+  bin = 'swift',
+  timeoutMs = OCR_TIMEOUT_MS,
+): Promise<PdfPage[]> {
+  let result;
   try {
-    return JSON.parse(raw) as PdfPage[];
+    result = await runChild({
+      bin,
+      args: [OCR_SCRIPT, pdfPath, pageNumbers.join(',')],
+      label: 'OCR',
+      timeoutMs,
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(
+        'OCR недоступен: не найден swift. Распознавание сканов работает только на macOS ' +
+          'с установленными Command Line Tools; на другой системе задайте PDF с текстовым слоем',
+      );
+    }
+    throw error;
+  }
+  if (result.code !== 0) {
+    throw new Error(`OCR не удался (код ${result.code}): ${result.stderr.trim()}`);
+  }
+  const raw = result.stdout;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
   } catch (error) {
     throw new Error(`OCR вернул неразбираемый ответ: ${(error as Error).message}`);
   }
+
+  // Форма проверяется до разбора: `null` и `{}` — законный JSON, и приведение
+  // типом их пропускает. Дальше сверка состава страниц падала бы на них голым
+  // TypeError вместо внятной жалобы на распознавание.
+  if (!Array.isArray(parsed) || !parsed.every(isPdfPage)) {
+    throw new Error('OCR вернул ответ не в виде списка страниц');
+  }
+  const pages: PdfPage[] = parsed;
+
+  // Состав страниц сверяется с запросом: у выпавшей страницы нет никакого следа
+  // в ответе, а дальше по конвейеру неполное оглавление неотличимо от полного.
+  const got = new Set(pages.map((page) => page.num));
+  const missing = pageNumbers.filter((num) => !got.has(num));
+  const duplicates = pages
+    .map((page) => page.num)
+    .filter((num, index, values) => values.indexOf(num) !== index);
+  const requested = new Set(pageNumbers);
+  const extra = pages.map((page) => page.num).filter((num) => !requested.has(num));
+  const outOfOrder =
+    pages.length === pageNumbers.length &&
+    pages.some((page, index) => page.num !== pageNumbers[index]);
+  if (missing.length > 0 || duplicates.length > 0 || extra.length > 0 || outOfOrder) {
+    const details = [
+      ...(missing.length === 0 ? [] : [`не вернул страницы: ${missing.join(', ')}`]),
+      ...(duplicates.length === 0 ? [] : [`повторил страницы: ${[...new Set(duplicates)].join(', ')}`]),
+      ...(extra.length === 0 ? [] : [`вернул лишние страницы: ${[...new Set(extra)].join(', ')}`]),
+      ...(outOfOrder ? ['вернул страницы не в запрошенном порядке'] : []),
+    ];
+    throw new Error(`OCR ${details.join('; ')}`);
+  }
+
+  return pages;
 }
 
 /**
@@ -183,43 +230,58 @@ export async function ocrPdfPages(pdfPath: string, pageNumbers: number[]): Promi
 export async function extractToc(options: ExtractTocOptions): Promise<ExtractTocResult> {
   assertReadablePdf(options.pdfPath);
 
-  const total = await readPdfPageCount(options.pdfPath);
-  if (total === 0) throw new Error(`PDF ${options.pdfPath} не содержит страниц`);
-
-  if (options.pages !== undefined) {
-    const { from, to } = options.pages;
-    if (from < 1 || to < from || to > total) {
-      throw new Error(`Диапазон страниц ${from}-${to} выходит за пределы книги (1-${total})`);
+  const extracted = await extractPdfPages(options.pdfPath, (total) => {
+    if (options.pages !== undefined) {
+      const { from, to } = options.pages;
+      if (from < 1 || to < from || to > total) {
+        throw new Error(`Диапазон страниц ${from}-${to} выходит за пределы книги (1-${total})`);
+      }
+      return pageRange(from, to);
     }
-  }
-
+    return scanWindow(total, options.scanEdge ?? DEFAULT_SCAN_EDGE);
+  });
+  const { total } = extracted;
+  if (total === 0) throw new Error(`PDF ${options.pdfPath} не содержит страниц`);
   const wanted =
     options.pages === undefined
       ? scanWindow(total, options.scanEdge ?? DEFAULT_SCAN_EDGE)
       : pageRange(options.pages.from, options.pages.to);
 
-  let pages = (await readPdfPages(options.pdfPath, wanted)).pages;
+  let pages = extracted.pages;
   let extraction: Extraction = 'text';
+  let textSelection: TocSelection | undefined;
+  if (options.pages === undefined) {
+    try {
+      textSelection = findTocPages(pages);
+    } catch {
+      // Если в текстовом слое оглавления нет, ниже решается, нужен ли OCR.
+    }
+  }
 
-  if (nonSpaceChars(pages) < MIN_TEXT_LAYER_CHARS) {
+  const explicitText = options.pages !== undefined && pages.some((page) => page.text.trim() !== '');
+  const trustExplicitText = explicitText && options.ocr === 'never';
+  if (
+    textSelection === undefined &&
+    !trustExplicitText &&
+    !hasUsableTextLayer(pages)
+  ) {
     if (options.ocr === 'never') {
       throw new Error(
         `У ${options.pdfPath} нет текстового слоя (это скан), а распознавание отключено`,
       );
     }
-    pages = await ocrPdfPages(options.pdfPath, wanted);
+    pages = await ocrPdfPages(options.pdfPath, wanted, options.ocrBin, options.ocrTimeoutMs);
     extraction = 'ocr';
   }
 
   // Заданный вручную диапазон — прямое указание, эвристика в него не лезет.
   const selection: TocSelection =
     options.pages === undefined
-      ? findTocPages(pages)
+      ? (textSelection ?? findTocPages(pages))
       : {
           pages,
           from: options.pages.from,
           to: options.pages.to,
-          scores: [],
         };
 
   const outDir = options.outDir ?? RAW_TOC_DIR;
@@ -244,17 +306,22 @@ function parsePages(value: string): { from: number; to: number } {
 export function parseArgs(argv: string[]): CliArgs {
   const values = new Map<string, string>();
   let ocr: 'auto' | 'never' = 'auto';
+  const allowed = new Set(['subject', 'pdf', 'pages', 'scan', 'out']);
 
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index] ?? '';
     if (flag === '--no-ocr') {
+      if (ocr === 'never') throw new Error('Флаг --no-ocr указан дважды');
       ocr = 'never';
       continue;
     }
     if (!flag.startsWith('--')) throw new Error(`Непонятный аргумент: ${flag}`);
+    const name = flag.slice(2);
+    if (!allowed.has(name)) throw new Error(`Неизвестный флаг: ${flag}`);
+    if (values.has(name)) throw new Error(`Флаг ${flag} указан дважды`);
     const value = argv[index + 1];
     if (value === undefined) throw new Error(`У флага ${flag} нет значения`);
-    values.set(flag.slice(2), value);
+    values.set(name, value);
     index += 1;
   }
 
@@ -268,6 +335,12 @@ export function parseArgs(argv: string[]): CliArgs {
   const pages = values.get('pages');
   const scanEdge = values.get('scan');
   const outDir = values.get('out');
+
+  // Без проверки `Number('abc')` даёт NaN, окно просмотра выходит пустым, и
+  // скрипт «не находит оглавление» вместо жалобы на аргумент.
+  if (scanEdge !== undefined && !/^[1-9]\d*$/.test(scanEdge)) {
+    throw new Error(`--scan ожидает положительное число, получено «${scanEdge}»`);
+  }
 
   return {
     subject: subject as Subject,

@@ -1,7 +1,7 @@
 import type { Database } from 'better-sqlite3';
 import type { Subject } from './db.js';
 import type { Topic, TopicGraph } from './curriculum.js';
-import { confidenceAt, newTopicState, readTopicStates, type TopicState } from './mastery.js';
+import { confidenceAt, readTopicStates, stateOf, type TopicState } from './mastery.js';
 
 /** Прогноз считается либо по одному предмету, либо по всем сразу. */
 export type ForecastScope = Subject | 'overall';
@@ -27,8 +27,9 @@ export const MAX_SCORE = LAST_ANCHOR.score;
 
 /**
  * Полуширина полосы погрешности при полностью непроверенной программе: балл в
- * каждую сторону. Прогноз по нулю данных — это «где-то между тройкой и
- * пятёркой», и полоса обязана это показывать, а не изображать точность.
+ * каждую сторону. По нулю данных освоенность нулевая, то есть оценка упирается
+ * в нижний край шкалы, и полоса даёт «где-то между двойкой и тройкой» — это и
+ * есть честный ответ до первой попытки, а не изображение точности.
  */
 export const MAX_BAND = 1;
 
@@ -74,38 +75,18 @@ export interface ForecastTrend {
   count: number;
 }
 
-/** Период выборки снимков; границы включаются. */
+/**
+ * Период выборки снимков; границы включаются. Только `Date`: в колонке лежит
+ * полная ISO-отметка, а сравнение идёт строками, поэтому граница вида
+ * `'2026-08-07'` молча отсекала бы весь этот день.
+ */
 export interface SnapshotWindow {
-  since?: Date | string;
-  until?: Date | string;
-}
-
-function stateOf(states: Map<string, TopicState>, topicId: string): TopicState {
-  return states.get(topicId) ?? newTopicState(topicId);
+  since?: Date;
+  until?: Date;
 }
 
 function examTopics(topics: readonly Topic[]): Topic[] {
   return topics.filter((topic) => topic.examWeight >= MIN_FORECAST_WEIGHT);
-}
-
-/**
- * `Σ(exam_weight × mastery) / Σ(exam_weight)` по темам, которые вообще бывают на
- * экзамене. `null` — взвешивать нечего: в карте нет ни одной такой темы, и
- * ноль здесь означал бы «двойка», а не «неизвестно».
- */
-export function masteryRatio(
-  topics: readonly Topic[],
-  states: Map<string, TopicState>,
-): number | null {
-  let weight = 0;
-  let earned = 0;
-
-  for (const topic of examTopics(topics)) {
-    weight += topic.examWeight;
-    earned += topic.examWeight * stateOf(states, topic.id).mastery;
-  }
-
-  return weight === 0 ? null : earned / weight;
 }
 
 /**
@@ -135,27 +116,9 @@ export function scoreFromRatio(ratio: number): number {
 }
 
 /**
- * Полуширина полосы: доля веса, не подтверждённого попытками, умноженная на
- * `MAX_BAND`. Уверенность берётся на момент `now`, а не из базы, поэтому
- * заброшенная тема снова расширяет полосу — знание о ней устарело.
+ * Прогноз по списку тем: единственное место, где считаются взвешенные суммы.
+ * `null` — суммарный вес нулевой, считать не из чего.
  */
-export function forecastBand(
-  topics: readonly Topic[],
-  states: Map<string, TopicState>,
-  now: Date = new Date(),
-): number | null {
-  let weight = 0;
-  let untested = 0;
-
-  for (const topic of examTopics(topics)) {
-    weight += topic.examWeight;
-    untested += topic.examWeight * (1 - confidenceAt(stateOf(states, topic.id), now));
-  }
-
-  return weight === 0 ? null : (untested / weight) * MAX_BAND;
-}
-
-/** Прогноз по списку тем. `null` — суммарный вес нулевой, считать не из чего. */
 export function computeForecast(
   topics: readonly Topic[],
   states: Map<string, TopicState>,
@@ -189,6 +152,31 @@ export function computeForecast(
   };
 }
 
+/**
+ * `Σ(exam_weight × mastery) / Σ(exam_weight)` по темам, которые вообще бывают на
+ * экзамене. `null` — взвешивать нечего: в карте нет ни одной такой темы, и
+ * ноль здесь означал бы «двойка», а не «неизвестно».
+ */
+export function masteryRatio(
+  topics: readonly Topic[],
+  states: Map<string, TopicState>,
+): number | null {
+  return computeForecast(topics, states)?.ratio ?? null;
+}
+
+/**
+ * Полуширина полосы: доля веса, не подтверждённого попытками, умноженная на
+ * `MAX_BAND`. Уверенность берётся на момент `now`, а не из базы, поэтому
+ * заброшенная тема снова расширяет полосу — знание о ней устарело.
+ */
+export function forecastBand(
+  topics: readonly Topic[],
+  states: Map<string, TopicState>,
+  now: Date = new Date(),
+): number | null {
+  return computeForecast(topics, states, now)?.band ?? null;
+}
+
 /** Прогноз по предмету или по всей карте. `null` — тем для прогноза нет. */
 export function forecastFor(
   graph: TopicGraph,
@@ -214,10 +202,6 @@ function toSnapshot(row: SnapshotRow): ForecastSnapshot {
   return { id: row.id, subject: row.subject, score: row.score, band: row.band, createdAt: row.created_at };
 }
 
-function isoOf(value: Date | string): string {
-  return typeof value === 'string' ? value : value.toISOString();
-}
-
 /**
  * Пишет снимок прогноза. Отметка времени проставляется явно в ISO, а не
  * умолчанием схемы (`datetime('now')` даёт другой формат): по этой колонке идут
@@ -233,8 +217,8 @@ export function writeForecastSnapshot(
   if (!Number.isFinite(forecast.score) || forecast.score < MIN_SCORE || forecast.score > MAX_SCORE) {
     throw new Error(`Прогноз: оценка вне шкалы ${MIN_SCORE}..${MAX_SCORE} (${forecast.score})`);
   }
-  if (!Number.isFinite(forecast.band) || forecast.band < 0) {
-    throw new Error(`Прогноз: полоса погрешности отрицательна (${forecast.band})`);
+  if (!Number.isFinite(forecast.band) || forecast.band < 0 || forecast.band > MAX_BAND) {
+    throw new Error(`Прогноз: полоса погрешности вне диапазона 0..${MAX_BAND} (${forecast.band})`);
   }
 
   const createdAt = at.toISOString();
@@ -260,8 +244,8 @@ export function readSnapshots(
   subject: ForecastScope,
   window: SnapshotWindow = {},
 ): ForecastSnapshot[] {
-  const since = window.since === undefined ? null : isoOf(window.since);
-  const until = window.until === undefined ? null : isoOf(window.until);
+  const since = window.since === undefined ? null : window.since.toISOString();
+  const until = window.until === undefined ? null : window.until.toISOString();
 
   const rows = db
     .prepare<{ subject: string; since: string | null; until: string | null }, SnapshotRow>(
@@ -304,10 +288,13 @@ export function recordForecasts(
   graph: TopicGraph,
   now: Date = new Date(),
 ): ForecastSnapshot[] {
-  const states = readTopicStates(db);
   const scopes: ForecastScope[] = ['overall', ...graph.subjects];
 
+  // Состояния читаются внутри транзакции, и она `immediate`: снимок обязан быть
+  // сделан по тем же данным, что и записан, а под WAL отложенная транзакция с
+  // чтением в начале падает `SQLITE_BUSY_SNAPSHOT` от чужой фиксации.
   return db.transaction((): ForecastSnapshot[] => {
+    const states = readTopicStates(db);
     const written: ForecastSnapshot[] = [];
     for (const scope of scopes) {
       const forecast = forecastFor(graph, states, scope, now);
@@ -315,5 +302,5 @@ export function recordForecasts(
       written.push(writeForecastSnapshot(db, scope, forecast, now));
     }
     return written;
-  })();
+  }).immediate();
 }

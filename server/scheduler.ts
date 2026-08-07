@@ -3,9 +3,10 @@ import { readProfile, type Subject } from './db.js';
 import type { Topic, TopicGraph } from './curriculum.js';
 import {
   GAP_MASTERY,
+  clamp01,
   daysBetween,
-  newTopicState,
   readTopicStates,
+  stateOf,
   type TopicState,
 } from './mastery.js';
 
@@ -17,6 +18,13 @@ import {
 export const PREREQ_MASTERY = GAP_MASTERY;
 
 /**
+ * Нижняя граница множителя готовности предпосылок. Тема с нетронутым
+ * фундаментом получает не ноль, а этот пол, иначе срочность к экзамену не может
+ * её разблокировать в принципе. Значения 0.15 и 0.2 в симуляции неразличимы.
+ */
+export const PREREQ_SOFT_FLOOR = 0.2;
+
+/**
  * Потолок просрочки повторения в интервалах: тема, забытая на два интервала,
  * уже максимально срочная. Без потолка заброшенная на полгода тема с нулевым
  * весом обгоняла бы всё остальное.
@@ -26,7 +34,11 @@ export const OVERDUE_CAP = 2;
 /** За сколько дней до экзамена начинает расти срочность тяжёлых тем. */
 export const EXAM_HORIZON_DAYS = 30;
 
-/** Во сколько раз экзамен поднимает тему максимального веса в день X. */
+/**
+ * Надбавка к множителю срочности для темы максимального веса в день экзамена:
+ * итоговый множитель равен `1 + EXAM_URGENCY_GAIN`, то есть втрое против
+ * спокойного месяца.
+ */
 export const EXAM_URGENCY_GAIN = 2;
 
 /** Максимальный `exam_weight` по схеме карты тем. */
@@ -44,14 +56,25 @@ export interface ScheduleOptions {
   examDate?: string | null;
   /** Предмет предыдущего забега: следующий будет другим, если есть из чего выбрать. */
   lastSubject?: Subject | null;
+  /**
+   * Забеги, уже назначенные предметам до этого плана. Метод делителей делит
+   * спрос предмета на этот счётчик, а сервер выдаёт забеги по одному, а не днём
+   * целиком: без переданного счёта каждый вызов начинал бы делёж заново, и
+   * третий предмет выпадал бы из дня — ровно то, ради чего делители и вводились.
+   */
+  assigned?: ReadonlyMap<Subject, number>;
+  /** Темы, уже использованные сегодня: повторять их в следующем плане нельзя. */
+  used?: ReadonlySet<string>;
 }
 
 /** Тема с посчитанными множителями: `priority` — то, по чему идёт сортировка. */
 export interface RankedTopic {
   topic: Topic;
   state: TopicState;
-  /** Все предпосылки освоены. Неготовая тема имеет нулевой приоритет. */
+  /** Все предпосылки освоены. */
   ready: boolean;
+  /** Множитель готовности предпосылок: 1 при `ready`, иначе от `PREREQ_SOFT_FLOOR` до 1. */
+  readiness: number;
   /** Произведение срочности повторения и срочности к дате экзамена. */
   urgency: number;
   priority: number;
@@ -63,22 +86,42 @@ export interface PlannedRun {
   priority: number;
 }
 
-/**
- * Состояние темы из карты. Недостающая строка — это ещё не выполненная
- * синхронизация, а не опечатка: состав тем задаёт карта, поэтому здесь
- * (в отличие от `readTopicState`) отсутствие строки равно нулевому состоянию.
- */
-function stateOf(states: Map<string, TopicState>, topicId: string): TopicState {
-  return states.get(topicId) ?? newTopicState(topicId);
-}
-
-function clamp01(value: number): number {
-  return Math.min(1, Math.max(0, value));
-}
-
-/** Тема открыта, только когда все её предпосылки перевалили порог освоения. */
+/** Все предпосылки темы перевалили порог освоения. */
 export function prereqsReady(topic: Topic, states: Map<string, TopicState>): boolean {
   return topic.prereqs.every((id) => stateOf(states, id).mastery >= PREREQ_MASTERY);
+}
+
+/**
+ * Насколько тема открыта предпосылками: 1 — все освоены, иначе средняя
+ * готовность предпосылок, но не ниже `PREREQ_SOFT_FLOOR`.
+ *
+ * Множитель мягкий, а не затвор 0/1, потому что жёсткий ноль обнулял приоритет
+ * целиком и `examUrgency` не мог его перебить: тема с неосвоенным фундаментом
+ * не всплывала никогда, сколько бы ни оставалось до экзамена. На собранных
+ * картах цепочки предпосылок доходят до девяти уровней.
+ *
+ * Замер на реальных картах (40 дней по 3 забега, 5 прогонов, темы с
+ * `exam_weight ≥ 2`) — пропущено тем / освоено из 58:
+ *
+ * | точность | затвор 0/1 | мягкий множитель |
+ * |----------|------------|------------------|
+ * | 50%      | 11.0 / 33.4| 5.4 / 40.4       |
+ * | 60%      | 4.8 / 48.8 | 3.2 / 50.6       |
+ * | 75%      | 1.4 / 55.6 | 0.0 / 57.0       |
+ *
+ * Пропуски при слабой успеваемости уменьшаются вдвое, но не исчезают: остаток —
+ * это нехватка бюджета (120 забегов на 69 тем при повторениях), а не затвор.
+ */
+export function prereqsReadiness(topic: Topic, states: Map<string, TopicState>): number {
+  if (topic.prereqs.length === 0) return 1;
+  if (prereqsReady(topic, states)) return 1;
+
+  const total = topic.prereqs.reduce(
+    (sum, id) => sum + Math.min(1, stateOf(states, id).mastery / PREREQ_MASTERY),
+    0,
+  );
+
+  return Math.max(PREREQ_SOFT_FLOOR, total / topic.prereqs.length);
 }
 
 /**
@@ -151,14 +194,16 @@ function rankTopic(
   const now = options.now ?? new Date();
   const state = stateOf(states, topic.id);
   const ready = prereqsReady(topic, states);
+  const readiness = prereqsReadiness(topic, states);
   const urgency = reviewUrgency(state, now) * examUrgency(topic, now, options.examDate);
 
   return {
     topic,
     state,
     ready,
+    readiness,
     urgency,
-    priority: topic.examWeight * (1 - state.mastery) * (ready ? 1 : 0) * urgency,
+    priority: topic.examWeight * (1 - state.mastery) * readiness * urgency,
   };
 }
 
@@ -228,16 +273,17 @@ export function selectSubject(
   states: Map<string, TopicState>,
   options: ScheduleOptions = {},
   exclude: ReadonlySet<string> = new Set(),
-  assigned: ReadonlyMap<Subject, number> = new Map(),
+  assigned: ReadonlyMap<Subject, number> = options.assigned ?? new Map(),
 ): Subject | null {
   const available = graph.subjects.filter(
     (subject) => selectTopic(graph, states, subject, options, exclude) !== null,
   );
   if (available.length === 0) return null;
 
+  // Предметы в `available` различны, так что отсев ровно одного из двух и более
+  // всегда оставляет хотя бы один кандидат — пустого `pool` здесь не бывает.
   const last = options.lastSubject ?? null;
   const pool = available.length > 1 ? available.filter((subject) => subject !== last) : available;
-  if (pool.length === 0) return null;
 
   // Спрос делится на число уже назначенных забегов: так отстающий получает
   // больше, но остальные предметы не выпадают из плана совсем.
@@ -263,8 +309,8 @@ export function planRuns(
   }
 
   const plan: PlannedRun[] = [];
-  const used = new Set<string>();
-  const assigned = new Map<Subject, number>();
+  const used = new Set<string>(options.used ?? []);
+  const assigned = new Map<Subject, number>(options.assigned ?? []);
   let last = options.lastSubject ?? null;
 
   for (let index = 0; index < count; index += 1) {
@@ -294,8 +340,46 @@ export function lastRunSubject(db: Database): Subject | null {
 }
 
 /**
- * План забегов по данным базы: состояния тем, дата экзамена из профиля и
- * предмет последнего забега берутся оттуда, карта тем — снаружи.
+ * Забеги каждого предмета, начатые в сутки `now`. Сутки — местные: день ученика
+ * кончается по его часам, а в UTC граница уезжала бы на смещение пояса и делёж
+ * дня перезапускался бы посреди вечернего занятия. В запрос границы уходят всё
+ * равно в ISO — сравнение по `started_at` строковое. Вчерашний перекос в счёт не
+ * идёт, делёж дня начинается заново.
+ */
+export function runsAssignedToday(db: Database, now: Date = new Date()): Map<Subject, number> {
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  // Прибавляется календарный день, а не 24 часа: перевод часов не сдвигает границу.
+  const next = new Date(start);
+  next.setDate(next.getDate() + 1);
+  const rows = db
+    .prepare<[string, string], { subject: Subject; runs: number }>(
+      `SELECT subject, COUNT(*) AS runs FROM runs
+       WHERE started_at >= ? AND started_at < ? GROUP BY subject`,
+    )
+    .all(start.toISOString(), next.toISOString());
+
+  return new Map(rows.map((row) => [row.subject, row.runs]));
+}
+
+/** Темы забегов, уже начатых в текущие местные сутки. */
+export function topicsUsedToday(db: Database, now: Date = new Date()): Set<string> {
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  const next = new Date(start);
+  next.setDate(next.getDate() + 1);
+  const rows = db
+    .prepare<[string, string], { topic_id: string }>(
+      'SELECT DISTINCT topic_id FROM runs WHERE started_at >= ? AND started_at < ?',
+    )
+    .all(start.toISOString(), next.toISOString());
+  return new Set(rows.map((row) => row.topic_id));
+}
+
+/**
+ * План забегов по данным базы: состояния тем, дата экзамена из профиля,
+ * предмет последнего забега и уже начатые сегодня забеги берутся оттуда,
+ * карта тем — снаружи.
  */
 export function planFromDatabase(
   db: Database,
@@ -307,5 +391,7 @@ export function planFromDatabase(
     now,
     examDate: readProfile(db).examDate,
     lastSubject: lastRunSubject(db),
+    assigned: runsAssignedToday(db, now),
+    used: topicsUsedToday(db, now),
   });
 }

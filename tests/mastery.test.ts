@@ -38,6 +38,26 @@ function attempt(patch: Partial<Attempt> = {}): Attempt {
 }
 
 describe('модель знаний', () => {
+  // Остальные тесты строят ожидание из этих же констант, поэтому подмена любой
+  // из них их не роняет. Числа заданы спекой, и здесь они прибиты буквально:
+  // тихая «калибровка» α или порога пробела перекраивает весь учебный план.
+  it('держит калибровочные константы спеки', () => {
+    expect(ALPHA).toBe(0.35);
+    expect(BETA).toBe(0.3);
+    expect(GAP_MASTERY).toBe(0.6);
+    expect(CONFIDENCE_FLOOR).toBe(0.5);
+    expect(MIN_REVIEW_DAYS).toBe(1);
+    expect(MAX_REVIEW_DAYS).toBe(21);
+    // Множители сложности и подсказки — через наблюдаемое поведение.
+    expect(nextMastery(0, attempt({ difficulty: 1 }))).toBeCloseTo(0.35 * 0.7, 12);
+    expect(nextMastery(0, attempt({ difficulty: 3 }))).toBeCloseTo(0.35 * 1.3, 12);
+    expect(nextMastery(0.5, attempt({ correct: false, difficulty: 1 })))
+      .toBeCloseTo(0.5 - 0.3 * 1.3 * 0.5, 12);
+    expect(nextMastery(0, attempt({ hintUsed: true }))).toBeCloseTo(0.35 * 0.5, 12);
+    expect(computeConfidence(1, 0)).toBeCloseTo(1 - 0.75, 12);
+    expect(computeConfidence(1, 1)).toBeCloseTo((1 - 0.75) * 0.98, 12);
+  });
+
   describe('обновление mastery', () => {
     it('верный ответ поднимает mastery на α·(1 − mastery)', () => {
       expect(nextMastery(0.4, attempt())).toBeCloseTo(0.4 + ALPHA * 0.6, 12);
@@ -136,6 +156,8 @@ describe('модель знаний', () => {
     it('не даёт отрицательных дней и отрицательных попыток исказить формулу', () => {
       expect(computeConfidence(5, -3)).toBeCloseTo(computeConfidence(5, 0), 12);
       expect(() => computeConfidence(-1, 0)).toThrow(/попыт/i);
+      expect(() => computeConfidence(3, Number.NaN)).toThrow(/дней/i);
+      expect(() => computeConfidence(3, Number.POSITIVE_INFINITY)).toThrow(/дней/i);
     });
 
     it('считает дни между отметками времени дробно', () => {
@@ -196,6 +218,14 @@ describe('модель знаний', () => {
       // Свежая попытка считается по числу попыток без затухания.
       expect(second.confidence).toBeCloseTo(1 - 0.75 ** 2, 12);
       expect(second.lastSeen).toBe(at(20).toISOString());
+    });
+
+    it('отвергает битое время и попытку старше уже применённой истории', () => {
+      const first = applyAttempt(newTopicState('math.fractions'), attempt({ at: at(5) }));
+      expect(() => applyAttempt(first, attempt({ at: at(4) }))).toThrow(/старше последней/);
+      expect(() => applyAttempt(first, attempt({ at: new Date(Number.NaN) }))).toThrow(/время попытки/);
+      expect(() => applyAttempt({ ...first, lastSeen: 'не дата' }, attempt({ at: at(6) })))
+        .toThrow(/время последней попытки/);
     });
   });
 
@@ -268,7 +298,7 @@ describe('модель знаний', () => {
       expect(isGap({ examWeight: 3 }, state, at(0))).toBe(false);
     });
 
-    it('возвращает тему в пробелы, когда уверенность затухла ниже порога', () => {
+    it('убирает тему из пробелов, когда уверенность затухла ниже порога', () => {
       let state = newTopicState('math.fractions');
       for (let index = 0; index < 6; index += 1) {
         state = applyAttempt(state, attempt({ correct: index % 3 === 0 }));

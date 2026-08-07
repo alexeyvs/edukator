@@ -224,7 +224,7 @@
       "id": "english.listening-dialogues",
       "subject": "english",
       "title": "Понимание коротких диалогов на слух",
-      "exam_weight": 2,
+      "exam_weight": 0,
       "difficulty": 2,
       "prereqs": [
         "english.question-words",
