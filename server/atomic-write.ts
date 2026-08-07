@@ -13,8 +13,14 @@ export function writeFileAtomic(path: string, content: string): void {
     handle = openSync(tempPath, 'wx');
     writeFileSync(handle, content);
     fsyncSync(handle);
-    closeSync(handle);
+    // Дескриптор снимается с уборки до закрытия, а не после: `closeSync` на
+    // переполненном диске выносит отложенную ошибку записи и уходит в catch,
+    // оставив `handle` заполненным, — и уборка закрыла бы его второй раз. К
+    // этому моменту номер уже свободен и его успевает занять соседний
+    // `openSync`, то есть второе закрытие рвёт чужой файл.
+    const written = handle;
     handle = undefined;
+    closeSync(written);
     renameSync(tempPath, path);
   } catch (error) {
     // Уборка не имеет права заслонить причину: на переполненном диске

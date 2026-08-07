@@ -586,6 +586,65 @@ describe('воркер тёплой очереди', () => {
       expect(calls).toBe(1);
       expect(logged.join('\n')).toMatch(/отсеян как повтор/u);
     });
+
+    // Проверяющий, бракующий всё подряд, исключения не бросает — он возвращает
+    // пустой список. Без причины в отчёте такой долив выглядел удачным, и
+    // `everyRefillFailed` его не видел: воркер держал минутную паузу и раз в
+    // минуту сжигал по восемь вызовов codex на ту же тему.
+    it('называет причину, когда тема исчерпала батчи и не залила ничего', async () => {
+      const graph = graphOf([topic('math.a')]);
+      let calls = 0;
+
+      const report = await runWarmupCycle({
+        db,
+        graph,
+        log,
+        produce: (): Promise<GeneratedTask[]> => {
+          calls += 1;
+          return Promise.resolve([]);
+        },
+      });
+
+      expect(calls).toBe(MAX_BATCHES_PER_TOPIC);
+      expect(report.refilled[0]?.stored).toBe(0);
+      expect(report.refilled[0]?.error).toMatch(/ни одно задание не дошло до банка/u);
+      expect(everyRefillFailed(report)).toBe(true);
+    });
+
+    // Тот же отчёт для темы, весь батч которой отсеян как повтор: долив
+    // оборвался на первом батче, но тема осталась голодной.
+    it('называет причину, когда весь батч темы отсеян как повтор', async () => {
+      const graph = graphOf([topic('math.a')]);
+      const repeated = batchOf('math.a', 3);
+      storeTasks(db, 'math.a', repeated);
+
+      const report = await runWarmupCycle({
+        db,
+        graph,
+        log,
+        produce: (): Promise<GeneratedTask[]> => Promise.resolve(repeated),
+      });
+
+      expect(report.refilled[0]?.error).toMatch(/ни одно задание не дошло до банка/u);
+    });
+
+    // Обратная сторона: тема, которая долилась, причину получать не должна —
+    // иначе отступ включался бы ровно тогда, когда очередь пополняется.
+    it('не приписывает причину теме, которая долилась', async () => {
+      const graph = graphOf([topic('math.a')]);
+
+      const report = await runWarmupCycle({
+        db,
+        graph,
+        log,
+        produce: (request): Promise<GeneratedTask[]> =>
+          Promise.resolve(batchOf(request.topic.id, QUEUE_TARGET)),
+      });
+
+      expect(report.refilled[0]?.stored).toBe(QUEUE_TARGET);
+      expect(report.refilled[0]?.error).toBeUndefined();
+      expect(everyRefillFailed(report)).toBe(false);
+    });
   });
 
   describe('пауза между циклами', () => {

@@ -106,6 +106,38 @@ describe('writeFileAtomic', () => {
     }
   });
 
+  it('не закрывает дескриптор дважды, когда отказ выносит сам closeSync', async () => {
+    // Отложенная ошибка записи всплывает именно в `closeSync`: файл к этому
+    // моменту уже закрыт, номер дескриптора свободен, и его успевает занять
+    // соседний `openSync` — второе закрытие рвало бы чужой файл.
+    const path = join(dir, 'seed.json');
+
+    const closed: number[] = [];
+    vi.resetModules();
+    vi.doMock('node:fs', async () => {
+      const real = await vi.importActual<typeof import('node:fs')>('node:fs');
+      return {
+        ...real,
+        closeSync: (handle: number) => {
+          closed.push(handle);
+          real.closeSync(handle);
+          throw new Error('ENOSPC: no space left on device');
+        },
+      };
+    });
+
+    try {
+      const { writeFileAtomic: patched } = await import('../server/atomic-write.js');
+
+      expect(() => patched(path, 'новый')).toThrow('ENOSPC: no space left on device');
+      expect(closed).toHaveLength(1);
+      expect(leftovers(path)).toEqual([]);
+    } finally {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    }
+  });
+
   it('не подменяет причину отказом уборки временного файла', async () => {
     // Второй отказ уборки: не убравшийся временный файл — беда куда меньшая,
     // чем потерянная причина, по которой снимок не записался.
