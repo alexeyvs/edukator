@@ -2,7 +2,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { runChild } from '../scripts/run-child.js';
+import { runChild } from '../server/run-child.js';
 
 const tempDirs: string[] = [];
 

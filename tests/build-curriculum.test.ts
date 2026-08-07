@@ -6,21 +6,17 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   buildCurriculum,
   buildPrompt,
-  codexArgs,
-  codexOutputSchema,
-  CodexUnavailableError,
   formatCurriculum,
   parseArgs,
-  parseCodexAnswer,
   parseCurriculumAnswer,
-  runCodexCli,
   TOPIC_LIMITS,
-  writeCodexSchema,
   writeCurriculumAtomic,
+} from '../scripts/build-curriculum.js';
+import {
+  CodexUnavailableError,
   type CodexRequest,
   type CodexRunner,
-} from '../scripts/build-curriculum.js';
-import { CURRICULUM_SCHEMA_PATH } from '../server/curriculum.js';
+} from '../server/codex/client.js';
 import type { Subject } from '../server/db.js';
 
 let dir: string;
@@ -82,14 +78,6 @@ function fakeRunner(answers: string[]): CodexRunner & { requests: CodexRequest[]
   return Object.assign(runner, { requests, schemas });
 }
 
-/** Исполняемая заглушка вместо codex: тестам нужен настоящий процесс, а не мок spawn. */
-function fakeCodexBin(name: string, body: string): string {
-  const path = join(dir, name);
-  writeFileSync(path, `#!/bin/sh\n${body}\n`);
-  chmodSync(path, 0o755);
-  return path;
-}
-
 describe('buildPrompt', () => {
   it('передаёт оглавление и требования к карте', () => {
     const prompt = buildPrompt('math', 'Глава 1. Дроби ..... 5');
@@ -111,26 +99,6 @@ describe('buildPrompt', () => {
     const prompt = buildPrompt('math', 'Оглавление', 'тема «math.x» дублируется');
     expect(prompt).toContain('тема «math.x» дублируется');
     expect(prompt).toContain('Исправь ровно это');
-  });
-});
-
-describe('parseCodexAnswer', () => {
-  it('разбирает чистый JSON', () => {
-    expect(parseCodexAnswer('{"subject":"math"}')).toEqual({ subject: 'math' });
-  });
-
-  it('снимает обрамление ```json', () => {
-    expect(parseCodexAnswer('```json\n{"subject":"math"}\n```')).toEqual({ subject: 'math' });
-  });
-
-  it('сообщает о неразбираемом ответе и показывает его начало', () => {
-    expect(() => parseCodexAnswer('Конечно! Вот карта тем:')).toThrow(
-      /не разбирается как JSON.*Конечно/s,
-    );
-  });
-
-  it('сообщает о пустом ответе', () => {
-    expect(() => parseCodexAnswer('   \n')).toThrow(/пуст/);
   });
 });
 
@@ -346,41 +314,6 @@ describe('buildCurriculum', () => {
   });
 });
 
-describe('codexOutputSchema', () => {
-  it('снимает ключевые слова, на которых структурированный вывод падает', () => {
-    const source = JSON.parse(readFileSync(CURRICULUM_SCHEMA_PATH, 'utf8')) as unknown;
-    const stripped = JSON.stringify(codexOutputSchema(source));
-
-    for (const keyword of ['uniqueItems', 'minItems', 'minLength', 'pattern', 'minimum', 'maximum']) {
-      expect(stripped).not.toContain(`"${keyword}"`);
-    }
-  });
-
-  it('сохраняет структуру, перечисления и обязательные поля', () => {
-    const source = JSON.parse(readFileSync(CURRICULUM_SCHEMA_PATH, 'utf8')) as unknown;
-    const stripped = codexOutputSchema(source) as {
-      type: string;
-      additionalProperties: boolean;
-      required: string[];
-      properties: { subject: { enum: string[] }; topics: { items: { $ref: string } } };
-      $defs: { topic: { required: string[] } };
-    };
-
-    expect(stripped.type).toBe('object');
-    expect(stripped.additionalProperties).toBe(false);
-    expect(stripped.required).toEqual(['subject', 'topics']);
-    expect(stripped.properties.subject.enum).toEqual(['math', 'russian', 'english']);
-    expect(stripped.properties.topics.items.$ref).toBe('#/$defs/topic');
-    expect(stripped.$defs.topic.required).toContain('prompt_seed');
-  });
-
-  it('не трогает значения, которые лишь называются как ключевые слова', () => {
-    expect(codexOutputSchema({ enum: ['pattern', 'minimum'] })).toEqual({
-      enum: ['pattern', 'minimum'],
-    });
-  });
-});
-
 describe('writeCurriculumAtomic', () => {
   it('заменяет существующую карту целиком', () => {
     const path = join(dir, 'atomic.json');
@@ -402,149 +335,6 @@ describe('writeCurriculumAtomic', () => {
     expect(
       readdirSync(dir).filter((name) => name.startsWith('atomic-target.') && name.endsWith('.tmp')),
     ).toEqual([]);
-  });
-});
-
-describe('writeCodexSchema', () => {
-  it('кладёт очищенную схему в рабочий каталог', () => {
-    const path = writeCodexSchema(dir);
-    const written = readFileSync(path, 'utf8');
-
-    expect(path).toBe(join(dir, 'curriculum.codex.json'));
-    expect(written).not.toContain('"uniqueItems"');
-    expect(JSON.parse(written)).toEqual(
-      codexOutputSchema(JSON.parse(readFileSync(CURRICULUM_SCHEMA_PATH, 'utf8'))),
-    );
-  });
-});
-
-describe('codexArgs', () => {
-  it('собирает флаги вызова из спеки', () => {
-    const args = codexArgs({
-      prompt: 'промпт',
-      schemaPath: '/s.json',
-      outPath: '/o.json',
-      model: 'gpt-5.6-terra',
-    });
-
-    expect(args).toEqual([
-      'exec',
-      '--ephemeral',
-      '--ignore-user-config',
-      '--ignore-rules',
-      '--skip-git-repo-check',
-      '--disable',
-      'shell_tool',
-      '--disable',
-      'unified_exec',
-      '--sandbox',
-      'read-only',
-      '--cd',
-      '/',
-      '-m',
-      'gpt-5.6-terra',
-      '--output-schema',
-      '/s.json',
-      '-o',
-      '/o.json',
-      'промпт',
-    ]);
-  });
-});
-
-describe('runCodexCli', () => {
-  it('возвращает записанный моделью ответ и не ждёт stdin', async () => {
-    // `cat` прочитал бы стандартный ввод до конца: если stdin не закрыт,
-    // заглушка повиснет и тест упадёт по таймауту.
-    const bin = fakeCodexBin(
-      'codex-ok',
-      'cat > /dev/null\nwhile [ "$#" -gt 0 ]; do\n' +
-        '  if [ "$1" = "-o" ]; then echo "{\\"ok\\":true}" > "$2"; exit; fi\n' +
-        '  shift\n' +
-        'done\nexit 2',
-    );
-    const outPath = join(dir, 'answer-ok.json');
-
-    await expect(
-      runCodexCli({ prompt: 'p', schemaPath: '/s.json', outPath, model: 'm', bin }),
-    ).resolves.toContain('"ok":true');
-  });
-
-  it('сообщает о ненулевом коде возврата вместе со stderr', async () => {
-    const bin = fakeCodexBin('codex-fail', 'echo "лимит подписки исчерпан" >&2\nexit 3');
-
-    await expect(
-      runCodexCli({
-        prompt: 'p',
-        schemaPath: '/s.json',
-        outPath: join(dir, 'answer-fail.json'),
-        model: 'm',
-        bin,
-      }),
-    ).rejects.toThrow(/завершился с кодом 3.*лимит подписки/s);
-  });
-
-  it('сообщает, что ответ не записан, если codex вышел с нулём и ничего не создал', async () => {
-    const bin = fakeCodexBin('codex-silent', 'exit 0');
-
-    await expect(
-      runCodexCli({
-        prompt: 'p',
-        schemaPath: '/s.json',
-        outPath: join(dir, 'answer-missing.json'),
-        model: 'm',
-        bin,
-      }),
-    ).rejects.toThrow(/не записал ответ/);
-  });
-
-  it('сообщает о пустом файле ответа', async () => {
-    const outPath = join(dir, 'answer-empty.json');
-    const bin = fakeCodexBin('codex-empty', `: > "${outPath}"`);
-
-    await expect(
-      runCodexCli({ prompt: 'p', schemaPath: '/s.json', outPath, model: 'm', bin }),
-    ).rejects.toThrow(/пустой ответ/);
-  });
-
-  it('отдельно сообщает, что codex не установлен', async () => {
-    await expect(
-      runCodexCli({
-        prompt: 'p',
-        schemaPath: '/s.json',
-        outPath: join(dir, 'answer-none.json'),
-        model: 'm',
-        bin: join(dir, 'codex-does-not-exist'),
-      }),
-    ).rejects.toThrow(CodexUnavailableError);
-  });
-
-  it('останавливает зависший codex по сроку', async () => {
-    const bin = fakeCodexBin('codex-hang', "trap '' TERM\nwhile :; do sleep 1; done");
-    await expect(
-      runCodexCli({
-        prompt: 'p',
-        schemaPath: '/s.json',
-        outPath: join(dir, 'answer-timeout.json'),
-        model: 'm',
-        bin,
-        timeoutMs: 30,
-      }),
-    ).rejects.toThrow(/превышен срок/);
-  });
-
-  it('останавливает codex, который льёт слишком много вывода', async () => {
-    const bin = fakeCodexBin('codex-noisy', 'yes x | head -c 200');
-    await expect(
-      runCodexCli({
-        prompt: 'p',
-        schemaPath: '/s.json',
-        outPath: join(dir, 'answer-noisy.json'),
-        model: 'm',
-        bin,
-        maxOutputBytes: 64,
-      }),
-    ).rejects.toThrow(/вывод превысил 64 байт/);
   });
 });
 

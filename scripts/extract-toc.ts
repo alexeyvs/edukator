@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { PDFParse } from 'pdf-parse';
 import { SUBJECTS, type Subject } from '../server/db.js';
 import { findTocPages, formatToc, type PdfPage, type TocSelection } from './toc.js';
-import { runChild } from './run-child.js';
+import { runChild } from '../server/run-child.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
