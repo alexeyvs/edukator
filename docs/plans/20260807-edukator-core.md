@@ -88,17 +88,30 @@
 
 ### Task 1: Каркас проекта и инструменты сборки
 
-- [ ] создать `package.json`: ESM (`"type": "module"`), Node 26, скрипты
+- [x] создать `package.json`: ESM (`"type": "module"`), Node 26, скрипты
       `dev` / `test` / `typecheck` / `lint`
-- [ ] добавить зависимости: `fastify`, `better-sqlite3`; dev: `typescript`,
+- [x] добавить зависимости: `fastify`, `better-sqlite3`; dev: `typescript`,
       `tsx`, `vitest`, `@types/node`, `eslint`
-- [ ] создать `tsconfig.json` (strict, ESM, target ES2023) и `vitest.config.ts`
-- [ ] создать `server/index.ts` — Fastify с маршрутом `GET /api/health`,
+- [x] создать `tsconfig.json` (strict, ESM, target ES2023) и `vitest.config.ts`
+- [x] создать `server/index.ts` — Fastify с маршрутом `GET /api/health`,
       слушающий `0.0.0.0` (доступ из домашней сети)
-- [ ] создать `.gitignore` (`node_modules`, `*.db`, `.env`, `content/cache`)
-- [ ] написать тест: сервер поднимается и `/api/health` отвечает `200`
-- [ ] написать тест: `/api/health` возвращает версию и статус БД
-- [ ] запустить тесты — обязаны пройти до задачи 2
+- [x] создать `.gitignore` (`node_modules`, `*.db`, `.env`, `content/cache`)
+- [x] написать тест: сервер поднимается и `/api/health` отвечает `200`
+- [x] написать тест: `/api/health` возвращает версию и статус БД
+- [x] запустить тесты — обязаны пройти до задачи 2
+
+➕ Обнаружено по ходу: npm 11 блокирует install-скрипты зависимостей. Для
+`better-sqlite3` (нативная сборка) и `esbuild` (бинарник) выполнен
+`npm approve-scripts`, разрешения зафиксированы в `allowScripts` в
+`package.json` — без этого не поднимается ни БД, ни vitest.
+
+➕ Добавлены `typescript-eslint` и `@eslint/js` (пин на `^9`, latest тянет
+eslint 10) с плоским конфигом `eslint.config.js` — иначе `lint` не работает
+с TypeScript.
+
+⚠️ Fastify возвращает из `listen()` адрес `http://127.0.0.1:<port>` даже при
+`host: '0.0.0.0'`, поэтому привязка проверяется через `server.address()`,
+а хост вынесен в экспортируемую константу `HOST`.
 
 ### Task 2: Схема базы данных и слой доступа
 
