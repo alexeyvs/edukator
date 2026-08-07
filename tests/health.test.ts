@@ -398,6 +398,35 @@ describe('GET /api/health', () => {
     expect(process.listenerCount('SIGUSR2')).toBe(0);
   });
 
+  // Список обязан совпадать с `DEATH_SIGNALS` из `run-child.ts`: там на каждом
+  // из этих сигналов снимается группа потомка, а смерть родителя досылается
+  // руками ровно тогда, когда сигнал до нас никто не слушал. Пропусти здесь
+  // `SIGHUP` — и закрытие терминала посреди разбора спора убивало бы процесс
+  // из-под незакрытой базы, то есть ровно то, ради чего заводился `onClose`.
+  it('по умолчанию слушает те же сигналы, что снимают потомков', async () => {
+    const signals: readonly NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+    const closing = buildServer();
+    await closing.ready();
+    const before = signals.map((signal) => process.listenerCount(signal));
+
+    closeOnSignals(closing);
+
+    try {
+      signals.forEach((signal, index) => {
+        expect(process.listenerCount(signal)).toBe((before[index] ?? 0) + 1);
+      });
+    } finally {
+      // Подписки снимаются руками: `once` снимет их только по самому сигналу, а
+      // послать настоящий SIGINT значит убить прогон тестов.
+      for (const signal of signals) {
+        const listeners = process.listeners(signal);
+        const last = listeners[listeners.length - 1];
+        if (last !== undefined) process.removeListener(signal, last as () => void);
+      }
+      await closing.close();
+    }
+  });
+
   // `Number(process.env.PORT ?? 3000)` ловил только незаданную переменную:
   // `PORT=` давало 0 — Fastify слушал случайный порт, а в баннере стояло `:0`,
   // то есть единственная строка, по которой на планшете открывают приложение,

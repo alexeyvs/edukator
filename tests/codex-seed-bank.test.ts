@@ -513,6 +513,30 @@ describe('посевной банк', () => {
 
       expect(collectSeedTasks(db, GRAPH, 'math')).toHaveLength(1);
     });
+
+    // Банк держит инварианты формата на момент вставки, а `answer_format` темы
+    // мог смениться потом — пересборкой карты тем при том же `id`. Строки при
+    // этом остаются законными, но выгруженный из них файл `parseSeedBank`
+    // отвергнет целиком, и предмет остался бы без посева навсегда: старый
+    // снимок к тому моменту уже переписан.
+    it('падает, когда задания не пройдут разбор под текущим answer_format темы', () => {
+      storeTasks(db, 'russian.a', [
+        task({
+          question: 'Запиши ответ словами.',
+          answer: 'сорок пять',
+          accept: ['сорок пять'],
+          hint: 'Между сорока и пятьюдесятью.',
+        }),
+      ]);
+
+      expect(collectSeedTasks(db, GRAPH, 'russian')).toHaveLength(1);
+
+      const renamedFormat = buildTopicGraph([topic('russian.a', { answerFormat: 'number' })]);
+
+      expect(() => collectSeedTasks(db, renamedFormat, 'russian')).toThrow(
+        /не пройдёт обратный разбор/u,
+      );
+    });
   });
 
   describe('посев в репозитории', () => {

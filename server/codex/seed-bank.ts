@@ -357,7 +357,8 @@ function requireSeedText(value: string | null, field: string, question: string):
 }
 
 export function collectSeedTasks(db: Database, graph: TopicGraph, subject: Subject): SeedTopic[] {
-  const ids = (graph.bySubject.get(subject) ?? []).map((topic) => topic.id);
+  const topics = graph.bySubject.get(subject) ?? [];
+  const ids = topics.map((topic) => topic.id);
   if (ids.length === 0) return [];
 
   const rows = db
@@ -399,9 +400,24 @@ export function collectSeedTasks(db: Database, graph: TopicGraph, subject: Subje
   // Порядок тем — как в карте: у файла в репозитории должен быть устойчивый
   // вид, иначе каждый экспорт даёт бессмысленный диф.
   const seeds: SeedTopic[] = [];
-  for (const id of ids) {
-    const tasks = byTopic.get(id);
-    if (tasks !== undefined) seeds.push({ topicId: id, tasks });
+  for (const topic of topics) {
+    const tasks = byTopic.get(topic.id);
+    if (tasks === undefined) continue;
+    // Снимок проверяется ровно тем разбором, которым его будут читать обратно
+    // (`parseSeedBank`), а не одними непустыми `hint`/`explain`/`joke`. Банк
+    // держит инварианты формата на момент вставки, а `answer_format` темы мог с
+    // тех пор смениться — пересборкой карты тем при том же `id`. Строки тогда
+    // лежат в базе законно, но выгруженный из них файл `parseTaskBatch`
+    // отвергнет, а `loadSeedBank` ловит такую порчу по предмету целиком: снимок
+    // оказался бы переписан нечитаемым, и предмет остался бы без посева.
+    try {
+      parseTaskBatch({ items: tasks }, topic.answerFormat);
+    } catch (error) {
+      throw new Error(
+        `Посевной банк: тема «${topic.id}» не пройдёт обратный разбор: ${(error as Error).message}`,
+      );
+    }
+    seeds.push({ topicId: topic.id, tasks });
   }
   return seeds;
 }
