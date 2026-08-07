@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edukator.local/schemas/verdicts.json",
+  "title": "Вердикты проверки батча заданий",
+  "description": "Ответ валидатора заданий: по одному вердикту на условие, в том же порядке. Ответов генератора валидатор не видит и решает задания сам. Ограничения, которые структурированный вывод не принимает (длины, количество), повторены словами в description: модель их видит, а проверяет server/codex/validate.ts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items"],
+  "properties": {
+    "items": {
+      "description": "Вердикты в том же порядке, что и присланные условия. Ровно столько же, сколько заданий.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/verdict" }
+    }
+  },
+  "$defs": {
+    "verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["answer", "unambiguous", "natural", "on_topic", "age_appropriate", "note"],
+      "properties": {
+        "answer": {
+          "description": "Твой собственный ответ на задание, в самой короткой записи. Для числовой темы — ровно одно число.",
+          "type": "string",
+          "minLength": 1
+        },
+        "unambiguous": {
+          "description": "Условие читается однозначно и данных для ответа хватает.",
+          "type": "boolean"
+        },
+        "natural": {
+          "description": "Ситуация не натянута: в неё можно поверить, числа и обстоятельства правдоподобны.",
+          "type": "boolean"
+        },
+        "on_topic": {
+          "description": "Задание проверяет именно заявленную тему, а не соседнюю.",
+          "type": "boolean"
+        },
+        "age_appropriate": {
+          "description": "Содержание уместно для тринадцатилетнего.",
+          "type": "boolean"
+        },
+        "note": {
+          "description": "Одна фраза о том, что не так. Если всё в порядке — пустая строка.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}
