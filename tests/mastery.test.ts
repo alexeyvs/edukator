@@ -145,6 +145,14 @@ describe('модель знаний', () => {
       expect(daysBetween(at(3), at(0))).toBe(0);
     });
 
+    it('отвергает битую отметку времени, а не считает дни от NaN', () => {
+      expect(() => daysBetween('не дата', at(0))).toThrow(/отметк/i);
+      expect(() => daysBetween(at(0), 'вчера')).toThrow(/отметк/i);
+      // Битая отметка в состоянии темы всплывает тем же способом.
+      const broken = { ...newTopicState('math.fractions'), attempts: 2, lastSeen: 'позавчера' };
+      expect(() => confidenceAt(broken, at(0))).toThrow(/отметк/i);
+    });
+
     it('затухает от даты последней попытки, а не от даты записи', () => {
       const state = applyAttempt(newTopicState('math.fractions'), attempt());
       expect(confidenceAt(state, at(0))).toBeCloseTo(0.25, 12);

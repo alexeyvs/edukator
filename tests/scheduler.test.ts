@@ -227,6 +227,17 @@ describe('планировщик', () => {
       expect(subjectDeficit(graph, states, 'english')).toBeCloseTo(0.2, 12);
     });
 
+    it('не считает отставанием темы вне экзамена', () => {
+      const withJunk = graphOf([
+        topic('math.core', { subject: 'math', examWeight: 2 }),
+        topic('math.junk', { subject: 'math', examWeight: 0 }),
+      ]);
+      // Освоена только внеэкзаменационная тема: отставание остаётся полным.
+      const only = stateMap(state('math.core', { mastery: 0 }), state('math.junk', { mastery: 1 }));
+
+      expect(subjectDeficit(withJunk, only, 'math')).toBeCloseTo(1, 12);
+    });
+
     it('начинает с самого отстающего предмета', () => {
       expect(selectSubject(graph, states, { now: at(0) })).toBe('math');
     });

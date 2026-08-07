@@ -12,6 +12,7 @@ import {
   MIN_SCORE,
   SCORE_ANCHORS,
   computeForecast,
+  forecastBand,
   forecastFor,
   forecastTrend,
   masteryRatio,
@@ -192,6 +193,34 @@ describe('computeForecast', () => {
   });
 });
 
+describe('forecastBand', () => {
+  it('даёт полную полосу по непроверенной программе и сужает её с ростом confidence', () => {
+    const topics = [topic('a'), topic('b')];
+
+    const untested = forecastBand(topics, new Map(), at(0));
+    const tested = forecastBand(topics, stateMap(seen('a', 0.5, 12), seen('b', 0.5, 12)), at(0));
+
+    expect(untested).toBeCloseTo(MAX_BAND, 10);
+    expect(tested).toBeLessThan(untested ?? 0);
+    expect(tested).toBeGreaterThan(0);
+  });
+
+  it('совпадает с полосой, посчитанной внутри computeForecast', () => {
+    const topics = [topic('a', { examWeight: 3 }), topic('b', { examWeight: 1 })];
+    const states = stateMap(seen('a', 0.4, 4), state('b', { mastery: 0.9 }));
+
+    expect(forecastBand(topics, states, at(3))).toBeCloseTo(
+      computeForecast(topics, states, at(3))?.band ?? -1,
+      10,
+    );
+  });
+
+  it('возвращает null, когда взвешивать нечего', () => {
+    expect(forecastBand([], new Map(), at(0))).toBeNull();
+    expect(forecastBand([topic('junk', { examWeight: 0 })], new Map(), at(0))).toBeNull();
+  });
+});
+
 describe('forecastFor', () => {
   const graph = graphOf([
     topic('math.a', { subject: 'math', examWeight: 2 }),
@@ -320,5 +349,18 @@ describe('снимки прогноза', () => {
     const broken = { ratio: 0.6, score: 7, band: 0, low: 7, high: 7, weight: 2, untestedWeight: 0 };
 
     expect(() => writeForecastSnapshot(db, 'math', broken, at(0))).toThrow(/2\.\.5/);
+    expect(() => writeForecastSnapshot(db, 'math', { score: Number.NaN, band: 0 }, at(0))).toThrow(
+      /2\.\.5/,
+    );
+  });
+
+  it('отвергает снимок с отрицательной полосой погрешности', () => {
+    expect(() => writeForecastSnapshot(db, 'math', { score: 4, band: -0.1 }, at(0))).toThrow(
+      /полос/i,
+    );
+    expect(() =>
+      writeForecastSnapshot(db, 'math', { score: 4, band: Number.NaN }, at(0)),
+    ).toThrow(/полос/i);
+    expect(readSnapshots(db, 'math')).toHaveLength(0);
   });
 });

@@ -114,6 +114,26 @@ describe('карта тем', () => {
       expect(graph.byId.size).toBeGreaterThan(0);
       expect(graph.subjects).toContain('math');
     });
+
+    /**
+     * Приёмка этапа: карты всех трёх предметов лежат в репозитории и проходят
+     * валидатор целиком, а не по одной. Содержание проверяет человек — здесь
+     * только структура и объём, которого хватит планировщику.
+     */
+    it('проводит карты трёх предметов через валидатор', () => {
+      const graph = loadCurriculum(CURRICULUM_DIR);
+
+      expect(graph.subjects).toEqual(['math', 'russian', 'english']);
+      for (const subject of graph.subjects) {
+        const topics = graph.bySubject.get(subject) ?? [];
+        expect(topics.length).toBeGreaterThanOrEqual(15);
+        expect(topics.length).toBeLessThanOrEqual(30);
+        // Есть на чём считать прогноз и что предлагать планировщику.
+        expect(topics.some((item) => item.examWeight >= 2)).toBe(true);
+      }
+      // Топологический порядок построен, значит циклов и висячих prereqs нет.
+      expect(graph.order).toHaveLength(graph.byId.size);
+    });
   });
 
   describe('ошибочные сценарии', () => {
