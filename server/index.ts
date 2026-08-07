@@ -2,7 +2,9 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
-import Database from 'better-sqlite3';
+import { databasePath, openDatabase } from './db.js';
+
+export { databasePath };
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -17,21 +19,14 @@ export function readVersion(): string {
 export type DatabaseStatus = 'ok' | 'error';
 
 /**
- * Путь к базе: переопределяется через EDUKATOR_DB, чтобы тесты и dev-запуск
- * не дрались за один файл.
- */
-export function databasePath(): string {
-  return process.env.EDUKATOR_DB ?? resolve(projectRoot, 'edukator.db');
-}
-
-/**
- * Проверка живости базы. На этом этапе схемы ещё нет, поэтому достаточно
- * открыть файл и выполнить тривиальный запрос.
+ * Проверка живости базы: открыть, домигрировать до текущей схемы и выполнить
+ * тривиальный запрос. Миграция на уже актуальной базе — чтение одной прагмы,
+ * так что health остаётся дешёвым.
  */
 export function checkDatabase(path: string = databasePath()): DatabaseStatus {
-  let db: Database.Database | undefined;
+  let db: ReturnType<typeof openDatabase> | undefined;
   try {
-    db = new Database(path);
+    db = openDatabase(path);
     db.prepare('SELECT 1').get();
     return 'ok';
   } catch {

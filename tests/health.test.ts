@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { buildServer, checkDatabase, HOST, readVersion } from '../server/index.js';
+import { DEFAULT_PROFILE, SCHEMA_VERSION, openDatabase, readProfile } from '../server/db.js';
 
 describe('GET /api/health', () => {
   let app: FastifyInstance;
@@ -60,6 +61,21 @@ describe('GET /api/health', () => {
 
   it('сообщает об ошибке базы, если путь недоступен', () => {
     expect(checkDatabase(join(tempDir, 'нет-такого-каталога', 'x.db'))).toBe('error');
+  });
+
+  it('оставляет базу мигрированной после проверки', () => {
+    const path = join(tempDir, 'свежая.db');
+
+    expect(checkDatabase(path)).toBe('ok');
+
+    const db = openDatabase(path);
+    try {
+      const [version] = db.pragma('user_version') as [{ user_version: number }];
+      expect(version.user_version).toBe(SCHEMA_VERSION);
+      expect(readProfile(db)).toEqual(DEFAULT_PROFILE);
+    } finally {
+      db.close();
+    }
   });
 
   it('отдаёт 404 на неизвестный маршрут', async () => {
