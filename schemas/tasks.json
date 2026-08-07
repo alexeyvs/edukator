@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edukator.local/schemas/tasks.json",
+  "title": "Батч заданий по одной теме",
+  "description": "Ответ генератора заданий. Эта же схема передаётся codex через --output-schema, поэтому корень обязан быть объектом, а не массивом. Ограничения, которые структурированный вывод не принимает (длины, диапазоны, уникальность), повторены словами в description: модель их видит, а проверяет server/codex/task-schema.ts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items"],
+  "properties": {
+    "items": {
+      "description": "Задания батча. Не меньше одного, все — по одной и той же теме.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/task" }
+    }
+  },
+  "$defs": {
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["question", "answer", "accept", "hint", "explain", "joke", "difficulty"],
+      "properties": {
+        "question": {
+          "description": "Условие целиком, без ответа и без подсказки. Одна задача — один вопрос.",
+          "type": "string",
+          "minLength": 1
+        },
+        "answer": {
+          "description": "Эталонный ответ в самой короткой записи. Для числовой темы — ровно одно число, без пояснений.",
+          "type": "string",
+          "minLength": 1
+        },
+        "accept": {
+          "description": "Равноправные записи того же ответа, обязательно включая answer. Не пустой, без повторов. Для числовой темы каждая запись обязана содержать ровно одно число.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "hint": {
+          "description": "Подсказка, которая направляет к решению и не содержит самого ответа.",
+          "type": "string",
+          "minLength": 1
+        },
+        "explain": {
+          "description": "Разбор решения по шагам: показывается после ответа.",
+          "type": "string",
+          "minLength": 1
+        },
+        "joke": {
+          "description": "Короткая шутка напарника по теме задания, в тон подростку.",
+          "type": "string",
+          "minLength": 1
+        },
+        "difficulty": {
+          "description": "Сложность задания: 1, 2 или 3.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        }
+      }
+    }
+  }
+}

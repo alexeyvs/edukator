@@ -1,10 +1,9 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
-import Ajv2020 from 'ajv/dist/2020.js';
-import type { ErrorObject, ValidateFunction } from 'ajv';
 import type { Database } from 'better-sqlite3';
 import { SUBJECTS, type Subject } from './db.js';
+import { describeSchemaErrors, schemaValidator } from './json-schema.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -65,33 +64,6 @@ interface TopicJson {
 interface CurriculumJson {
   subject: Subject;
   topics: TopicJson[];
-}
-
-/**
- * Ajv поставляется как CommonJS: под ESM `default` оказывается либо самим
- * классом, либо вложенным в `.default` — зависит от того, кто грузит модуль.
- */
-const Ajv = (Ajv2020 as unknown as { default?: typeof Ajv2020 }).default ?? Ajv2020;
-
-let cachedValidator: ValidateFunction<CurriculumJson> | undefined;
-
-function validator(): ValidateFunction<CurriculumJson> {
-  if (cachedValidator === undefined) {
-    const schema = JSON.parse(readFileSync(CURRICULUM_SCHEMA_PATH, 'utf8')) as object;
-    const ajv = new Ajv({ allErrors: true, strict: true });
-    cachedValidator = ajv.compile<CurriculumJson>(schema);
-  }
-  return cachedValidator;
-}
-
-/** Ajv не кладёт в `message` виновника (лишнее поле, допустимые значения) — добираем из `params`. */
-function describeError(error: ErrorObject): string {
-  const where = error.instancePath === '' ? '/' : error.instancePath;
-  const params = Object.values(error.params)
-    .flat()
-    .filter((value) => value !== undefined && value !== null)
-    .join(', ');
-  return params === '' ? `${where}: ${error.message}` : `${where}: ${error.message} (${params})`;
 }
 
 function toTopic(raw: TopicJson): Topic {
@@ -210,10 +182,11 @@ export function parseCurriculumFile(
   source: string,
   expected?: Subject,
 ): TopicGraph {
-  const validate = validator();
+  const validate = schemaValidator<CurriculumJson>(CURRICULUM_SCHEMA_PATH);
   if (!validate(raw)) {
-    const details = (validate.errors ?? []).map(describeError).join('; ');
-    throw new Error(`Карта тем ${source} не соответствует схеме: ${details}`);
+    throw new Error(
+      `Карта тем ${source} не соответствует схеме: ${describeSchemaErrors(validate.errors)}`,
+    );
   }
 
   // Иначе `math.json` с предметом «russian» проходит молча, и математика просто
