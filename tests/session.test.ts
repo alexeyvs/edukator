@@ -289,6 +289,32 @@ describe('занятие', () => {
       expect(row).toEqual({ hint_used: 1, duration_ms: 4200 });
     });
 
+    // Часы на ноутбуке ходят и назад: поправка NTP, ручной перевод времени.
+    // Без подтяжки отметки `applyAttempt` бросает обычной ошибкой, та изнутри
+    // транзакции откатывает уже вставленную попытку — ответ теряется, наружу
+    // уходит пятисотка, и повторная отправка даёт ровно то же, пока часы не
+    // догонят сохранённое `last_seen`.
+    it('принимает ответ после шага часов назад, не теряя попытку', () => {
+      const first = new Date('2026-08-08T12:00:00.000Z');
+      submitAnswer(db, graph, { taskId: issue(), answer: '45', at: first });
+
+      const stepped = new Date(first.getTime() - 5 * 60 * 1000);
+      const second = submitAnswer(db, graph, { taskId: issue(), answer: '30', at: stepped });
+
+      expect(second.correct).toBe(false);
+      expect(second.state.attempts).toBe(2);
+      // Отметка подтянута к последней известной, а не записана из прошлого:
+      // иначе пересчёт истории спором проигрывал бы попытки в другом порядке.
+      expect(second.state.lastSeen).toBe(first.toISOString());
+      const rows = db
+        .prepare<[], { created_at: string }>('SELECT created_at FROM attempts ORDER BY id')
+        .all();
+      expect(rows.map((row) => row.created_at)).toEqual([
+        first.toISOString(),
+        first.toISOString(),
+      ]);
+    });
+
     it('отказывает по несуществующему заданию', () => {
       expect(() => submitAnswer(db, graph, { taskId: 4242, answer: '45' })).toThrow(SessionError);
       try {

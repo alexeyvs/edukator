@@ -337,6 +337,11 @@ export function parseArgs(argv: string[]): CliArgs {
     if (values.has(name)) throw new Error(`Флаг ${flag} указан дважды`);
     const value = argv[index + 1];
     if (value === undefined) throw new Error(`У флага ${flag} нет значения`);
+    // Пустое значение не то же самое, что незаданное: `??` его не ловит, и оно
+    // молча доезжает до места применения. `--out ''` и `--pdf ''` проходят через
+    // `resolve()` и превращаются в текущий каталог — оглавление ложится не туда,
+    // куда просили, а отсутствующий учебник жалуется на каталог вместо файла.
+    if (value.trim() === '') throw new Error(`У флага ${flag} пустое значение`);
     values.set(name, value);
     index += 1;
   }

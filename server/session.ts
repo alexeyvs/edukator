@@ -18,7 +18,12 @@
 import type { Database } from 'better-sqlite3';
 import type { AnswerFormat, Topic, TopicGraph } from './curriculum.js';
 import type { Subject } from './db.js';
-import { recomputeTopicState, recordAttempt, type TopicState } from './mastery.js';
+import {
+  readTopicState,
+  recomputeTopicState,
+  recordAttempt,
+  type TopicState,
+} from './mastery.js';
 import { checkAnswer, type CheckResult, type RejectReason } from './normalize.js';
 import { planFromDatabase } from './scheduler.js';
 import { issuedTask, type BankTask } from './codex/bank.js';
@@ -227,6 +232,17 @@ function topicOf(graph: TopicGraph, topicId: string): Topic {
 }
 
 /**
+ * Отметка попытки не раньше последней известной по теме. Нечитаемое `last_seen`
+ * не чинится здесь: на нём осмысленно падает сам `applyAttempt`, назвав колонку.
+ */
+function notBefore(at: Date, lastSeen: string | null): Date {
+  if (lastSeen === null) return at;
+  const previous = Date.parse(lastSeen);
+  if (!Number.isFinite(previous) || at.getTime() >= previous) return at;
+  return new Date(previous);
+}
+
+/**
  * Принимает ответ: сверяет, пишет попытку и двигает модель знаний.
  *
  * Задание, которое ученику не выдавали, ответа не принимает: `takeTask`
@@ -239,7 +255,7 @@ export function submitAnswer(
   graph: TopicGraph,
   request: AnswerRequest,
 ): AnswerResult {
-  const at = request.at ?? new Date();
+  const requestedAt = request.at ?? new Date();
   const hintUsed = request.hintUsed ?? false;
   const durationMs = Math.max(0, Math.round(request.durationMs ?? 0));
   const log =
@@ -273,6 +289,16 @@ export function submitAnswer(
     // навсегда. Такое уходит пятисоткой; повторной выдачи она не вызовет —
     // темы вне карты в план не попадают.
     const topic = topicOf(graph, row.topic_id);
+
+    // Шаг часов назад (поправка NTP, ручной перевод времени на ноутбуке) не
+    // имеет права стоить ученику ответа. `applyAttempt` требует неубывающего
+    // времени и на нарушении бросает обычной ошибкой — а она изнутри этой
+    // транзакции откатывает уже вставленную попытку и уходит наружу
+    // пятисоткой, и так на каждой повторной отправке, пока часы не догонят
+    // сохранённое `last_seen`. Запрет заводился для импорта истории не по
+    // порядку; живой ответ происходит сейчас, поэтому его отметка
+    // подтягивается к последней известной, а не отвергается.
+    const at = notBefore(requestedAt, readTopicState(db, row.topic_id).lastSeen);
 
     // Дефект самого задания — нечитаемый `accept[]`, эталон без числа на
     // числовой теме — не должен вставать поперёк занятия навсегда. Выдача такое
