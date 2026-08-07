@@ -17,6 +17,17 @@ export interface ChildOutput {
   stderr: string;
 }
 
+/**
+ * Процесс не уложился в срок и был снят вместе с группой. Отдельный класс, а не
+ * текст: вызывающий отличает молчащий инструмент от инструмента, который
+ * ответил отказом, — повторять первый теми же попытками бессмысленно, он съест
+ * ещё столько же времени.
+ */
+export class ChildTimeoutError extends Error {}
+
+/** Процесс перебрал общий предел вывода и был снят вместе с группой. */
+export class ChildOutputLimitError extends Error {}
+
 /** Запускает внешний инструмент с закрытым stdin, сроком и ограниченным выводом. */
 export function runChild(options: RunChildOptions): Promise<ChildOutput> {
   if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
@@ -31,15 +42,25 @@ export function runChild(options: RunChildOptions): Promise<ChildOutput> {
     const limit = options.maxOutputBytes ?? MAX_CHILD_OUTPUT_BYTES;
     let stdout = '';
     let stderr = '';
+    // Счётчик ведётся по кускам: пересчёт `Buffer.byteLength` по всему
+    // накопленному на каждое событие `data` — это перебор мегабайтов заново
+    // на каждую строчку болтливого процесса.
+    let bytes = 0;
     let failure: Error | undefined;
     let killTimer: NodeJS.Timeout | undefined;
 
+    // Ошибка снятия не выбрасывается наружу ни в каком виде: `signal` зовётся из
+    // таймера, из обработчика `data` и из `close`, а там исключение уже некому
+    // поймать — оно валит процесс, и обещание остаётся навсегда неразрешённым.
+    // Чинить всё равно нечего: `ESRCH` — процесс уже мёртв, `EPERM` — его pid
+    // успел уйти чужой группе, и в обоих случаях снимать некого. Обещание
+    // закроет обычный путь `close`/`error`.
     const signal = (name: NodeJS.Signals): void => {
       try {
         if (grouped && child.pid !== undefined) process.kill(-child.pid, name);
         else child.kill(name);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      } catch {
+        // см. выше
       }
     };
 
@@ -54,8 +75,9 @@ export function runChild(options: RunChildOptions): Promise<ChildOutput> {
       if (failure !== undefined) return;
       if (target === 'stdout') stdout += chunk;
       else stderr += chunk;
-      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > limit) {
-        stop(new Error(`${options.label}: вывод превысил ${limit} байт`));
+      bytes += Buffer.byteLength(chunk);
+      if (bytes > limit) {
+        stop(new ChildOutputLimitError(`${options.label}: вывод превысил ${limit} байт`));
       }
     };
 
@@ -65,7 +87,7 @@ export function runChild(options: RunChildOptions): Promise<ChildOutput> {
     child.stderr.on('data', (chunk: string) => append('stderr', chunk));
 
     const timeout = setTimeout(
-      () => stop(new Error(`${options.label}: превышен срок ${options.timeoutMs} мс`)),
+      () => stop(new ChildTimeoutError(`${options.label}: превышен срок ${options.timeoutMs} мс`)),
       options.timeoutMs,
     );
 

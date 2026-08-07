@@ -99,11 +99,13 @@ function toNumber(token: string): number {
   return (sign * value) / (percent ? 100 : 1);
 }
 
-/**
- * Все числа, найденные в строке. Экспортируется ради разбора споров и тестов:
- * по длине списка видно, ответ ли это без числа или с двумя числами сразу.
- */
-export function findNumbers(text: string): number[] {
+/** Разобранное число вместе с признаком, что оно записано со знаком процента. */
+interface ParsedNumber {
+  value: number;
+  percent: boolean;
+}
+
+function parseNumbers(text: string): ParsedNumber[] {
   // Краевые пробелы снимаются до разбора: иначе знак в «  − 45» уже не в начале
   // строки и перестаёт читаться как знак.
   const prepared = text
@@ -112,8 +114,33 @@ export function findNumbers(text: string): number[] {
     .replace(GROUPING_SPACE, '$1');
 
   return [...prepared.matchAll(NUMBER)]
-    .map((match) => toNumber(match[0]))
-    .filter((value) => Number.isFinite(value));
+    .map((match) => ({
+      value: toNumber(match[0]),
+      percent: match[0].trimEnd().endsWith('%'),
+    }))
+    .filter((parsed) => Number.isFinite(parsed.value));
+}
+
+/**
+ * Все числа, найденные в строке. Экспортируется ради разбора споров и тестов:
+ * по длине списка видно, ответ ли это без числа или с двумя числами сразу.
+ */
+export function findNumbers(text: string): number[] {
+  return parseNumbers(text).map((parsed) => parsed.value);
+}
+
+/**
+ * Два законных прочтения ответа со знаком процента. «40%» — это и доля 0,4, и
+ * сами сорок процентов: в теме про проценты эталон записан числом («Сколько
+ * процентов класса составляют девочки?» — «40»), и деление на сто засчитывало
+ * бы верный ответ неверным, а в теме про доли эталон как раз «0,4». Что имел в
+ * виду ученик, из записи не видно, поэтому годятся оба прочтения.
+ *
+ * Только для ответа ученика: эталон «0,5» с вариантом «50%» — это доля, и
+ * голое «50» рядом с ней остаётся другим числом, а не второй записью того же.
+ */
+function answerForms(parsed: ParsedNumber): number[] {
+  return parsed.percent ? [parsed.value, parsed.value * 100] : [parsed.value];
 }
 
 /**
@@ -129,29 +156,70 @@ export function normalizeText(value: string): string {
     .trim();
 }
 
-/** Выбор приходит из интерфейса как есть — снимаются только краевые пробелы. */
+/**
+ * Выбор сверяется знак в знак — метка «A» и вариант «A) Work in pairs» обязаны
+ * остаться разными записями, — но регистр к выбору отношения не имеет: ученик
+ * вводит ответ руками, и «a» вместо «A» — это тот же вариант, а не другой.
+ * Промпт требует перечислять в `accept[]` и метку, и текст варианта, но набрать
+ * метку строчной он предусмотреть не может.
+ *
+ * Кириллические двойники латинских букв (`В` и `B`) при этом **не** сводятся:
+ * в списке «А, Б, В» третий вариант выглядит ровно как второй вариант списка
+ * «A, B, C», и такая замена засчитывала бы соседний вариант как верный.
+ */
 export function normalizeChoice(value: string): string {
-  return value.trim();
+  return normalizeText(value);
 }
 
 /**
- * Разделитель, стоящий не между цифрами: точка в конце предложения, дефис в
- * «что-то», косая черта в «и/или». Внутри числа те же знаки значимы — «2,5» и
- * «25» разные условия, — поэтому вырезаются только краевые.
+ * Знаки действия и их синонимы: «·», «×» и «*» — одно и то же умножение, «:» и
+ * «÷» — одно деление. Приводятся к одной записи и отбиваются пробелами, поэтому
+ * «2+2» и «2 + 2» дают один отпечаток, а «2 + 2» и «2 · 2» — разные.
  */
-const OUTER_SEPARATOR = /(?<!\p{N})[.,/-]|[.,/-](?!\p{N})/gu;
+const OPERATOR_FORMS: Record<string, string> = {
+  '+': '+',
+  '-': '-',
+  '−': '-',
+  '–': '-',
+  '—': '-',
+  '*': '*',
+  '×': '*',
+  '·': '*',
+  '/': '/',
+  '÷': '/',
+  ':': '/',
+  '=': '=',
+  '%': '%',
+};
 
-/** Всё остальное, что не буква, не цифра и не разделитель числа. */
-const PUNCTUATION = /[^\p{L}\p{N}.,/-]+/gu;
+/**
+ * Знаки действия обязаны дожить до отпечатка: «4800 : 16 + 37 · 25» и
+ * «4800 · 16 - 37 : 25» отличаются только ими. Снятые вместе с пунктуацией, они
+ * делали такие задания неразличимыми — банк отвергал второе как повтор, а тема,
+ * весь батч которой лёг на такие совпадения, переставала доливаться совсем.
+ */
+const OPERATORS = /[+*×·/÷:=%−–—-]/gu;
+
+/**
+ * Разделитель, стоящий не между цифрами: точка в конце предложения, запятая
+ * после вводного слова. Внутри числа те же знаки значимы — «2,5» и «25» разные
+ * условия, — поэтому вырезаются только краевые. Дефис и косая черта сюда не
+ * входят: их раньше разбирает `OPERATORS`.
+ */
+const OUTER_SEPARATOR = /(?<!\p{N})[.,]|[.,](?!\p{N})/gu;
+
+/** Всё остальное, что не буква, не цифра, не разделитель числа и не знак действия. */
+const PUNCTUATION = /[^\p{L}\p{N}.,+*/=%-]+/gu;
 
 /**
  * Отпечаток формулировки задания: по нему банк отсекает повторы внутри темы.
- * Снимает регистр, «ё», пунктуацию и разницу в пробелах, но **сохраняет числа**:
- * «сколько будет 2+2» и «сколько будет 3+5» — разные задания, и склеив их,
- * банк отверг бы всю тему после первого же задания.
+ * Снимает регистр, «ё», пунктуацию и разницу в пробелах, но **сохраняет числа и
+ * знаки действия**: «сколько будет 2+2» и «сколько будет 3+5» — разные задания,
+ * и склеив их, банк отверг бы всю тему после первого же задания.
  */
 export function questionFingerprint(text: string): string {
   return normalizeText(text)
+    .replace(OPERATORS, (sign) => ` ${OPERATOR_FORMS[sign] ?? sign} `)
     .replace(OUTER_SEPARATOR, ' ')
     .replace(PUNCTUATION, ' ')
     .replace(/\s+/g, ' ')
@@ -215,15 +283,17 @@ function checkNumber(given: string, expected: ExpectedAnswer): CheckResult {
   const asText = normalizeText(trimmed);
   if (texts.includes(asText)) return { correct: true, normalized: asText };
 
-  const numbers = findNumbers(trimmed);
+  const numbers = parseNumbers(trimmed);
   const only = numbers[0];
   if (only === undefined) return reject(trimmed, 'no-number');
   if (numbers.length > 1) return reject(trimmed, 'ambiguous-number');
 
-  const normalized = String(only);
-  return wanted.some((value) => sameNumber(value, only))
-    ? { correct: true, normalized }
-    : reject(normalized, 'mismatch');
+  // Показывается та запись, которая совпала: ученику, ответившему «40%» на
+  // эталон «40», нормализованное «0.4» читалось бы как «мне засчитали другое».
+  const matched = answerForms(only).find((form) => wanted.some((value) => sameNumber(value, form)));
+  return matched === undefined
+    ? reject(String(only.value), 'mismatch')
+    : { correct: true, normalized: String(matched) };
 }
 
 function checkText(given: string, expected: ExpectedAnswer): CheckResult {

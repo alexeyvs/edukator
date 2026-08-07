@@ -1,10 +1,12 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Topic } from '../server/curriculum.js';
 import {
   CODEX_FALLBACK_MODEL,
   CODEX_MODEL,
+  CODEX_ROLE_ENV,
+  CodexRunError,
   CodexUnavailableError,
   type CodexRequest,
 } from '../server/codex/client.js';
@@ -13,6 +15,17 @@ import type { GeneratedTask } from '../server/codex/task-schema.js';
 import { generateTaskBatch } from '../server/codex/generate.js';
 
 const PERSONA = 'Ты напарник, а не учитель.';
+
+// Модель роли читается из окружения, поэтому умолчание проверяется только на
+// пустой переменной: иначе `EDUKATOR_MODEL_GENERATE` в оболочке разработчика
+// красил бы набор по причине, к коду отношения не имеющей.
+beforeEach(() => {
+  for (const name of Object.values(CODEX_ROLE_ENV)) vi.stubEnv(name, '');
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 function topic(patch: Partial<Topic> = {}): Topic {
   return {
@@ -102,6 +115,18 @@ describe('generateTaskBatch: успешная генерация', () => {
     expect(request?.prompt).toContain(`ровно ${TASK_BATCH_SIZE}`);
     expect(request?.prompt).toContain('Сколько будет 1/2 + 1/3?');
     expect(request?.prompt).toContain(PERSONA);
+  });
+
+  it('берёт модель роли generate, а не роли соседнего вызова', async () => {
+    // Иначе перепутанная роль здесь неотличима: без переменных все четыре роли
+    // дают одну и ту же модель.
+    vi.stubEnv(CODEX_ROLE_ENV.generate, 'модель-генератора');
+    vi.stubEnv(CODEX_ROLE_ENV.validate, 'модель-проверяющего');
+    const { requests, run } = recorder([batch()]);
+
+    await generateTaskBatch({ topic: topic(), difficulty: 1, persona: PERSONA, run });
+
+    expect(requests[0]?.model).toBe('модель-генератора');
   });
 
   it('уходит на запасную модель и на другой размер батча, когда их указали', async () => {
@@ -195,6 +220,22 @@ describe('generateTaskBatch: повторные попытки', () => {
 
     expect(result.attempts).toBe(2);
     expect(result.failures[0]).toMatch(/лимит исчерпан/u);
+  });
+
+  // Замечанием к ответу это не является: модель ничего не писала, а в тексте
+  // диагностика CLI с локальными путями. Ещё и второй десятиминутный вызов ушёл
+  // бы на «исправь ровно это».
+  it('не отправляет модели текст сорванного запуска, но оставляет его в отчёте', async () => {
+    const { requests, run } = recorder([
+      new CodexRunError('codex завершился с кодом 3: /Users/kid/edukator сломан'),
+      batch(),
+    ]);
+
+    const result = await generateTaskBatch({ topic: topic(), difficulty: 2, persona: PERSONA, run });
+
+    expect(result.failures[0]).toMatch(/сломан/u);
+    expect(requests[1]?.prompt).not.toContain('# Прошлая попытка');
+    expect(requests[1]?.prompt).not.toContain('/Users/kid');
   });
 
   it('дописывает текст ошибки в промпт повторной попытки', async () => {

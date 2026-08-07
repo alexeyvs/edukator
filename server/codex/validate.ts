@@ -22,7 +22,7 @@ import type { AnswerFormat, Topic } from '../curriculum.js';
 import { checkAnswer } from '../normalize.js';
 import { describeSchemaErrors, schemaValidator } from '../json-schema.js';
 import {
-  CODEX_MODEL,
+  modelForRole,
   parseCodexAnswer,
   runCodexCli,
   writeCodexSchema,
@@ -184,7 +184,7 @@ export async function validateTaskBatch(
       prompt: buildValidationPrompt({ topic, questions: tasks.map((task) => task.question) }),
       schemaPath: writeCodexSchema(workDir, VERDICTS_SCHEMA_PATH),
       outPath: join(workDir, 'verdicts.json'),
-      model: options.model ?? CODEX_MODEL,
+      model: options.model ?? modelForRole('validate'),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     });
     verdicts = parseVerdictBatch(parseCodexAnswer(answer), tasks.length);

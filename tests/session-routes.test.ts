@@ -1,15 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import type { Database } from 'better-sqlite3';
-import { buildServer } from '../server/index.js';
+import { buildServer, type ServerOptions } from '../server/index.js';
 import { openDatabase, SUBJECTS } from '../server/db.js';
 import { loadCurriculum } from '../server/curriculum.js';
 import { storeTasks } from '../server/codex/bank.js';
 import type { DisputeContext, DisputeReview } from '../server/codex/dispute.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
+import { MAX_ANSWER_LENGTH } from '../server/routes/session.js';
+import { MAX_CODEX_CONCURRENCY } from '../server/codex/worker.js';
 
 /** Карта из одной темы на предмет: без всех трёх файлов карта не грузится. */
 function writeCurriculum(dir: string): void {
@@ -61,6 +63,19 @@ describe('маршруты занятия', () => {
   /** Фоновые разборы: тест их дожидается, вместо того чтобы гадать о таймингах. */
   const pending: Promise<void>[] = [];
   const logged: string[] = [];
+  /**
+   * Серверы, поднятые внутри отдельных тестов. Закрываются в `afterEach`, а не
+   * последней строкой тела: упавшая проверка до неё не доходит, и соединение с
+   * базой вместе с файлами `-wal`/`-shm` жило бы до конца прогона.
+   */
+  const extra: FastifyInstance[] = [];
+
+  /** Сервер со своими настройками, закрываемый вместе с тестом. */
+  function extraServer(options: ServerOptions = {}, dir?: string): FastifyInstance {
+    const instance = buildServer(dir ?? join(tempDir, 'curriculum'), options);
+    extra.push(instance);
+    return instance;
+  }
 
   beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), 'edukator-session-routes-'));
@@ -75,6 +90,7 @@ describe('маршруты занятия', () => {
     reviewed.length = 0;
     pending.length = 0;
     logged.length = 0;
+    extra.length = 0;
 
     app = buildServer(curriculumDir, {
       seedDir,
@@ -97,6 +113,7 @@ describe('маршруты занятия', () => {
 
   afterEach(async () => {
     db.close();
+    for (const instance of extra) await instance.close();
     await app.close();
     delete process.env.EDUKATOR_DB;
     rmSync(tempDir, { recursive: true, force: true });
@@ -139,6 +156,18 @@ describe('маршруты занятия', () => {
 
       expect(response.statusCode).toBe(503);
       expect((response.json() as { error: string }).error).toMatch(/нет готовых заданий/);
+    });
+
+    // Порча посева на старте сервер не роняет; посреди занятия она приезжала бы
+    // ученику пятисоткой с абсолютным путём в теле ответа.
+    it('отвечает 503, а не 500, когда посевной файл испорчен', async () => {
+      db.prepare('DELETE FROM task_bank').run();
+      writeFileSync(join(seedDir, 'math.json'), 'не json');
+
+      const response = await app.inject({ method: 'GET', url: '/api/session/next' });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.body).not.toContain(seedDir);
     });
 
     it('отвечает 503, когда планировщику нечего предложить', async () => {
@@ -197,8 +226,40 @@ describe('маршруты занятия', () => {
       expect(
         (await answer({ task_id: issued['id'], answer: '45', duration_ms: '5с' })).statusCode,
       ).toBe(400);
+      // `1e999` разбирается в `Infinity` и доезжает до `duration_ms INTEGER`
+      // как есть: SQLite типы не навязывает, а `CHECK (duration_ms >= 0)`
+      // бесконечность пропускает.
+      expect(
+        (
+          await app.inject({
+            method: 'POST',
+            url: '/api/session/answer',
+            headers: { 'content-type': 'application/json' },
+            payload: `{"task_id":${String(issued['id'])},"answer":"45","duration_ms":1e999}`,
+          })
+        ).statusCode,
+      ).toBe(400);
+      // Тот же довод, что и про `Infinity`: `1e300` переживает `Math.round`, а
+      // дробное и отрицательное доезжают до `duration_ms INTEGER` как есть.
+      for (const duration of [1e300, 0.5, -1]) {
+        expect(
+          (await answer({ task_id: issued['id'], answer: '45', duration_ms: duration })).statusCode,
+        ).toBe(400);
+      }
       // Ни одна из отклонённых попыток не записалась: задание всё ещё ждёт ответа.
       expect((await answer({ task_id: issued['id'], answer: '45' })).statusCode).toBe(200);
+    });
+
+    // Ответ ученика — слово, фраза или число: без предела в `attempts` уезжает
+    // мегабайт (умолчание `bodyLimit` Fastify), и он же потом идёт в промпт.
+    it('отвергает ответ длиннее предела и не записывает попытку', async () => {
+      const issued = await next();
+      const long = 'я'.repeat(MAX_ANSWER_LENGTH + 1);
+
+      expect((await answer({ task_id: issued['id'], answer: long })).statusCode).toBe(400);
+      expect(
+        (await answer({ task_id: issued['id'], answer: 'я'.repeat(MAX_ANSWER_LENGTH) })).statusCode,
+      ).toBe(200);
     });
 
     it('отвечает 409 на чужое задание — то, которое ученику не выдавали', async () => {
@@ -291,6 +352,56 @@ describe('маршруты занятия', () => {
       expect(db.prepare('SELECT COUNT(*) AS n FROM disputes').get()).toEqual({ n: 1 });
     });
 
+    // Набор «уже разбирается» держит только повтор по одному и тому же спору, а
+    // разных открытых споров бывает сколько угодно — и каждый это ещё один
+    // процесс codex на минуты.
+    it('не заводит больше одновременных разборов, чем предел вызовов codex', async () => {
+      const release: (() => void)[] = [];
+      const blocking = extraServer({
+        seedDir,
+        review: (context): Promise<DisputeReview> => {
+          reviewed.push(context);
+          return new Promise<DisputeReview>((resolve) => {
+            release.push(() => resolve(verdict));
+          });
+        },
+        background: (job): void => {
+          pending.push(job());
+        },
+        log: (message): void => {
+          logged.push(message);
+        },
+      });
+      await blocking.ready();
+
+      const attempts: number[] = [];
+      for (let index = 0; index <= MAX_CODEX_CONCURRENCY; index += 1) {
+        attempts.push((await wrongAnswer()).attemptId);
+      }
+      const disputeAt = (attemptId: number) =>
+        blocking.inject({
+          method: 'POST',
+          url: '/api/session/dispute',
+          payload: { attempt_id: attemptId },
+        });
+      for (const attemptId of attempts) await disputeAt(attemptId);
+
+      expect(reviewed).toHaveLength(MAX_CODEX_CONCURRENCY);
+      expect(logged.some((message) => message.includes('отложен'))).toBe(true);
+
+      for (const resolve of release) resolve();
+      await Promise.all(pending);
+
+      // Отложенный спор остался открытым и попадает на разбор со следующим
+      // нажатием кнопки — места к тому времени освободились.
+      const retry = await disputeAt(attempts[MAX_CODEX_CONCURRENCY] ?? 0);
+      expect((retry.json() as { status: string }).status).toBe('open');
+      release[release.length - 1]?.();
+      await Promise.all(pending);
+
+      expect(reviewed).toHaveLength(MAX_CODEX_CONCURRENCY + 1);
+    });
+
     it('отвечает 404 на несуществующую попытку и 400 на засчитанную', async () => {
       const issued = await next();
       const correct = (await answer({ task_id: issued['id'], answer: '45' })).json() as {
@@ -303,7 +414,7 @@ describe('маршруты занятия', () => {
     });
 
     it('не роняет сервер, когда разбирающий недоступен: спор остаётся открытым', async () => {
-      const failing = buildServer(join(tempDir, 'curriculum'), {
+      const failing = extraServer({
         seedDir,
         review: (): Promise<DisputeReview> => Promise.reject(new Error('codex не найден')),
         background: (job): void => {
@@ -328,19 +439,209 @@ describe('маршруты занятия', () => {
       expect(
         db.prepare<[], { status: string }>('SELECT status FROM disputes').get()?.status,
       ).toBe('open');
-      await failing.close();
+    });
+
+    // Провалившийся разбор иначе не повторился бы никогда: второй раз спор уже
+    // заведён, и по признаку «завели сейчас» на разбор он больше не попадал бы.
+    it('ставит на разбор заново спор, оставшийся открытым после отказа', async () => {
+      let available = false;
+      const flaky = extraServer({
+        seedDir,
+        review: (context): Promise<DisputeReview> => {
+          reviewed.push(context);
+          return available
+            ? Promise.resolve(verdict)
+            : Promise.reject(new Error('codex не найден'));
+        },
+        background: (job): void => {
+          pending.push(job());
+        },
+        log: (message): void => {
+          logged.push(message);
+        },
+      });
+      await flaky.ready();
+      const { attemptId, taskId } = await wrongAnswer();
+
+      const press = () =>
+        flaky.inject({
+          method: 'POST',
+          url: '/api/session/dispute',
+          payload: { attempt_id: attemptId },
+        });
+
+      expect((await press()).statusCode).toBe(202);
+      await Promise.all(pending);
+      expect(reviewed).toHaveLength(1);
+
+      available = true;
+      const repeat = await press();
+      await Promise.all(pending);
+
+      expect(repeat.statusCode).toBe(200);
+      expect(reviewed).toHaveLength(2);
+      expect(db.prepare('SELECT COUNT(*) AS n FROM disputes').get()).toEqual({ n: 1 });
+      expect(
+        db.prepare<[], { status: string }>('SELECT status FROM disputes').get()?.status,
+      ).toBe('upheld');
+      const stored = db
+        .prepare<[number], { accept: string }>('SELECT accept FROM task_bank WHERE id = ?')
+        .get(taskId);
+      expect(JSON.parse(stored?.accept ?? '[]')).toContain('сорок пять');
+    });
+
+    // Разбор идёт минутами, а состояние спора клиент узнаёт этим же запросом:
+    // без защёлки каждое нажатие поднимало бы ещё один процесс codex, минуя
+    // предел одновременных вызовов, который живёт в воркере.
+    it('не ставит на разбор спор, разбор которого уже идёт', async () => {
+      let release: (() => void) | undefined;
+      const slow = extraServer({
+        seedDir,
+        review: (context): Promise<DisputeReview> => {
+          reviewed.push(context);
+          return new Promise<DisputeReview>((resolve) => {
+            release = (): void => resolve(verdict);
+          });
+        },
+        background: (job): void => {
+          pending.push(job());
+        },
+      });
+      await slow.ready();
+      const { attemptId } = await wrongAnswer();
+
+      const press = () =>
+        slow.inject({
+          method: 'POST',
+          url: '/api/session/dispute',
+          payload: { attempt_id: attemptId },
+        });
+
+      expect((await press()).statusCode).toBe(202);
+      for (let i = 0; i < 4; i += 1) expect((await press()).statusCode).toBe(200);
+
+      // Ни один повтор не дошёл до модели, пока первый разбор не закончился.
+      expect(reviewed).toHaveLength(1);
+
+      release?.();
+      await Promise.all(pending);
+      expect(reviewed).toHaveLength(1);
+      expect(
+        db.prepare<[], { status: string }>('SELECT status FROM disputes').get()?.status,
+      ).toBe('upheld');
     });
   });
 
+  // Негодное задание не должно вставать поперёк занятия навсегда: без пометки
+  // оно остаётся `used` без попытки, `issuedTask` выдаёт его снова, и ученик
+  // получает ту же ошибку до конца занятия. Причина при этом называет эталонный
+  // ответ, а его ученик видеть не должен, — она уходит в журнал.
+  it('отбраковывает задание, которое нечем сверить, и не выдаёт его снова', async () => {
+    // Повреждённый `accept[]`: сверять ответ нечем, и виновато само задание.
+    const broken = db
+      .prepare<[], { id: number }>(
+        `UPDATE task_bank SET status = 'used', accept = '{'
+          WHERE topic_id = 'math.a' RETURNING id`,
+      )
+      .get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/session/answer',
+      payload: { task_id: broken?.id, answer: '45' },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect((response.json() as { code: string }).code).toBe('task-defective');
+    // Причина называет содержимое банка: она уходит в журнал, а не ученику.
+    expect(response.body).not.toContain('accept');
+    expect(logged.join('\n')).toContain('отбраковано при приёме ответа');
+    expect(
+      db
+        .prepare<[number], { status: string }>('SELECT status FROM task_bank WHERE id = ?')
+        .get(broken?.id ?? 0)?.status,
+    ).toBe('rejected');
+  });
+
+  // Тема, пропавшая из карты, — расхождение карты с базой, а не негодное
+  // задание: `syncTopicState` ровно поэтому ничего не удаляет, а `rejected`
+  // выкинул бы целые задания из выгружаемого посева навсегда.
+  it('не бракует задание темы, которой не стало в карте', async () => {
+    const otherDir = join(tempDir, 'curriculum-b');
+    mkdirSync(otherDir);
+    for (const subject of SUBJECTS) {
+      const raw = JSON.parse(
+        readFileSync(join(tempDir, 'curriculum', `${subject}.json`), 'utf8'),
+      ) as { topics: { id: string }[] };
+      const topics = raw.topics.map((entry) => ({ ...entry, id: `${subject}.b` }));
+      writeFileSync(join(otherDir, `${subject}.json`), JSON.stringify({ subject, topics }));
+    }
+
+    // Задание темы, которой в карте этого сервера нет: `topicOf` бросает обычным
+    // Error, и Fastify по умолчанию положил бы его текст в тело ответа.
+    const stale = db
+      .prepare<[], { id: number }>(
+        "UPDATE task_bank SET status = 'used' WHERE topic_id = 'math.a' RETURNING id",
+      )
+      .get();
+    const other = extraServer(
+      {
+        seedDir,
+        log: (message): void => {
+          logged.push(message);
+        },
+      },
+      otherDir,
+    );
+    await other.ready();
+
+    const response = await other.inject({
+      method: 'POST',
+      url: '/api/session/answer',
+      payload: { task_id: stale?.id, answer: '45' },
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect((response.json() as { error: string }).error).toBe('Внутренняя ошибка сервера');
+    expect(response.body).not.toContain('math.a');
+    expect(
+      db
+        .prepare<[number], { status: string }>('SELECT status FROM task_bank WHERE id = ?')
+        .get(stale?.id ?? 0)?.status,
+    ).toBe('used');
+  });
+
+  // Текст исключения называет локальные пути и содержимое базы, а сервер слушает
+  // всю домашнюю сеть без пароля.
+  it('на поломке отвечает 500 без внутренних подробностей', async () => {
+    const issued = db
+      .prepare<[], { id: number }>(
+        "UPDATE task_bank SET status = 'used' WHERE topic_id = 'math.a' RETURNING id",
+      )
+      .get();
+    // Поломка, а не дефект одного задания: сверять ответ не с чем не потому, что
+    // задание негодное, а потому, что база нечитаема.
+    db.exec('DROP TABLE attempts');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/session/answer',
+      payload: { task_id: issued?.id, answer: '45' },
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect((response.json() as { error: string }).error).toBe('Внутренняя ошибка сервера');
+    expect(response.body).not.toContain('attempts');
+  });
+
   it('отдаёт 503 на занятие, когда карта тем не загрузилась', async () => {
-    const broken = buildServer(join(tempDir, 'нет-такого-каталога'));
+    const broken = extraServer({}, join(tempDir, 'нет-такого-каталога'));
     await broken.ready();
 
     const response = await broken.inject({ method: 'GET', url: '/api/session/next' });
 
     expect(response.statusCode).toBe(503);
     expect((response.json() as { error: string }).error).toMatch(/карта тем не загружена/);
-    await broken.close();
   });
 
   it('карта тем и посев остаются доступными: /api/health не сломан занятием', async () => {

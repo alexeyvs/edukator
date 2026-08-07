@@ -10,12 +10,18 @@
  * Запуск:
  *   npm run prefetch                                  # погреть ближайшие темы
  *   npm run prefetch -- --topics 12 --target 10       # шире и глубже
+ *   npm run prefetch -- --target 10 --threshold 10    # добрать и уже тёплые темы
  *   npm run prefetch -- --export                      # выгрузить банк в посев
+ *
+ * Тема доливается, только пока её остаток ниже порога (`--threshold`, по
+ * умолчанию `REFILL_BELOW`), поэтому один `--target` глубже уже тёплые темы не
+ * копает: поднимать надо оба.
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { databasePath, openDatabase, SUBJECTS } from '../server/db.js';
+import { databasePath, openDatabase, SUBJECTS, type Subject } from '../server/db.js';
+import { writeFileAtomic } from '../server/atomic-write.js';
 import { CURRICULUM_DIR, loadCurriculum, syncTopicState } from '../server/curriculum.js';
 import type { CodexRunner } from '../server/codex/client.js';
 import {
@@ -23,10 +29,14 @@ import {
   formatSeedBank,
   loadSeedBank,
   seedBankPath,
+  SeedBankError,
   SEED_BANK_DIR,
   type LoadSeedBankResult,
+  type SeedTopic,
 } from '../server/codex/seed-bank.js';
 import {
+  everyRefillFailed,
+  REFILL_BELOW,
   runWarmupCycle,
   type CycleReport,
   type TaskProducer,
@@ -38,10 +48,21 @@ export interface PrefetchOptions {
   topics?: number;
   /** Запас заданий на тему. */
   target?: number;
+  /**
+   * Остаток, ниже которого тема доливается; по умолчанию воркерский
+   * `REFILL_BELOW`. Свой флаг нужен, потому что порог обязан быть не выше
+   * запаса: без него `--target 2` упирался бы в отказ воркера, называя число,
+   * которое из командной строки задать нечем.
+   */
+  threshold?: number;
   /** Потолок батчей на тему за цикл: он и есть «ограничение числа батчей». */
   batches?: number;
   /** Сколько циклов пополнения прогнать подряд; между ними план пересчитывается. */
   cycles?: number;
+  /**
+   * Одна модель сразу на генератор и на проверяющего; по умолчанию каждый
+   * берёт модель своей роли (`EDUKATOR_MODEL_GENERATE`, `_VALIDATE`).
+   */
   model?: string;
   /** Выгрузить содержимое банка в посевные файлы после наполнения. */
   exportSeed?: boolean;
@@ -64,6 +85,13 @@ export interface PrefetchResult {
   seeded: LoadSeedBankResult;
   /** Пути выгруженных посевных файлов; пусто без `--export`. */
   exported: string[];
+  /**
+   * Предметы, снимок которых выгрузить не вышло: битая строка банка, отказ
+   * записи, непрочитанный посев. Отдельно от пропущенных по осторожности (пустой
+   * банк, чужой снимок на месте выгрузки) — те не ошибка, а эти обязаны красить
+   * прогон.
+   */
+  exportFailed: Subject[];
 }
 
 export const DEFAULT_CYCLES = 1;
@@ -85,16 +113,44 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
     throw new Error(`Число циклов должно быть положительным целым, получено ${cycles}`);
   }
 
+  // Порог по умолчанию прижимается к запасу: воркер отвергает порог выше
+  // запаса, и `--target 2` иначе падал бы на умолчании `REFILL_BELOW = 4` уже
+  // после того, как посев записан в базу. Заданный руками порог не трогается —
+  // пусть отказ воркера назовёт именно то, что попросили.
+  const threshold =
+    options.threshold ?? (options.target === undefined ? undefined : Math.min(REFILL_BELOW, options.target));
+
   const log = options.log ?? defaultLog;
   const graph = loadCurriculum(options.curriculumDir ?? CURRICULUM_DIR);
   const db = openDatabase(options.dbPath ?? databasePath());
 
   try {
     syncTopicState(db, graph);
-    const seeded = loadSeedBank(db, graph, {
-      ...(options.seedDir === undefined ? {} : { dir: options.seedDir }),
-    });
+    // Порча посева не должна останавливать наполнение: генерация от него не
+    // зависит, а `prefetch` — единственный способ греть очередь, и одна битая
+    // тема в `content/seed-bank/*.json` иначе блокировала бы его целиком. Так
+    // же поступает старт сервера (`trySeedBank` в `server/index.ts`).
+    let seeded: LoadSeedBankResult = { loaded: 0, skipped: 0, missing: [] };
+    // Предметы, посев которых до банка не доехал: их выгрузка не трогает.
+    const brokenSeed = new Set<string>();
+    try {
+      seeded = loadSeedBank(db, graph, {
+        ...(options.seedDir === undefined ? {} : { dir: options.seedDir }),
+      });
+    } catch (error) {
+      log(`посев не загружен: ${(error as Error).message}`);
+      // Виновных предметов ошибка не назвала — значит, сорвалось до обхода, и
+      // про любой из них известно одно: посев в базу не попал. Частичный итог
+      // `SeedBankError` при этом сохраняется: здоровые предметы доехали, и
+      // выгрузке важно, у каких из них файла не было вовсе.
+      const affected = error instanceof SeedBankError ? error.subjects : SUBJECTS;
+      if (error instanceof SeedBankError) seeded = error.result;
+      for (const subject of affected) brokenSeed.add(subject);
+    }
     if (seeded.loaded > 0) log(`посев: добавлено ${seeded.loaded} задани(й)`);
+    // Предмет без исходного файла загружен не был — в банке одно
+    // нагенерированное, ровно как у непрочитанного.
+    const missingSeed = new Set<string>(seeded.missing);
 
     const reports: CycleReport[] = [];
     for (let cycle = 1; cycle <= cycles; cycle += 1) {
@@ -104,6 +160,7 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
         log,
         ...(options.topics === undefined ? {} : { topics: options.topics }),
         ...(options.target === undefined ? {} : { target: options.target }),
+        ...(threshold === undefined ? {} : { threshold }),
         ...(options.batches === undefined ? {} : { maxBatches: options.batches }),
         ...(options.model === undefined ? {} : { model: options.model }),
         ...(options.produce === undefined ? {} : { produce: options.produce }),
@@ -126,26 +183,91 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
     }
 
     const exported: string[] = [];
+    const exportFailed: Subject[] = [];
     if (options.exportSeed === true) {
       const outDir = options.outDir ?? SEED_BANK_DIR;
       mkdirSync(outDir, { recursive: true });
       for (const subject of SUBJECTS) {
-        const topics = collectSeedTasks(db, graph, subject);
         const path = seedBankPath(subject, outDir);
-        writeFileSync(path, formatSeedBank(subject, topics));
+        // Предмет с непрочитанным посевом не выгружается вовсе, даже когда
+        // задания в банке есть: в нём лежит не снимок, а огрызок — то, что
+        // успели нагенерировать циклы поверх незагруженного файла. Проверки на
+        // пустоту тут мало: переименованная в карте тема роняет разбор всего
+        // файла, а один долитый батч делает предмет непустым, и снимок из
+        // полусотни заданий молча сменился бы пятью.
+        //
+        // Пропуск красит прогон: непрочитанный посев — ошибка, а `--export`
+        // зовут ради файлов, и «выгружено 2 файла» с нулём на выходе неотличимо
+        // от полной выгрузки. Молча устаревший снимок заметить нечем.
+        if (brokenSeed.has(subject)) {
+          log(`посев ${subject}: файл не загрузился, ${path} не переписан`);
+          exportFailed.push(subject);
+          continue;
+        }
+        // Исходного файла не было, а по пути выгрузки чужой снимок лежит: это
+        // `--seed-dir` мимо `--out`, и в базе опять же огрызок — то, что успели
+        // нагенерировать циклы. Когда файла нет и там, писать нечего поверх, и
+        // выгрузка создаёт его, ради чего её и зовут в первый раз.
+        if (missingSeed.has(subject) && existsSync(path)) {
+          log(`посев ${subject}: исходного файла не было, ${path} не переписан`);
+          continue;
+        }
+        let topics: SeedTopic[];
+        try {
+          topics = collectSeedTasks(db, graph, subject);
+        } catch (error) {
+          // Битая строка банка (пустой `hint`, нечитаемый `accept[]`) — беда
+          // одного предмета. Обрыв всей выгрузки на ней оставлял бы половину
+          // снимков обновлённой, а половину прежней: набор файлов в репозитории
+          // перестал бы быть одним снимком банка.
+          log(`посев ${subject}: снимок не собрался, ${path} не переписан: ${(error as Error).message}`);
+          exportFailed.push(subject);
+          continue;
+        }
+        // Пустой предмет не выгружается по той же причине: в базе может не быть
+        // ни одного его задания (чужая база в `--db`, ничего не давший цикл), а
+        // записав пустой файл, экспорт уничтожил бы ровно тот снимок, который
+        // должен был обновить.
+        if (topics.length === 0) {
+          log(`посев ${subject}: в банке нет заданий, ${path} не переписан`);
+          continue;
+        }
+        // Через временный файл: посев — снимок для первого запуска и отката, и
+        // оборванная на середине запись оставила бы вместо него битый JSON.
+        try {
+          writeFileAtomic(path, formatSeedBank(subject, topics));
+        } catch (error) {
+          // Отказ записи — беда того же одного предмета, что и битая строка
+          // банка: каталог на месте файла, права, кончившееся место. Обрыв
+          // выгрузки здесь тем более заметен — часть снимков уже переписана.
+          log(`посев ${subject}: снимок не записан в ${path}: ${(error as Error).message}`);
+          exportFailed.push(subject);
+          continue;
+        }
         exported.push(path);
         const count = topics.reduce((sum, entry) => sum + entry.tasks.length, 0);
         log(`посев ${subject}: ${count} задани(й) в ${topics.length} теме(ах) → ${path}`);
       }
     }
 
-    return { cycles: reports, seeded, exported };
+    return { cycles: reports, seeded, exported, exportFailed };
   } finally {
     db.close();
   }
 }
 
-const NUMERIC_FLAGS = ['topics', 'target', 'batches', 'cycles'] as const;
+/**
+ * Счётчик из командной строки. Одного `/^\d+$/` мало: ему подходит и
+ * «99999999999999999999», а это `1e20` настоящих вызовов codex по десять минут
+ * каждый — от опечатки такой запуск неотличим до самого утра. Ноль тоже не
+ * значение: цикл с ним ничего не делает и молча отчитывается «0 новых заданий».
+ */
+function isPositiveCount(value: string): boolean {
+  const parsed = Number(value);
+  return /^\d+$/.test(value) && Number.isSafeInteger(parsed) && parsed >= 1;
+}
+
+const NUMERIC_FLAGS = ['topics', 'target', 'threshold', 'batches', 'cycles'] as const;
 const TEXT_FLAGS = ['model', 'out', 'seed-dir', 'db', 'curriculum'] as const;
 const BOOLEAN_FLAGS = ['export'] as const;
 
@@ -171,8 +293,16 @@ export function parseArgs(argv: string[]): PrefetchOptions {
 
     const value = argv[index + 1];
     if (value === undefined) throw new Error(`У флага ${flag} нет значения`);
-    if (numeric.has(name) && !/^\d+$/.test(value)) {
-      throw new Error(`${flag} ожидает число, получено «${value}»`);
+    if (numeric.has(name) && !isPositiveCount(value)) {
+      throw new Error(`${flag} ожидает целое число не меньше 1, получено «${value}»`);
+    }
+    // Пустое значение молча доезжает до места применения и там значит совсем не
+    // «не задано»: `--model ''` уходит в codex как `-m ''` (умолчание берётся по
+    // `??`, а пустая строка не `undefined`), и каждый батч падает уже в модели с
+    // невнятной причиной. Так же `--db ''` превратился бы в путь до текущего
+    // каталога.
+    if (text.has(name) && value.trim() === '') {
+      throw new Error(`У флага ${flag} пустое значение`);
     }
     values.set(name, value);
     index += 1;
@@ -189,6 +319,7 @@ export function parseArgs(argv: string[]): PrefetchOptions {
 
   const topics = number('topics');
   const target = number('target');
+  const threshold = number('threshold');
   const batches = number('batches');
   const cycles = number('cycles');
   const model = values.get('model');
@@ -200,6 +331,7 @@ export function parseArgs(argv: string[]): PrefetchOptions {
   return {
     ...(topics === undefined ? {} : { topics }),
     ...(target === undefined ? {} : { target }),
+    ...(threshold === undefined ? {} : { threshold }),
     ...(batches === undefined ? {} : { batches }),
     ...(cycles === undefined ? {} : { cycles }),
     ...(model === undefined ? {} : { model }),
@@ -209,6 +341,22 @@ export function parseArgs(argv: string[]): PrefetchOptions {
     ...(dbPath === undefined ? {} : { dbPath }),
     ...(curriculumDir === undefined ? {} : { curriculumDir }),
   };
+}
+
+/**
+ * Провалившийся прогон: codex не запускается, ни одна голодная тема цикла не
+ * долилась либо снимок предмета не собрался. Нужен ради кода возврата —
+ * `prefetch` зовут из `&&`-цепочек и заданий по расписанию, а «0 новых заданий»
+ * с нулём на выходе там неотличимо от «всё уже тёплое». Частичная неудача
+ * (часть тем упала) успехом остаётся: очередь всё-таки пополнилась. Сорванная
+ * выгрузка — нет: её зовут именно ради файлов, и молча недописанный снимок
+ * заметить нечем.
+ */
+export function prefetchFailed(result: PrefetchResult): boolean {
+  return (
+    result.exportFailed.length > 0 ||
+    result.cycles.some((cycle) => cycle.codexUnavailable || everyRefillFailed(cycle))
+  );
 }
 
 async function main(): Promise<void> {
@@ -223,6 +371,11 @@ async function main(): Promise<void> {
     `prefetch: ${stored} новых задани(й) за ${result.cycles.length} цикл(ов)` +
       `${result.exported.length === 0 ? '' : `, посев выгружен в ${result.exported.length} файл(ов)`}\n`,
   );
+
+  if (prefetchFailed(result)) {
+    process.stderr.write('prefetch: наполнение не удалось, подробности выше\n');
+    process.exitCode = 1;
+  }
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

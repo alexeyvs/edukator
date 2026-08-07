@@ -4,7 +4,14 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FastifyInstance } from 'fastify';
-import { buildServer, checkDatabase, HOST, readVersion, syncCurriculumState } from '../server/index.js';
+import {
+  buildServer,
+  checkDatabase,
+  closeOnSignals,
+  HOST,
+  readVersion,
+  syncCurriculumState,
+} from '../server/index.js';
 import { DEFAULT_PROFILE, SCHEMA_VERSION, openDatabase, readProfile } from '../server/db.js';
 import { loadCurriculum } from '../server/curriculum.js';
 
@@ -62,6 +69,7 @@ describe('GET /api/health', () => {
       version: string;
       database: string;
       curriculum: string;
+      session: string;
     };
 
     expect(body.status).toBe('ok');
@@ -70,6 +78,7 @@ describe('GET /api/health', () => {
     expect(body.version).toMatch(/^\d+\.\d+\.\d+$/);
     expect(body.database).toBe('ok');
     expect(body.curriculum).toBe('ok');
+    expect(body.session).toBe('ok');
   });
 
   it('отвечает 503 и status error, когда база недоступна', async () => {
@@ -157,12 +166,14 @@ describe('GET /api/health', () => {
     expect(written.join('')).toContain('math.переименованная');
   });
 
-  it('buildServer синхронизирует topic_state, а не только поднимает маршруты', () => {
+  it('buildServer синхронизирует topic_state, а не только поднимает маршруты', async () => {
     const path = join(tempDir, 'через-buildServer.db');
     const previous = process.env.EDUKATOR_DB;
     process.env.EDUKATOR_DB = path;
+    // Соединение занятия закрывается хуком `onClose`: без `app.close()` оно и
+    // файлы `-wal`/`-shm` живут до конца прогона.
+    const app = buildServer();
     try {
-      buildServer();
       const db = openDatabase(path);
       try {
         const rows = db.prepare<[], { n: number }>('SELECT COUNT(*) AS n FROM topic_state').get();
@@ -171,6 +182,7 @@ describe('GET /api/health', () => {
         db.close();
       }
     } finally {
+      await app.close();
       if (previous === undefined) delete process.env.EDUKATOR_DB;
       else process.env.EDUKATOR_DB = previous;
     }
@@ -227,8 +239,19 @@ describe('GET /api/health', () => {
 
       mkdirSync(parent);
       const restored = await recovering.inject({ method: 'GET', url: '/api/health' });
-      expect(restored.statusCode).toBe(200);
-      expect(restored.json()).toMatchObject({ status: 'ok', database: 'ok', curriculum: 'ok' });
+      // База поднялась и карта синхронизирована, но занятие осталось на
+      // заглушке: маршруты выбраны один раз при старте. Зелёный статус здесь
+      // означал бы «занимайся», а `/api/session/*` до перезапуска отдаёт 503.
+      expect(restored.statusCode).toBe(503);
+      expect(restored.json()).toMatchObject({
+        status: 'error',
+        database: 'ok',
+        curriculum: 'ok',
+        session: 'error',
+      });
+
+      const lesson = await recovering.inject({ method: 'GET', url: '/api/session/next' });
+      expect(lesson.statusCode).toBe(503);
 
       const db = openDatabase(path);
       try {
@@ -343,5 +366,27 @@ describe('GET /api/health', () => {
     const response = await app.inject({ method: 'GET', url: '/api/nope' });
 
     expect(response.statusCode).toBe(404);
+  });
+
+  // Без обработчика сигнала `onClose` не срабатывает никогда: процесс снимают
+  // по Ctrl-C, соединение занятия остаётся открытым, и WAL закрывается не
+  // переносом в основной файл, а восстановлением при следующем запуске.
+  // Сигнал взят посторонний: настоящий SIGINT снял бы сам прогон тестов.
+  it('закрывает сервер по сигналу', async () => {
+    const closing = buildServer();
+    let closed = false;
+    closing.addHook('onClose', () => {
+      closed = true;
+    });
+    await closing.ready();
+
+    closeOnSignals(closing, ['SIGUSR2']);
+    process.emit('SIGUSR2');
+    await closing.close();
+
+    expect(closed).toBe(true);
+    // `once`: повторный тот же сигнал обязан убивать процесс по-обычному, иначе
+    // зависшее закрытие нечем прервать.
+    expect(process.listenerCount('SIGUSR2')).toBe(0);
   });
 });

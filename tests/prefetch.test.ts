@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, SUBJECTS, type Subject } from '../server/db.js';
@@ -7,7 +7,7 @@ import { countAvailable } from '../server/codex/bank.js';
 import { CodexUnavailableError } from '../server/codex/client.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import type { ProduceRequest } from '../server/codex/worker.js';
-import { DEFAULT_CYCLES, parseArgs, prefetch } from '../scripts/prefetch.js';
+import { DEFAULT_CYCLES, parseArgs, prefetch, prefetchFailed } from '../scripts/prefetch.js';
 
 /** Карта из одной темы на предмет: без всех трёх файлов карта не грузится. */
 function writeCurriculum(dir: string): void {
@@ -175,6 +175,141 @@ describe('prefetch', () => {
       }
     });
 
+    it('не переписывает посевной файл предмета, которого нет в банке', async () => {
+      const outDir = join(tempDir, 'out');
+      mkdirSync(outDir);
+      const existing = JSON.stringify({ subject: 'math', topics: [] }, null, 2);
+      for (const subject of SUBJECTS) {
+        writeFileSync(join(outDir, `${subject}.json`), existing);
+      }
+
+      // Генерация ничего не вернула: в базе нет ни одного задания. Пустая
+      // выгрузка поверх снимка уничтожила бы то, ради чего снимок и держат.
+      const result = await run({
+        topics: 3,
+        batches: 1,
+        exportSeed: true,
+        outDir,
+        produce: () => Promise.resolve([]),
+      });
+
+      expect(result.exported).toEqual([]);
+      for (const subject of SUBJECTS) {
+        expect(readFileSync(join(outDir, `${subject}.json`), 'utf8')).toBe(existing);
+      }
+      expect(logged.join('\n')).toMatch(/не переписан/u);
+    });
+
+    // Проверки на пустоту тут мало: переименованная в карте тема роняет разбор
+    // всего файла, а долитый следом батч делает предмет непустым — снимок из
+    // полусотни заданий сменился бы горсткой свежесгенерированных.
+    it('не переписывает посевной файл предмета, который не загрузился', async () => {
+      const outDir = join(tempDir, 'out');
+      mkdirSync(outDir);
+      const snapshot = JSON.stringify({ subject: 'math', topics: [] }, null, 2);
+      writeFileSync(join(outDir, 'math.json'), snapshot);
+      // Тема, которой нет в карте: разбор посева математики падает целиком.
+      writeFileSync(
+        join(seedDir, 'math.json'),
+        JSON.stringify({ subject: 'math', topics: [{ topic_id: 'math.старая', tasks: [] }] }),
+      );
+
+      const result = await run({ topics: 3, batches: 1, exportSeed: true, outDir });
+
+      const db = openDatabase(dbPath);
+      try {
+        expect(countAvailable(db, 'math.a')).toBeGreaterThan(0);
+      } finally {
+        db.close();
+      }
+      expect(result.exported).not.toContain(join(outDir, 'math.json'));
+      expect(readFileSync(join(outDir, 'math.json'), 'utf8')).toBe(snapshot);
+      expect(logged.join('\n')).toMatch(/посев math: файл не загрузился/u);
+      // Осторожность осторожностью, а прогон провален: просили файлы, а снимок
+      // математики остался прежним — с нулём на выходе это неотличимо от удачи.
+      expect(result.exportFailed).toEqual(['math']);
+      expect(prefetchFailed(result)).toBe(true);
+    });
+
+    // `--seed-dir` мимо `--out`: посева на входе не было, значит в банке лежит
+    // только нагенерированное, а по пути выгрузки — полный чужой снимок.
+    it('не переписывает чужой снимок предмета, посева которого не было на входе', async () => {
+      const outDir = join(tempDir, 'out');
+      mkdirSync(outDir);
+      const snapshot = JSON.stringify({ subject: 'russian', topics: [] }, null, 2);
+      writeFileSync(join(outDir, 'russian.json'), snapshot);
+      writeFileSync(join(outDir, 'math.json'), JSON.stringify({ subject: 'math', topics: [] }));
+      // У математики посев на входе есть — её снимок обновляется как обычно.
+      writeFileSync(
+        join(seedDir, 'math.json'),
+        JSON.stringify({
+          subject: 'math',
+          topics: [{ topic_id: 'math.a', tasks: [task('math.a')] }],
+        }),
+      );
+
+      const result = await run({ topics: 3, exportSeed: true, outDir });
+
+      expect(result.exported).toContain(join(outDir, 'math.json'));
+      expect(result.exported).not.toContain(join(outDir, 'russian.json'));
+      expect(readFileSync(join(outDir, 'russian.json'), 'utf8')).toBe(snapshot);
+      expect(logged.join('\n')).toMatch(/посев russian: исходного файла не было/u);
+    });
+
+    // Строка банка без подсказки не пройдёт обратную загрузку, и `collectSeedTasks`
+    // на ней падает. Обрыв всей выгрузки этой ошибкой оставлял бы часть файлов
+    // обновлённой, а часть — прежней: набор перестал бы быть одним снимком.
+    it('пропускает предмет с битой строкой банка и выгружает остальные', async () => {
+      await run({ topics: 3 });
+
+      const db = openDatabase(dbPath);
+      try {
+        db.prepare(`UPDATE task_bank SET hint = '' WHERE topic_id = 'math.a'`).run();
+      } finally {
+        db.close();
+      }
+
+      const result = await run({ topics: 3, exportSeed: true, outDir: seedDir });
+
+      expect(result.exportFailed).toEqual(['math']);
+      expect(prefetchFailed(result)).toBe(true);
+      expect(result.exported).toHaveLength(SUBJECTS.length - 1);
+      for (const subject of SUBJECTS.filter((item) => item !== 'math')) {
+        expect(result.exported).toContain(join(seedDir, `${subject}.json`));
+      }
+      expect(existsSync(join(seedDir, 'math.json'))).toBe(false);
+      expect(logged.join('\n')).toMatch(/посев math: снимок не собрался/u);
+    });
+
+    // Запись падает не реже сборки: каталог на месте файла, права, место на
+    // диске. Обрыв на ней ещё заметнее — часть снимков уже переписана.
+    it('пропускает предмет, снимок которого не записался, и выгружает остальные', async () => {
+      const outDir = join(tempDir, 'out');
+      mkdirSync(outDir);
+      // Каталог вместо файла: переименование временного файла поверх него падает.
+      mkdirSync(join(outDir, 'math.json'));
+      // Посев на входе есть у всех: иначе предмет отсеялся бы раньше записи.
+      for (const subject of SUBJECTS) {
+        writeFileSync(
+          join(seedDir, `${subject}.json`),
+          JSON.stringify({
+            subject,
+            topics: [{ topic_id: `${subject}.a`, tasks: [task(`${subject}.a`)] }],
+          }),
+        );
+      }
+
+      const result = await run({ topics: 3, exportSeed: true, outDir });
+
+      expect(result.exportFailed).toEqual(['math']);
+      expect(prefetchFailed(result)).toBe(true);
+      expect(result.exported).toHaveLength(SUBJECTS.length - 1);
+      for (const subject of SUBJECTS.filter((item) => item !== 'math')) {
+        expect(result.exported).toContain(join(outDir, `${subject}.json`));
+      }
+      expect(logged.join('\n')).toMatch(/посев math: снимок не записан/u);
+    });
+
     it('без флага выгрузки файлов не трогает', async () => {
       const result = await run({ topics: 1 });
 
@@ -195,6 +330,85 @@ describe('prefetch', () => {
       expect(logged.join('\n')).toMatch(/прерван: codex недоступен/u);
     });
 
+    it('переживает битый посев и всё равно наполняет банк', async () => {
+      // Генерация от посева не зависит, а prefetch — единственный способ греть
+      // очередь: одна битая тема не должна оставлять банк пустым.
+      writeFileSync(join(seedDir, 'math.json'), '{ это не json');
+
+      const result = await run({ topics: 1 });
+
+      expect(logged.join('\n')).toMatch(/посев не загружен/u);
+      expect(result.cycles[0]?.refilled[0]?.stored).toBeGreaterThan(0);
+    });
+
+    // Порог долива по умолчанию — `REFILL_BELOW = 4`, а воркер отвергает порог
+    // выше запаса: без прижимания к запасу `--target 2` падал бы уже после
+    // того, как посев записан в базу, называя число, которого из командной
+    // строки было нечем задать.
+    it('греет тему до запаса меньше порога по умолчанию', async () => {
+      const result = await run({ topics: 1, target: 2 });
+
+      expect(result.cycles[0]?.refilled[0]?.stored).toBeGreaterThan(0);
+      expect(result.cycles[0]?.refilled[0]?.available).toBeGreaterThanOrEqual(2);
+    });
+
+    // Один `--target` уже тёплую тему не углубляет: долив меряется порогом.
+    it('добирает тему выше порога, когда порог поднят вместе с запасом', async () => {
+      await run({ topics: 1, target: 5 });
+
+      const deepened = await run({ topics: 1, target: 10, threshold: 10 });
+      expect(deepened.cycles[0]?.refilled[0]?.stored).toBeGreaterThan(0);
+
+      const untouched = await run({ topics: 1, target: 20 });
+      expect(untouched.cycles[0]?.refilled).toEqual([]);
+    });
+
+    it('заданный руками порог выше запаса всё равно отвергает', async () => {
+      await expect(run({ topics: 1, target: 2, threshold: 5 })).rejects.toThrow(
+        /порог долива 5 выше запаса 2/u,
+      );
+    });
+
+    // Прогон, не давший ничего, обязан отличаться кодом возврата от «всё уже
+    // тёплое»: `prefetch` зовут из `&&`-цепочек и заданий по расписанию.
+    it('считает провалом недоступный codex и цикл без единой долитой темы', async () => {
+      const unavailable = await run({
+        topics: 2,
+        produce: () => Promise.reject(new CodexUnavailableError('codex не найден')),
+      });
+      expect(prefetchFailed(unavailable)).toBe(true);
+
+      const allFailed = await run({
+        topics: 2,
+        produce: () => Promise.reject(new Error('codex завершился с кодом 1')),
+      });
+      expect(allFailed.cycles[0]?.codexUnavailable).toBe(false);
+      expect(prefetchFailed(allFailed)).toBe(true);
+    });
+
+    it('не считает провалом успешный прогон', async () => {
+      expect(prefetchFailed(await run({ topics: 2 }))).toBe(false);
+    });
+
+    // Иначе провалом объявлялся бы любой прогон с одной кривой темой, хотя
+    // очередь пополнилась: `&&`-цепочка обрывалась бы на здоровой модели.
+    it('не считает провалом отказ одной темы из двух', async () => {
+      let failing: string | null = null;
+      const partial = await run({
+        topics: 2,
+        produce: (request: ProduceRequest) => {
+          failing ??= request.topic.id;
+          return request.topic.id === failing
+            ? Promise.reject(new Error('codex завершился с кодом 1'))
+            : Promise.resolve(Array.from({ length: 5 }, () => task(request.topic.id)));
+        },
+      });
+
+      expect(partial.cycles[0]?.refilled).toHaveLength(2);
+      expect(partial.cycles[0]?.refilled.filter((refill) => refill.error !== undefined)).toHaveLength(1);
+      expect(prefetchFailed(partial)).toBe(false);
+    });
+
     it('падает на неположительном числе циклов', async () => {
       await expect(run({ cycles: 0 })).rejects.toThrow(/положительным целым/u);
     });
@@ -211,6 +425,7 @@ describe('prefetch', () => {
       const options = parseArgs([
         '--topics', '4',
         '--target', '10',
+        '--threshold', '10',
         '--batches', '2',
         '--cycles', '3',
         '--model', 'gpt-5.6-luna',
@@ -220,6 +435,7 @@ describe('prefetch', () => {
       expect(options).toMatchObject({
         topics: 4,
         target: 10,
+        threshold: 10,
         batches: 2,
         cycles: 3,
         model: 'gpt-5.6-luna',
@@ -227,11 +443,31 @@ describe('prefetch', () => {
       });
     });
 
-    it('превращает пути в абсолютные', () => {
-      const options = parseArgs(['--out', 'content/seed-bank', '--db', 'edukator.db']);
+    // Пустое значение — не «не задано»: `--model ''` уходит в codex как `-m ''`
+    // (умолчание берётся по `??`), и каждый батч падает уже в модели.
+    it('падает на пустом значении текстового флага', () => {
+      expect(() => parseArgs(['--model', ''])).toThrow(/пустое значение/u);
+      expect(() => parseArgs(['--model', '  '])).toThrow(/пустое значение/u);
+      expect(() => parseArgs(['--db', ''])).toThrow(/пустое значение/u);
+    });
 
-      expect(options.outDir?.startsWith('/')).toBe(true);
+    // Все четыре сразу: перепутанные местами `--curriculum` и `--seed-dir`
+    // разбираются без ошибки и молча читают чужой каталог.
+    it('превращает пути в абсолютные и кладёт каждый в своё поле', () => {
+      const options = parseArgs([
+        '--out', 'content/seed-bank',
+        '--db', 'edukator.db',
+        '--curriculum', 'content/curriculum',
+        '--seed-dir', 'content/seed-bank-2',
+      ]);
+
+      expect(options.outDir?.endsWith('/content/seed-bank')).toBe(true);
       expect(options.dbPath?.endsWith('/edukator.db')).toBe(true);
+      expect(options.curriculumDir?.endsWith('/content/curriculum')).toBe(true);
+      expect(options.seedDir?.endsWith('/content/seed-bank-2')).toBe(true);
+      for (const path of [options.outDir, options.dbPath, options.curriculumDir, options.seedDir]) {
+        expect(path?.startsWith('/')).toBe(true);
+      }
     });
 
     it('без аргументов не задаёт ничего: умолчания живут в самом наполнении', () => {
@@ -244,7 +480,15 @@ describe('prefetch', () => {
       expect(() => parseArgs(['--topics'])).toThrow(/нет значения/u);
       expect(() => parseArgs(['--topics', '4', '--topics', '5'])).toThrow(/указан дважды/u);
       expect(() => parseArgs(['--export', '--export'])).toThrow(/указан дважды/u);
-      expect(() => parseArgs(['--topics', 'много'])).toThrow(/ожидает число/u);
+      expect(() => parseArgs(['--topics', 'много'])).toThrow(/ожидает целое число/u);
+    });
+
+    // Ноль даёт цикл, который молча ничего не делает, а «99999999999999999999»
+    // проходит `/^\d+$/` и превращается в 1e20 настоящих вызовов codex.
+    it('падает на нуле и на числе за пределом точного целого', () => {
+      expect(() => parseArgs(['--batches', '0'])).toThrow(/не меньше 1/u);
+      expect(() => parseArgs(['--cycles', '0'])).toThrow(/не меньше 1/u);
+      expect(() => parseArgs(['--topics', '99999999999999999999'])).toThrow(/не меньше 1/u);
     });
   });
 });

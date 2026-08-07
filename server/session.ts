@@ -19,10 +19,11 @@ import type { Database } from 'better-sqlite3';
 import type { AnswerFormat, Topic, TopicGraph } from './curriculum.js';
 import type { Subject } from './db.js';
 import { recomputeTopicState, recordAttempt, type TopicState } from './mastery.js';
-import { checkAnswer, type RejectReason } from './normalize.js';
+import { checkAnswer, type CheckResult, type RejectReason } from './normalize.js';
 import { planFromDatabase } from './scheduler.js';
+import { issuedTask, type BankTask } from './codex/bank.js';
 import { takeTaskOrSeed } from './codex/seed-bank.js';
-import { duplicateKey } from './codex/task-schema.js';
+import { duplicateKey, fitsAccept } from './codex/task-schema.js';
 import type { DisputeContext, DisputeReviewer } from './codex/dispute.js';
 
 /** Причина отказа: по ней маршрут выбирает код ответа. */
@@ -32,7 +33,9 @@ export type SessionErrorCode =
   | 'already-answered'
   | 'attempt-not-found'
   | 'attempt-correct'
-  | 'dispute-not-found';
+  | 'dispute-not-found'
+  /** Задание отбраковано при приёме ответа: сверить его не по чему. */
+  | 'task-defective';
 
 /** Отказ по состоянию занятия, а не по поломке: маршрут отвечает на него 4xx. */
 export class SessionError extends Error {
@@ -75,11 +78,23 @@ export interface NextTaskOptions {
   now?: Date;
   /** Каталог посевного банка; по умолчанию репозиторный. */
   seedDir?: string;
+  /** Куда писать про пропущенную тему; по умолчанию stderr. */
+  log?: (message: string) => void;
 }
 
 /**
  * Следующее задание: тема от планировщика, задание из банка. Целевая сложность —
  * базовая сложность темы; подстройку под точность ученика делает триаж этапа 3.
+ *
+ * Перебирается **весь** план, а не первые несколько тем: пустая очередь темы не
+ * повод сказать «заданий нет» — ответить по ней ученик не может, состояние её не
+ * меняется, и планировщик предлагает её же снова, то есть занятие встаёт
+ * навсегда. Посев покрывает шесть тем предмета из двадцати с лишним, так что
+ * окно фиксированного размера регулярно целиком состоит из пустых тем, а
+ * остальной банк остаётся недостижимым. Перебор дешёвый: план строится в памяти.
+ *
+ * Уже выданное, но неотвеченное задание темы возвращается повторно: перезагрузка
+ * страницы не должна сжигать очередь.
  */
 export function nextTask(
   db: Database,
@@ -87,29 +102,59 @@ export function nextTask(
   options: NextTaskOptions = {},
 ): NextTaskResult {
   const now = options.now ?? new Date();
-  const [planned] = planFromDatabase(db, graph, 1, now);
-  if (planned === undefined) return { status: 'no-topic' };
+  const log = options.log ?? ((message: string): void => void process.stderr.write(`${message}\n`));
+  const planned = planFromDatabase(db, graph, graph.byId.size, now);
+  const first = planned[0];
+  if (first === undefined) return { status: 'no-topic' };
 
-  const { topic } = planned;
-  const task = takeTaskOrSeed(db, graph, topic.id, {
-    difficulty: topic.difficulty,
-    ...(options.seedDir === undefined ? {} : { dir: options.seedDir }),
-  });
-  if (task === null) return { status: 'no-task', topicId: topic.id };
+  // Один набор на весь перебор: посев предмета дозаливается целиком, и второй
+  // раз за запрос это только разбор того же файла впустую.
+  const seeded = new Set<Subject>();
+  // Первая поломка перебора: если сорвались все темы плана без исключения, дело
+  // не в банке, а в самой базе (заблокированная запись, рассинхронизованная
+  // `topic_state`), и молчаливое «заданий нет» увело бы разбирательство не туда.
+  let firstFailure: Error | undefined;
+  let failed = 0;
+  for (const { topic } of planned) {
+    let task: BankTask | null;
+    // Поломка одной темы не должна валить весь перебор: повреждённый `accept[]`
+    // одного задания — дефект банка, и превращать его в пятисотку на каждом
+    // запросе значит остановить занятие целиком, хотя соседние темы полны.
+    try {
+      task =
+        issuedTask(db, topic.id) ??
+        takeTaskOrSeed(db, graph, topic.id, {
+          difficulty: topic.difficulty,
+          seeded,
+          ...(options.seedDir === undefined ? {} : { dir: options.seedDir }),
+        });
+    } catch (error) {
+      firstFailure ??= error as Error;
+      failed += 1;
+      log(`тема «${topic.id}» пропущена: ${(error as Error).message}`);
+      continue;
+    }
+    if (task === null) continue;
 
-  return {
-    status: 'ok',
-    task: {
-      id: task.id,
-      topicId: topic.id,
-      subject: topic.subject,
-      topicTitle: topic.title,
-      question: task.question,
-      hint: task.hint,
-      difficulty: task.difficulty,
-      answerFormat: topic.answerFormat,
-    },
-  };
+    return {
+      status: 'ok',
+      task: {
+        id: task.id,
+        topicId: topic.id,
+        subject: topic.subject,
+        topicTitle: topic.title,
+        question: task.question,
+        hint: task.hint,
+        difficulty: task.difficulty,
+        answerFormat: topic.answerFormat,
+      },
+    };
+  }
+
+  if (firstFailure !== undefined && failed === planned.length) throw firstFailure;
+
+  // Тема первого забега: она же осталась бы выбранной и на следующем запросе.
+  return { status: 'no-task', topicId: first.topic.id };
 }
 
 export interface AnswerRequest {
@@ -119,6 +164,8 @@ export interface AnswerRequest {
   durationMs?: number;
   /** Время попытки; по умолчанию — сейчас. Задаётся явно в тестах. */
   at?: Date;
+  /** Куда писать про отбракованное задание; по умолчанию stderr. */
+  log?: (message: string) => void;
 }
 
 export interface AnswerResult {
@@ -195,11 +242,13 @@ export function submitAnswer(
   const at = request.at ?? new Date();
   const hintUsed = request.hintUsed ?? false;
   const durationMs = Math.max(0, Math.round(request.durationMs ?? 0));
+  const log =
+    request.log ?? ((message: string): void => void process.stderr.write(`${message}\n`));
 
   // Всё одной `immediate`-транзакцией: проверка «уже отвечали», запись попытки
   // и сдвиг модели обязаны видеть один снимок, иначе два одновременных ответа
   // на одно задание оба пройдут проверку и оба сдвинут `mastery`.
-  return db.transaction((): AnswerResult => {
+  const outcome = db.transaction((): AnswerResult | { defect: string } => {
     const row = readTask(db, request.taskId);
     if (row.status !== 'used') {
       throw new SessionError(
@@ -218,12 +267,30 @@ export function submitAnswer(
       );
     }
 
+    // Пропавшая из карты тема — не дефект задания, а расхождение карты с базой:
+    // задания темы целы и вернутся вместе с ней (`syncTopicState` ровно поэтому
+    // ничего не удаляет), а `rejected` выкинул бы их из выгружаемого посева
+    // навсегда. Такое уходит пятисоткой; повторной выдачи она не вызовет —
+    // темы вне карты в план не попадают.
     const topic = topicOf(graph, row.topic_id);
-    const check = checkAnswer(
-      request.answer,
-      { answer: row.answer, accept: parseAccept(row.accept, row.id) },
-      topic.answerFormat,
-    );
+
+    // Дефект самого задания — нечитаемый `accept[]`, эталон без числа на
+    // числовой теме — не должен вставать поперёк занятия навсегда. Выдача такое
+    // задание уже пропускает (`nextTask`), а здесь оно уже выдано: без пометки
+    // задание остаётся `used` без попытки, `issuedTask` возвращает его снова, и
+    // ученик получает ту же пятисотку до конца занятия. Пометка `rejected`
+    // выводит его из очереди.
+    let check: CheckResult;
+    try {
+      check = checkAnswer(
+        request.answer,
+        { answer: row.answer, accept: parseAccept(row.accept, row.id) },
+        topic.answerFormat,
+      );
+    } catch (error) {
+      db.prepare("UPDATE task_bank SET status = 'rejected' WHERE id = ?").run(row.id);
+      return { defect: (error as Error).message };
+    }
 
     const info = db
       .prepare(
@@ -260,6 +327,19 @@ export function submitAnswer(
       state,
     };
   }).immediate();
+
+  // Отказ бросается уже после фиксации: пометка `rejected` обязана уцелеть, а
+  // исключение изнутри транзакции откатило бы её вместе со всем остальным.
+  // Наружу уходит только факт — причина называет эталонный ответ, а его ученик
+  // видеть не должен, поэтому подробности идут в журнал.
+  if ('defect' in outcome) {
+    log(`задание ${request.taskId} отбраковано при приёме ответа: ${outcome.defect}`);
+    throw new SessionError(
+      'task-defective',
+      `Занятие: задание ${request.taskId} отбраковано, возьмите следующее`,
+    );
+  }
+  return outcome;
 }
 
 export type DisputeStatus = 'open' | 'upheld' | 'rejected';
@@ -363,6 +443,11 @@ function readDispute(db: Database, disputeId: number): DisputeRow {
  *
  * Уже закрытый спор второй раз не разбирается: вызов возвращает сохранённый
  * вердикт, не трогая ни модель, ни задание.
+ *
+ * Подтверждение спора всегда засчитывает попытку, но не всякий ответ попадает в
+ * `accept[]`: пустая строка и «45 и 46» на числовой теме не проходят `fitsAccept`
+ * и дописаны не будут — иначе выгруженный посевной файл предмета перестал бы
+ * разбираться этим же `parseTaskBatch`.
  */
 export async function resolveDispute(
   db: Database,
@@ -425,7 +510,11 @@ export async function resolveDispute(
     const keys = new Set(
       [fresh.answer, ...current].map((value) => duplicateKey(value, topic.answerFormat)),
     );
-    const next = keys.has(duplicateKey(given, topic.answerFormat)) ? current : [...current, given];
+    const next =
+      !fitsAccept(given, topic.answerFormat) ||
+      keys.has(duplicateKey(given, topic.answerFormat))
+        ? current
+        : [...current, given];
 
     db.prepare('UPDATE task_bank SET accept = @accept WHERE id = @id').run({
       id: fresh.task_id,

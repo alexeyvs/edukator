@@ -383,11 +383,16 @@ describe('модель знаний', () => {
       return Number(info.lastInsertRowid);
     }
 
-    function addAttempt(correct: boolean, difficulty: number, day: number): void {
+    function addAttempt(
+      correct: boolean,
+      difficulty: number,
+      day: number,
+      hintUsed = false,
+    ): void {
       db.prepare(
-        `INSERT INTO attempts (task_id, topic_id, answer, is_correct, created_at)
-         VALUES (?, 'math.fractions', '45', ?, ?)`,
-      ).run(addTask(difficulty), correct ? 1 : 0, at(day).toISOString());
+        `INSERT INTO attempts (task_id, topic_id, answer, is_correct, hint_used, created_at)
+         VALUES (?, 'math.fractions', '45', ?, ?, ?)`,
+      ).run(addTask(difficulty), correct ? 1 : 0, hintUsed ? 1 : 0, at(day).toISOString());
     }
 
     beforeEach(() => {
@@ -414,6 +419,34 @@ describe('модель знаний', () => {
       expected = applyAttempt(expected, attempt({ correct: true, difficulty: 1, at: at(2) }));
       expect(replayed).toEqual(expected);
       expect(readTopicState(db, 'math.fractions')).toEqual(expected);
+    });
+
+    // Пересчёт идёт по всей истории темы, и штраф за подсказку обязан пережить
+    // его: иначе разбор спора молча раздувал бы `mastery`, а на нём держатся и
+    // план, и прогноз.
+    it('сохраняет штраф за подсказку при пересчёте', () => {
+      addAttempt(true, 2, 0, true);
+      addAttempt(true, 2, 1, false);
+
+      const replayed = recomputeTopicState(db, 'math.fractions');
+
+      let expected = newTopicState('math.fractions');
+      expected = applyAttempt(
+        expected,
+        attempt({ correct: true, difficulty: 2, at: at(0), hintUsed: true }),
+      );
+      expected = applyAttempt(
+        expected,
+        attempt({ correct: true, difficulty: 2, at: at(1), hintUsed: false }),
+      );
+      expect(replayed).toEqual(expected);
+
+      // И это не то же самое, что цепочка без подсказки: иначе тест ничего не
+      // держал бы.
+      let unhinted = newTopicState('math.fractions');
+      unhinted = applyAttempt(unhinted, attempt({ correct: true, difficulty: 2, at: at(0) }));
+      unhinted = applyAttempt(unhinted, attempt({ correct: true, difficulty: 2, at: at(1) }));
+      expect(replayed.mastery).toBeLessThan(unhinted.mastery);
     });
 
     it('видит исправленный результат попытки: ради этого пересчёт и нужен', () => {

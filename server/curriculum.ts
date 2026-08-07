@@ -266,17 +266,25 @@ export interface SyncResult {
  */
 export function syncTopicState(db: Database, graph: TopicGraph): SyncResult {
   const insert = db.prepare('INSERT INTO topic_state (topic_id) VALUES (?)');
+  const readState = db.prepare<[], { topic_id: string }>('SELECT topic_id FROM topic_state');
+
+  // Чтение без транзакции перед транзакцией: заводить обычно нечего, а
+  // `syncTopicState` зовётся на каждом /api/health. `immediate` берёт запись на
+  // всю базу и под WAL ждёт занятия и воркера до истечения busy timeout —
+  // синхронно, всем событийным циклом, — а по истечении опрос здоровья ответил
+  // бы «database: error» об исправной базе. Гонку двух стартов это не открывает:
+  // состав перечитывается заново уже под записью, и решение о вставке принимает
+  // именно оно.
+  const before = new Set(readState.all().map((row) => row.topic_id));
+  if ([...graph.byId.keys()].every((id) => before.has(id))) {
+    return { added: [], stale: [...before].filter((id) => !graph.byId.has(id)) };
+  }
 
   // Чтение состава внутри той же транзакции, что и вставка, и `immediate`, а не
   // отложенная: иначе два старта сервера подряд оба увидят пустой `topic_state`,
   // оба соберут один и тот же `added` — и второй упадёт на первичном ключе.
   const { known, added } = db.transaction((): { known: Set<string>; added: string[] } => {
-    const seen = new Set(
-      db
-        .prepare<[], { topic_id: string }>('SELECT topic_id FROM topic_state')
-        .all()
-        .map((row) => row.topic_id),
-    );
+    const seen = new Set(readState.all().map((row) => row.topic_id));
     const fresh = [...graph.byId.keys()].filter((id) => !seen.has(id));
     for (const id of fresh) insert.run(id);
     return { known: seen, added: fresh };

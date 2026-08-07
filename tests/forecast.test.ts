@@ -4,8 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import { openDatabase } from '../server/db.js';
-import { buildTopicGraph, type Topic, type TopicGraph } from '../server/curriculum.js';
-import { newTopicState, type TopicState } from '../server/mastery.js';
+import {
+  buildTopicGraph,
+  syncTopicState,
+  type Topic,
+  type TopicGraph,
+} from '../server/curriculum.js';
+import { newTopicState, writeTopicState, type TopicState } from '../server/mastery.js';
 import {
   MAX_BAND,
   MAX_SCORE,
@@ -20,6 +25,7 @@ import {
   recordForecasts,
   scoreFromRatio,
   writeForecastSnapshot,
+  type ForecastValue,
 } from '../server/forecast.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -273,20 +279,27 @@ describe('снимки прогноза', () => {
     topic('rus.a', { subject: 'russian', examWeight: 2 }),
   ]);
 
-  function snapshot(scope: 'math' | 'overall', ratio: number, day: number): void {
+  function snapshot(scope: 'math' | 'overall', ratio: number, day: number): ForecastValue {
     const forecast = computeForecast([topic('a')], stateMap(seen('a', ratio, 12, day)), at(day));
     if (forecast === null) throw new Error('фикстура: прогноз не посчитался');
     writeForecastSnapshot(db, scope, forecast, at(day));
+    return forecast;
   }
 
   it('записывает снимок и читает его обратно', () => {
-    snapshot('math', 0.6, 0);
+    const written = snapshot('math', 0.6, 0);
 
     const [row] = readSnapshots(db, 'math');
-    expect(row?.subject).toBe('math');
+    // Сверка со всем посчитанным прогнозом, а не «больше нуля»: искажение
+    // `band` на записи иначе прошло бы незамеченным.
+    expect(row).toEqual({
+      id: expect.any(Number),
+      subject: 'math',
+      score: written.score,
+      band: written.band,
+      createdAt: at(0).toISOString(),
+    });
     expect(row?.score).toBeCloseTo(4, 6);
-    expect(row?.band).toBeGreaterThan(0);
-    expect(row?.createdAt).toBe(at(0).toISOString());
   });
 
   it('читает снимки только запрошенного предмета в хронологическом порядке', () => {
@@ -356,6 +369,31 @@ describe('снимки прогноза', () => {
     expect(readSnapshots(db, 'overall')).toHaveLength(1);
     expect(readSnapshots(db, 'math')).toHaveLength(1);
     expect(readSnapshots(db, 'english')).toHaveLength(0);
+  });
+
+  // На пустом `topic_state` все состояния нулевые, и снимок выходит одинаковым
+  // независимо от того, читалась база вообще или нет.
+  it('считает снимки по состояниям из базы, а не по нулям', () => {
+    syncTopicState(db, graph);
+    writeTopicState(db, seen('math.a', 0.9, 12, 0));
+    writeTopicState(db, seen('rus.a', 0.1, 12, 0));
+
+    const written = recordForecasts(db, graph, at(0));
+    const states = new Map([
+      ['math.a', seen('math.a', 0.9, 12, 0)],
+      ['rus.a', seen('rus.a', 0.1, 12, 0)],
+    ]);
+    const byScope = new Map(written.map((item) => [item.subject, item]));
+
+    for (const scope of ['overall', 'math', 'russian'] as const) {
+      const expected = forecastFor(graph, states, scope, at(0));
+      expect(expected).not.toBeNull();
+      expect(byScope.get(scope)?.score).toBeCloseTo(expected?.score ?? 0, 10);
+      expect(byScope.get(scope)?.band).toBeCloseTo(expected?.band ?? 0, 10);
+    }
+    const math = byScope.get('math')?.score ?? 0;
+    const russian = byScope.get('russian')?.score ?? 0;
+    expect(math).toBeGreaterThan(russian);
   });
 
   it('не пишет ничего по карте без экзаменационных тем', () => {

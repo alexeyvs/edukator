@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Database } from 'better-sqlite3';
 import BetterSqlite3 from 'better-sqlite3';
 import {
@@ -112,6 +113,30 @@ function createVersionOneDatabase(path: string): Database {
   return legacy;
 }
 
+/**
+ * База версии 2: текущая схема, но `forecast_snapshots` ещё без верхней границы
+ * полосы. Строится из настоящей схемы и перестройкой одной таблицы, а не своей
+ * DDL: остальные таблицы версии 2 от текущих не отличаются, и вторая копия их
+ * определений разъехалась бы с `SCHEMA` при первом же изменении.
+ */
+function createVersionTwoDatabase(path: string): Database {
+  const legacy = openDatabase(path);
+  legacy.exec(`
+    DROP INDEX forecast_by_subject;
+    DROP TABLE forecast_snapshots;
+    CREATE TABLE forecast_snapshots (
+      id INTEGER PRIMARY KEY,
+      subject TEXT NOT NULL CHECK (subject IN ('math', 'russian', 'english', 'overall')),
+      score REAL NOT NULL CHECK (score BETWEEN 2 AND 5),
+      band REAL NOT NULL DEFAULT 0 CHECK (band >= 0),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+    CREATE INDEX forecast_by_subject ON forecast_snapshots (subject, created_at);
+  `);
+  legacy.pragma('user_version = 2');
+  return legacy;
+}
+
 describe('база данных', () => {
   let tempDir: string;
   let dbFile: string;
@@ -162,6 +187,36 @@ describe('база данных', () => {
       expect(state?.mastery).toBeCloseTo(0.42);
       expect(readProfile(db).name).toBe('Тимофей');
       expect(readProfile(db).interests).toEqual(['Minecraft']);
+    });
+
+    it('не повторяет миграцию, если базу мигрировал соседний процесс', () => {
+      const racePath = join(tempDir, 'race.db');
+      const racing = new BetterSqlite3(racePath);
+      try {
+        // Версия читается быстрой проверкой до транзакции, и ровно в этот момент
+        // базу мигрирует другое соединение: так выглядит одновременный старт
+        // сервера и `npm run prefetch` на чистом чекауте. Решение обязано
+        // приниматься по перечитанной под записью версии, иначе миграция пойдёт
+        // поверх готовой схемы и упадёт на «объекте profile».
+        const pragma = racing.pragma.bind(racing);
+        let raced = false;
+        racing.pragma = (source: string, options?: Parameters<Database['pragma']>[1]): unknown => {
+          const result = pragma(source, options);
+          if (!raced && source === 'user_version') {
+            raced = true;
+            openDatabase(racePath).close();
+          }
+          return result;
+        };
+
+        expect(() => {
+          migrate(racing);
+        }).not.toThrow();
+        expect(raced).toBe(true);
+        expect(tableNames(racing)).toEqual([...TABLES].sort());
+      } finally {
+        racing.close();
+      }
     });
 
     it('обновляет схему версии 1 до текущей и ставит ограничения целостности', () => {
@@ -282,6 +337,145 @@ describe('база данных', () => {
       expect(version.user_version).toBe(1);
     });
 
+    // Схема версии 2 — текущая без затвора `band BETWEEN 0 AND 1`: снимок
+    // прогноза с полосой вне диапазона в неё влезал. Без этого теста весь
+    // переход `version <= 2` вырезался бы, не покраснев ни одним тестом.
+    it('ставит базе версии 2 затвор полосы прогноза, сохраняя снимки', () => {
+      const path = join(tempDir, 'версия-2.db');
+      const legacy = createVersionTwoDatabase(path);
+      legacy
+        .prepare('INSERT INTO forecast_snapshots (subject, score, band) VALUES (?, ?, ?)')
+        .run('math', 4.2, 0.3);
+      legacy.close();
+
+      const migrated = openDatabase(path);
+      try {
+        const [version] = migrated.pragma('user_version') as [{ user_version: number }];
+        expect(version.user_version).toBe(SCHEMA_VERSION);
+        expect(
+          migrated
+            .prepare<[], { subject: string; score: number; band: number }>(
+              'SELECT subject, score, band FROM forecast_snapshots',
+            )
+            .all(),
+        ).toEqual([{ subject: 'math', score: 4.2, band: 0.3 }]);
+
+        expect(() =>
+          migrated
+            .prepare('INSERT INTO forecast_snapshots (subject, score, band) VALUES (?, ?, ?)')
+            .run('math', 4.2, 1.5),
+        ).toThrow(/CHECK/);
+      } finally {
+        migrated.close();
+      }
+    });
+
+    // Данные, которые новый затвор не пропустит, обязаны назваться до DDL:
+    // молча их отбросить значило бы потерять историю прогноза.
+    it('отказывается обновлять базу версии 2 с полосой вне диапазона', () => {
+      const path = join(tempDir, 'версия-2-битая.db');
+      const legacy = createVersionTwoDatabase(path);
+      legacy
+        .prepare('INSERT INTO forecast_snapshots (subject, score, band) VALUES (?, ?, ?)')
+        .run('math', 4.2, 1.5);
+      legacy.close();
+
+      expect(() => openDatabase(path)).toThrow(/полосу прогноза вне диапазона/);
+    });
+
+    // Единственная версия, которая входит в перестройку `version <= 3` со всеми
+    // триггерами и индексами на месте: их приходится снимать перед
+    // переименованием таблиц, иначе `SCHEMA` спотыкается о старые. Схема
+    // версии 3 — текущая без отпечатка формулировки.
+    it('перестраивает базу версии 3, сохраняя цепочку задание-попытка-спор', () => {
+      const path = join(tempDir, 'версия-3.db');
+      const legacy = openDatabase(path);
+      legacy.exec('DROP INDEX task_bank_fingerprint; ALTER TABLE task_bank DROP COLUMN fingerprint;');
+      const topicId = seedTopic(legacy);
+      const taskId = seedTask(legacy, topicId);
+      // Отметки в формате `datetime('now')`: ради их перевода в ISO переход и
+      // заведён — сравнение по этим колонкам строковое.
+      legacy
+        .prepare('UPDATE task_bank SET created_at = ? WHERE id = ?')
+        .run('2026-08-07 10:00:00', taskId);
+      const attemptId = Number(
+        legacy
+          .prepare(
+            `INSERT INTO attempts (task_id, topic_id, answer, is_correct, created_at)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+          .run(taskId, topicId, '4', 0, '2026-08-07 11:00:00').lastInsertRowid,
+      );
+      legacy
+        .prepare(
+          `INSERT INTO disputes (attempt_id, status, resolution, created_at, resolved_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(attemptId, 'upheld', 'ученик прав', '2026-08-07 11:05:00', '2026-08-07 12:34:56');
+      legacy.pragma('user_version = 3');
+      legacy.close();
+
+      const migrated = openDatabase(path);
+      try {
+        const [version] = migrated.pragma('user_version') as [{ user_version: number }];
+        expect(version.user_version).toBe(SCHEMA_VERSION);
+
+        const task = migrated
+          .prepare<[], { id: number; created_at: string; fingerprint: string }>(
+            'SELECT id, created_at, fingerprint FROM task_bank',
+          )
+          .get();
+        expect(task).toEqual({ id: taskId, created_at: '2026-08-07T10:00:00.000Z', fingerprint: '' });
+
+        const attempt = migrated
+          .prepare<[], { task_id: number; topic_id: string; created_at: string }>(
+            'SELECT task_id, topic_id, created_at FROM attempts',
+          )
+          .get();
+        expect(attempt).toEqual({
+          task_id: taskId,
+          topic_id: topicId,
+          created_at: '2026-08-07T11:00:00.000Z',
+        });
+
+        const dispute = migrated
+          .prepare<[], { attempt_id: number; resolution: string; created_at: string; resolved_at: string }>(
+            'SELECT attempt_id, resolution, created_at, resolved_at FROM disputes',
+          )
+          .get();
+        expect(dispute).toEqual({
+          attempt_id: attemptId,
+          resolution: 'ученик прав',
+          created_at: '2026-08-07T11:05:00.000Z',
+          resolved_at: '2026-08-07T12:34:56.000Z',
+        });
+
+        // Перестройка идёт переименованием, так что и внешние ключи, и снятые
+        // перед ней триггеры с индексами обязаны вернуться на место.
+        expect(migrated.pragma('foreign_key_check')).toEqual([]);
+        const triggers = migrated.prepare<[], { n: number }>(
+          "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger'",
+        ).get();
+        expect(triggers?.n).toBe(4);
+        migrated
+          .prepare(
+            `INSERT INTO task_bank (topic_id, question, answer, difficulty, fingerprint)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+          .run(topicId, 'Новое задание', '4', 2, 'новое задание');
+        expect(() =>
+          migrated
+            .prepare(
+              `INSERT INTO task_bank (topic_id, question, answer, difficulty, fingerprint)
+               VALUES (?, ?, ?, ?, ?)`,
+            )
+            .run(topicId, 'новое  задание!', '4', 2, 'новое задание'),
+        ).toThrow(/UNIQUE/i);
+      } finally {
+        migrated.close();
+      }
+    });
+
     it('добавляет отпечаток формулировки базе версии 4, сохраняя задания', () => {
       const path = join(tempDir, 'версия-4.db');
       const legacy = openDatabase(path);
@@ -390,6 +584,29 @@ describe('база данных', () => {
     });
   });
 
+  // База с актуальным номером версии не обязана быть целой: индекс или триггер
+  // мог снести кто угодно, а вместе с ними тихо отключаются защита от повторов
+  // и согласованность попыток с забегами.
+  describe('проверка схемы при открытии', () => {
+    it('отвергает базу без обязательного индекса', () => {
+      const path = join(tempDir, 'без-индекса.db');
+      const seed = openDatabase(path);
+      seed.exec('DROP INDEX task_bank_fingerprint');
+      seed.close();
+
+      expect(() => openDatabase(path)).toThrow(/отсутствуют task_bank_fingerprint/u);
+    });
+
+    it('отвергает базу без обязательного триггера', () => {
+      const path = join(tempDir, 'без-триггера.db');
+      const seed = openDatabase(path);
+      seed.exec('DROP TRIGGER attempts_topic_consistency_insert');
+      seed.close();
+
+      expect(() => openDatabase(path)).toThrow(/отсутствуют attempts_topic_consistency_insert/u);
+    });
+  });
+
   describe('профиль', () => {
     it('на первом запуске отдаёт значения по умолчанию', () => {
       expect(readProfile(db)).toEqual(DEFAULT_PROFILE);
@@ -482,9 +699,11 @@ describe('база данных', () => {
 
     it('сообщает внятной ошибкой о повреждённых интересах в базе', () => {
       writeProfile(db, { name: 'Тимофей' });
-      db.prepare('UPDATE profile SET interests = ? WHERE id = 1').run('не json');
 
-      expect(() => readProfile(db)).toThrow(/interests/);
+      for (const broken of ['не json', '{"a":1}', '[1,2]', '["ок", 4]']) {
+        db.prepare('UPDATE profile SET interests = ? WHERE id = 1').run(broken);
+        expect(() => readProfile(db)).toThrow(/interests/);
+      }
     });
   });
 
@@ -661,9 +880,15 @@ describe('база данных', () => {
     });
 
     it('по умолчанию указывает на edukator.db в корне проекта', () => {
+      const saved = process.env.EDUKATOR_DB;
       delete process.env.EDUKATOR_DB;
-
-      expect(databasePath()).toMatch(/edukator\.db$/);
+      try {
+        // Полный путь, а не хвост: `/edukator\.db$/` совпал бы и с путём из
+        // переменной окружения, то есть отката к умолчанию бы не доказывал.
+        expect(databasePath()).toBe(resolve(fileURLToPath(import.meta.url), '..', '..', 'edukator.db'));
+      } finally {
+        if (saved !== undefined) process.env.EDUKATOR_DB = saved;
+      }
     });
 
     it('падает внятной ошибкой, если каталог базы недоступен', () => {

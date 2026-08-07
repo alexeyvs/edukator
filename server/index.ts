@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import { databasePath, openDatabase } from './db.js';
 import {
   CURRICULUM_DIR,
@@ -42,8 +42,12 @@ export type DatabaseStatus = 'ok' | 'error';
 
 /**
  * Проверка живости базы: открыть, домигрировать до текущей схемы и выполнить
- * тривиальный запрос. Миграция на уже актуальной базе — чтение одной прагмы,
- * так что health остаётся дешёвым.
+ * тривиальный запрос. Дешёвой её называть нельзя — `validateSchema` заодно
+ * гоняет `quick_check` по всем страницам, — поэтому повторно за запрос она
+ * вызывается только на восстановлении после неудачного старта. Синхронизация
+ * карты тем открывает базу своим соединением и тот же `quick_check` повторяет:
+ * опрос здоровья стоит двух проходов по файлу, и это осознанная плата за то,
+ * что занятие не делит соединение с health.
  *
  * Причина отказа уходит в stderr: логгер Fastify выключен, а «database: error»
  * без текста не отличает занятый файл от непрочитанной схемы — а читают health
@@ -130,6 +134,20 @@ export function buildServer(
   options: ServerOptions = {},
 ): FastifyInstance {
   const app = Fastify({ logger: false });
+
+  // Fastify по умолчанию отдаёт текст исключения в теле ответа, а внутренние
+  // ошибки называют абсолютные пути и содержимое базы. Сервер слушает всю
+  // домашнюю сеть без пароля, так что наружу уходит только факт поломки, а
+  // подробности — в stderr. Отказы самого Fastify (битый JSON в теле — 400)
+  // остаются как есть: они про запрос, а не про внутренности.
+  app.setErrorHandler((error: FastifyError, request, reply) => {
+    const status = error.statusCode ?? 500;
+    if (status < 500) return reply.code(status).send({ error: error.message });
+
+    process.stderr.write(`${request.method} ${request.url}: ${error.message}\n`);
+    return reply.code(500).send({ error: 'Внутренняя ошибка сервера' });
+  });
+
   let curriculum: CurriculumStatus = 'ok';
   let graph: TopicGraph | undefined;
   let curriculumSynchronized = false;
@@ -187,6 +205,7 @@ export function buildServer(
   // идут транзакциями, а открывать базу на каждый запрос значит терять WAL и
   // получать чужой снимок посреди read-modify-write.
   const sessionDb = graph !== undefined && curriculumSynchronized ? tryOpenSession() : undefined;
+  const session: DatabaseStatus = graph !== undefined && sessionDb !== undefined ? 'ok' : 'error';
   if (graph !== undefined && sessionDb !== undefined) {
     registerSessionRoutes(app, { ...options, db: sessionDb, graph });
     app.addHook('onClose', () => {
@@ -202,6 +221,11 @@ export function buildServer(
   // `status` выводится из проверки базы, а не из факта «маршрут ответил»:
   // здоровье читают ровно тогда, когда что-то сломалось, и зелёный статус над
   // «database: error» ввёл бы в заблуждение именно в этот момент.
+  //
+  // Занятие входит в статус наравне с базой. Маршруты выбираются один раз при
+  // старте, и поднявшаяся позже база их уже не вернёт: без этого поля health
+  // отвечал бы `ok` процессу, который на все `/api/session/*` до перезапуска
+  // отдаёт 503, — то есть врал бы именно о том, ради чего приложение и запущено.
   app.get('/api/health', (_request, reply) => {
     let database = checkDatabase();
     if (graph !== undefined) {
@@ -212,9 +236,14 @@ export function buildServer(
       const synchronized = database === 'ok' || !curriculumSynchronized
         ? trySyncCurriculum()
         : false;
-      database = synchronized ? checkDatabase() : 'error';
+      // Повторная проверка нужна только там, где база была недоступна и её мог
+      // создать сам `trySyncCurriculum`: гонять `quick_check` второй раз по уже
+      // признанной исправной базе незачем.
+      if (!synchronized) database = 'error';
+      else if (database !== 'ok') database = checkDatabase();
     }
-    const status: DatabaseStatus = database === 'ok' && curriculum === 'ok' ? 'ok' : 'error';
+    const status: DatabaseStatus =
+      database === 'ok' && curriculum === 'ok' && session === 'ok' ? 'ok' : 'error';
 
     return reply
       .code(status === 'ok' ? 200 : 503)
@@ -223,10 +252,29 @@ export function buildServer(
         version: readVersion(),
         database,
         curriculum,
+        session,
       });
   });
 
   return app;
+}
+
+/**
+ * Останавливает сервер по сигналу. Без этого `onClose` не срабатывает никогда:
+ * процесс снимают по Ctrl-C, соединение занятия остаётся открытым, и WAL
+ * закрывается не переносом в основной файл, а восстановлением при следующем
+ * запуске. `once`: второй тот же сигнал должен убивать процесс по-обычному,
+ * иначе зависшее закрытие нечем прервать.
+ */
+export function closeOnSignals(
+  app: FastifyInstance,
+  signals: readonly NodeJS.Signals[] = ['SIGINT', 'SIGTERM'],
+): void {
+  for (const signal of signals) {
+    process.once(signal, () => {
+      void app.close();
+    });
+  }
 }
 
 const isDirectRun = process.argv[1] !== undefined
@@ -235,6 +283,7 @@ const isDirectRun = process.argv[1] !== undefined
 if (isDirectRun) {
   const app = buildServer();
   const port = Number(process.env.PORT ?? 3000);
+  closeOnSignals(app);
   await app.listen({ host: HOST, port });
   console.log(`edukator слушает http://${HOST}:${port}`);
 }

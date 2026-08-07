@@ -10,10 +10,11 @@ import {
   type Topic,
   type TopicGraph,
 } from '../server/curriculum.js';
-import { storeTasks } from '../server/codex/bank.js';
+import { countAvailable, storeTasks } from '../server/codex/bank.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import type { DisputeContext, DisputeReview, DisputeReviewer } from '../server/codex/dispute.js';
 import { readTopicState } from '../server/mastery.js';
+import { planFromDatabase } from '../server/scheduler.js';
 import { checkAnswer } from '../server/normalize.js';
 import {
   SessionError,
@@ -124,7 +125,10 @@ describe('занятие', () => {
       expect(JSON.stringify(result.task)).not.toContain('45');
     });
 
-    it('не выдаёт одно задание дважды', () => {
+    // Перезагрузка страницы не должна сжигать очередь: выданное задание помечено
+    // `used` безвозвратно, и без повторной выдачи несколько обновлений подряд
+    // опустошили бы тему, ни разу не спросив ученика.
+    it('повторяет выданное задание, пока на него не ответили', () => {
       storeTasks(db, 'math.a', [task(), task()]);
       storeTasks(db, 'russian.a', [task(), task()]);
       storeTasks(db, 'english.a', [task(), task()]);
@@ -135,7 +139,91 @@ describe('занятие', () => {
       expect(first.status).toBe('ok');
       expect(second.status).toBe('ok');
       if (first.status !== 'ok' || second.status !== 'ok') return;
+      expect(second.task.id).toBe(first.task.id);
+      expect(countAvailable(db, first.task.topicId)).toBe(1);
+    });
+
+    it('не выдаёт одно задание дважды после ответа на него', () => {
+      storeTasks(db, 'math.a', [task(), task()]);
+      storeTasks(db, 'russian.a', [task(), task()]);
+      storeTasks(db, 'english.a', [task(), task()]);
+
+      const first = nextTask(db, graph, { seedDir });
+      expect(first.status).toBe('ok');
+      if (first.status !== 'ok') return;
+      submitAnswer(db, graph, { taskId: first.task.id, answer: '45' });
+
+      const second = nextTask(db, graph, { seedDir });
+      expect(second.status).toBe('ok');
+      if (second.status !== 'ok') return;
       expect(second.task.id).not.toBe(first.task.id);
+    });
+
+    // Одна пустая тема не повод свернуть занятие: ответить по ней ученик не
+    // может, состояние её не меняется, и планировщик предложил бы её снова.
+    it('переходит к следующей теме плана, когда по первой заданий нет', () => {
+      storeTasks(db, 'russian.a', [task()]);
+      storeTasks(db, 'english.a', [task()]);
+
+      const result = nextTask(db, graph, { seedDir });
+
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') return;
+      expect(result.task.topicId).not.toBe('math.a');
+    });
+
+    // Посев покрывает шесть тем предмета из двадцати с лишним, так что окно
+    // фиксированного размера регулярно целиком состоит из пустых тем, а
+    // остальной банк остаётся недостижимым — занятие встаёт на ровном месте.
+    it('добирается до темы, стоящей в плане далеко не первой', () => {
+      const many = buildTopicGraph(
+        ['math', 'russian', 'english'].flatMap((subject) =>
+          ['a', 'b', 'c', 'd'].map((suffix, index) =>
+            topic(`${subject}.${suffix}`, { examWeight: index === 3 ? 1 : 5 }),
+          ),
+        ),
+      );
+      syncTopicState(db, many);
+      storeTasks(db, 'english.d', [task()]);
+
+      const plan = planFromDatabase(db, many, many.byId.size);
+      const position = plan.findIndex((run) => run.topic.id === 'english.d');
+      expect(position).toBeGreaterThan(4);
+
+      const result = nextTask(db, many, { seedDir });
+
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') return;
+      expect(result.task.topicId).toBe('english.d');
+    });
+
+    // Дефект одного задания не должен останавливать занятие целиком: строка
+    // `used` без попытки находится снова и снова, и пятисотка была бы вечной.
+    it('обходит тему, задание которой не читается, и говорит об этом', () => {
+      const brokenId = issue('math.a');
+      db.prepare("UPDATE task_bank SET accept = 'не json' WHERE id = ?").run(brokenId);
+      storeTasks(db, 'russian.a', [task()]);
+      storeTasks(db, 'english.a', [task()]);
+      const written: string[] = [];
+
+      const result = nextTask(db, graph, { seedDir, log: (message) => written.push(message) });
+
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') return;
+      expect(result.task.topicId).not.toBe('math.a');
+      expect(written.join('\n')).toMatch(/math\.a/u);
+    });
+
+    // Сорвались все темы плана без единого исключения — дело не в банке, а в
+    // самой базе. Молчаливое «заданий нет» отправило бы разбираться в очередь.
+    it('не выдаёт «нет задания», когда сорвался весь план', () => {
+      db.exec('DROP TABLE task_bank');
+      const written: string[] = [];
+
+      expect(() => nextTask(db, graph, { seedDir, log: (message) => written.push(message) })).toThrow(
+        /task_bank/u,
+      );
+      expect(written).not.toHaveLength(0);
     });
 
     it('сообщает «нет задания», когда очередь темы и посев пусты', () => {
@@ -238,6 +326,42 @@ describe('занятие', () => {
       expect(db.prepare('SELECT COUNT(*) AS n FROM attempts').get()).toEqual({ n: 1 });
       expect(readTopicState(db, 'math.a').mastery).toBe(first.state.mastery);
     });
+
+    // Иначе задание остаётся `used` без попытки, `issuedTask` выдаёт его снова
+    // на каждый запрос, и занятие встаёт на нём навсегда.
+    it('отбраковывает выданное задание, эталон которого нечем сверить', () => {
+      const id = issue();
+      // Порча после выдачи: `nextTask` такое задание уже не выдал бы, а это
+      // ученик держит на экране.
+      db.prepare("UPDATE task_bank SET answer = 'сорок пять' WHERE id = ?").run(id);
+      const logged: string[] = [];
+
+      try {
+        submitAnswer(db, graph, { taskId: id, answer: '45', log: (m) => logged.push(m) });
+        expect.unreachable('ответ на негодное задание должен быть отклонён');
+      } catch (error) {
+        expect((error as SessionError).code).toBe('task-defective');
+        // Наружу — только факт: причина называет эталонный ответ.
+        expect((error as SessionError).message).not.toContain('сорок пять');
+      }
+
+      expect(logged.join('\n')).toContain('сорок пять');
+      // Пометка пережила откат транзакции, попытки и сдвига модели не случилось.
+      expect(
+        db.prepare<[number], { status: string }>('SELECT status FROM task_bank WHERE id = ?')
+          .get(id)?.status,
+      ).toBe('rejected');
+      expect(db.prepare('SELECT COUNT(*) AS n FROM attempts').get()).toEqual({ n: 0 });
+      expect(readTopicState(db, 'math.a').attempts).toBe(0);
+      // И следующий запрос выдаёт уже не его, а соседнее задание темы.
+      // `seedDir` обязателен: без него перебор уходит в посев репозитория,
+      // тем которого в синтетической карте нет, и `no-task` прошёл бы за
+      // «выдано другое».
+      const spare = storeTasks(db, 'math.a', [task({ question: 'Сколько будет 20 + 25?' })]);
+      const next = nextTask(db, graph, { seedDir });
+      expect(next.status).toBe('ok');
+      expect(next.status === 'ok' ? next.task.id : 0).toBe(spare.stored[0]?.id);
+    });
   });
 
   describe('разбор спора', () => {
@@ -296,6 +420,68 @@ describe('занятие', () => {
       ).toBe(true);
     });
 
+    // Иначе каждый подтверждённый спор по уже известной записи раздувал бы
+    // `accept[]` копиями, неотличимыми для нормализатора.
+    it('не дописывает в accept[] то, что там уже есть', async () => {
+      const taskId = issue();
+      // «45 монет» уже лежит в accept[], но с другим регистром и пробелами.
+      const attempt = submitAnswer(db, graph, { taskId, answer: '  45  Монет ' });
+      expect(attempt.correct).toBe(true);
+      // Спорить о засчитанной попытке нельзя, поэтому она отмечается неверной
+      // руками: важно только то, как разбор обходится с уже известной записью.
+      db.prepare('UPDATE attempts SET is_correct = 0 WHERE id = ?').run(attempt.attemptId);
+      const { review } = reviewer({ studentCorrect: true, note: 'та же запись' });
+
+      const result = await resolveDispute(
+        db,
+        graph,
+        openDispute(db, attempt.attemptId).id,
+        review,
+      );
+
+      expect(result.status).toBe('upheld');
+      expect(result.accept).toEqual(['45', '45 монет']);
+      const stored = db
+        .prepare<[number], { accept: string }>('SELECT accept FROM task_bank WHERE id = ?')
+        .get(taskId);
+      expect(JSON.parse(stored?.accept ?? '[]')).toEqual(['45', '45 монет']);
+    });
+
+    // Выгруженный посев читается тем же `parseTaskBatch`, что и ответ модели:
+    // непригодная запись в `accept[]` сделала бы файл предмета неразбираемым.
+    it('не дописывает в accept[] запись, которую разбор батча потом отвергнет', async () => {
+      const cases: { given: string; why: string }[] = [
+        { given: '45 и 46', why: 'два числа на числовой теме' },
+        { given: '   ', why: 'пустой ответ' },
+      ];
+
+      for (const { given, why } of cases) {
+        const taskId = issue();
+        const attempt = submitAnswer(db, graph, { taskId, answer: given });
+        expect(attempt.correct, why).toBe(false);
+        const { review } = reviewer({ studentCorrect: true, note: 'ученик прав' });
+
+        const result = await resolveDispute(
+          db,
+          graph,
+          openDispute(db, attempt.attemptId).id,
+          review,
+        );
+
+        expect(result.status, why).toBe('upheld');
+        expect(result.accept, why).toEqual(['45', '45 монет']);
+        const stored = db
+          .prepare<[number], { accept: string }>('SELECT accept FROM task_bank WHERE id = ?')
+          .get(taskId);
+        expect(JSON.parse(stored?.accept ?? '[]'), why).toEqual(['45', '45 монет']);
+        // Баллы всё равно возвращаются: спор подтверждён, чинить нечего только банк.
+        expect(
+          db.prepare('SELECT is_correct FROM attempts WHERE id = ?').get(attempt.attemptId),
+          why,
+        ).toEqual({ is_correct: 1 });
+      }
+    });
+
     it('отклонённый спор не трогает ни модель, ни задание', async () => {
       const { attemptId, taskId, mastery } = disputed();
       const { review } = reviewer({ studentCorrect: false, note: 'это другое число' });
@@ -344,6 +530,34 @@ describe('занятие', () => {
       expect(calls).toHaveLength(1);
       expect(repeat.status).toBe('upheld');
       expect(repeat.state).toBeNull();
+    });
+
+    // Ради этой ветви спор и перечитывается заново под записью: проверка до
+    // вызова модели видит его открытым, а закрыть его успевают, пока вызов идёт.
+    // Второй вердикт иначе удвоил бы `accept[]` и пересчитал модель дважды.
+    it('спор, закрытый пока шёл вызов модели, второй раз не применяется', async () => {
+      const { attemptId, taskId } = disputed();
+      const { id } = openDispute(db, attemptId);
+
+      // Закрытие происходит внутри вызова модели — ровно там, где его успевает
+      // сделать параллельный разбор.
+      const review = async (): Promise<DisputeReview> => {
+        db.prepare("UPDATE disputes SET status = 'upheld', resolution = 'первый' WHERE id = ?")
+          .run(id);
+        db.prepare('UPDATE task_bank SET accept = ? WHERE id = ?')
+          .run(JSON.stringify(['сорок пять']), taskId);
+        return { studentCorrect: true, note: 'второй' };
+      };
+
+      const result = await resolveDispute(db, graph, id, review);
+
+      expect(result.resolution).toBe('первый');
+      expect(result.state).toBeNull();
+      expect(result.accept).toEqual(['сорок пять']);
+      const stored = db
+        .prepare<[number], { accept: string }>('SELECT accept FROM task_bank WHERE id = ?')
+        .get(taskId);
+      expect(JSON.parse(stored?.accept ?? '[]')).toEqual(['сорок пять']);
     });
 
     it('ошибка разбирающего оставляет спор открытым', async () => {

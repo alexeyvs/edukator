@@ -176,9 +176,41 @@ export interface LoadSeedBankOptions {
 }
 
 /**
+ * Порча посева с перечнем предметов, которые её не пережили.
+ *
+ * Список нужен выгрузке `prefetch --export`: предмет, посев которого не
+ * загрузился, лежит в базе огрызком — тем, что успела нагенерировать пара
+ * циклов, — и переписать им снимок значит потерять сам снимок. Отличить это от
+ * «предмет ещё не грели» по содержимому базы нельзя, поэтому причина
+ * передаётся ошибкой, а не угадывается по числу заданий.
+ *
+ * Вместе со списком уходит и частичный итог: здоровые предметы до банка
+ * доехали, а `missing` той же выгрузке говорит, у каких предметов исходного
+ * файла не было вовсе. Потеряв итог вместе с исключением, вызывающий считал бы
+ * такой предмет загруженным.
+ */
+export class SeedBankError extends Error {
+  readonly subjects: readonly Subject[];
+  readonly result: LoadSeedBankResult;
+
+  constructor(message: string, subjects: readonly Subject[], result: LoadSeedBankResult) {
+    super(message);
+    this.name = 'SeedBankError';
+    this.subjects = subjects;
+    this.result = result;
+  }
+}
+
+/**
  * Заливает посев в банк. Идемпотентна: повторный вызов не добавляет ничего, всё
  * уходит в `skipped` — на этом же и держится «не загружается повторно при
  * перезапуске».
+ *
+ * Испорченный файл одного предмета не отменяет посев остальных: предметы
+ * обходятся до конца, здоровые доезжают до банка, а причины собираются и
+ * бросаются одной ошибкой уже после. Иначе дефект в `math.json` оставлял бы без
+ * заданий и русский с английским — то есть занятие целиком, — а вызывающие
+ * ошибку и так только пишут в stderr.
  */
 export function loadSeedBank(
   db: Database,
@@ -189,26 +221,55 @@ export function loadSeedBank(
   const subjects = options.subjects ?? graph.subjects;
 
   const result: LoadSeedBankResult = { loaded: 0, skipped: 0, missing: [] };
+  const broken: string[] = [];
+  // Предмет попадает сюда и когда не разобрался файл, и когда упала запись
+  // одной темы: в обоих случаях в банке лежит не весь посев предмета.
+  const brokenSubjects = new Set<Subject>();
 
   for (const subject of subjects) {
-    const bank = readSeedBank(graph, subject, dir);
+    let bank: SeedBank | null;
+    try {
+      bank = readSeedBank(graph, subject, dir);
+    } catch (error) {
+      broken.push((error as Error).message);
+      brokenSubjects.add(subject);
+      continue;
+    }
     if (bank === null) {
       result.missing.push(subject);
       continue;
     }
 
+    // Запись каждой темы — под своим перехватом. Тема, которой нет в
+    // `topic_state`, роняет `storeTasks`, и общий на файл перехват оставлял бы
+    // без посева весь остаток этого файла: отказ на пятой теме `math.json`
+    // молча хоронил бы восемнадцать следующих.
     for (const { topicId, tasks } of bank.topics) {
-      const { stored, duplicates } = storeTasks(db, topicId, tasks);
-      result.loaded += stored.length;
-      result.skipped += duplicates.length;
+      try {
+        const { stored, duplicates } = storeTasks(db, topicId, tasks);
+        result.loaded += stored.length;
+        result.skipped += duplicates.length;
+      } catch (error) {
+        broken.push(`посев темы «${topicId}»: ${(error as Error).message}`);
+        brokenSubjects.add(subject);
+      }
     }
   }
+
+  if (broken.length > 0) throw new SeedBankError(broken.join('; '), [...brokenSubjects], result);
 
   return result;
 }
 
 export interface TakeTaskOrSeedOptions extends TakeTaskOptions {
   dir?: string;
+  /**
+   * Предметы, посев которых в этом запросе уже дозаливали. Вызывающий перебирает
+   * несколько тем подряд, а дозаливка предмета — разбор всего его файла плюс
+   * транзакция на каждую тему; повторять это на второй пустой теме того же
+   * предмета бессмысленно, залито уже всё.
+   */
+  seeded?: Set<Subject>;
 }
 
 /**
@@ -228,7 +289,7 @@ export function takeTaskOrSeed(
   topicId: string,
   options: TakeTaskOrSeedOptions = {},
 ): BankTask | null {
-  const { dir, ...take } = options;
+  const { dir, seeded, ...take } = options;
   const first = takeTask(db, topicId, take);
   if (first !== null) return first;
 
@@ -236,11 +297,24 @@ export function takeTaskOrSeed(
   if (topic === undefined) {
     throw new Error(`Посевной банк: темы «${topicId}» нет в карте`);
   }
+  if (seeded !== undefined && seeded.has(topic.subject)) return null;
+  seeded?.add(topic.subject);
 
-  loadSeedBank(db, graph, {
-    subjects: [topic.subject],
-    ...(dir === undefined ? {} : { dir }),
-  });
+  // Порча посевного файла — не повод отказать в занятии: сервер и при старте
+  // терпит её, а здесь она пришла бы ученику пятисоткой посреди занятия. Причина
+  // уходит в stderr, а тема выглядит просто пустой — что и есть правда.
+  try {
+    loadSeedBank(db, graph, {
+      subjects: [topic.subject],
+      ...(dir === undefined ? {} : { dir }),
+    });
+  } catch (error) {
+    // Выдача повторяется и после ошибки: `loadSeedBank` бросает уже после обхода
+    // всех тем, и здоровые из них — в том числе запрошенная — до банка доехали.
+    // Возврат `null` прямо отсюда прятал бы залитое задание, а вместе с ним (из-за
+    // отметки в `seeded`) и весь остаток предмета в этом запросе.
+    process.stderr.write(`посевной банк не дозалит: ${(error as Error).message}\n`);
+  }
 
   return takeTask(db, topicId, take);
 }
@@ -259,8 +333,29 @@ interface SeedRow {
 /**
  * Собирает задания предмета из банка в вид посевного файла. Берутся все
  * задания, включая выданные: посев — снимок содержимого банка для репозитория,
- * а не остаток очереди.
+ * а не остаток очереди. Кроме отбракованных: занятие пометило их `rejected`
+ * именно потому, что задание негодное, — вернув их в посев, следующая загрузка
+ * либо повторно выдала бы битое задание, либо уронила бы разбор файла и
+ * оставила бы без посева весь предмет.
  */
+/**
+ * Поле, без которого выгруженный посев не загрузится обратно: схема батча
+ * требует непустых `hint`, `explain` и `joke`, а колонки банка допускают NULL —
+ * строки, записанные до появления генератора, или правка базы руками. Выгрузив
+ * их пустой строкой, экспорт переписал бы снимок файлом, который `parseTaskBatch`
+ * отвергнет, а `loadSeedBank` ловит такую порчу по предмету целиком: снимок
+ * пропал бы, и предмет остался бы вовсе без посева.
+ */
+function requireSeedText(value: string | null, field: string, question: string): string {
+  const text = value ?? '';
+  if (text.trim() === '') {
+    throw new Error(
+      `Посевной банк: у задания «${question}» пустое поле ${field}: такой посев не загрузится обратно`,
+    );
+  }
+  return text;
+}
+
 export function collectSeedTasks(db: Database, graph: TopicGraph, subject: Subject): SeedTopic[] {
   const ids = (graph.bySubject.get(subject) ?? []).map((topic) => topic.id);
   if (ids.length === 0) return [];
@@ -269,7 +364,7 @@ export function collectSeedTasks(db: Database, graph: TopicGraph, subject: Subje
     .prepare<string[], SeedRow>(
       `SELECT topic_id, question, answer, accept, hint, explain, joke, difficulty
          FROM task_bank
-        WHERE topic_id IN (${ids.map(() => '?').join(', ')})
+        WHERE topic_id IN (${ids.map(() => '?').join(', ')}) AND status <> 'rejected'
         ORDER BY topic_id, id`,
     )
     .all(...ids);
@@ -287,25 +382,28 @@ export function collectSeedTasks(db: Database, graph: TopicGraph, subject: Subje
     if (!Array.isArray(accept) || accept.some((item) => typeof item !== 'string')) {
       throw new Error(`Посевной банк: accept[] задания «${row.question}» не массив строк`);
     }
-    byTopic.set(row.topic_id, [
-      ...(byTopic.get(row.topic_id) ?? []),
-      {
-        question: row.question,
-        answer: row.answer,
-        accept: accept as string[],
-        hint: row.hint ?? '',
-        explain: row.explain ?? '',
-        joke: row.joke ?? '',
-        difficulty: row.difficulty,
-      },
-    ]);
+    const task: GeneratedTask = {
+      question: row.question,
+      answer: row.answer,
+      accept: accept as string[],
+      hint: requireSeedText(row.hint, 'hint', row.question),
+      explain: requireSeedText(row.explain, 'explain', row.question),
+      joke: requireSeedText(row.joke, 'joke', row.question),
+      difficulty: row.difficulty,
+    };
+    const list = byTopic.get(row.topic_id);
+    if (list === undefined) byTopic.set(row.topic_id, [task]);
+    else list.push(task);
   }
 
   // Порядок тем — как в карте: у файла в репозитории должен быть устойчивый
   // вид, иначе каждый экспорт даёт бессмысленный диф.
-  return ids
-    .filter((id) => byTopic.has(id))
-    .map((id) => ({ topicId: id, tasks: byTopic.get(id) ?? [] }));
+  const seeds: SeedTopic[] = [];
+  for (const id of ids) {
+    const tasks = byTopic.get(id);
+    if (tasks !== undefined) seeds.push({ topicId: id, tasks });
+  }
+  return seeds;
 }
 
 /** Сериализует посев в тот же вид, в котором он лежит в репозитории. */

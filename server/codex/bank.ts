@@ -90,6 +90,21 @@ function toBankTask(row: TaskRow): BankTask {
   };
 }
 
+/**
+ * Читает строку как задание, а негодную выводит из очереди. Без пометки строка
+ * остаётся `used` без попытки, то есть ровно тем, что `issuedTask` находит
+ * снова: одно повреждённое `accept[]` хоронило бы тему навсегда, потому что
+ * занятие обходит стороной всю тему, а не это задание.
+ */
+function toBankTaskOrReject(db: Database, row: TaskRow): BankTask {
+  try {
+    return toBankTask(row);
+  } catch (error) {
+    db.prepare("UPDATE task_bank SET status = 'rejected' WHERE id = ?").run(row.id);
+    throw error;
+  }
+}
+
 const TASK_COLUMNS = 'id, topic_id, question, answer, accept, hint, explain, joke, difficulty';
 
 /**
@@ -166,8 +181,10 @@ export function storeTasks(
  * выданным: выбор и пометка врозь дали бы двум забегам одно задание. Пустая
  * очередь — обычный ответ `null`, а не ошибка: на него у воркера свой сценарий.
  *
- * Задание с повреждённым `accept[]` роняет вызов уже помеченным выданным — и
- * это правильнее, чем предлагать его снова каждому следующему забегу.
+ * Задание с повреждённым `accept[]` роняет вызов уже помеченным выданным,
+ * поэтому такая строка тут же помечается `rejected` (`toBankTaskOrReject`):
+ * иначе `issuedTask` возвращал бы её снова, а занятие обходит стороной всю тему
+ * (`nextTask`), и тема с одним битым заданием больше не выдавалась бы.
  */
 export function takeTask(
   db: Database,
@@ -195,7 +212,29 @@ export function takeTask(
     )
     .get({ topicId, ...(difficulty === undefined ? {} : { difficulty }) });
 
-  return row === undefined ? null : toBankTask(row);
+  return row === undefined ? null : toBankTaskOrReject(db, row);
+}
+
+/**
+ * Задание, которое ученику уже выдали, но ответа на него ещё нет. Нужно, чтобы
+ * перезагрузка страницы не сжигала очередь: `takeTask` помечает выданное `used`
+ * безвозвратно, и без повторной выдачи несколько обновлений подряд опустошали
+ * бы тему, ни разу не спросив ученика.
+ */
+export function issuedTask(db: Database, topicId: string): BankTask | null {
+  ensureTopic(db, topicId);
+
+  const row = db
+    .prepare<[string], TaskRow>(
+      `SELECT ${TASK_COLUMNS} FROM task_bank
+        WHERE topic_id = ? AND status = 'used'
+          AND NOT EXISTS (SELECT 1 FROM attempts WHERE attempts.task_id = task_bank.id)
+        ORDER BY created_at, id
+        LIMIT 1`,
+    )
+    .get(topicId);
+
+  return row === undefined ? null : toBankTaskOrReject(db, row);
 }
 
 /**

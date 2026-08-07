@@ -98,6 +98,21 @@ describe('нормализатор ответов', () => {
       expect(checkAnswer('0.5', expected({ answer: '50%' }), 'number').correct).toBe(true);
     });
 
+    it('читает ответ со знаком процента двояко: «45%» подходит и к 0.45, и к 45', () => {
+      // Эталон темы про проценты — само число («Сколько процентов класса
+      // составляют девочки?» — «40»), и деление на сто засчитывало бы верный
+      // ответ неверным.
+      expect(checkAnswer('45%', expected({ answer: '45' }), 'number')).toEqual({
+        correct: true,
+        normalized: '45',
+      });
+      expect(checkAnswer('45%', expected({ answer: '0.45' }), 'number')).toEqual({
+        correct: true,
+        normalized: '0.45',
+      });
+      expect(checkAnswer('45%', expected({ answer: '46' }), 'number').correct).toBe(false);
+    });
+
     it('отвергает другое число', () => {
       expect(checkAnswer('45', expected(), 'number')).toEqual({
         correct: false,
@@ -212,14 +227,21 @@ describe('нормализатор ответов', () => {
       expect(checkAnswer('b', task, 'choice').correct).toBe(true);
       expect(checkAnswer('В', task, 'choice')).toEqual({
         correct: false,
-        normalized: 'В',
+        normalized: 'в',
         reason: 'mismatch',
       });
     });
 
-    it('различает регистр: выбор приходит из интерфейса как есть', () => {
-      expect(checkAnswer('б', expected({ answer: 'Б' }), 'choice').correct).toBe(false);
-      expect(normalizeChoice('  Б ')).toBe('Б');
+    it('не различает регистр: строчная метка — тот же вариант, а не другой', () => {
+      expect(checkAnswer('б', expected({ answer: 'Б' }), 'choice').correct).toBe(true);
+      expect(checkAnswer('work in pairs', expected({ answer: 'Work in pairs' }), 'choice').correct)
+        .toBe(true);
+      expect(normalizeChoice('  Б ')).toBe('б');
+    });
+
+    it('не сводит кириллические двойники: «В» списка А-Б-В — не «B» списка A-B-C', () => {
+      expect(checkAnswer('В', expected({ answer: 'B' }), 'choice').correct).toBe(false);
+      expect(checkAnswer('С', expected({ answer: 'C' }), 'choice').correct).toBe(false);
     });
 
     it('пустой выбор отвергается с причиной empty', () => {
@@ -244,6 +266,25 @@ describe('нормализатор ответов', () => {
       expect(questionFingerprint('Сколько будет 2 + 2?')).not.toBe(
         questionFingerprint('Сколько будет 3 + 5?'),
       );
+    });
+
+    it('сохраняет знак действия: задания, отличающиеся только им, — разные', () => {
+      const fingerprints = [
+        'Вычислите: 4800 : 16 + 37 · 25',
+        'Вычислите: 4800 · 16 - 37 : 25',
+        'Вычислите: 4800 : 16 - 37 · 25',
+      ].map(questionFingerprint);
+
+      expect(new Set(fingerprints).size).toBe(3);
+      expect(questionFingerprint('Вычислите: 18,75 - 6,408')).not.toBe(
+        questionFingerprint('Вычислите: 18,75 + 6,408'),
+      );
+    });
+
+    it('сводит синонимы одного знака к одной записи', () => {
+      expect(questionFingerprint('2 · 3')).toBe(questionFingerprint('2 × 3'));
+      expect(questionFingerprint('8 : 4')).toBe(questionFingerprint('8 ÷ 4'));
+      expect(questionFingerprint('7 − 3')).toBe(questionFingerprint('7 - 3'));
     });
 
     it('сохраняет разделитель внутри числа и снимает его на границе слова', () => {

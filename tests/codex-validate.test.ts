@@ -1,10 +1,11 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Topic } from '../server/curriculum.js';
 import {
   CODEX_FALLBACK_MODEL,
   CODEX_MODEL,
+  CODEX_ROLE_ENV,
   CodexUnavailableError,
   type CodexRequest,
 } from '../server/codex/client.js';
@@ -84,7 +85,30 @@ function recorder(answer: string | Error): {
   };
 }
 
+// Модель роли читается из окружения, поэтому умолчание проверяется только на
+// пустой переменной: иначе `EDUKATOR_MODEL_VALIDATE` в оболочке разработчика
+// красил бы набор по причине, к коду отношения не имеющей.
+beforeEach(() => {
+  for (const name of Object.values(CODEX_ROLE_ENV)) vi.stubEnv(name, '');
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 describe('validateTaskBatch: совпадающие ответы', () => {
+  it('берёт модель роли validate, а не роли генератора', async () => {
+    // Разведение ролей и заведено ради этого: слабый проверяющий бракует
+    // верные задания, считая расхождение ответов ошибкой генератора.
+    vi.stubEnv(CODEX_ROLE_ENV.validate, 'модель-проверяющего');
+    vi.stubEnv(CODEX_ROLE_ENV.generate, 'модель-генератора');
+    const { requests, run } = recorder(verdicts(verdict()));
+
+    await validateTaskBatch({ topic: topic(), tasks: [task()], run });
+
+    expect(requests[0]?.model).toBe('модель-проверяющего');
+  });
+
   it('пропускает задание, на которое проверяющий ответил так же', async () => {
     const { requests, run } = recorder(verdicts(verdict(), verdict({ answer: '30' })));
 

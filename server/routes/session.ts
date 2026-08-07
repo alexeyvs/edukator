@@ -10,6 +10,8 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { Database } from 'better-sqlite3';
 import type { TopicGraph } from '../curriculum.js';
 import { disputeReviewer, type DisputeReviewer } from '../codex/dispute.js';
+import { MAX_ANSWER_LENGTH } from '../codex/prompt.js';
+import { MAX_CODEX_CONCURRENCY } from '../codex/worker.js';
 import {
   nextTask,
   openDispute,
@@ -30,7 +32,18 @@ const STATUS_BY_CODE: Record<SessionErrorCode, number> = {
   'attempt-not-found': 404,
   'attempt-correct': 400,
   'dispute-not-found': 404,
+  // 409, а не 500: задание оказалось негодным, но занятие цело — клиенту надо
+  // просто запросить следующее.
+  'task-defective': 409,
 };
+
+/**
+ * Предел длины ответа ученика: всё, что длиннее, — не ответ, а мусор в теле.
+ * Число живёт в `codex/prompt.ts` рядом с обрезкой промпта разбора спора: если
+ * маршрут примет больше, чем увидит разбирающий, вердикт будет вынесен не по
+ * тому тексту, который потом засчитается.
+ */
+export { MAX_ANSWER_LENGTH };
 
 /** Запуск фоновой работы: тесты подменяют её, чтобы дождаться разбора. */
 export type BackgroundRunner = (task: () => Promise<void>) => void;
@@ -95,40 +108,70 @@ export function registerSessionRoutes(app: FastifyInstance, options: SessionRout
   const now = options.now ?? ((): Date => new Date());
 
   /**
+   * Споры, разбор которых уже идёт. Без этого набора каждое повторное нажатие
+   * кнопки (а состояние спора клиент узнаёт именно повторным запросом) поднимало
+   * бы ещё один процесс codex на минуты.
+   */
+  const reviewing = new Set<number>();
+
+  /**
    * Разбор идёт фоном: ученик нажал кнопку и решает дальше, а вызов модели
-   * занимает минуты. Ошибка разбора спор не закрывает — он остаётся открытым и
-   * разберётся следующей попыткой.
+   * занимает минуты. Ошибка разбора спор не закрывает — он остаётся открытым, и
+   * следующее нажатие кнопки ставит его на разбор заново.
+   *
+   * Одновременных разборов не больше `MAX_CODEX_CONCURRENCY`: набор `reviewing`
+   * держит только повтор по одному и тому же спору, а разных открытых споров
+   * бывает сколько угодно, и каждый — это ещё один процесс codex на минуты.
+   * Сверх предела спор остаётся открытым и попадёт на разбор со следующим
+   * запросом — ровно тот же сценарий, что и при недоступном codex.
    */
   function scheduleReview(id: number): void {
+    if (reviewing.has(id)) return;
+    if (reviewing.size >= MAX_CODEX_CONCURRENCY) {
+      log(`разбор спора ${id} отложен: уже идёт ${reviewing.size} разбор(ов)`);
+      return;
+    }
+    reviewing.add(id);
     background(async () => {
       try {
         await resolveDispute(db, graph, id, review);
       } catch (error) {
         log(`разбор спора ${id} не выполнен: ${(error as Error).message}`);
+      } finally {
+        // Именно в `finally`: снятая только при успехе пометка навсегда
+        // запретила бы повторный разбор спора, который как раз и остался
+        // открытым из-за недоступного codex.
+        reviewing.delete(id);
       }
     });
   }
 
   app.get('/api/session/next', (_request, reply) => {
-    const result = nextTask(db, graph, {
-      now: now(),
-      ...(options.seedDir === undefined ? {} : { seedDir: options.seedDir }),
-    });
+    try {
+      const result = nextTask(db, graph, {
+        now: now(),
+        log,
+        ...(options.seedDir === undefined ? {} : { seedDir: options.seedDir }),
+      });
 
-    // 503, а не 404: предлагать нечего сейчас — воркер догенерирует, а все темы
-    // освоенными не остаются дольше, чем до следующего повторения.
-    if (result.status === 'no-topic') {
-      return reply
-        .code(503)
-        .send({ error: 'Планировщику нечего предложить: свободных тем нет' });
-    }
-    if (result.status === 'no-task') {
-      return reply
-        .code(503)
-        .send({ error: `По теме «${result.topicId}» нет готовых заданий` });
-    }
+      // 503, а не 404: предлагать нечего сейчас — очередь пополняется
+      // `npm run prefetch`, а все темы освоенными не остаются дольше, чем до
+      // следующего повторения.
+      if (result.status === 'no-topic') {
+        return reply
+          .code(503)
+          .send({ error: 'Планировщику нечего предложить: свободных тем нет' });
+      }
+      if (result.status === 'no-task') {
+        return reply
+          .code(503)
+          .send({ error: `По теме «${result.topicId}» нет готовых заданий` });
+      }
 
-    return reply.send({ task: taskJson(result.task) });
+      return reply.send({ task: taskJson(result.task) });
+    } catch (error) {
+      return fail(reply, error);
+    }
   });
 
   app.post('/api/session/answer', (request, reply) => {
@@ -139,19 +182,35 @@ export function registerSessionRoutes(app: FastifyInstance, options: SessionRout
       if (typeof answer !== 'string') {
         throw new BadRequest('Поле answer должно быть строкой');
       }
+      // Длина ограничена так же, как и всё остальное в теле: ответ ученика —
+      // слово, фраза или число, а без предела в `attempts` уезжает мегабайт
+      // (умолчание `bodyLimit` Fastify), и он же потом идёт в промпт разбора.
+      if (answer.length > MAX_ANSWER_LENGTH) {
+        throw new BadRequest(`Поле answer длиннее ${MAX_ANSWER_LENGTH} символов`);
+      }
       const hintUsed = isObject(body) ? body['hint_used'] : undefined;
       const durationMs = isObject(body) ? body['duration_ms'] : undefined;
       if (hintUsed !== undefined && typeof hintUsed !== 'boolean') {
         throw new BadRequest('Поле hint_used должно быть логическим');
       }
-      if (durationMs !== undefined && typeof durationMs !== 'number') {
-        throw new BadRequest('Поле duration_ms должно быть числом');
+      // Не только `typeof`: `1e999` разбирается в `Infinity`, а `1e300`
+      // переживает `Math.round`, и оба доезжают до колонки
+      // `duration_ms INTEGER` как есть — SQLite типы не навязывает, а
+      // `CHECK (duration_ms >= 0)` пропускает и то, и другое. Отрицательное
+      // отсекается здесь же: занятие зажимает его нулём, но клиенту, который
+      // прислал минус, стоит ответить, что это ошибка, а не молча записать 0.
+      if (
+        durationMs !== undefined
+        && (typeof durationMs !== 'number' || !Number.isSafeInteger(durationMs) || durationMs < 0)
+      ) {
+        throw new BadRequest('Поле duration_ms должно быть целым числом миллисекунд не меньше 0');
       }
 
       const result = submitAnswer(db, graph, {
         taskId,
         answer,
         at: now(),
+        log,
         ...(hintUsed === undefined ? {} : { hintUsed }),
         ...(durationMs === undefined ? {} : { durationMs }),
       });
@@ -180,7 +239,11 @@ export function registerSessionRoutes(app: FastifyInstance, options: SessionRout
     try {
       const attemptId = readId(request.body, 'attempt_id');
       const dispute = openDispute(db, attemptId);
-      if (dispute.created) scheduleReview(dispute.id);
+      // Не только на заведение: спор остаётся `open`, когда разбор не удался
+      // (codex недоступен, ответ не разобрался), и повторное нажатие кнопки —
+      // единственное, что ставит его на разбор снова. Параллельный второй разбор
+      // безопасен: `resolveDispute` перечитывает спор уже под записью.
+      if (dispute.status === 'open') scheduleReview(dispute.id);
 
       // 202: спор принят, но вердикта ещё нет — его приносит следующий запрос
       // состояния, а не этот ответ.

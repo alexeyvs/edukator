@@ -522,10 +522,28 @@ describe('планировщик', () => {
       expect(plan.map((run) => run.subject)).toEqual(['russian', 'math']);
     });
 
+    it('не считает вчерашние темы за использованные сегодня', () => {
+      // Нижняя граница суток нужна не меньше верхней: без неё каждая когда-либо
+      // пройденная тема исключалась бы из плана навсегда, и через неделю
+      // `planRuns` возвращал бы пустой план.
+      db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)').run(
+        'math',
+        'math.t0',
+        at(-1).toISOString(),
+      );
+
+      expect(topicsUsedToday(db, at(0))).toEqual(new Set());
+      expect(topicsUsedToday(db, at(-1))).toEqual(new Set(['math.t0']));
+    });
+
     it('считает сутки по местной полуночи, а не по UTC', () => {
       // Пояс закреплён: в UTC+3 местная полночь — это 21:00 UTC предыдущего дня,
       // и по границам UTC счётчик дня сбрасывался бы в 03:00 по часам ученика.
       const saved = process.env.TZ;
+      // Пояс по умолчанию снимается до подмены: `resolvedOptions()` после неё
+      // вернул бы уже Москву, и незаданный `TZ` (обычный случай) «восстановился»
+      // бы московским — следующие тесты этого воркера считали бы сутки по UTC+3.
+      const fallback = Intl.DateTimeFormat().resolvedOptions().timeZone;
       process.env.TZ = 'Europe/Moscow';
       try {
         const insert = db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)');
@@ -535,8 +553,9 @@ describe('планировщик', () => {
         const now = new Date('2026-08-07T21:30:00.000Z'); // 8 августа 00:30 по Москве
         expect([...runsAssignedToday(db, now)]).toEqual([['russian', 1]]);
       } finally {
-        if (saved === undefined) delete process.env.TZ;
-        else process.env.TZ = saved;
+        // `delete` не возвращает исходный пояс: Node запоминает последнее
+        // присваивание, и следующие тесты этого воркера остались бы в Москве.
+        process.env.TZ = saved ?? fallback;
       }
     });
 

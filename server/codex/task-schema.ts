@@ -49,16 +49,81 @@ export function duplicateKey(value: string, format: AnswerFormat): string {
 }
 
 /**
- * Числовой эталон обязан читаться однозначно: «сорок пять» или «45 или 46» в
- * `accept[]` числовой темы уронят нормализатор на первом же ответе ученика.
+ * Числовой эталон обязан читаться однозначно: на «45 или 46» нормализатор не
+ * знает, что считать верным.
  */
 function readsAsOneNumber(value: string): boolean {
   return findNumbers(value).length === 1;
 }
 
+/**
+ * Знак процента в записи числовой темы. Нормализатор читает «40%» как долю 0,4,
+ * поэтому запись «40%» рядом с ответом «40» приняла бы 0,4 — ответ, ошибочный
+ * ровно в сто раз, — и подняла бы за него `mastery`. Ученику она при этом не
+ * нужна: «40%» разворачивается в оба прочтения только для ответа ученика, и он
+ * засчитывается уже по самому `answer`.
+ *
+ * Проверяется отдельно от числа: `findNumbers` знак процента не видит и «40%»
+ * для неё такое же одно число, как «40».
+ */
+function hasPercentSign(value: string): boolean {
+  return value.includes('%');
+}
+
+/**
+ * Запись `accept[]` числовой темы: либо одно число («45», «45 монет»), либо
+ * вовсе без чисел — словесная форма вроде «сорок пять». Второе сверяется как
+ * текст (`numberExpectations`), и запрещать его нельзя: разбор спора дописывает
+ * в `accept[]` подтверждённый ответ ученика как есть, а этот же `parseTaskBatch`
+ * потом читает выгруженный посевной файл. Запрет ломал бы задание навсегда
+ * после первого же спора. Отсеивается ровно неоднозначное — два числа и больше
+ * либо знак процента.
+ */
+function fitsNumberTopic(value: string): boolean {
+  return findNumbers(value).length <= 1 && !hasPercentSign(value);
+}
+
+/**
+ * Годится ли строка в `accept[]` вообще. Тот же вопрос, что `parseTaskBatch`
+ * задаёт записям батча, но нужен и разбору спора: подтверждённый ответ ученика
+ * дописывается в `accept[]` как есть, а выгруженный посевной файл читается
+ * обратно этим же разбором. Пустая строка (её отвергает `minLength` схемы) и
+ * «45 и 46» на числовой теме сделали бы посев предмета неразбираемым навсегда,
+ * а «40%» — засчитывало бы 0,4 за ответ 40 (см. `hasPercentSign`).
+ */
+export function fitsAccept(value: string, format: AnswerFormat): boolean {
+  const trimmed = value.trim();
+  if (trimmed === '') return false;
+  return format !== 'number' || fitsNumberTopic(trimmed);
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
+
+/**
+ * Ниже этой длины буквенный ответ на раскрытие не проверяется. Ответ в один-два
+ * знака — это буква фонетики («о», «б»), метка варианта («A») или служебное
+ * слово английского («a», «an»), и они же стоят предлогом, союзом и артиклем в
+ * любой осмысленной подсказке: «подумай **о** проверочном слове» считалось бы
+ * раскрытием ответа «о». Ложное срабатывание тут дороже пропуска — оно роняет
+ * весь батч, и темы с односимвольным ответом (фонетика, морфемика) остались бы
+ * без заданий совсем.
+ *
+ * На цифры послабление не распространяется: короткий числовой ответ «45» в
+ * подсказке — настоящее раскрытие, служебных чисел не бывает.
+ */
+export const MIN_REVEAL_LENGTH = 3;
+
+/**
+ * Знаки, которые связывают цифры в одно число: разделитель десятичной дроби и
+ * черта обыкновенной. Цифра ответа, стоящая к такому знаку вплотную, — часть
+ * чужого числа, а не раскрытие: «45» в подсказке «выросло с 45,5 до 60» и в
+ * «приведи к 45/2» — это 45,5 и 22,5. Граница «не буква и не цифра» их не
+ * отсекает (запятая под неё как раз подходит), а цена промаха здесь не одно
+ * задание: `parseTaskBatch` роняет весь батч, а в посевном файле — весь предмет.
+ */
+const NUMBER_GLUE = '[.,/]';
 
 /**
  * Подсказка не должна содержать ответ. Совпадение ищется по границе слова, но
@@ -67,9 +132,17 @@ function escapeRegExp(value: string): string {
  */
 function revealsAnswer(hint: string, answer: string): boolean {
   const needle = normalizeText(answer);
-  if (needle === '') return false;
+  if (needle.length < MIN_REVEAL_LENGTH && !/\p{N}/u.test(needle)) return false;
 
-  const boundary = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(needle)}(?![\\p{L}\\p{N}])`, 'u');
+  // Склейка проверяется только с той стороны, где у самого ответа стоит цифра:
+  // у словесного ответа соседняя запятая — обычная пунктуация, и запрет на неё
+  // пропускал бы настоящее раскрытие в «вспомни про did, дальше сам».
+  const glueBefore = /^\p{N}/u.test(needle) ? `(?<!\\p{N}${NUMBER_GLUE})` : '';
+  const glueAfter = /\p{N}$/u.test(needle) ? `(?!${NUMBER_GLUE}\\p{N})` : '';
+  const boundary = new RegExp(
+    `(?<![\\p{L}\\p{N}])${glueBefore}${escapeRegExp(needle)}(?![\\p{L}\\p{N}])${glueAfter}`,
+    'u',
+  );
   return boundary.test(normalizeText(hint));
 }
 
@@ -80,10 +153,29 @@ function taskProblems(task: GeneratedTask, format: AnswerFormat): string[] {
   // нормализатором, а он на нечисловом эталоне числовой темы бросает.
   let numbersFit = true;
   if (format === 'number') {
-    for (const value of [task.answer, ...task.accept]) {
-      if (!readsAsOneNumber(value)) {
+    if (!readsAsOneNumber(task.answer)) {
+      numbersFit = false;
+      problems.push(`ответ «${task.answer}» не читается как одно число, а тема числовая`);
+    } else if (hasPercentSign(task.answer)) {
+      // Эталон «40%» нормализатор читает как долю 0,4, а два прочтения («40%» —
+      // это и 0,4, и сорок) он разворачивает только для ответа ученика. Ученик,
+      // написавший требуемое формой «40», получил бы незачёт на верном ответе,
+      // и починить это можно было бы только спором. Знак процента — часть
+      // условия, а не ответа.
+      numbersFit = false;
+      problems.push(`ответ «${task.answer}» записан со знаком процента, а тема числовая: нужно голое число`);
+    }
+    for (const value of task.accept) {
+      // Причины разводятся: «40%» — одно число для `findNumbers`, и сообщение
+      // про «больше одного числа» отправило бы генератор чинить не то.
+      if (findNumbers(value).length > 1) {
         numbersFit = false;
-        problems.push(`запись «${value}» не читается как одно число, а тема числовая`);
+        problems.push(`запись «${value}» содержит больше одного числа, а тема числовая`);
+      } else if (hasPercentSign(value)) {
+        numbersFit = false;
+        problems.push(
+          `запись «${value}» содержит знак процента, а тема числовая: она приняла бы долю вместо числа`,
+        );
       }
     }
   }
@@ -95,7 +187,15 @@ function taskProblems(task: GeneratedTask, format: AnswerFormat): string[] {
     seen.add(key);
   }
 
-  if (numbersFit && !task.accept.some((value) => checkAnswer(task.answer, { answer: value }, format).correct)) {
+  // Словесные записи `accept[]` числовой темы в сверку не идут: эталоном их
+  // подставлять нельзя (нормализатор требует от эталона число), да и совпасть с
+  // числовым `answer` они не могут.
+  const acceptsAnswer = task.accept.some((value) =>
+    format === 'number' && !readsAsOneNumber(value)
+      ? false
+      : checkAnswer(task.answer, { answer: value }, format).correct,
+  );
+  if (numbersFit && !acceptsAnswer) {
     problems.push(`ответ «${task.answer}» отсутствует в accept[]`);
   }
 

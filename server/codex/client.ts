@@ -9,13 +9,53 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { runChild } from '../run-child.js';
+import { ChildOutputLimitError, ChildTimeoutError, runChild } from '../run-child.js';
 
-/** Рабочая модель из спеки: она уложилась в бюджет времени на генерацию. */
-export const CODEX_MODEL = 'gpt-5.6-terra';
+/**
+ * Модель по умолчанию для всех ролей.
+ *
+ * Замер 2026-08-07 на батче из 5 заданий (тема «Глагол: спряжение и вид»):
+ * sol 29.1 с против terra 32.1 с — на реальной нагрузке sol не медленнее.
+ * Ранний замер (15.5 с против 9.7 с) снят на тривиальном промпте и на батчи
+ * не переносится. Полнота `accept[]` сопоставима, но sol сам перечисляет
+ * сокращения («несов. вид», «несов.»), из-за отсутствия которых валидатор
+ * браковал половину батча на открытых формулировках.
+ */
+export const CODEX_MODEL = 'gpt-5.6-sol';
 
 /** Запасная модель: берётся вручную, когда рабочая недоступна или деградировала. */
-export const CODEX_FALLBACK_MODEL = 'gpt-5.6-luna';
+export const CODEX_FALLBACK_MODEL = 'gpt-5.6-terra';
+
+/**
+ * Роли вызовов codex. Модель задаётся на роль, а не одна на всё: валидатор
+ * решает задания независимо от генератора, и если он слабее, то начинает
+ * браковать верные задания — расхождение ответов он трактует как ошибку
+ * генератора, а не свою.
+ */
+export const CODEX_ROLES = ['generate', 'validate', 'dispute', 'curriculum'] as const;
+
+export type CodexRole = (typeof CODEX_ROLES)[number];
+
+/** Переменная окружения на роль: смена модели не требует правки кода. */
+export const CODEX_ROLE_ENV: Record<CodexRole, string> = {
+  generate: 'EDUKATOR_MODEL_GENERATE',
+  validate: 'EDUKATOR_MODEL_VALIDATE',
+  dispute: 'EDUKATOR_MODEL_DISPUTE',
+  curriculum: 'EDUKATOR_MODEL_CURRICULUM',
+};
+
+/**
+ * Модель для роли: переменная окружения, иначе `CODEX_MODEL`. Пустая или
+ * состоящая из пробелов переменная считается незаданной — иначе `VAR=` в
+ * окружении молча запускал бы codex без `-m` с чужим умолчанием.
+ */
+export function modelForRole(role: CodexRole, env: NodeJS.ProcessEnv = process.env): string {
+  if (!CODEX_ROLES.includes(role)) {
+    throw new Error(`Клиент codex: неизвестная роль «${role}», ожидается одна из ${CODEX_ROLES.join(', ')}`);
+  }
+
+  return env[CODEX_ROLE_ENV[role]]?.trim() || CODEX_MODEL;
+}
 
 /** Сколько раз ответ модели прогоняется через проверку, прежде чем вызывающий сдаётся. */
 export const DEFAULT_ATTEMPTS = 3;
@@ -52,6 +92,33 @@ const UNSUPPORTED_SCHEMA_KEYWORDS = new Set([
   'unevaluatedProperties',
 ]);
 
+/**
+ * Ключевые слова, значение которых — карта «имя поля → схема». Их ключи это
+ * имена полей данных, а не ключевые слова: поле, названное `pattern` или
+ * `minimum`, вырезать нельзя — оно осталось бы в `required`, и схема стала бы
+ * невыполнимой.
+ */
+const SCHEMA_MAP_KEYWORDS = new Set([
+  'properties',
+  'patternProperties',
+  'dependentSchemas',
+  '$defs',
+  'definitions',
+]);
+
+/** Ключевые слова, значение которых — данные, а не схема: внутрь лезть нечего. */
+const LITERAL_KEYWORDS = new Set(['enum', 'const', 'default', 'examples']);
+
+function stripSchemaMap(value: unknown): unknown {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([name, nested]) => [
+      name,
+      codexOutputSchema(nested),
+    ]),
+  );
+}
+
 /** Копия схемы без запрещённых структурированным выводом ключевых слов. */
 export function codexOutputSchema(schema: unknown): unknown {
   if (Array.isArray(schema)) return schema.map(codexOutputSchema);
@@ -60,7 +127,10 @@ export function codexOutputSchema(schema: unknown): unknown {
   return Object.fromEntries(
     Object.entries(schema as Record<string, unknown>)
       .filter(([key]) => !UNSUPPORTED_SCHEMA_KEYWORDS.has(key))
-      .map(([key, value]) => [key, codexOutputSchema(value)]),
+      .map(([key, value]) => {
+        if (LITERAL_KEYWORDS.has(key)) return [key, value];
+        return [key, SCHEMA_MAP_KEYWORDS.has(key) ? stripSchemaMap(value) : codexOutputSchema(value)];
+      }),
   );
 }
 
@@ -95,8 +165,23 @@ export interface CodexRequest {
 /** Вызов codex, вынесенный за интерфейс: тесты подменяют его, не запуская модель. */
 export type CodexRunner = (request: CodexRequest) => Promise<string>;
 
-/** codex не установлен или не запускается: повторять попытки бессмысленно. */
+/**
+ * codex не запускается или молчит: повторять попытки бессмысленно, и решение
+ * принимает не тема, а цикл. Сюда попадает и несостоявшийся запуск (нет файла,
+ * нет прав), и превышенный срок: десять минут молчания три раза подряд — это
+ * полчаса на одну тему, после которых воркер ещё и сбросил бы отступ, решив,
+ * что просто не повезло с темой.
+ */
 export class CodexUnavailableError extends Error {}
+
+/**
+ * Сорвался сам запуск: ненулевой код возврата или не записанный файл ответа.
+ * Отличать от негодного ответа модели нужно ради промпта повторной попытки —
+ * туда уходит текст прошлого провала под заголовком «исправь эти замечания».
+ * Диагностика CLI (с локальными путями внутри) замечанием к модели не является,
+ * и отправлять её обратно значит сжечь ещё один вызов на минуты.
+ */
+export class CodexRunError extends Error {}
 
 /**
  * Аргументы командной строки codex. Вынесены отдельно, чтобы состав флагов
@@ -149,16 +234,29 @@ export async function runCodexCli(request: CodexRequest): Promise<string> {
       ...(request.maxOutputBytes === undefined ? {} : { maxOutputBytes: request.maxOutputBytes }),
     });
   } catch (error) {
+    const bin = request.bin ?? 'codex';
+    if (error instanceof ChildTimeoutError) {
+      throw new CodexUnavailableError(`codex не ответил: ${error.message}`);
+    }
+    // Разговорившийся процесс — беда одного вызова, а не всего codex: следующий
+    // придёт с другим промптом. Но и замечанием к модели это не является.
+    if (error instanceof ChildOutputLimitError) throw new CodexRunError(error.message);
     const system = error as NodeJS.ErrnoException;
     if (system.code === 'ENOENT') {
       throw new CodexUnavailableError(
-        `codex не найден: ожидался исполняемый файл «${request.bin ?? 'codex'}» в PATH`,
+        `codex не найден: ожидался исполняемый файл «${bin}» в PATH`,
       );
+    }
+    // Прочие ошибки запуска (нет прав, каталог вместо файла) отличаются от
+    // отсутствия только текстом: процесс не стартовал, и три попытки этого не
+    // исправят.
+    if (system.code !== undefined) {
+      throw new CodexUnavailableError(`codex не запускается («${bin}»): ${system.code}`);
     }
     throw error;
   }
   if (result.code !== 0) {
-    throw new Error(
+    throw new CodexRunError(
       `codex завершился с кодом ${result.code}: ${(result.stderr + result.stdout).trim()}`,
     );
   }
@@ -168,14 +266,14 @@ export async function runCodexCli(request: CodexRequest): Promise<string> {
   try {
     answer = readFileSync(request.outPath, 'utf8');
   } catch (error) {
-    throw new Error(
+    throw new CodexRunError(
       `codex не записал ответ в ${request.outPath}: ${(error as Error).message}` +
         (stderr.trim() === '' ? '' : `; stderr: ${stderr.trim()}`),
     );
   }
 
   if (answer.trim() === '') {
-    throw new Error(`codex вернул пустой ответ в ${request.outPath}`);
+    throw new CodexRunError(`codex вернул пустой ответ в ${request.outPath}`);
   }
 
   return answer;

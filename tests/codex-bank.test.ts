@@ -6,6 +6,7 @@ import type { Database } from 'better-sqlite3';
 import { openDatabase } from '../server/db.js';
 import {
   countAvailable,
+  issuedTask,
   recentQuestions,
   storeTasks,
   takeTask,
@@ -108,6 +109,43 @@ describe('банк заданий', () => {
     });
   });
 
+  describe('уже выданное задание', () => {
+    it('находит выданное, на которое ещё не ответили', () => {
+      storeTasks(db, TOPIC, batch(3));
+      const given = takeTask(db, TOPIC);
+
+      expect(issuedTask(db, TOPIC)).toMatchObject({ id: given?.id, question: given?.question });
+      // Очередь при этом не тронута: повторная выдача её не расходует.
+      expect(countAvailable(db, TOPIC)).toBe(2);
+    });
+
+    it('перестаёт находить задание, на которое ответили', () => {
+      storeTasks(db, TOPIC, batch(2));
+      const given = takeTask(db, TOPIC);
+      db.prepare(
+        `INSERT INTO attempts (task_id, topic_id, answer, is_correct)
+         VALUES (?, ?, '4', 1)`,
+      ).run(given?.id, TOPIC);
+
+      expect(issuedTask(db, TOPIC)).toBeNull();
+    });
+
+    it('отдаёт null, когда выданного нет, и падает на теме вне карты', () => {
+      storeTasks(db, TOPIC, batch(2));
+
+      expect(issuedTask(db, TOPIC)).toBeNull();
+      expect(() => issuedTask(db, 'math.unknown')).toThrow(/нет в карте/u);
+    });
+
+    it('отдаёт раньше выданное первым, когда неотвеченных несколько', () => {
+      storeTasks(db, TOPIC, batch(3));
+      const first = takeTask(db, TOPIC);
+      takeTask(db, TOPIC);
+
+      expect(issuedTask(db, TOPIC)?.id).toBe(first?.id);
+    });
+  });
+
   describe('защита от повторов', () => {
     it('не пускает в банк формулировку, отличающуюся только регистром и пунктуацией', () => {
       storeTasks(db, TOPIC, [task()]);
@@ -207,6 +245,34 @@ describe('банк заданий', () => {
       db.prepare('UPDATE task_bank SET accept = ? WHERE id = ?').run('[4]', stored[0]?.id);
 
       expect(() => takeTask(db, TOPIC)).toThrow(/должен быть массивом строк/i);
+    });
+
+    // Иначе строка остаётся `used` без попытки, `issuedTask` находит её снова, а
+    // занятие обходит стороной всю тему — тема с одним битым заданием умирает.
+    it('выводит задание с повреждённым accept[] из очереди, а не оставляет выданным', () => {
+      const { stored } = storeTasks(db, TOPIC, batch(2));
+      const broken = stored[0]?.id;
+      db.prepare('UPDATE task_bank SET accept = ? WHERE id = ?').run('{не json', broken);
+
+      expect(() => takeTask(db, TOPIC)).toThrow(/accept\[\] не как JSON/i);
+      expect(
+        db.prepare('SELECT status FROM task_bank WHERE id = ?').get(broken),
+      ).toEqual({ status: 'rejected' });
+      expect(issuedTask(db, TOPIC)).toBeNull();
+      // Соседнее задание темы по-прежнему выдаётся.
+      expect(takeTask(db, TOPIC)?.id).toBe(stored[1]?.id);
+    });
+
+    it('отбраковывает повреждённое задание и при повторной выдаче выданного', () => {
+      const { stored } = storeTasks(db, TOPIC, [task()]);
+      const issued = takeTask(db, TOPIC);
+      db.prepare('UPDATE task_bank SET accept = ? WHERE id = ?').run('[4]', issued?.id);
+
+      expect(() => issuedTask(db, TOPIC)).toThrow(/должен быть массивом строк/i);
+      expect(issuedTask(db, TOPIC)).toBeNull();
+      expect(
+        db.prepare('SELECT status FROM task_bank WHERE id = ?').get(stored[0]?.id),
+      ).toEqual({ status: 'rejected' });
     });
   });
 });

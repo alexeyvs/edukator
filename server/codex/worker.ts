@@ -89,7 +89,11 @@ export interface WorkerOptions {
   produce?: TaskProducer;
   now?: () => Date;
   log?: WorkerLog;
-  /** Модель codex для генератора и проверяющего; по умолчанию рабочая. */
+  /**
+   * Одна модель сразу на генератор и на проверяющего; по умолчанию каждый
+   * берёт модель своей роли. Разводить роли этим полем нельзя — для этого
+   * есть `EDUKATOR_MODEL_GENERATE` и `EDUKATOR_MODEL_VALIDATE`.
+   */
   model?: string;
   /** Подменяемый вызов codex: тесты передают заглушку. */
   run?: CodexRunner;
@@ -121,7 +125,11 @@ function defaultLog(message: string): void {
 
 export interface ProducerOptions {
   log?: WorkerLog;
-  /** Модель codex для генератора и проверяющего; по умолчанию рабочая. */
+  /**
+   * Одна модель сразу на генератор и на проверяющего; по умолчанию каждый
+   * берёт модель своей роли. Разводить роли этим полем нельзя — для этого
+   * есть `EDUKATOR_MODEL_GENERATE` и `EDUKATOR_MODEL_VALIDATE`.
+   */
   model?: string;
   /** Подменяемый вызов codex: тесты передают заглушку. */
   run?: CodexRunner;
@@ -199,7 +207,24 @@ async function pool<T>(
       await work(item);
     }
   });
-  await Promise.all(runners);
+
+  // `allSettled`, а не `all`: `all` отпускает вызывающего на первой же ошибке,
+  // но соседние исполнители продолжают разбирать ту же очередь и писать в базу
+  // уже после того, как цикл отчитался, — отчёт перестаёт описывать то, что
+  // на самом деле произошло. Первая ошибка всё равно летит наверх, просто
+  // тогда, когда работа действительно закончилась.
+  const settled = await Promise.allSettled(runners);
+  const failed = settled.find((result) => result.status === 'rejected');
+  if (failed !== undefined) throw (failed as PromiseRejectedResult).reason;
+}
+
+/** Остаток очереди для отчёта об уже случившейся ошибке — см. место вызова. */
+function countOrZero(db: Database, topicId: string): number {
+  try {
+    return countAvailable(db, topicId);
+  } catch {
+    return 0;
+  }
 }
 
 interface RefillContext {
@@ -243,14 +268,28 @@ async function refillTopic(topic: Topic, context: RefillContext): Promise<Refill
       return { topicId: topic.id, batches, stored, available, error: message };
     }
 
-    const result = storeTasks(db, topic.id, tasks);
-    stored += result.stored.length;
-    available = countAvailable(db, topic.id);
+    // Запись в банк — под тем же перехватом, что и генерация: без него отказ
+    // базы улетал бы в общий перехват цикла, а тот отчитывается нулями и стирает
+    // из отчёта всё, что тема успела налить прошлыми батчами.
+    let result: ReturnType<typeof storeTasks>;
+    try {
+      result = storeTasks(db, topic.id, tasks);
+      stored += result.stored.length;
+      available = countAvailable(db, topic.id);
+    } catch (error) {
+      const message = (error as Error).message;
+      log(`воркер: тема «${topic.id}» не пополнена: ${message}`);
+      return { topicId: topic.id, batches, stored, available, error: message };
+    }
 
-    // Батч, из которого не осталось ничего нового, повторять внутри цикла
-    // бессмысленно: следующий придёт с тем же списком прошлых формулировок.
-    if (result.stored.length === 0) {
-      log(`воркер: тема «${topic.id}» не пополнилась, весь батч отсеян`);
+    // Батч, целиком отсеянный как повтор, повторять внутри цикла бессмысленно:
+    // следующий придёт с тем же списком прошлых формулировок. А вот батч, весь
+    // отбракованный проверяющим, до банка не дошёл — прошлые формулировки не
+    // изменились, но и заданий в них не добавилось, и следующая попытка честно
+    // даёт другие условия. Именно так ведут себя темы с многочастным ответом,
+    // то есть самые голодные: обрывая их здесь, воркер не долил бы их никогда.
+    if (tasks.length > 0 && result.stored.length === 0) {
+      log(`воркер: тема «${topic.id}» не пополнилась, весь батч отсеян как повтор`);
       break;
     }
   }
@@ -261,7 +300,8 @@ async function refillTopic(topic: Topic, context: RefillContext): Promise<Refill
 /**
  * Один проход пополнения: активные темы, из них голодные, из них — долив до
  * запаса. Исключений наружу не отдаёт, кроме тех, что делают дальнейшую работу
- * бессмысленной (нечитаемая база): воркер живёт внутри сервера.
+ * бессмысленной (нечитаемая база): цикл крутится фоном (`startWorker`) и в
+ * `npm run prefetch`, и падение одной темы не повод останавливать наполнение.
  */
 export async function runWarmupCycle(options: WorkerOptions): Promise<CycleReport> {
   const { db, graph } = options;
@@ -269,6 +309,13 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
   const threshold = options.threshold ?? REFILL_BELOW;
   if (threshold > target) {
     throw new Error(`Воркер: порог долива ${threshold} выше запаса ${target}`);
+  }
+
+  // Нулевой предел `pool` не отличить от «голодных тем нет»: исполнителей ноль,
+  // цикл отчитывается пустым доливом и молчит.
+  const concurrency = options.concurrency ?? MAX_CODEX_CONCURRENCY;
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new Error(`Воркер: предел одновременных пополнений должен быть положительным целым, получено ${concurrency}`);
   }
 
   const log = options.log ?? defaultLog;
@@ -285,7 +332,13 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
   });
 
   const profile = readProfile(db);
-  const hungry = topics.filter((topic) => countAvailable(db, topic.id) < threshold);
+  // Счётчик под перехватом: тема, добавленная в карту и ещё не синхронизированная
+  // в `topic_state`, роняет `countAvailable`, а здесь это обрушило бы весь цикл
+  // из-за одной темы — `startWorker` принял бы отказ за недоступность codex и
+  // ушёл в получасовой отступ при полностью исправной модели. Ноль означает
+  // «голодная»: причина назовётся в отчёте по теме, когда `refillTopic` упрётся
+  // в тот же запрос.
+  const hungry = topics.filter((topic) => countOrZero(db, topic.id) < threshold);
 
   const refilled: RefillReport[] = [];
   let unavailable = false;
@@ -299,14 +352,19 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
     aborted: () => unavailable,
   };
 
-  await pool(hungry, options.concurrency ?? MAX_CODEX_CONCURRENCY, async (topic) => {
+  await pool(hungry, concurrency, async (topic) => {
     if (unavailable) return;
     try {
       refilled.push(await refillTopic(topic, context));
     } catch (error) {
       if (error instanceof CodexUnavailableError) {
         unavailable = true;
-        log(`воркер: codex недоступен (${(error as Error).message}), пополнение отложено`);
+        // Тема названа: в отчёт цикла она не попадает, а искать по логу «на чём
+        // всё встало» приходится именно её.
+        log(
+          `воркер: codex недоступен на теме «${topic.id}» (${(error as Error).message}), ` +
+            'пополнение отложено',
+        );
         return;
       }
       const message = (error as Error).message;
@@ -315,7 +373,11 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
         topicId: topic.id,
         batches: 0,
         stored: 0,
-        available: countAvailable(db, topic.id),
+        // Счётчик берётся отдельной попыткой: сюда попадает и отказ самого
+        // доступа к теме (нет строки в `topic_state`), и тогда тот же запрос
+        // упал бы второй раз — уже мимо всякой обработки, обрушив весь цикл
+        // из-за одной темы. Причина уже названа в `error`.
+        available: countOrZero(db, topic.id),
         error: message,
       });
     }
@@ -326,6 +388,29 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
     refilled,
     codexUnavailable: unavailable,
   };
+}
+
+/**
+ * Цикл, не давший ничего: голодные темы были, и каждая упёрлась в ошибку.
+ *
+ * Нужен потому, что `CodexUnavailableError` покрывает не всякий отказ модели:
+ * процесс, который стартовал и вышел с ненулевым кодом (просроченная
+ * авторизация, исчерпанная квота, обрыв сети), приезжает как `CodexRunError` и
+ * до `codexUnavailable` не доходит. Без этой проверки воркер держал бы обычную
+ * минутную паузу и раз в минуту заново запускал codex по каждой голодной теме —
+ * ровно то, от чего заводился отступ.
+ *
+ * Смотрит не только на ошибку, но и на `stored`: тема прекращает долив на первом
+ * же отказе, и упавший второй батч оставляет в отчёте ошибку рядом с заданиями
+ * первого. Считать такую тему провалившейся значило бы уводить воркер в
+ * получасовой отступ (а `npm run prefetch` — в ненулевой код возврата) ровно
+ * тогда, когда очередь пополняется.
+ */
+export function everyRefillFailed(report: CycleReport): boolean {
+  return (
+    report.refilled.length > 0 &&
+    report.refilled.every((refill) => refill.error !== undefined && refill.stored === 0)
+  );
 }
 
 /**
@@ -369,7 +454,15 @@ export function startWorker(options: StartWorkerOptions): WorkerHandle {
     while (!stopped) {
       let unavailable = false;
       try {
-        unavailable = (await runWarmupCycle(options)).codexUnavailable;
+        const report = await runWarmupCycle(options);
+        unavailable = report.codexUnavailable;
+        if (!unavailable && everyRefillFailed(report)) {
+          unavailable = true;
+          log(
+            `воркер: ни одна из ${report.refilled.length} голодных тем не пополнена, ` +
+              'пауза увеличена',
+          );
+        }
       } catch (error) {
         // Цикл не должен уронить сервер: ошибка сюда доходит только неожиданная,
         // и следующий цикл — единственный способ узнать, что она прошла.
@@ -380,6 +473,8 @@ export function startWorker(options: StartWorkerOptions): WorkerHandle {
       failures = unavailable ? failures + 1 : 0;
       if (stopped) break;
 
+      // Гонка паузы с будильником: после отказов codex пауза доходит до
+      // получаса, а `stop()` обязан прерывать её, а не досиживать.
       await Promise.race([
         wait(backoffDelay(failures)),
         new Promise<void>((resolve) => {

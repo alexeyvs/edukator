@@ -251,7 +251,11 @@ describe('карта тем', () => {
 
     it('отвергает пустой список тем и не-объект в корне файла', () => {
       expect(() => parseCurriculumFile(file([]), 'math.json')).toThrow(/topics/);
-      expect(() => parseCurriculumFile([topic()], 'math.json')).toThrow(/math\.json/);
+      // Не только имя файла: оно есть в каждом сообщении о нарушении схемы, и
+      // проверка на него одного пропускала бы любую другую ошибку разбора.
+      expect(() => parseCurriculumFile([topic()], 'math.json')).toThrow(
+        /Карта тем math\.json не соответствует схеме.*object/s,
+      );
     });
 
     it('сообщает имя файла в ошибке разбора', () => {
@@ -326,6 +330,29 @@ describe('карта тем', () => {
 
       expect(result.stale).toEqual(['math.старая']);
       expect(states().map((row) => row.topic_id)).toContain('math.старая');
+    });
+
+    // Синхронизация зовётся на каждом /api/health, а `immediate` берёт запись на
+    // всю базу: когда заводить нечего, транзакции быть не должно вовсе.
+    it('не открывает запись, когда все темы уже заведены', () => {
+      const graph = parseCurriculumFile(file([topic()]), 'math.json');
+      syncTopicState(db, graph);
+      let immediate = 0;
+      const original = db.transaction.bind(db);
+      db.transaction = ((fn: (...args: unknown[]) => unknown) => {
+        const wrapped = original(fn);
+        wrapped.immediate = ((...args: unknown[]) => {
+          immediate += 1;
+          return fn(...args);
+        }) as typeof wrapped.immediate;
+        return wrapped;
+      }) as typeof db.transaction;
+
+      const result = syncTopicState(db, graph);
+
+      db.transaction = original as typeof db.transaction;
+      expect(immediate).toBe(0);
+      expect(result.added).toEqual([]);
     });
 
     it('идемпотентна: повторный вызов ничего не меняет', () => {

@@ -286,8 +286,9 @@ export function writeTopicState(db: Database, state: TopicState): void {
  * её `SQLITE_BUSY_SNAPSHOT` — и попытка ученика теряется вместе с ошибкой.
  *
  * Строку в `attempts` эта функция **не** пишет: для неё нужен `task_id` из
- * `task_bank`, а банк заданий появляется на этапе 2. Тогда же вставка попытки
- * заедет внутрь этой транзакции — засчитанный ответ без сдвига модели (или
+ * `task_bank`. Занятие вставляет попытку само и зовёт `recordAttempt` из своей
+ * `immediate`-транзакции (`submitAnswer`), так что запись попытки и сдвиг
+ * модели остаются одним целым: засчитанный ответ без сдвига модели (или
  * наоборот) недопустим.
  */
 export function recordAttempt(db: Database, topicId: string, attempt: Attempt): TopicState {

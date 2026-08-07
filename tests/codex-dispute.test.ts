@@ -1,10 +1,11 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Topic } from '../server/curriculum.js';
 import {
   CODEX_FALLBACK_MODEL,
   CODEX_MODEL,
+  CODEX_ROLE_ENV,
   CodexUnavailableError,
   type CodexRequest,
 } from '../server/codex/client.js';
@@ -60,7 +61,28 @@ function recorder(answer: string | Error): {
   };
 }
 
+// Модель роли читается из окружения, поэтому умолчание проверяется только на
+// пустой переменной: иначе `EDUKATOR_MODEL_DISPUTE` в оболочке разработчика
+// красил бы набор по причине, к коду отношения не имеющей.
+beforeEach(() => {
+  for (const name of Object.values(CODEX_ROLE_ENV)) vi.stubEnv(name, '');
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 describe('reviewDispute: успешный путь', () => {
+  it('берёт модель роли dispute, а не роли соседнего вызова', async () => {
+    vi.stubEnv(CODEX_ROLE_ENV.dispute, 'модель-разбора');
+    vi.stubEnv(CODEX_ROLE_ENV.generate, 'модель-генератора');
+    const { requests, run } = recorder(review());
+
+    await reviewDispute(context(), { run });
+
+    expect(requests[0]?.model).toBe('модель-разбора');
+  });
+
   it('отдаёт вердикт разбирающего', async () => {
     const { requests, run } = recorder(review());
 

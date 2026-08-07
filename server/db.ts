@@ -26,6 +26,17 @@ export const TABLES = [
 export const SUBJECTS = ['math', 'russian', 'english'] as const;
 export type Subject = (typeof SUBJECTS)[number];
 
+/**
+ * Человеческие названия предметов для промптов. Живут рядом с `SUBJECTS`, а не
+ * у каждого промпта свои: две копии значат, что переименование предмета молча
+ * даст сборке карты тем и генератору заданий разный словарь.
+ */
+export const SUBJECT_TITLES: Record<Subject, string> = {
+  math: 'математика',
+  russian: 'русский язык',
+  english: 'английский язык',
+};
+
 export interface Profile {
   name: string;
   /** Игры, стримеры, увлечения — подставляются в промпт генерации заданий. */
@@ -184,25 +195,39 @@ export function databasePath(): string {
 }
 
 /**
+ * Номер версии схемы базы. База новее кода отвергается, а не считается
+ * мигрированной: пропустить её молча значило бы работать с чужой схемой и
+ * портить данные, которых этот код не понимает.
+ */
+function readUserVersion(db: Database.Database): number {
+  const [row] = db.pragma('user_version') as [{ user_version: number }];
+  if (row.user_version > SCHEMA_VERSION) {
+    throw new Error(
+      `База собрана более новой версией схемы (${row.user_version} > ${SCHEMA_VERSION}): обновите приложение`,
+    );
+  }
+  return row.user_version;
+}
+
+/**
  * Приводит базу к текущей версии схемы. Идемпотентна: на уже мигрированной базе
  * ничего не выполняет, данные не трогает. Вся DDL идёт одной транзакцией —
  * оборванная миграция не оставляет половину таблиц.
- *
- * База новее кода отвергается, а не считается мигрированной: пропустить её
- * молча значило бы работать с чужой схемой и портить данные, которых этот код
- * не понимает.
  */
 export function migrate(db: Database.Database): void {
-  const [version] = db.pragma('user_version') as [{ user_version: number }];
-  if (version.user_version > SCHEMA_VERSION) {
-    throw new Error(
-      `База собрана более новой версией схемы (${version.user_version} > ${SCHEMA_VERSION}): обновите приложение`,
-    );
-  }
-  if (version.user_version === SCHEMA_VERSION) return;
+  if (readUserVersion(db) === SCHEMA_VERSION) return;
 
+  // Версия перечитывается под записью, а транзакция именно `immediate`: между
+  // быстрой проверкой выше и первым запросом транзакции базу мог мигрировать
+  // соседний процесс (сервер и `npm run prefetch` открывают её одновременно, а
+  // на чистом чекауте оба видят версию 0). Отложенная транзакция повторила бы
+  // миграцию поверх уже готовой схемы и упала бы «база без версии содержит
+  // объект profile» на совершенно исправной базе.
   db.transaction(() => {
-    if (version.user_version === 0) {
+    const version = readUserVersion(db);
+    if (version === SCHEMA_VERSION) return;
+
+    if (version === 0) {
       const existing = db
         .prepare<[], { name: string }>(
           `SELECT name FROM sqlite_master
@@ -235,7 +260,7 @@ export function migrate(db: Database.Database): void {
       db.exec(`ALTER TABLE task_bank ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''`);
     }
 
-    if (version.user_version === 1) {
+    if (version === 1) {
       const badRun = db.prepare('SELECT id FROM runs WHERE correct > total LIMIT 1').get();
       const badAttempt = db.prepare(
         `SELECT attempts.id
@@ -252,7 +277,7 @@ export function migrate(db: Database.Database): void {
       db.exec(SCHEMA);
     }
 
-    if (version.user_version <= 2) {
+    if (version <= 2) {
       const badBand = db
         .prepare('SELECT id FROM forecast_snapshots WHERE band < 0 OR band > 1 LIMIT 1')
         .get();
@@ -275,7 +300,7 @@ export function migrate(db: Database.Database): void {
       `);
     }
 
-    if (version.user_version <= 3) {
+    if (version <= 3) {
       // CREATE TABLE IF NOT EXISTS не меняет DEFAULT у существующей колонки.
       // Поэтому базы версий 1-3 продолжали писать datetime('now') в эти три
       // таблицы даже после появления ISO-умолчаний в SCHEMA. Таблицы образуют
@@ -325,7 +350,7 @@ export function migrate(db: Database.Database): void {
       `);
     }
 
-    if (version.user_version <= 4) {
+    if (version <= 4) {
       // Колонка уже добавлена выше; базе версии 4 не хватает только индекса —
       // базы версий 1-3 получили его вместе с SCHEMA.
       db.exec(`
@@ -335,7 +360,7 @@ export function migrate(db: Database.Database): void {
     }
 
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
-  })();
+  }).immediate();
 }
 
 const REQUIRED_COLUMNS: Readonly<Record<(typeof TABLES)[number], readonly string[]>> = {

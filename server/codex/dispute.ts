@@ -15,7 +15,7 @@ import { dirname, join, resolve } from 'node:path';
 import type { Topic } from '../curriculum.js';
 import { describeSchemaErrors, schemaValidator } from '../json-schema.js';
 import {
-  CODEX_MODEL,
+  modelForRole,
   parseCodexAnswer,
   runCodexCli,
   writeCodexSchema,
@@ -106,7 +106,7 @@ export async function reviewDispute(
       }),
       schemaPath: writeCodexSchema(workDir, DISPUTE_SCHEMA_PATH),
       outPath: join(workDir, 'dispute.json'),
-      model: options.model ?? CODEX_MODEL,
+      model: options.model ?? modelForRole('dispute'),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     });
     return parseDisputeReview(parseCodexAnswer(answer));

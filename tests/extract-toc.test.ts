@@ -524,6 +524,19 @@ describe('parseArgs', () => {
     expect(() => parseArgs(['--subject'])).toThrow(/нет значения/);
   });
 
+  // `$&` в строке-замене — ссылка на совпадение, то есть на сам «~».
+  it('подставляет HOME буквально, даже когда в нём есть $', () => {
+    const home = process.env['HOME'];
+    process.env['HOME'] = '/tmp/$&dom';
+    try {
+      expect(parseArgs(['--subject', 'math', '--pdf', '~/book.pdf']).pdfPath)
+        .toBe('/tmp/$&dom/book.pdf');
+    } finally {
+      if (home === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = home;
+    }
+  });
+
   it('отвергает неизвестный и повторный флаг', () => {
     expect(() => parseArgs(['--subject', 'math', '--pdf', 'b.pdf', '--ouut', 'x']))
       .toThrow(/Неизвестный флаг/);

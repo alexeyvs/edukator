@@ -101,7 +101,10 @@ export function pageRange(from: number, to: number): number[] {
 }
 
 function hasUsableTextLayer(pages: PdfPage[]): boolean {
-  return pages.every(
+  // `every` на пустом списке истинно: без этой проверки книга, из которой не
+  // вернулось ни одной страницы, считалась бы книгой с текстовым слоем, и в
+  // файл уехало бы оглавление из одних заголовков.
+  return pages.length > 0 && pages.every(
     (page) => page.text.replace(/\s/gu, '').length >= MIN_TEXT_LAYER_CHARS_PER_PAGE,
   );
 }
@@ -110,36 +113,50 @@ function hasUsableTextLayer(pages: PdfPage[]): boolean {
 async function extractPdfPages(
   pdfPath: string,
   choosePages: (total: number) => number[] | undefined,
-): Promise<{ pages: PdfPage[]; total: number }> {
+): Promise<{ pages: PdfPage[]; total: number; requested: number[] | undefined }> {
   const { readFile } = await import('node:fs/promises');
   const data = new Uint8Array(await readFile(pdfPath));
   const parser = new PDFParse({ data });
   try {
-    const total = (await parser.getInfo()).total;
+    let total: number;
+    try {
+      total = (await parser.getInfo()).total;
+    } catch (error) {
+      throw new Error(`PDF ${pdfPath} не разбирается: ${(error as Error).message}`);
+    }
+
+    // Выбор страниц — вне обёртки «не разбирается»: он падает на негодном
+    // диапазоне, то есть на запросе пользователя, а не на самом PDF, и
+    // подменять причину нельзя.
     const pageNumbers = choosePages(total);
-    // pageJoiner по умолчанию дописывает «-- 3 of 334 --», а это лишние строки
-    // в знаменателе плотности.
-    const result = await parser.getText({
-      ...(pageNumbers === undefined ? {} : { partial: pageNumbers }),
-      pageJoiner: '',
-    });
-    return {
-      pages: result.pages.map((page) => ({ num: page.num, text: page.text })),
-      total: result.total,
-    };
-  } catch (error) {
-    throw new Error(`PDF ${pdfPath} не разбирается: ${(error as Error).message}`);
+
+    try {
+      // pageJoiner по умолчанию дописывает «-- 3 of 334 --», а это лишние строки
+      // в знаменателе плотности.
+      const result = await parser.getText({
+        ...(pageNumbers === undefined ? {} : { partial: pageNumbers }),
+        pageJoiner: '',
+      });
+      return {
+        pages: result.pages.map((page) => ({ num: page.num, text: page.text })),
+        total: result.total,
+        requested: pageNumbers,
+      };
+    } catch (error) {
+      throw new Error(`PDF ${pdfPath} не разбирается: ${(error as Error).message}`);
+    }
   } finally {
     await parser.destroy();
   }
 }
 
 /** Читает текстовый слой указанных страниц (или всей книги). */
-export function readPdfPages(
+export async function readPdfPages(
   pdfPath: string,
   pageNumbers?: number[],
 ): Promise<{ pages: PdfPage[]; total: number }> {
-  return extractPdfPages(pdfPath, () => pageNumbers);
+  const { pages, total } = await extractPdfPages(pdfPath, () => pageNumbers);
+  return { pages, total };
 }
 
 function isPdfPage(value: unknown): value is PdfPage {
@@ -242,10 +259,9 @@ export async function extractToc(options: ExtractTocOptions): Promise<ExtractToc
   });
   const { total } = extracted;
   if (total === 0) throw new Error(`PDF ${options.pdfPath} не содержит страниц`);
-  const wanted =
-    options.pages === undefined
-      ? scanWindow(total, options.scanEdge ?? DEFAULT_SCAN_EDGE)
-      : pageRange(options.pages.from, options.pages.to);
+  // Те же страницы, что читались из текстового слоя: считать выбор второй раз
+  // значит завести второе место, где его легко разойтись с первым.
+  const wanted = extracted.requested ?? [];
 
   let pages = extracted.pages;
   let extraction: Extraction = 'text';
@@ -344,7 +360,9 @@ export function parseArgs(argv: string[]): CliArgs {
 
   return {
     subject: subject as Subject,
-    pdfPath: resolve(pdfPath.replace(/^~(?=\/)/, process.env['HOME'] ?? '~')),
+    // Замена функцией, а не строкой: `$&` и `$1` в `HOME` строка-замена
+    // истолковала бы как ссылки на совпадение.
+    pdfPath: resolve(pdfPath.replace(/^~(?=\/)/, () => process.env['HOME'] ?? '~')),
     ocr,
     ...(pages === undefined ? {} : { pages: parsePages(pages) }),
     ...(scanEdge === undefined ? {} : { scanEdge: Number(scanEdge) }),

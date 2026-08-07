@@ -1,7 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { codexOutputSchema } from '../server/codex/client.js';
-import { parseTaskBatch, TASKS_SCHEMA_PATH, type GeneratedTask } from '../server/codex/task-schema.js';
+import { checkAnswer } from '../server/normalize.js';
+import {
+  fitsAccept,
+  MIN_REVEAL_LENGTH,
+  parseTaskBatch,
+  TASKS_SCHEMA_PATH,
+  type GeneratedTask,
+} from '../server/codex/task-schema.js';
 
 /** Задание по числовой теме: от него отталкиваются все проверки инвариантов. */
 function task(patch: Partial<GeneratedTask> = {}): unknown {
@@ -164,10 +171,181 @@ describe('parseTaskBatch: нарушения инвариантов', () => {
     ).not.toThrow();
   });
 
-  it('отвергает нечисловой accept при answer_format: number', () => {
+  // Ответ в один-два знака — буква фонетики или артикль, и он же предлог в
+  // осмысленной подсказке. Раньше это роняло весь батч, то есть темы русского с
+  // односимвольным ответом оставались без заданий вовсе.
+  it('не проверяет на раскрытие ответы короче трёх знаков', () => {
+    expect(MIN_REVEAL_LENGTH).toBe(3);
+
+    expect(() =>
+      parseTaskBatch(
+        batch(
+          task({ answer: 'о', accept: ['о'], hint: 'Подумай о проверочном слове', explain: 'о' }),
+        ),
+        'text',
+      ),
+    ).not.toThrow();
+    expect(() =>
+      parseTaskBatch(
+        batch(
+          task({
+            answer: 'an',
+            accept: ['an'],
+            hint: 'Перед гласным звуком ставится an, а не a',
+            explain: 'an',
+          }),
+        ),
+        'text',
+      ),
+    ).not.toThrow();
+  });
+
+  it('проверяет на раскрытие ответы от трёх знаков', () => {
+    expect(() =>
+      parseTaskBatch(
+        batch(
+          task({
+            answer: 'did',
+            accept: ['did'],
+            hint: 'Вспомогательный глагол прошедшего — did',
+            explain: 'did',
+          }),
+        ),
+        'text',
+      ),
+    ).toThrow(/задание 1.*подсказк/s);
+  });
+
+  // Послабление для коротких ответов — про служебные слова, а не про числа:
+  // «45» в подсказке раскрывает ответ по-настоящему.
+  it('проверяет на раскрытие короткий числовой ответ', () => {
+    expect(() =>
+      parseTaskBatch(batch(task({ answer: '45', hint: 'Останется 45 монет' })), 'number'),
+    ).toThrow(/задание 1.*подсказк/s);
+    expect(() =>
+      parseTaskBatch(
+        batch(task({ answer: '5', accept: ['5'], hint: 'Ответ 5', explain: '5' })),
+        'number',
+      ),
+    ).toThrow(/задание 1.*подсказк/s);
+  });
+
+  // Запятая и точка под границу «не буква и не цифра» подходят, поэтому ответ
+  // «45» совпадал бы с началом числа 45,5 — и ронял весь батч на подсказке, где
+  // никакого раскрытия нет. То же с чертой обыкновенной дроби.
+  it('не считает раскрытием ответ, склеенный в подсказке в другое число', () => {
+    expect(() =>
+      parseTaskBatch(
+        batch(task({ answer: '45', hint: 'Цена выросла с 45,5 до 60 рублей' })),
+        'number',
+      ),
+    ).not.toThrow();
+    expect(() =>
+      parseTaskBatch(batch(task({ answer: '45', hint: 'Начни с 1,45 метра' })), 'number'),
+    ).not.toThrow();
+    expect(() =>
+      parseTaskBatch(batch(task({ answer: '45', hint: 'Приведи дробь к 45/2' })), 'number'),
+    ).not.toThrow();
+  });
+
+  // Послабление ровно на цифру рядом с разделителем: точка в конце предложения
+  // ответ по-прежнему раскрывает.
+  it('видит раскрытие числового ответа в конце предложения', () => {
+    expect(() =>
+      parseTaskBatch(batch(task({ answer: '45', hint: 'Останется ровно 45.' })), 'number'),
+    ).toThrow(/задание 1.*подсказк/s);
+  });
+
+  // Послабление про числа, а не про слова: у буквенного ответа соседняя запятая
+  // — обычная пунктуация, и раскрытие через неё обязано ловиться.
+  it('видит раскрытие словесного ответа перед запятой', () => {
+    expect(() =>
+      parseTaskBatch(
+        batch(
+          task({
+            answer: 'did',
+            accept: ['did'],
+            hint: 'Вспомни про did, дальше сам',
+            explain: 'did',
+          }),
+        ),
+        'text',
+      ),
+    ).toThrow(/задание 1.*подсказк/s);
+  });
+
+  // Ответ уходит в регулярку, и метасимволы в нём экранируются. Без этого
+  // «2.5» совпадало бы с «275» в подсказке (точка — любой знак), а «(3;4)»
+  // роняло бы весь разбор `SyntaxError` из `new RegExp`.
+  it('не считает раскрытием совпадение по метасимволам ответа', () => {
+    expect(() =>
+      parseTaskBatch(
+        batch(task({ answer: '2.5', accept: ['2.5'], hint: 'Начни с 275 граммов', explain: '2.5' })),
+        'number',
+      ),
+    ).not.toThrow();
+  });
+
+  it('разбирает метку варианта со скобкой, а не падает на построении регулярки', () => {
+    // Метка «2)» — обычный ответ на теме с выбором, а незакрытая скобка в
+    // регулярке — `SyntaxError` наружу из разбора, то есть весь батч в мусор.
+    expect(() =>
+      parseTaskBatch(
+        batch(task({ answer: '2)', accept: ['2)'], hint: 'Сравни знаменатели', explain: 'второй' })),
+        'choice',
+      ),
+    ).not.toThrow();
+    // И настоящее раскрытие такой метки по-прежнему ловится.
+    expect(() =>
+      parseTaskBatch(
+        batch(task({ answer: '2)', accept: ['2)'], hint: 'Верный — 2)', explain: 'второй' })),
+        'choice',
+      ),
+    ).toThrow(/задание 1.*подсказк/s);
+  });
+
+  // Разбор спора дописывает подтверждённый ответ ученика в `accept[]` как есть,
+  // а выгруженный посевной файл читается этим же разбором: запрет на словесную
+  // запись ломал бы задание навсегда после первого же спора.
+  it('пропускает словесную запись accept при answer_format: number', () => {
     expect(() =>
       parseTaskBatch(batch(task({ accept: ['45', 'сорок пять'] })), 'number'),
-    ).toThrow(/задание 1.*сорок пять/s);
+    ).not.toThrow();
+  });
+
+  it('отвергает нечисловой ответ при answer_format: number', () => {
+    expect(() =>
+      parseTaskBatch(batch(task({ answer: 'сорок пять', accept: ['сорок пять'] })), 'number'),
+    ).toThrow(/задание 1.*сорок пять.*не читается как одно число/s);
+  });
+
+  // Эталон «40%» нормализатор читает как долю 0,4, и ученик, написавший
+  // требуемое формой ответа «40», получил бы незачёт на верном ответе.
+  it('отвергает эталон со знаком процента при answer_format: number', () => {
+    expect(() =>
+      parseTaskBatch(batch(task({ answer: '40%', accept: ['40%', '40'] })), 'number'),
+    ).toThrow(/задание 1.*40%.*знаком процента/s);
+  });
+
+  // Дыра, которую запрет на `%` в самом `answer` не закрывает: «40%» просится в
+  // `accept[]` как «равноправная запись» ответа «40», но нормализатор читает её
+  // как долю 0,4 — и ответ, ошибочный ровно в сто раз, шёл бы в зачёт.
+  it('отвергает знак процента в accept при answer_format: number', () => {
+    expect(() =>
+      parseTaskBatch(batch(task({ answer: '40', accept: ['40', '40%'] })), 'number'),
+    ).toThrow(/задание 1.*40%.*знак процента/s);
+  });
+
+  it('ученику знак процента при этом не нужен: «40%» засчитывается по самому answer', () => {
+    expect(checkAnswer('40%', { answer: '40', accept: ['40'] }, 'number').correct).toBe(true);
+    expect(checkAnswer('0,4', { answer: '40', accept: ['40'] }, 'number').correct).toBe(false);
+  });
+
+  it('не пускает «40%» в accept и через разбор спора', () => {
+    expect(fitsAccept('40%', 'number')).toBe(false);
+    expect(fitsAccept('40', 'number')).toBe(true);
+    // Текстовой темы запрет не касается: там процент — часть формулировки.
+    expect(fitsAccept('40%', 'text')).toBe(true);
   });
 
   it('отвергает неоднозначный числовой accept: два числа в одной записи', () => {

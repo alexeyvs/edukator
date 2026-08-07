@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
-import { openDatabase, SUBJECTS } from '../server/db.js';
+import { openDatabase, SUBJECTS, type Subject } from '../server/db.js';
 import {
   buildTopicGraph,
   loadCurriculum,
@@ -23,6 +23,7 @@ import {
   parseSeedBank,
   readSeedBank,
   seedBankPath,
+  SeedBankError,
   SEED_BANK_DIR,
   takeTaskOrSeed,
 } from '../server/codex/seed-bank.js';
@@ -222,6 +223,122 @@ describe('посевной банк', () => {
       expect(countAvailable(db, 'math.a')).toBe(5);
     });
 
+    // Не ENOENT: отсутствие файла — обычный случай, а вот каталог вместо файла
+    // означает поломку настройки, и молчать о ней нельзя.
+    it('сообщает о нечитаемом посевном файле, а не считает его отсутствующим', () => {
+      mkdirSync(join(seedDir, 'math.json'));
+
+      expect(() => loadSeedBank(db, GRAPH, { dir: seedDir })).toThrow(/не читается/u);
+    });
+
+    // Иначе дефект в одном файле оставлял бы без заданий все предметы разом:
+    // вызывающие эту ошибку только пишут в stderr, и занятие вставало бы целиком.
+    it('заливает здоровые предметы, даже когда файл соседнего испорчен', () => {
+      writeFileSync(join(seedDir, 'math.json'), 'не json');
+      writeSeed('russian', seedJson([{ topic_id: 'russian.a', tasks: batch(2) }], 'russian'));
+
+      expect(() => loadSeedBank(db, GRAPH, { dir: seedDir })).toThrow(/не разбирается как JSON/u);
+      expect(countAvailable(db, 'russian.a')).toBe(2);
+    });
+
+    // Файл разбирается, а падает уже запись: без перехвата вокруг неё один
+    // такой `topic_id` в math.json оставлял бы без заданий и русский.
+    it('заливает здоровые предметы, даже когда тема соседнего не заведена в базе', () => {
+      db.prepare('DELETE FROM topic_state WHERE topic_id = ?').run('math.a');
+      writeSeed('math', seedJson([{ topic_id: 'math.a', tasks: batch(2) }]));
+      writeSeed('russian', seedJson([{ topic_id: 'russian.a', tasks: batch(2) }], 'russian'));
+
+      expect(() => loadSeedBank(db, GRAPH, { dir: seedDir })).toThrow(
+        /темы «math.a» нет в карте/u,
+      );
+      expect(countAvailable(db, 'russian.a')).toBe(2);
+    });
+
+    // Общий на файл перехват хоронил весь его остаток: отказ на первой теме
+    // math.json оставлял бы без посева все следующие, а сообщение в stderr
+    // выглядело бы как одна сломанная тема.
+    it('заливает здоровые темы файла, даже когда соседняя тема не заведена в базе', () => {
+      const wider = buildTopicGraph([topic('math.a'), topic('math.b'), topic('russian.a', { answerFormat: 'text' })]);
+      syncTopicState(db, wider);
+      db.prepare('DELETE FROM topic_state WHERE topic_id = ?').run('math.a');
+      writeSeed(
+        'math',
+        seedJson([
+          { topic_id: 'math.a', tasks: batch(2) },
+          { topic_id: 'math.b', tasks: batch(3) },
+        ]),
+      );
+
+      expect(() => loadSeedBank(db, wider, { dir: seedDir, subjects: ['math'] })).toThrow(
+        /посев темы «math.a».*нет в карте/su,
+      );
+      expect(countAvailable(db, 'math.b')).toBe(3);
+    });
+
+    // Список виновных предметов — сигнал для выгрузки посева: предмет с
+    // непрочитанным файлом лежит в базе огрызком, и по её содержимому это не
+    // отличить от «предмет ещё не грели».
+    it('называет предмет, файл посева которого не разобрался', () => {
+      writeSeed('math', seedJson([{ topic_id: 'math.нет', tasks: batch(2) }]));
+      writeSeed('russian', seedJson([{ topic_id: 'russian.a', tasks: batch(2) }], 'russian'));
+
+      let caught: unknown;
+      try {
+        loadSeedBank(db, GRAPH, { dir: seedDir });
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(SeedBankError);
+      expect((caught as SeedBankError).subjects).toEqual(['math']);
+      expect(countAvailable(db, 'russian.a')).toBe(2);
+      // Частичный итог уходит вместе с ошибкой: без него вызывающий считал бы
+      // здоровые предметы незагруженными.
+      expect((caught as SeedBankError).result).toMatchObject({ loaded: 2, skipped: 0 });
+    });
+
+    // Предмет без файла посева от порчи соседнего не становится загруженным:
+    // выгрузка `prefetch --export` по этому списку решает, можно ли переписать
+    // снимок на пути `--out`.
+    it('перечисляет предметы без файла даже когда посев сорвался', () => {
+      writeSeed('math', seedJson([{ topic_id: 'math.нет', tasks: batch(2) }]));
+
+      let caught: unknown;
+      try {
+        loadSeedBank(db, GRAPH, { dir: seedDir });
+      } catch (error) {
+        caught = error;
+      }
+
+      expect((caught as SeedBankError).result.missing).toEqual(['russian']);
+    });
+
+    // Файл разобрался, а упала запись одной темы: в банке всё равно не весь
+    // посев предмета, значит выгружать его тоже нельзя.
+    it('называет предмет, у которого не записалась одна тема', () => {
+      const wider = buildTopicGraph([topic('math.a'), topic('math.b')]);
+      syncTopicState(db, wider);
+      db.prepare('DELETE FROM topic_state WHERE topic_id = ?').run('math.a');
+      writeSeed(
+        'math',
+        seedJson([
+          { topic_id: 'math.a', tasks: batch(2) },
+          { topic_id: 'math.b', tasks: batch(3) },
+        ]),
+      );
+
+      let caught: unknown;
+      try {
+        loadSeedBank(db, wider, { dir: seedDir, subjects: ['math'] });
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(SeedBankError);
+      expect((caught as SeedBankError).subjects).toEqual(['math']);
+      expect(countAvailable(db, 'math.b')).toBe(3);
+    });
+
     it('грузит только запрошенные предметы', () => {
       writeSeed('math', seedJson([{ topic_id: 'math.a', tasks: batch(2) }]));
       writeSeed('russian', seedJson([{ topic_id: 'russian.a', tasks: batch(2) }], 'russian'));
@@ -275,6 +392,52 @@ describe('посевной банк', () => {
       expect(takeTaskOrSeed(db, GRAPH, 'math.a', { dir: seedDir })).toBeNull();
     });
 
+    // Сервер терпит порчу посева при старте; здесь она пришлась бы на середину
+    // занятия, то есть приехала бы ученику пятисоткой.
+    it('отдаёт null на испорченном посевном файле, а не бросает', () => {
+      writeFileSync(join(seedDir, 'math.json'), 'не json');
+
+      expect(takeTaskOrSeed(db, GRAPH, 'math.a', { dir: seedDir })).toBeNull();
+    });
+
+    // `loadSeedBank` бросает уже после обхода всех тем: здоровые до банка
+    // доехали, и отказ на соседней теме не повод прятать залитое задание — а
+    // вместе с ним (из-за отметки в `seeded`) и весь остаток предмета.
+    it('выдаёт задание, когда часть посева предмета не залилась', () => {
+      const graph = buildTopicGraph([
+        topic('math.a'),
+        topic('math.b'),
+        topic('russian.a', { answerFormat: 'text' }),
+      ]);
+      syncTopicState(db, graph);
+      db.prepare('DELETE FROM topic_state WHERE topic_id = ?').run('math.b');
+      writeSeed(
+        'math',
+        seedJson([
+          { topic_id: 'math.a', tasks: batch(1) },
+          { topic_id: 'math.b', tasks: batch(1) },
+        ]),
+      );
+
+      const given = takeTaskOrSeed(db, graph, 'math.a', { dir: seedDir, seeded: new Set() });
+
+      expect(given?.question).toBe('Задание 1: сколько будет 1 + 2?');
+    });
+
+    // Перебор тем в `nextTask` идёт по пяти кандидатам, и без набора каждый
+    // промах очереди разбирал бы весь файл предмета заново — на живом запросе.
+    it('не дозаливает посев одного предмета дважды за перебор', () => {
+      writeSeed('math', seedJson([{ topic_id: 'math.a', tasks: batch(1) }]));
+      const seeded = new Set<Subject>();
+
+      expect(takeTaskOrSeed(db, GRAPH, 'math.a', { dir: seedDir, seeded })).not.toBeNull();
+      writeSeed('math', seedJson([{ topic_id: 'math.a', tasks: batch(3) }]));
+
+      expect(takeTaskOrSeed(db, GRAPH, 'math.a', { dir: seedDir, seeded })).toBeNull();
+      // Без набора — обычное поведение: файл разбирается и пополняет очередь.
+      expect(takeTaskOrSeed(db, GRAPH, 'math.a', { dir: seedDir })).not.toBeNull();
+    });
+
     it('падает на теме вне карты', () => {
       const stale = buildTopicGraph([topic('math.a')]);
       db.prepare('INSERT INTO topic_state (topic_id) VALUES (?)').run('math.gone');
@@ -304,6 +467,21 @@ describe('посевной банк', () => {
       expect(collectSeedTasks(db, GRAPH, 'english')).toEqual([]);
     });
 
+    // Отбраковал их не человек, а занятие: такое задание либо снова уехало бы
+    // ученику, либо уронило бы разбор посевного файла и оставило бы весь предмет
+    // без посева.
+    it('не берёт в посев отбракованные задания', () => {
+      const { stored } = storeTasks(db, 'math.a', [
+        task(),
+        task({ question: 'Второе задание: сколько будет 3 + 3?', answer: '6', accept: ['6'] }),
+      ]);
+      db.prepare("UPDATE task_bank SET status = 'rejected' WHERE id = ?").run(stored[0]?.id);
+
+      const topics = collectSeedTasks(db, GRAPH, 'math');
+
+      expect(topics[0]?.tasks.map((entry) => entry.answer)).toEqual(['6']);
+    });
+
     it('падает на задании с повреждённым accept[]', () => {
       const { stored } = storeTasks(db, 'math.a', [task()]);
       db.prepare('UPDATE task_bank SET accept = ? WHERE id = ?').run('[4]', stored[0]?.id);
@@ -313,6 +491,27 @@ describe('посевной банк', () => {
       db.prepare('UPDATE task_bank SET accept = ? WHERE id = ?').run('{не json', stored[0]?.id);
 
       expect(() => collectSeedTasks(db, GRAPH, 'math')).toThrow(/не разбирается как JSON/u);
+    });
+
+    // Колонки `hint`, `explain` и `joke` допускают NULL, а схема батча требует
+    // непустых строк. Выгрузив NULL пустой строкой, экспорт переписал бы снимок
+    // файлом, который `readSeedBank` отвергает целиком, — предмет остался бы без
+    // посева ровно тогда, когда посев и нужен.
+    it('падает на задании с пустым hint, explain или joke', () => {
+      const { stored } = storeTasks(db, 'math.a', [task()]);
+      const id = stored[0]?.id;
+
+      for (const column of ['hint', 'explain', 'joke']) {
+        db.prepare(`UPDATE task_bank SET ${column} = NULL WHERE id = ?`).run(id);
+
+        expect(() => collectSeedTasks(db, GRAPH, 'math')).toThrow(
+          new RegExp(`пустое поле ${column}`, 'u'),
+        );
+
+        db.prepare(`UPDATE task_bank SET ${column} = 'что-то' WHERE id = ?`).run(id);
+      }
+
+      expect(collectSeedTasks(db, GRAPH, 'math')).toHaveLength(1);
     });
   });
 

@@ -11,13 +11,18 @@ import {
   type TopicGraph,
 } from '../server/curriculum.js';
 import { storeTasks, countAvailable, takeTask } from '../server/codex/bank.js';
-import { CodexUnavailableError, type CodexRequest } from '../server/codex/client.js';
+import {
+  CodexRunError,
+  CodexUnavailableError,
+  type CodexRequest,
+} from '../server/codex/client.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import {
   activeTopics,
   backoffDelay,
   BACKOFF_BASE_MS,
   BACKOFF_MAX_MS,
+  everyRefillFailed,
   IDLE_INTERVAL_MS,
   MAX_BATCHES_PER_TOPIC,
   MAX_CODEX_CONCURRENCY,
@@ -26,7 +31,9 @@ import {
   runWarmupCycle,
   startWorker,
   WARM_TOPICS,
+  type CycleReport,
   type ProduceRequest,
+  type RefillReport,
   type TaskProducer,
 } from '../server/codex/worker.js';
 
@@ -422,12 +429,162 @@ describe('воркер тёплой очереди', () => {
       expect(logged.join('\n')).toMatch(/math\.a. не пополнена/u);
     });
 
+    // Отказ мимо генератора (тема исчезла из `topic_state`, пока цикл шёл)
+    // разбирается внешним перехватом: `refillTopic` ловит только ошибки самого
+    // генератора. Учёт остатка при этом падает той же ошибкой, и без отдельной
+    // попытки она обрушила бы цикл целиком — из-за одной темы.
+    it('оставляет соседние темы долитыми, когда тема упала мимо генератора', async () => {
+      const graph = graphOf(WIDE);
+      const filled: string[] = [];
+
+      const report = await runWarmupCycle({
+        db,
+        graph,
+        topics: 2,
+        concurrency: 2,
+        log,
+        produce: (request) => {
+          if (request.topic.id === 'math.a') {
+            // Батч сам по себе годный: спотыкается уже `storeTasks`.
+            db.prepare('DELETE FROM topic_state WHERE topic_id = ?').run('math.a');
+          } else {
+            filled.push(request.topic.id);
+          }
+          return Promise.resolve(batchOf(request.topic.id, QUEUE_TARGET));
+        },
+      });
+
+      const broken = report.refilled.find((item) => item.topicId === 'math.a');
+      expect(broken?.error).toMatch(/math\.a/u);
+      expect(broken?.available).toBe(0);
+      // Соседний исполнитель довёл свою тему до конца, а не остался брошенным
+      // после того, как цикл уже отчитался.
+      expect(filled).toHaveLength(1);
+      const neighbour = filled[0] ?? '';
+      expect(countAvailable(db, neighbour)).toBe(QUEUE_TARGET);
+      expect(report.refilled.find((item) => item.topicId === neighbour)?.error).toBeUndefined();
+    });
+
+    // Отчёт обязан описывать то, что случилось: залитые первым батчем задания
+    // никуда не делись, а обнулённый отчёт увёл бы воркер в отступ (см.
+    // `everyRefillFailed`) при исправной модели и полной очереди.
+    it('сохраняет уже залитое, когда следующий батч упал на записи в банк', async () => {
+      const graph = graphOf([topic('math.a')]);
+      let call = 0;
+
+      const report = await runWarmupCycle({
+        db,
+        graph,
+        log,
+        produce: (request) => {
+          call += 1;
+          // Формулировка, пустая после нормализации: `storeTasks` бросает на ней
+          // ещё до транзакции, то есть мимо перехвата вокруг генерации.
+          return Promise.resolve(
+            call === 1 ? batchOf(request.topic.id, 3) : [task(request.topic.id, { question: '???' })],
+          );
+        },
+      });
+
+      expect(call).toBe(2);
+      expect(report.refilled).toEqual([
+        {
+          topicId: 'math.a',
+          batches: 2,
+          stored: 3,
+          available: 3,
+          error: expect.stringMatching(/пуста после нормализации/u) as unknown as string,
+        },
+      ]);
+      expect(countAvailable(db, 'math.a')).toBe(3);
+    });
+
+    // Отбор голодных тем идёт по тому же счётчику, что и долив: тема, которую
+    // добавили в карту и ещё не синхронизировали, обрушила бы весь цикл ещё до
+    // первой генерации — а `startWorker` принял бы это за недоступность codex и
+    // ушёл в получасовой отступ при исправной модели.
+    it('не роняет цикл на теме, которой нет в topic_state', async () => {
+      const graph = graphOf([topic('math.a'), topic('math.unknown')]);
+
+      const report = await runWarmupCycle({
+        db,
+        graph,
+        topics: 2,
+        concurrency: 1,
+        log,
+        produce: (request) => Promise.resolve(batchOf(request.topic.id, QUEUE_TARGET)),
+      });
+
+      expect(report.codexUnavailable).toBe(false);
+      expect(report.refilled.find((item) => item.topicId === 'math.unknown')?.error).toMatch(
+        /нет в карте/u,
+      );
+      expect(countAvailable(db, 'math.a')).toBe(QUEUE_TARGET);
+    });
+
     it('падает, когда порог долива выше запаса', async () => {
       const graph = graphOf([topic('math.a')]);
 
       await expect(
         runWarmupCycle({ db, graph, target: 2, threshold: 5, log, produce: producer().produce }),
       ).rejects.toThrow(/порог долива 5 выше запаса 2/u);
+    });
+
+    // Нулевой предел даёт ноль исполнителей: цикл отчитался бы пустым доливом,
+    // и «нечего греть» было бы не отличить от «некому греть».
+    it('отвергает непригодный предел одновременных пополнений', async () => {
+      const graph = graphOf([topic('math.a')]);
+
+      for (const concurrency of [0, -1, 1.5]) {
+        await expect(
+          runWarmupCycle({ db, graph, produce: producer().produce, log, concurrency }),
+        ).rejects.toThrow(/предел одновременных пополнений/u);
+      }
+    });
+
+    // Батч, целиком отбракованный проверяющим, до банка не дошёл: прошлые
+    // формулировки не изменились, и следующая попытка честно даёт другие
+    // условия. Так ведут себя самые голодные темы — обрывая их здесь, воркер не
+    // долил бы их никогда.
+    it('продолжает долив, когда весь батч отбракован проверяющим', async () => {
+      const graph = graphOf([topic('math.a')]);
+      let calls = 0;
+
+      const report = await runWarmupCycle({
+        db,
+        graph,
+        log,
+        produce: (request): Promise<GeneratedTask[]> => {
+          calls += 1;
+          return Promise.resolve(calls === 1 ? [] : batchOf(request.topic.id, QUEUE_TARGET));
+        },
+      });
+
+      expect(calls).toBe(2);
+      expect(countAvailable(db, 'math.a')).toBe(QUEUE_TARGET);
+      expect(report.refilled[0]?.batches).toBe(2);
+    });
+
+    // А вот батч, целиком отсеянный как повтор, повторять внутри цикла
+    // бессмысленно: следующий придёт с тем же списком прошлых формулировок.
+    it('прекращает долив темы, когда весь батч отсеян как повтор', async () => {
+      const graph = graphOf([topic('math.a')]);
+      const repeated = batchOf('math.a', 3);
+      storeTasks(db, 'math.a', repeated);
+      let calls = 0;
+
+      await runWarmupCycle({
+        db,
+        graph,
+        log,
+        produce: (): Promise<GeneratedTask[]> => {
+          calls += 1;
+          return Promise.resolve(repeated);
+        },
+      });
+
+      expect(calls).toBe(1);
+      expect(logged.join('\n')).toMatch(/отсеян как повтор/u);
     });
   });
 
@@ -494,8 +651,87 @@ describe('воркер тёплой очереди', () => {
       expect(countAvailable(db, 'math.a')).toBe(QUEUE_TARGET);
     });
 
+    // `CodexUnavailableError` покрывает не всякий отказ модели: процесс,
+    // стартовавший и вышедший с ненулевым кодом (просроченная авторизация,
+    // исчерпанная квота), приезжает как `CodexRunError`. Без отступа воркер
+    // запускал бы codex по каждой голодной теме раз в минуту вечно.
+    it('откладывает цикл, в котором не долилась ни одна голодная тема', async () => {
+      const graph = graphOf([topic('math.a'), topic('math.b')]);
+      const delays: number[] = [];
+
+      const handle = startWorker({
+        db,
+        graph,
+        log,
+        produce: () => Promise.reject(new CodexRunError('codex завершился с кодом 1: not logged in')),
+        wait: (ms): Promise<void> => {
+          delays.push(ms);
+          if (delays.length >= 2) handle.stop();
+          return Promise.resolve();
+        },
+      });
+
+      await handle.done;
+
+      expect(delays).toEqual([BACKOFF_BASE_MS, BACKOFF_BASE_MS * 2]);
+      expect(logged.join('\n')).toMatch(/ни одна из 2 голодных тем не пополнена/);
+    });
+
+    // Иначе отступ включался бы на здоровой модели: одна тема упала, соседняя
+    // долилась — очередь греется, ждать полчаса не за чем.
+    it('не откладывает цикл, в котором долилась хотя бы одна тема', async () => {
+      const graph = graphOf([topic('math.a'), topic('math.b')]);
+      const delays: number[] = [];
+
+      const handle = startWorker({
+        db,
+        graph,
+        log,
+        produce: (request) =>
+          request.topic.id === 'math.a'
+            ? Promise.reject(new CodexRunError('codex завершился с кодом 1'))
+            : Promise.resolve(batchOf(request.topic.id, QUEUE_TARGET)),
+        wait: (ms): Promise<void> => {
+          delays.push(ms);
+          handle.stop();
+          return Promise.resolve();
+        },
+      });
+
+      await handle.done;
+
+      expect(delays).toEqual([IDLE_INTERVAL_MS]);
+    });
+
+    // Пустой цикл — не отказ: греть просто нечего, все темы уже тёплые.
+    it('не откладывает цикл, в котором голодных тем не было', async () => {
+      const graph = graphOf([topic('math.a')]);
+      storeTasks(db, 'math.a', batchOf('math.a', QUEUE_TARGET));
+      const delays: number[] = [];
+
+      const handle = startWorker({
+        db,
+        graph,
+        log,
+        produce: () => Promise.reject(new CodexRunError('сюда дойти не должны')),
+        wait: (ms): Promise<void> => {
+          delays.push(ms);
+          handle.stop();
+          return Promise.resolve();
+        },
+      });
+
+      await handle.done;
+
+      expect(delays).toEqual([IDLE_INTERVAL_MS]);
+    });
+
     it('не роняет воркер на неожиданной ошибке цикла', async () => {
-      const graph = graphOf([topic('math.unknown')]);
+      const graph = graphOf([topic('math.a')]);
+      // Профиль читается до всякой генерации: разбор его полей — это уже не
+      // отказ темы, а отказ цикла.
+      writeProfile(db, { name: 'Тимофей', interests: [] });
+      db.prepare('UPDATE profile SET interests = ?').run('не json');
       const delays: number[] = [];
 
       const handle = startWorker({
@@ -513,7 +749,7 @@ describe('воркер тёплой очереди', () => {
       await handle.done;
 
       expect(delays).toEqual([BACKOFF_BASE_MS]);
-      expect(logged.join('\n')).toMatch(/цикл пополнения провалился.*нет в карте/su);
+      expect(logged.join('\n')).toMatch(/цикл пополнения провалился.*Профиль повреждён/su);
     });
 
     it('останавливается по stop, не начиная нового цикла', async () => {
@@ -541,12 +777,78 @@ describe('воркер тёплой очереди', () => {
       expect(cycles).toBe(1);
       expect(delays).toEqual([IDLE_INTERVAL_MS]);
     });
+
+    // Пауза после отказов codex доходит до получаса, и остановка обязана её
+    // прерывать, а не досиживать. Остальные тесты этого не ловят: их `wait`
+    // отдаёт готовый промис и гонка завершается им, а не будильником.
+    it('прерывает начатую паузу, а не досиживает её до конца', async () => {
+      const graph = graphOf([topic('math.a')]);
+      let waiting: (() => void) | null = null;
+
+      const handle = startWorker({
+        db,
+        graph,
+        log,
+        produce: (request) => Promise.resolve(batchOf(request.topic.id, QUEUE_TARGET)),
+        // Пауза не кончается сама: единственный выход — будильник `stop()`.
+        wait: (): Promise<void> =>
+          new Promise<void>((resolve) => {
+            waiting = resolve;
+          }),
+      });
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      expect(waiting).not.toBeNull();
+      handle.stop();
+
+      await expect(
+        Promise.race([
+          handle.done,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('не остановился')), 500)),
+        ]),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  describe('итог цикла', () => {
+    const refill = (patch: Partial<RefillReport>): RefillReport => ({
+      topicId: 'math.a',
+      batches: 1,
+      stored: 0,
+      available: 0,
+      ...patch,
+    });
+    const cycle = (refilled: RefillReport[]): CycleReport => ({
+      topics: refilled.map((item) => item.topicId),
+      refilled,
+      codexUnavailable: false,
+    });
+
+    it('считает провалом цикл, в котором ни одна тема ничего не долила', () => {
+      expect(everyRefillFailed(cycle([refill({ error: 'codex завершился с кодом 1' })]))).toBe(true);
+    });
+
+    // Тема прекращает долив на первом отказе, и упавший второй батч оставляет
+    // ошибку рядом с заданиями первого. Отступ на такой теме включался бы ровно
+    // тогда, когда очередь пополняется.
+    it('не считает провалом тему, которая долилась и упала на следующем батче', () => {
+      expect(
+        everyRefillFailed(
+          cycle([refill({ batches: 2, stored: 3, available: 3, error: 'codex завершился с кодом 1' })]),
+        ),
+      ).toBe(false);
+    });
+
+    it('не считает провалом цикл без голодных тем', () => {
+      expect(everyRefillFailed(cycle([]))).toBe(false);
+    });
   });
 
   it('держит калибровочные числа спеки', () => {
     expect(QUEUE_TARGET).toBe(8);
     expect(REFILL_BELOW).toBe(4);
     expect(MAX_CODEX_CONCURRENCY).toBe(2);
+    expect(MAX_BATCHES_PER_TOPIC).toBe(4);
     expect(WARM_TOPICS).toBe(3);
     expect(IDLE_INTERVAL_MS).toBe(60_000);
     expect(BACKOFF_BASE_MS).toBe(60_000);

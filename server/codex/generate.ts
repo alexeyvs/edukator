@@ -16,7 +16,8 @@ import { join } from 'node:path';
 import type { Topic } from '../curriculum.js';
 import type { Profile } from '../db.js';
 import {
-  CODEX_MODEL,
+  modelForRole,
+  CodexRunError,
   CodexUnavailableError,
   DEFAULT_ATTEMPTS,
   parseCodexAnswer,
@@ -71,7 +72,7 @@ export async function generateTaskBatch(
   }
 
   const run = options.run ?? runCodexCli;
-  const model = options.model ?? CODEX_MODEL;
+  const model = options.model ?? modelForRole('generate');
   const count = options.count ?? TASK_BATCH_SIZE;
   // Персона читается до первого вызова: её отсутствие — ошибка настройки, и
   // узнать о ней дешевле сразу, чем через полминуты работы модели.
@@ -79,12 +80,15 @@ export async function generateTaskBatch(
 
   const workDir = mkdtempSync(join(tmpdir(), 'edukator-tasks-'));
   const failures: string[] = [];
+  // Отдельно от `failures`: в промпт следующей попытки уходит только то, что
+  // модель действительно написала. Сорванный запуск (`CodexRunError`) в отчёт
+  // попадает, а в промпт — нет.
+  let previousError: string | undefined;
 
   try {
     const schemaPath = writeCodexSchema(workDir, TASKS_SCHEMA_PATH);
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      const previousError = failures[failures.length - 1];
       const prompt = buildGenerationPrompt({
         topic,
         difficulty: options.difficulty,
@@ -109,6 +113,7 @@ export async function generateTaskBatch(
         // codex, которого нет в PATH, к третьей попытке не появится.
         if (error instanceof CodexUnavailableError) throw error;
         failures.push((error as Error).message);
+        if (!(error instanceof CodexRunError)) previousError = (error as Error).message;
       }
     }
   } finally {

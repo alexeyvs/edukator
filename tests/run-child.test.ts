@@ -29,6 +29,16 @@ async function waitUntilDead(pid: number): Promise<boolean> {
 }
 
 describe('runChild', () => {
+  // Без срока `setTimeout(…, 0)` срабатывает сразу, а на NaN не срабатывает
+  // никогда — то есть внешний вызов либо гибнет мгновенно, либо висит вечно.
+  it('требует положительный конечный срок', async () => {
+    for (const timeoutMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(
+        runChild({ bin: '/bin/echo', args: ['ок'], label: 'проба', timeoutMs }),
+      ).rejects.toThrow(/срок/u);
+    }
+  });
+
   it.skipIf(process.platform === 'win32')(
     'после выхода лидера добивает потомка, который игнорирует TERM и закрыл stdio',
     async () => {
