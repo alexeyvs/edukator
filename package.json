@@ -15,6 +15,7 @@
     "lint": "eslint ."
   },
   "dependencies": {
+    "ajv": "^8.20.0",
     "better-sqlite3": "^12.4.1",
     "fastify": "^5.6.1"
   },
