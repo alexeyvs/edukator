@@ -10,8 +10,17 @@ import type { ErrorObject, ValidateFunction } from 'ajv';
 /**
  * Ajv поставляется как CommonJS: под ESM `default` оказывается либо самим
  * классом, либо вложенным в `.default` — зависит от того, кто грузит модуль.
+ * Под `moduleResolution: nodenext` тип импорта из CJS — пространство имён, а не
+ * конструктор, поэтому нужный тип назван здесь руками. Проверяет его сам вызов
+ * `compile`: ошибись в форме — упадёт компиляция схем в тестах.
  */
-const Ajv = (Ajv2020 as unknown as { default?: typeof Ajv2020 }).default ?? Ajv2020;
+type Ajv2020Constructor = new (options: {
+  allErrors: boolean;
+  strict: boolean;
+}) => { compile: <T>(schema: object) => ValidateFunction<T> };
+
+const Ajv = ((Ajv2020 as unknown as { default?: unknown }).default ??
+  Ajv2020) as unknown as Ajv2020Constructor;
 
 const compiled = new Map<string, ValidateFunction>();
 

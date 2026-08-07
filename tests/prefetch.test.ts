@@ -330,6 +330,41 @@ describe('prefetch', () => {
       expect(logged.join('\n')).toMatch(/прерван: codex недоступен/u);
     });
 
+    // `CodexUnavailableError` покрывает не всякий отказ: просроченная
+    // авторизация, кончившаяся квота и обрыв сети приезжают ненулевым кодом
+    // возврата и до `codexUnavailable` не доходят. Без второй остановки
+    // `--cycles 3` трижды гонял бы все голодные темы по десять минут на вызов,
+    // зная заранее, что ни одна не долилась. Воркер так и делает.
+    it('прекращает циклы, когда ни одна голодная тема не долилась', async () => {
+      const result = await run({
+        topics: 3,
+        cycles: 3,
+        produce: () => Promise.reject(new Error('codex завершился с кодом 1')),
+      });
+
+      expect(result.cycles).toHaveLength(1);
+      expect(result.cycles[0]?.codexUnavailable).toBe(false);
+      expect(logged.join('\n')).toMatch(/прерван: ни одна из 3 голодных тем не пополнена/u);
+    });
+
+    // Обратная сторона той же остановки: пока очередь греется, циклы обязаны
+    // доигрываться — иначе одна упавшая тема обрывала бы весь прогон.
+    it('не прекращает циклы, пока хотя бы одна тема долилась', async () => {
+      let failing: string | null = null;
+      const result = await run({
+        topics: 2,
+        cycles: 2,
+        produce: (request: ProduceRequest) => {
+          failing ??= request.topic.id;
+          return request.topic.id === failing
+            ? Promise.reject(new Error('codex завершился с кодом 1'))
+            : Promise.resolve(Array.from({ length: 5 }, () => task(request.topic.id)));
+        },
+      });
+
+      expect(result.cycles).toHaveLength(2);
+    });
+
     it('переживает битый посев и всё равно наполняет банк', async () => {
       // Генерация от посева не зависит, а prefetch — единственный способ греть
       // очередь: одна битая тема не должна оставлять банк пустым.

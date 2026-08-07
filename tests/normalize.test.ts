@@ -61,6 +61,40 @@ describe('нормализатор ответов', () => {
       expect(checkAnswer('1,5', expected({ answer: '1 1/2' }), 'number').correct).toBe(true);
     });
 
+    it('делит на сто и смешанное число со знаком процента', () => {
+      // Ветвь смешанного числа возвращалась раньше деления на сто, и «12 1/2%»
+      // читалось как 12,5 вместо 0,125: верный ответ на теме про проценты
+      // засчитывался неверным, а «12 1/2%» рядом с эталоном 12,5 — верным.
+      expect(findNumbers('12 1/2%')).toEqual([0.125]);
+      expect(findNumbers('1 1/2%')).toEqual([0.015]);
+      expect(checkAnswer('12 1/2%', expected({ answer: '0,125' }), 'number').correct).toBe(true);
+      // Оба прочтения записи со знаком процента доступны и здесь.
+      expect(checkAnswer('12 1/2%', expected({ answer: '12,5' }), 'number').correct).toBe(true);
+      expect(checkAnswer('12 1/2%', expected({ answer: '12' }), 'number').correct).toBe(false);
+    });
+
+    it('читает длинное тире как знак минуса', () => {
+      // Автозамена macOS и iOS ставит именно его. Без этого «—45» читалось как
+      // 45: верный отрицательный ответ шёл в незачёт, а неверный положительный
+      // засчитывался.
+      expect(findNumbers('—45')).toEqual([-45]);
+      expect(checkAnswer('—45', expected(), 'number')).toMatchObject({ correct: true });
+      expect(checkAnswer('—45', expected({ answer: '45' }), 'number').correct).toBe(false);
+      // Пунктуационное длинное тире внутри фразы знаком не становится.
+      expect(findNumbers('Ответ — 5')).toEqual([5]);
+    });
+
+    it('сверяет числа с допуском плавающей точки, а не побитово', () => {
+      // Буквальное равенство ломалось бы на разной записи одного числа: 0.1+0.2
+      // не равно 0.3, и «0,3» на эталон «0,1+0,2» уходило бы в mismatch.
+      expect(checkAnswer('0,3', expected({ answer: String(0.1 + 0.2) }), 'number').correct)
+        .toBe(true);
+      expect(checkAnswer('4,35', expected({ answer: String(4.35 + 1e-15) }), 'number').correct)
+        .toBe(true);
+      // Допуск относительный и узкий: соседнее число им не покрывается.
+      expect(checkAnswer('0,3000001', expected({ answer: '0,3' }), 'number').correct).toBe(false);
+    });
+
     it('не принимает числитель смешанного числа за разряды: «1 200/3»', () => {
       // Пробел перед трёхзначной группой — разделитель разрядов только тогда,
       // когда за группой не идёт дробная черта. Иначе «1 200/3» схлопывалось в

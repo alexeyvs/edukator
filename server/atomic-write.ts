@@ -17,8 +17,22 @@ export function writeFileAtomic(path: string, content: string): void {
     handle = undefined;
     renameSync(tempPath, path);
   } catch (error) {
-    if (handle !== undefined) closeSync(handle);
-    rmSync(tempPath, { force: true });
+    // Уборка не имеет права заслонить причину: на переполненном диске
+    // `closeSync` выносит отложенную ошибку записи повторно, и без отдельного
+    // catch она заменила бы исходную, а `rmSync` не выполнился бы вовсе —
+    // временный файл остался бы лежать рядом со снимком в репозитории.
+    if (handle !== undefined) {
+      try {
+        closeSync(handle);
+      } catch {
+        /* исходная ошибка важнее */
+      }
+    }
+    try {
+      rmSync(tempPath, { force: true });
+    } catch {
+      /* исходная ошибка важнее */
+    }
     throw error;
   }
 }

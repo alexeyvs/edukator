@@ -217,6 +217,38 @@ describe('маршруты занятия', () => {
       expect((await answer({ task_id: 7 })).statusCode).toBe(400);
     });
 
+    // Проверялись только отказы на кривых значениях, а годные до занятия не
+    // доезжали ни в одном тесте: подстановка `{hintUsed: false, durationMs: 0}`
+    // была бы невидима, и каждая попытка с подсказкой считалась бы решённой без
+    // неё — а `hint_used` идёт прямо в модель знаний.
+    it('доносит hint_used и duration_ms до записи попытки', async () => {
+      const issued = await next();
+
+      const response = await answer({
+        task_id: issued['id'],
+        answer: '45',
+        hint_used: true,
+        duration_ms: 4200,
+      });
+
+      expect(response.statusCode).toBe(200);
+      const row = db
+        .prepare('SELECT hint_used, duration_ms FROM attempts WHERE task_id = ?')
+        .get(issued['id']) as { hint_used: number; duration_ms: number };
+      expect(row).toEqual({ hint_used: 1, duration_ms: 4200 });
+    });
+
+    it('записывает попытку без подсказки, когда поля не присланы', async () => {
+      const issued = await next();
+
+      await answer({ task_id: issued['id'], answer: '45' });
+
+      const row = db
+        .prepare('SELECT hint_used, duration_ms FROM attempts WHERE task_id = ?')
+        .get(issued['id']) as { hint_used: number; duration_ms: number };
+      expect(row).toEqual({ hint_used: 0, duration_ms: 0 });
+    });
+
     it('отвергает необязательные поля не того типа', async () => {
       const issued = await next();
 
@@ -642,6 +674,21 @@ describe('маршруты занятия', () => {
 
     expect(response.statusCode).toBe(503);
     expect((response.json() as { error: string }).error).toMatch(/карта тем не загружена/);
+  });
+
+  // Все три адреса, а не один: незарегистрированный маршрут отвечает 404 от
+  // Fastify, и клиент прочитал бы отказ по состоянию как опечатку в пути —
+  // ровно то, ради чего заглушка и заведена.
+  it('отдаёт 503 и на приём ответа, и на спор, а не молчаливое 404', async () => {
+    const broken = extraServer({}, join(tempDir, 'нет-такого-каталога'));
+    await broken.ready();
+
+    for (const url of ['/api/session/answer', '/api/session/dispute']) {
+      const response = await broken.inject({ method: 'POST', url, payload: {} });
+
+      expect(response.statusCode, url).toBe(503);
+      expect((response.json() as { error: string }).error, url).toMatch(/карта тем не загружена/);
+    }
   });
 
   it('карта тем и посев остаются доступными: /api/health не сломан занятием', async () => {

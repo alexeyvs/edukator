@@ -180,6 +180,17 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
         log('цикл пополнения прерван: codex недоступен');
         break;
       }
+      // Та же остановка по второму признаку, что и у воркера: просроченная
+      // авторизация, кончившаяся квота и обрыв сети приезжают `CodexRunError` и
+      // до `codexUnavailable` не доходят. Без этого `--cycles 3` трижды
+      // прогоняет все голодные темы по десять минут на вызов, зная заранее, что
+      // ни одна не долилась.
+      if (everyRefillFailed(report)) {
+        log(
+          `цикл пополнения прерван: ни одна из ${report.refilled.length} голодных тем не пополнена`,
+        );
+        break;
+      }
     }
 
     const exported: string[] = [];
@@ -367,9 +378,17 @@ async function main(): Promise<void> {
     (sum, cycle) => sum + cycle.refilled.reduce((inner, refill) => inner + refill.stored, 0),
     0,
   );
+  // Итог выгрузки печатается всегда, когда её просили, — в том числе нулевой:
+  // пропуск предмета по осторожности («исходного файла не было, чужой снимок на
+  // месте») прогон не красит, и умолчав о нём, `--export` выглядел бы
+  // сработавшим, хотя не переписал ни одного файла.
+  const exportSummary =
+    options.exportSeed === true
+      ? `, посев выгружен в ${result.exported.length} файл(ов)` +
+        (result.exportFailed.length === 0 ? '' : `, не выгружен: ${result.exportFailed.join(', ')}`)
+      : '';
   process.stdout.write(
-    `prefetch: ${stored} новых задани(й) за ${result.cycles.length} цикл(ов)` +
-      `${result.exported.length === 0 ? '' : `, посев выгружен в ${result.exported.length} файл(ов)`}\n`,
+    `prefetch: ${stored} новых задани(й) за ${result.cycles.length} цикл(ов)${exportSummary}\n`,
   );
 
   if (prefetchFailed(result)) {

@@ -382,4 +382,46 @@ describe('runCodexCli', () => {
       }),
     ).rejects.toBeInstanceOf(CodexUnavailableError);
   });
+
+  // Слишком длинный промпт даёт `E2BIG` — беду одного вызова, а не всего codex.
+  // Записанная в недоступность, она уводила бы воркер в получасовой отступ, а
+  // `npm run prefetch` — в ненулевой код возврата на исправной модели.
+  it('не считает недоступностью сорванный запуск, который следующий вызов переживёт', async () => {
+    const bin = fakeCodexBin('codex-e2big', 'exit 0');
+    // Аргументы длиннее ARG_MAX: `spawn` отказывает с `E2BIG` ещё до процесса.
+    const call = runCodexCli({
+      prompt: 'п'.repeat(4 * 1024 * 1024),
+      schemaPath: '/s.json',
+      outPath: join(dir, 'answer-e2big.json'),
+      model: 'm',
+      bin,
+    });
+
+    await expect(call).rejects.toBeInstanceOf(CodexRunError);
+    await expect(call).rejects.not.toBeInstanceOf(CodexUnavailableError);
+    // Именно несостоявшийся запуск, а не «codex вышел с нулём и ничего не создал»:
+    // без кода ошибки тест проходил бы и на успешно запустившейся заглушке.
+    await expect(call).rejects.toThrow(/не запустился.*E2BIG/);
+  });
+
+  // Ответ идёт не через stdout, а через `--output-last-message`, то есть предел
+  // вывода `runChild` его не покрывает. Без своей проверки зациклившаяся на
+  // токенах генерация роняла бы процесс на `ERR_STRING_TOO_LONG` — в сервере
+  // это унесло бы и занятие.
+  it('отвергает слишком большой файл ответа, не читая его в память', async () => {
+    const outPath = join(dir, 'answer-huge.json');
+    const bin = fakeCodexBin('codex-huge', `yes '{"x":1}' | head -c 400 > "${outPath}"`);
+
+    const call = runCodexCli({
+      prompt: 'p',
+      schemaPath: '/s.json',
+      outPath,
+      model: 'm',
+      bin,
+      maxOutputBytes: 64,
+    });
+
+    await expect(call).rejects.toBeInstanceOf(CodexRunError);
+    await expect(call).rejects.toThrow(/400 байт при пределе 64/);
+  });
 });

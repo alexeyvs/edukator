@@ -716,14 +716,17 @@ describe('воркер тёплой очереди', () => {
         produce: () => Promise.reject(new CodexRunError('сюда дойти не должны')),
         wait: (ms): Promise<void> => {
           delays.push(ms);
-          handle.stop();
+          // Два цикла: `IDLE_INTERVAL_MS` и `BACKOFF_BASE_MS` совпадают, и по
+          // одной паузе «отступа нет» от «отступ взведён» не отличить. Пустые
+          // циклы одинаковы, поэтому взведённый отступ дал бы удвоение.
+          if (delays.length === 2) handle.stop();
           return Promise.resolve();
         },
       });
 
       await handle.done;
 
-      expect(delays).toEqual([IDLE_INTERVAL_MS]);
+      expect(delays).toEqual([IDLE_INTERVAL_MS, IDLE_INTERVAL_MS]);
     });
 
     it('не роняет воркер на неожиданной ошибке цикла', async () => {
@@ -741,14 +744,17 @@ describe('воркер тёплой очереди', () => {
         produce: producer().produce,
         wait: (ms): Promise<void> => {
           delays.push(ms);
-          handle.stop();
+          // Два цикла, а не один: `IDLE_INTERVAL_MS` и `BACKOFF_BASE_MS` равны,
+          // и по первой паузе отступ от обычного интервала не отличить —
+          // проверка на одном цикле проходила бы и с невзведённым отступом.
+          if (delays.length === 2) handle.stop();
           return Promise.resolve();
         },
       });
 
       await handle.done;
 
-      expect(delays).toEqual([BACKOFF_BASE_MS]);
+      expect(delays).toEqual([BACKOFF_BASE_MS, BACKOFF_BASE_MS * 2]);
       expect(logged.join('\n')).toMatch(/цикл пополнения провалился.*Профиль повреждён/su);
     });
 

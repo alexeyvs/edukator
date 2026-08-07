@@ -7,9 +7,14 @@
  * оглавление, интересы ученика), поэтому вызов идёт без пользовательской
  * конфигурации, в read-only песочнице и с отключёнными инструментами.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { ChildOutputLimitError, ChildTimeoutError, runChild } from '../run-child.js';
+import {
+  ChildOutputLimitError,
+  ChildTimeoutError,
+  MAX_CHILD_OUTPUT_BYTES,
+  runChild,
+} from '../run-child.js';
 
 /**
  * Модель по умолчанию для всех ролей.
@@ -62,6 +67,13 @@ export const DEFAULT_ATTEMPTS = 3;
 export const CODEX_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
+ * Ошибки запуска, которые следующая попытка не исправит: исполняемого файла нет,
+ * прав нет, на его месте каталог. Всё остальное с `errno` — беда одного вызова
+ * (см. разбор в `runCodexCli`).
+ */
+const PERMANENT_SPAWN_ERRORS = new Set(['ENOENT', 'EACCES', 'EPERM', 'ENOTDIR', 'ENOEXEC']);
+
+/**
  * Ключевые слова, которые структурированный вывод не принимает: запрос падает
  * с `invalid_json_schema` ещё до обращения к модели. Ограничения от этого не
  * теряются — их проверяет валидатор на стороне вызывающего, а нарушение уходит
@@ -97,10 +109,12 @@ const UNSUPPORTED_SCHEMA_KEYWORDS = new Set([
  * имена полей данных, а не ключевые слова: поле, названное `pattern` или
  * `minimum`, вырезать нельзя — оно осталось бы в `required`, и схема стала бы
  * невыполнимой.
+ *
+ * `patternProperties` сюда не входит намеренно: оно вырезано целиком фильтром
+ * выше, и запись в обоих наборах была бы недостижимой ветвью.
  */
 const SCHEMA_MAP_KEYWORDS = new Set([
   'properties',
-  'patternProperties',
   'dependentSchemas',
   '$defs',
   'definitions',
@@ -247,11 +261,20 @@ export async function runCodexCli(request: CodexRequest): Promise<string> {
         `codex не найден: ожидался исполняемый файл «${bin}» в PATH`,
       );
     }
-    // Прочие ошибки запуска (нет прав, каталог вместо файла) отличаются от
-    // отсутствия только текстом: процесс не стартовал, и три попытки этого не
-    // исправят.
-    if (system.code !== undefined) {
+    // Прочие постоянные ошибки запуска (нет прав, каталог вместо файла)
+    // отличаются от отсутствия только текстом: процесс не стартовал, и три
+    // попытки этого не исправят.
+    //
+    // Список именно перечислен, а не «всё, у чего есть errno»: сорванный запуск
+    // бывает и бедой одного вызова. Слишком длинный промпт даёт `E2BIG`, нехватка
+    // процессов под нагрузкой — `EAGAIN`, и записав их в «codex недоступен»,
+    // воркер уходил бы в получасовой отступ на исправной модели, бросив все
+    // остальные темы.
+    if (system.code !== undefined && PERMANENT_SPAWN_ERRORS.has(system.code)) {
       throw new CodexUnavailableError(`codex не запускается («${bin}»): ${system.code}`);
+    }
+    if (system.code !== undefined) {
+      throw new CodexRunError(`codex не запустился («${bin}»): ${system.code}`);
     }
     throw error;
   }
@@ -261,6 +284,26 @@ export async function runCodexCli(request: CodexRequest): Promise<string> {
     );
   }
   const stderr = result.stderr;
+
+  // Предел вывода `runChild` этот файл не покрывает: ответ идёт не через stdout,
+  // а через `--output-last-message`. Без проверки размера зациклившаяся на
+  // токенах генерация даёт файл в сотни мегабайт, и чтение его одной строкой
+  // валит процесс на `ERR_STRING_TOO_LONG` — в сервере это уносит и занятие.
+  const limit = request.maxOutputBytes ?? MAX_CHILD_OUTPUT_BYTES;
+  try {
+    const { size } = statSync(request.outPath);
+    if (size > limit) {
+      throw new CodexRunError(
+        `codex записал в ${request.outPath} ${size} байт при пределе ${limit}`,
+      );
+    }
+  } catch (error) {
+    if (error instanceof CodexRunError) throw error;
+    throw new CodexRunError(
+      `codex не записал ответ в ${request.outPath}: ${(error as Error).message}` +
+        (stderr.trim() === '' ? '' : `; stderr: ${stderr.trim()}`),
+    );
+  }
 
   let answer: string;
   try {

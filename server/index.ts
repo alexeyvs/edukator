@@ -124,6 +124,9 @@ function syncLoadedCurriculum(path: string, graph: TopicGraph): SyncResult {
 /** Слушаем все интерфейсы — чтобы заходить с других устройств домашней сети. */
 export const HOST = '0.0.0.0';
 
+/** Порт по умолчанию; переопределяется переменной `PORT` (см. `readPort`). */
+export const DEFAULT_PORT = 3000;
+
 export type CurriculumStatus = 'ok' | 'error';
 
 /** Настройки занятия, которые тесты подменяют: разбирающий спор и запуск фона. */
@@ -277,12 +280,28 @@ export function closeOnSignals(
   }
 }
 
+/**
+ * Порт из окружения. Проверяется, а не приводится через `Number`: `??` ловит
+ * только незаданную переменную, и `PORT=` давало `0` — Fastify слушал случайный
+ * порт, а в баннере стояло `:0`, то есть единственная строка, по которой на
+ * планшете открывают приложение, вела в никуда. `PORT=abc` давало `NaN` и
+ * необработанный отказ верхнеуровневого `await`.
+ */
+export function readPort(value: string | undefined): number {
+  if (value === undefined || value.trim() === '') return DEFAULT_PORT;
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`PORT должен быть целым числом от 1 до 65535, получено «${value}»`);
+  }
+  return port;
+}
+
 const isDirectRun = process.argv[1] !== undefined
   && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (isDirectRun) {
   const app = buildServer();
-  const port = Number(process.env.PORT ?? 3000);
+  const port = readPort(process.env.PORT);
   closeOnSignals(app);
   await app.listen({ host: HOST, port });
   console.log(`edukator слушает http://${HOST}:${port}`);

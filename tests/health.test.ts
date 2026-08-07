@@ -8,7 +8,9 @@ import {
   buildServer,
   checkDatabase,
   closeOnSignals,
+  DEFAULT_PORT,
   HOST,
+  readPort,
   readVersion,
   syncCurriculumState,
 } from '../server/index.js';
@@ -374,19 +376,50 @@ describe('GET /api/health', () => {
   // Сигнал взят посторонний: настоящий SIGINT снял бы сам прогон тестов.
   it('закрывает сервер по сигналу', async () => {
     const closing = buildServer();
-    let closed = false;
-    closing.addHook('onClose', () => {
-      closed = true;
+    // Ожидание закрытия ставится до сигнала и разрешается самим `onClose`:
+    // явный `close()` в конце теста поднял бы флаг и без единого обработчика
+    // сигнала, то есть проверка проходила бы и на пустой `closeOnSignals`.
+    const closed = new Promise<void>((resolve) => {
+      closing.addHook('onClose', () => {
+        resolve();
+      });
     });
     await closing.ready();
 
     closeOnSignals(closing, ['SIGUSR2']);
+    // Обработчик действительно повешен, иначе ждать нечего.
+    expect(process.listenerCount('SIGUSR2')).toBe(1);
     process.emit('SIGUSR2');
-    await closing.close();
+    await closed;
 
-    expect(closed).toBe(true);
+    await closing.close();
     // `once`: повторный тот же сигнал обязан убивать процесс по-обычному, иначе
     // зависшее закрытие нечем прервать.
     expect(process.listenerCount('SIGUSR2')).toBe(0);
+  });
+
+  // `Number(process.env.PORT ?? 3000)` ловил только незаданную переменную:
+  // `PORT=` давало 0 — Fastify слушал случайный порт, а в баннере стояло `:0`,
+  // то есть единственная строка, по которой на планшете открывают приложение,
+  // вела в никуда. `PORT=abc` давало NaN и необработанный отказ.
+  describe('readPort', () => {
+    it('берёт умолчание на незаданной и пустой переменной', () => {
+      expect(readPort(undefined)).toBe(DEFAULT_PORT);
+      expect(readPort('')).toBe(DEFAULT_PORT);
+      expect(readPort('   ')).toBe(DEFAULT_PORT);
+      expect(DEFAULT_PORT).toBe(3000);
+    });
+
+    it('принимает заданный порт', () => {
+      expect(readPort('8080')).toBe(8080);
+      expect(readPort(' 1 ')).toBe(1);
+      expect(readPort('65535')).toBe(65535);
+    });
+
+    it('падает внятно на значении, которое портом быть не может', () => {
+      for (const value of ['abc', '0', '-1', '65536', '3000.5', 'Infinity']) {
+        expect(() => readPort(value), value).toThrow(/PORT должен быть целым числом от 1 до 65535/u);
+      }
+    });
   });
 });
