@@ -4,6 +4,7 @@ import {
   findNumbers,
   normalizeChoice,
   normalizeText,
+  questionFingerprint,
   type ExpectedAnswer,
 } from '../server/normalize.js';
 
@@ -223,6 +224,35 @@ describe('нормализатор ответов', () => {
 
     it('пустой выбор отвергается с причиной empty', () => {
       expect(checkAnswer(' ', expected({ answer: 'Б' }), 'choice').reason).toBe('empty');
+    });
+  });
+
+  describe('отпечаток формулировки', () => {
+    it('снимает регистр, ё, пунктуацию и разницу в пробелах', () => {
+      const same = [
+        'Сколько будет 2 + 2?',
+        '  сколько   будет 2+2 ',
+        'Сколько будет 2 + 2!',
+        'Сколько будет 2+2',
+      ].map(questionFingerprint);
+
+      expect(new Set(same).size).toBe(1);
+      expect(questionFingerprint('Что подберёшь?')).toBe(questionFingerprint('что подберешь'));
+    });
+
+    it('сохраняет числа: задания, отличающиеся только ими, — разные', () => {
+      expect(questionFingerprint('Сколько будет 2 + 2?')).not.toBe(
+        questionFingerprint('Сколько будет 3 + 5?'),
+      );
+    });
+
+    it('сохраняет разделитель внутри числа и снимает его на границе слова', () => {
+      expect(questionFingerprint('Итого 2,5 кг.')).toBe('итого 2,5 кг');
+      expect(questionFingerprint('Итого 25 кг')).not.toBe(questionFingerprint('Итого 2,5 кг'));
+    });
+
+    it('на строке без букв и цифр даёт пустой отпечаток', () => {
+      expect(questionFingerprint('  ???  ')).toBe('');
     });
   });
 

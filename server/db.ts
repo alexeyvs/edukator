@@ -9,7 +9,7 @@ const projectRoot = resolve(here, '..');
  * Версия схемы. Хранится в `PRAGMA user_version`; миграция сравнивает её со
  * своей и пропускает работу, если база уже актуальна.
  */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /** Семь таблиц из спеки. Тесты сверяют состав базы именно с этим списком. */
 export const TABLES = [
@@ -85,11 +85,19 @@ const SCHEMA = `
     difficulty INTEGER NOT NULL CHECK (difficulty BETWEEN 1 AND 3),
     status     TEXT    NOT NULL DEFAULT 'pending'
                        CHECK (status IN ('pending', 'valid', 'rejected', 'used')),
+    -- Отпечаток формулировки (questionFingerprint): по нему банк отсекает
+    -- повторы внутри темы.
+    fingerprint TEXT   NOT NULL DEFAULT '',
     created_at TEXT    NOT NULL DEFAULT (${NOW_ISO})
   );
 
   CREATE INDEX IF NOT EXISTS task_bank_queue
     ON task_bank (topic_id, status, difficulty);
+
+  -- Индекс частичный: у строк, записанных до версии 5, отпечатка нет, и пустое
+  -- значение не должно означать, что они все дубли друг друга.
+  CREATE UNIQUE INDEX IF NOT EXISTS task_bank_fingerprint
+    ON task_bank (topic_id, fingerprint) WHERE fingerprint <> '';
 
   CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY,
@@ -213,6 +221,20 @@ export function migrate(db: Database.Database): void {
       return;
     }
 
+    // Колонка отпечатка добавляется раньше любых `db.exec(SCHEMA)` ниже: SCHEMA
+    // строит по ней уникальный индекс, а существующую с версии 1 таблицу
+    // `CREATE TABLE IF NOT EXISTS` не обновляет — индекс упал бы на нет колонки.
+    // Отпечатки старых строк не восстанавливаются: считать их пришлось бы второй,
+    // SQL-реализацией нормализации, а частичный индекс пустое значение дублем и
+    // не считает.
+    const taskBankColumns = db
+      .prepare<[], { name: string }>('PRAGMA table_info(task_bank)')
+      .all()
+      .map((column) => column.name);
+    if (taskBankColumns.length > 0 && !taskBankColumns.includes('fingerprint')) {
+      db.exec(`ALTER TABLE task_bank ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''`);
+    }
+
     if (version.user_version === 1) {
       const badRun = db.prepare('SELECT id FROM runs WHERE correct > total LIMIT 1').get();
       const badAttempt = db.prepare(
@@ -264,6 +286,7 @@ export function migrate(db: Database.Database): void {
         DROP TRIGGER IF EXISTS attempts_topic_consistency_update;
         DROP INDEX IF EXISTS attempts_by_topic;
         DROP INDEX IF EXISTS task_bank_queue;
+        DROP INDEX IF EXISTS task_bank_fingerprint;
 
         ALTER TABLE disputes RENAME TO disputes_v3;
         ALTER TABLE attempts RENAME TO attempts_v3;
@@ -302,6 +325,15 @@ export function migrate(db: Database.Database): void {
       `);
     }
 
+    if (version.user_version <= 4) {
+      // Колонка уже добавлена выше; базе версии 4 не хватает только индекса —
+      // базы версий 1-3 получили его вместе с SCHEMA.
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS task_bank_fingerprint
+          ON task_bank (topic_id, fingerprint) WHERE fingerprint <> '';
+      `);
+    }
+
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   })();
 }
@@ -309,7 +341,7 @@ export function migrate(db: Database.Database): void {
 const REQUIRED_COLUMNS: Readonly<Record<(typeof TABLES)[number], readonly string[]>> = {
   profile: ['id', 'name', 'interests', 'exam_date', 'partner_name'],
   topic_state: ['topic_id', 'mastery', 'confidence', 'attempts', 'last_seen', 'next_review'],
-  task_bank: ['id', 'topic_id', 'question', 'answer', 'accept', 'hint', 'explain', 'joke', 'difficulty', 'status', 'created_at'],
+  task_bank: ['id', 'topic_id', 'question', 'answer', 'accept', 'hint', 'explain', 'joke', 'difficulty', 'status', 'fingerprint', 'created_at'],
   runs: ['id', 'subject', 'topic_id', 'started_at', 'finished_at', 'total', 'correct'],
   attempts: ['id', 'task_id', 'topic_id', 'run_id', 'answer', 'is_correct', 'hint_used', 'duration_ms', 'created_at'],
   disputes: ['id', 'attempt_id', 'status', 'resolution', 'created_at', 'resolved_at'],
@@ -318,6 +350,7 @@ const REQUIRED_COLUMNS: Readonly<Record<(typeof TABLES)[number], readonly string
 
 const REQUIRED_AUXILIARY_OBJECTS = [
   'task_bank_queue',
+  'task_bank_fingerprint',
   'attempts_by_topic',
   'forecast_by_subject',
   'runs_correct_not_above_total_insert',

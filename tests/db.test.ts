@@ -282,6 +282,51 @@ describe('база данных', () => {
       expect(version.user_version).toBe(1);
     });
 
+    it('добавляет отпечаток формулировки базе версии 4, сохраняя задания', () => {
+      const path = join(tempDir, 'версия-4.db');
+      const legacy = openDatabase(path);
+      const topicId = seedTopic(legacy);
+      seedTask(legacy, topicId);
+      // Схема версии 4 — текущая без отпечатка: колонка входит в индекс, так что
+      // сначала снимается он.
+      legacy.exec('DROP INDEX task_bank_fingerprint; ALTER TABLE task_bank DROP COLUMN fingerprint;');
+      legacy.pragma('user_version = 4');
+      legacy.close();
+
+      const migrated = openDatabase(path);
+      try {
+        const [version] = migrated.pragma('user_version') as [{ user_version: number }];
+        const rows = migrated
+          .prepare<[], { question: string; fingerprint: string }>(
+            'SELECT question, fingerprint FROM task_bank',
+          )
+          .all();
+
+        expect(version.user_version).toBe(SCHEMA_VERSION);
+        expect(rows).toEqual([{ question: 'Сколько будет 2 + 2?', fingerprint: '' }]);
+
+        // Отпечатков у старых строк нет, и пустое значение не считается дублем;
+        // новые записи уникальны по теме.
+        seedTask(migrated, topicId);
+        migrated
+          .prepare(
+            `INSERT INTO task_bank (topic_id, question, answer, difficulty, fingerprint)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+          .run(topicId, 'Новое задание', '4', 2, 'новое задание');
+        expect(() =>
+          migrated
+            .prepare(
+              `INSERT INTO task_bank (topic_id, question, answer, difficulty, fingerprint)
+               VALUES (?, ?, ?, ?, ?)`,
+            )
+            .run(topicId, 'новое  задание!', '4', 2, 'новое задание'),
+        ).toThrow(/UNIQUE/i);
+      } finally {
+        migrated.close();
+      }
+    });
+
     it('не объявляет текущей непустую базу без номера версии', () => {
       const path = join(tempDir, 'неизвестная.db');
       const unknown = new BetterSqlite3(path);

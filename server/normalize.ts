@@ -134,6 +134,30 @@ export function normalizeChoice(value: string): string {
   return value.trim();
 }
 
+/**
+ * Разделитель, стоящий не между цифрами: точка в конце предложения, дефис в
+ * «что-то», косая черта в «и/или». Внутри числа те же знаки значимы — «2,5» и
+ * «25» разные условия, — поэтому вырезаются только краевые.
+ */
+const OUTER_SEPARATOR = /(?<!\p{N})[.,/-]|[.,/-](?!\p{N})/gu;
+
+/** Всё остальное, что не буква, не цифра и не разделитель числа. */
+const PUNCTUATION = /[^\p{L}\p{N}.,/-]+/gu;
+
+/**
+ * Отпечаток формулировки задания: по нему банк отсекает повторы внутри темы.
+ * Снимает регистр, «ё», пунктуацию и разницу в пробелах, но **сохраняет числа**:
+ * «сколько будет 2+2» и «сколько будет 3+5» — разные задания, и склеив их,
+ * банк отверг бы всю тему после первого же задания.
+ */
+export function questionFingerprint(text: string): string {
+  return normalizeText(text)
+    .replace(OUTER_SEPARATOR, ' ')
+    .replace(PUNCTUATION, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function candidates(expected: ExpectedAnswer): string[] {
   return [expected.answer, ...(expected.accept ?? [])];
 }
