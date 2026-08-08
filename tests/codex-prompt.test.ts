@@ -117,8 +117,23 @@ describe('buildGenerationPrompt: состав промпта', () => {
 
     expect(prompt).toContain('2–6 вариантов в choices');
     expect(prompt).toContain('accept должен содержать только answer');
+    expect(prompt).toContain('accept — ровно один элемент: answer');
+    expect(prompt).not.toContain('accept — от одной до четырёх');
     expect(prompt).toContain('без буквенных меток A/B/C');
     expect(prompt).not.toContain('сама метка отдельно');
+  });
+
+  it('разрешает несколько равноправных accept только для свободного ввода', () => {
+    for (const answerFormat of ['number', 'text'] as const) {
+      const prompt = buildGenerationPrompt({
+        topic: topic({ answerFormat }),
+        difficulty: 1,
+        persona: PERSONA,
+      });
+
+      expect(prompt).toContain('accept — от одной до четырёх');
+      expect(prompt).not.toContain('accept — ровно один элемент: answer');
+    }
   });
 
   it('приводит целевую сложность к диапазону 1..3', () => {
