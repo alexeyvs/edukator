@@ -17,10 +17,31 @@ export interface SubjectForecast {
   high: number;
 }
 
+export interface Streak {
+  current: number;
+  best: number;
+  completedToday: boolean;
+}
+
+export type BossReadiness =
+  | { status: 'working'; eligible: boolean }
+  | { status: 'closed'; eligible: false }
+  | { status: 'preparing' | 'ready'; eligible: boolean; batchId: number }
+  | { status: 'active'; eligible: boolean; batchId: number; runId: number };
+
+export interface HomeTopic {
+  id: string;
+  title: string;
+  subject: Subject;
+  readiness: BossReadiness;
+}
+
 export interface DayPlanResponse {
   plan: PlannedRun[];
   forecasts: SubjectForecast[];
   triage: Array<{ subject: Subject; passed: boolean }>;
+  streak: Streak;
+  topics: HomeTopic[];
 }
 
 export interface ProfileSummary {
@@ -33,10 +54,17 @@ export interface StartRunResponse {
   progress: RunProgress;
 }
 
+export interface StartBossResponse {
+  batchId: number;
+  runId: number;
+  resumed: boolean;
+}
+
 export interface HomeApi {
   plan(): Promise<DayPlanResponse>;
   profile(): Promise<ProfileSummary>;
   start(subject: Subject): Promise<StartRunResponse>;
+  startBoss(topicId: string): Promise<StartBossResponse>;
   startTriage(subject: Subject): Promise<StartRunResponse>;
   finish(runId: number): Promise<FinishRunResponse>;
 }
@@ -62,10 +90,19 @@ function postSubject<T>(url: string, subject: Subject): Promise<T> {
   });
 }
 
+function postTopic<T>(url: string, topicId: string): Promise<T> {
+  return request<T>(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ topic_id: topicId }),
+  });
+}
+
 export const browserHomeApi: HomeApi = {
   plan: () => request<DayPlanResponse>('/api/run/plan'),
   profile: () => request<ProfileSummary>('/api/profile'),
   start: (subject) => postSubject<StartRunResponse>('/api/run/start', subject),
+  startBoss: (topicId) => postTopic<StartBossResponse>('/api/boss/start', topicId),
   startTriage: (subject) => postSubject<StartRunResponse>('/api/triage/start', subject),
   finish: (runId) => request<FinishRunResponse>(`/api/run/${runId}/finish`, { method: 'POST' }),
 };

@@ -23,6 +23,7 @@ describe('браузерные API-адаптеры', () => {
     await browserHomeApi.plan();
     await browserHomeApi.profile();
     await browserHomeApi.start('math');
+    await browserHomeApi.startBoss('math.fractions');
     await browserHomeApi.startTriage('english');
     await browserHomeApi.finish(7);
     await browserProfileApi.read();
@@ -37,6 +38,10 @@ describe('браузерные API-адаптеры', () => {
       ['/api/run/plan', undefined],
       ['/api/profile', undefined],
       ['/api/run/start', expect.objectContaining({ method: 'POST', body: '{"subject":"math"}' })],
+      ['/api/boss/start', expect.objectContaining({
+        method: 'POST',
+        body: '{"topic_id":"math.fractions"}',
+      })],
       ['/api/triage/start', expect.objectContaining({ method: 'POST', body: '{"subject":"english"}' })],
       ['/api/run/7/finish', { method: 'POST' }],
       ['/api/profile', undefined],

@@ -3,6 +3,7 @@ import { FinishScreen } from './FinishScreen';
 import {
   browserHomeApi,
   type DayPlanResponse,
+  type HomeTopic,
   type HomeApi,
   type ProfileSummary,
   type Subject,
@@ -40,6 +41,40 @@ function ExamCountdown({ examDate, now }: { examDate: string | null; now: Date }
   return <p>До экзамена <strong>{days}</strong> дн.</p>;
 }
 
+function StreakCard({ streak }: { streak: DayPlanResponse['streak'] }) {
+  let title: string;
+  let note: string;
+  if (streak.best === 0) {
+    title = 'Первый день серии впереди';
+    note = 'Один обычный забег положит начало.';
+  } else if (streak.current === 0) {
+    title = 'Начни новую серию';
+    note = `Лучший результат — ${streak.best} дн.`;
+  } else {
+    title = `${streak.current} дн. подряд`;
+    note = streak.completedToday
+      ? 'Сегодня серия уже продолжена.'
+      : 'Сегодняшний забег продолжит серию.';
+  }
+  return (
+    <section className="streak-card" aria-label="Серия занятий">
+      <span>Серия занятий</span>
+      <strong>{title}</strong>
+      <small>{note}</small>
+    </section>
+  );
+}
+
+function topicStatus(topic: HomeTopic): string {
+  switch (topic.readiness.status) {
+    case 'preparing': return 'Босс готовится';
+    case 'ready': return 'Можно вызвать босса';
+    case 'active': return 'Бой уже начат';
+    case 'closed': return 'Закрыта';
+    case 'working': return topic.readiness.eligible ? 'Босс готовится' : 'В работе';
+  }
+}
+
 export function HomeScreen({
   api = browserHomeApi,
   now = () => new Date(),
@@ -49,6 +84,7 @@ export function HomeScreen({
   const [profile, setProfile] = useState<ProfileSummary | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [starting, setStarting] = useState<Subject | null>(null);
+  const [startingBoss, setStartingBoss] = useState<string | null>(null);
   const [finish, setFinish] = useState<{
     result: FinishRunResponse;
     kind: 'run' | 'triage';
@@ -87,10 +123,27 @@ export function HomeScreen({
     }
   }
 
+  async function startBoss(topicId: string): Promise<void> {
+    setStartingBoss(topicId);
+    setProblem(null);
+    try {
+      const started = await api.startBoss(topicId);
+      navigate(`/?runId=${started.runId}&kind=boss`);
+    } catch (error) {
+      setProblem(error instanceof Error ? error.message : 'Не получилось начать бой с боссом');
+    } finally {
+      setStartingBoss(null);
+    }
+  }
+
   if (finish !== null) return <FinishScreen result={finish.result} kind={finish.kind} />;
 
   const anyTriagePassed = plan?.triage.some((item) => item.passed) ?? false;
   const nextTriage = plan?.triage.find((item) => !item.passed)?.subject ?? 'math';
+  const closedTopicIds = new Set(
+    plan?.topics.filter((topic) => topic.readiness.status === 'closed').map((topic) => topic.id) ?? [],
+  );
+  const visiblePlan = plan?.plan.filter((item) => !closedTopicIds.has(item.topic.id)) ?? [];
 
   return (
     <main className="home-shell">
@@ -99,6 +152,9 @@ export function HomeScreen({
         <div><span>Подготовка к экзамену</span><strong>Эдукатор</strong></div>
         <a className="profile-link" href="/?screen=profile">Профиль</a>
       </header>
+
+
+      {plan !== null && <StreakCard streak={plan.streak} />}
 
       <section className="home-intro">
         <div>
@@ -177,11 +233,11 @@ export function HomeScreen({
                 </button>
               )}
             </div>
-            {plan.plan.length === 0 ? (
+            {visiblePlan.length === 0 ? (
               <div className="empty-day"><strong>На сегодня всё закрыто</strong><span>Можно отдыхать без чувства долга.</span></div>
             ) : (
               <div className="plan-cards">
-                {plan.plan.map((item, index) => (
+                {visiblePlan.map((item, index) => (
                   <article key={`${item.subject}:${item.topic.id}`}>
                     <span className="plan-number">{String(index + 1).padStart(2, '0')}</span>
                     <div><small>{SUBJECT_NAMES[item.subject]}</small><h3>{item.topic.title}</h3></div>
@@ -199,6 +255,50 @@ export function HomeScreen({
             )}
           </section>
         </>
+      )}
+
+      {plan !== null && (
+        <section className="topic-map" aria-labelledby="topic-map-title">
+          <div className="section-heading">
+            <p>Путь к боссам</p>
+            <h2 id="topic-map-title">Карта тем</h2>
+          </div>
+          <div className="topic-map-subjects">
+            {(Object.keys(SUBJECT_NAMES) as Subject[]).map((subject) => (
+              <section key={subject} aria-labelledby={`topic-map-${subject}`}>
+                <h3 id={`topic-map-${subject}`}>{SUBJECT_NAMES[subject]}</h3>
+                <ul>
+                  {plan.topics.filter((topic) => topic.subject === subject).map((topic) => {
+                    const canStart = topic.readiness.status === 'ready' || topic.readiness.status === 'active';
+                    return (
+                      <li
+                        className={topic.readiness.status === 'closed' ? 'topic-closed' : undefined}
+                        key={topic.id}
+                      >
+                        <div>
+                          <span>{topic.title}</span>
+                          <small>{topicStatus(topic)}</small>
+                        </div>
+                        {canStart && (
+                          <button
+                            className="secondary topic-boss-button"
+                            type="button"
+                            disabled={startingBoss !== null}
+                            onClick={() => void startBoss(topic.id)}
+                          >
+                            {startingBoss === topic.id
+                              ? 'Начинаю…'
+                              : topic.readiness.status === 'active' ? 'Продолжить бой' : 'Вызвать босса'}
+                          </button>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </section>
+            ))}
+          </div>
+        </section>
       )}
     </main>
   );

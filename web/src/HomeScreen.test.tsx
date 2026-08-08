@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HomeScreen } from './HomeScreen';
 import type { DayPlanResponse, HomeApi } from './home-api';
@@ -24,6 +24,45 @@ const PLAN: DayPlanResponse = {
     { subject: 'russian', passed: false },
     { subject: 'english', passed: false },
   ],
+  streak: { current: 3, best: 5, completedToday: false },
+  topics: [
+    {
+      id: 'math.fractions',
+      title: 'Обыкновенные дроби',
+      subject: 'math',
+      readiness: { status: 'working', eligible: false },
+    },
+    {
+      id: 'math.percent',
+      title: 'Проценты',
+      subject: 'math',
+      readiness: { status: 'working', eligible: true },
+    },
+    {
+      id: 'russian.vowels',
+      title: 'Безударные гласные',
+      subject: 'russian',
+      readiness: { status: 'preparing', eligible: true, batchId: 2 },
+    },
+    {
+      id: 'russian.syntax',
+      title: 'Синтаксис',
+      subject: 'russian',
+      readiness: { status: 'ready', eligible: true, batchId: 3 },
+    },
+    {
+      id: 'english.articles',
+      title: 'Артикли',
+      subject: 'english',
+      readiness: { status: 'active', eligible: true, batchId: 4, runId: 11 },
+    },
+    {
+      id: 'english.reading',
+      title: 'Чтение',
+      subject: 'english',
+      readiness: { status: 'closed', eligible: false },
+    },
+  ],
 };
 
 function apiWith(plan: DayPlanResponse): HomeApi {
@@ -35,6 +74,7 @@ function apiWith(plan: DayPlanResponse): HomeApi {
       resumed: false,
       progress: { total: 0, correct: 0, target: 12, done: false },
     }),
+    startBoss: vi.fn().mockResolvedValue({ batchId: 3, runId: 10, resumed: false }),
     startTriage: vi.fn().mockResolvedValue({
       runId: 8,
       resumed: false,
@@ -45,6 +85,20 @@ function apiWith(plan: DayPlanResponse): HomeApi {
 }
 
 describe('главный экран', () => {
+  it.each([
+    [{ current: 0, best: 0, completedToday: false }, 'Первый день серии впереди', 'Один обычный забег положит начало.'],
+    [{ current: 3, best: 5, completedToday: false }, '3 дн. подряд', 'Сегодняшний забег продолжит серию.'],
+    [{ current: 4, best: 5, completedToday: true }, '4 дн. подряд', 'Сегодня серия уже продолжена.'],
+    [{ current: 0, best: 5, completedToday: false }, 'Начни новую серию', 'Лучший результат — 5 дн.'],
+  ] as const)('показывает состояние серии %# без обвиняющего текста', async (streak, title, note) => {
+    render(<HomeScreen api={apiWith({ ...PLAN, streak })} />);
+
+    const card = await screen.findByLabelText('Серия занятий');
+    expect(card).toHaveTextContent(title);
+    expect(card).toHaveTextContent(note);
+    expect(card).not.toHaveTextContent(/пропустил|потерял|оборвал/iu);
+  });
+
   it('до первого триажа показывает только его, после — план дня', async () => {
     const before = apiWith({
       ...PLAN,
@@ -168,5 +222,78 @@ describe('главный экран', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('План временно недоступен');
     expect(screen.queryByLabelText('Загрузка плана')).not.toBeInTheDocument();
+  });
+
+  it('показывает все состояния карты по трём предметам без числового mastery и ссылки для родителей', async () => {
+    const plan = {
+      ...PLAN,
+      topics: PLAN.topics.map((topic) => ({ ...topic, mastery: 0.82 })),
+    };
+    const { container } = render(<HomeScreen api={apiWith(plan)} />);
+
+    expect(await screen.findByRole('heading', { name: 'Карта тем' })).toBeInTheDocument();
+    for (const subject of ['Математика', 'Русский язык', 'Английский язык']) {
+      expect(screen.getAllByRole('heading', { name: subject }).length).toBeGreaterThan(0);
+    }
+    expect(screen.getByText('В работе')).toBeInTheDocument();
+    expect(screen.getAllByText('Босс готовится')).toHaveLength(2);
+    expect(screen.getByText('Можно вызвать босса')).toBeInTheDocument();
+    expect(screen.getByText('Бой уже начат')).toBeInTheDocument();
+    expect(screen.getByText('Закрыта')).toBeInTheDocument();
+    expect(container).not.toHaveTextContent('0.82');
+    expect(screen.queryByRole('link', { name: /родител/iu })).not.toBeInTheDocument();
+    expect(container.querySelector('a[href="/parents"]')).toBeNull();
+  });
+
+  it('готовую тему запускает как boss и открывает экран боя', async () => {
+    const api = apiWith(PLAN);
+    const navigate = vi.fn();
+    render(<HomeScreen api={api} navigate={navigate} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Вызвать босса' }));
+
+    await waitFor(() => expect(api.startBoss).toHaveBeenCalledWith('russian.syntax'));
+    expect(navigate).toHaveBeenCalledWith('/?runId=10&kind=boss');
+  });
+
+  it('показывает спокойную подготовку без кнопки и не блокирует обычный план', async () => {
+    render(<HomeScreen api={apiWith(PLAN)} />);
+
+    const map = await screen.findByRole('heading', { name: 'Карта тем' }).then((value) => value.closest('section'));
+    const topic = within(map!).getAllByText('Безударные гласные')
+      .find((value) => value.closest('li') !== null)?.closest('li') ?? null;
+    expect(topic).not.toBeNull();
+    expect(within(topic!).getByText('Босс готовится')).toBeInTheDocument();
+    expect(within(topic!).queryByRole('button')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Начать' })[0]).toBeEnabled();
+  });
+
+  it('показывает ошибку API старта босса и возвращает кнопку', async () => {
+    const api = apiWith(PLAN);
+    vi.mocked(api.startBoss).mockRejectedValue(new Error('Босс пока недоступен'));
+    render(<HomeScreen api={api} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Вызвать босса' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Босс пока недоступен');
+    expect(screen.getByRole('button', { name: 'Вызвать босса' })).toBeEnabled();
+  });
+
+  it('не предлагает закрытую тему в карточках плана дня', async () => {
+    render(<HomeScreen api={apiWith({
+      ...PLAN,
+      plan: [...PLAN.plan, {
+        subject: 'english',
+        topic: { id: 'english.reading', title: 'Чтение' },
+        priority: 3,
+        triagePassed: true,
+      }],
+    })} />);
+
+    await screen.findByRole('heading', { name: 'Забеги на сегодня' });
+    const dayPlan = screen.getByRole('heading', { name: 'Забеги на сегодня' }).closest('section');
+    expect(dayPlan).not.toBeNull();
+    expect(within(dayPlan!).queryByText('Чтение')).not.toBeInTheDocument();
+    expect(within(dayPlan!).getAllByRole('button', { name: 'Начать' })).toHaveLength(2);
   });
 });

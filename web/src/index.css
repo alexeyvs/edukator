@@ -76,6 +76,35 @@ button:disabled {
   margin-bottom: 3.5rem;
 }
 
+.streak-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  gap: .25rem 1rem;
+  margin-bottom: 1.5rem;
+  padding: 1rem 1.25rem;
+  border-left: .3rem solid #e3a31b;
+  border-radius: 0 1rem 1rem 0;
+  background: rgb(255 255 255 / 65%);
+}
+
+.streak-card span {
+  grid-row: 1 / 3;
+  color: #72520c;
+  font-size: .72rem;
+  font-weight: 850;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.streak-card strong {
+  font-size: 1.3rem;
+}
+
+.streak-card small {
+  color: #66756f;
+}
+
 .home-kicker,
 .section-heading p {
   margin: 0 0 .5rem;
@@ -188,8 +217,83 @@ button:disabled {
 }
 
 .forecast-strip,
-.day-plan {
+.day-plan,
+.topic-map {
   margin-top: 3rem;
+}
+
+.topic-map-subjects {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+
+.topic-map-subjects > section {
+  padding: 1rem;
+  border: 1px solid #dbe4de;
+  border-radius: 1.2rem;
+  background: rgb(255 255 255 / 65%);
+}
+
+.topic-map-subjects h3 {
+  margin: 0 0 .8rem;
+  font-size: 1rem;
+}
+
+.topic-map-subjects ul {
+  display: grid;
+  gap: .55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.topic-map-subjects li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+  padding-top: .55rem;
+  border-top: 1px solid #e7ece8;
+}
+
+.topic-map-subjects li:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.topic-map-subjects li > div {
+  display: grid;
+  min-width: 0;
+}
+
+.topic-map-subjects li span {
+  font-size: .84rem;
+  line-height: 1.25;
+}
+
+.topic-map-subjects li small {
+  margin-top: .18rem;
+  color: #0b7c5d;
+  font-size: .7rem;
+  font-weight: 750;
+}
+
+.topic-map-subjects .topic-closed {
+  opacity: .48;
+}
+
+.topic-map-subjects .topic-closed small {
+  color: #66756f;
+}
+
+.topic-boss-button {
+  flex: 0 0 auto;
+  padding: .42rem .55rem;
+  border-radius: .6rem;
+  font-size: .7rem;
+  font-weight: 800;
 }
 
 .section-heading h2 {
@@ -1012,8 +1116,17 @@ button:disabled {
   }
 
   .home-intro,
-  .forecast-cards {
+  .forecast-cards,
+  .topic-map-subjects {
     grid-template-columns: 1fr;
+  }
+
+  .streak-card {
+    grid-template-columns: 1fr;
+  }
+
+  .streak-card span {
+    grid-row: auto;
   }
 
   .home-intro {
