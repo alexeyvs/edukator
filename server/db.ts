@@ -463,16 +463,14 @@ export function migrate(db: Database.Database): void {
       // Старую очередь нельзя показать новым интерфейсом без надёжного деления
       // question на инструкцию и материал. Уже выданные строки остаются ради
       // попыток, споров и восстановления открытого задания.
-      if (version <= 9) {
-        db.exec(`
-          UPDATE task_bank SET status = 'rejected'
-           WHERE status IN ('pending', 'valid')
-             AND EXISTS (SELECT 1 FROM attempts WHERE attempts.task_id = task_bank.id);
-          DELETE FROM task_bank
-           WHERE status IN ('pending', 'valid')
-             AND NOT EXISTS (SELECT 1 FROM attempts WHERE attempts.task_id = task_bank.id);
-        `);
-      }
+      db.exec(`
+        UPDATE task_bank SET status = 'rejected'
+         WHERE status IN ('pending', 'valid')
+           AND EXISTS (SELECT 1 FROM attempts WHERE attempts.task_id = task_bank.id);
+        DELETE FROM task_bank
+         WHERE status IN ('pending', 'valid')
+           AND NOT EXISTS (SELECT 1 FROM attempts WHERE attempts.task_id = task_bank.id);
+      `);
     }
 
     db.pragma(`user_version = ${SCHEMA_VERSION}`);

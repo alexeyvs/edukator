@@ -2,7 +2,7 @@ import type { Database } from 'better-sqlite3';
 import type { Topic, TopicGraph } from './curriculum.js';
 import type { Subject } from './db.js';
 import { issuedTask, takeTask, type BankTask } from './codex/bank.js';
-import { projectIssuedTask, type IssuedTask } from './session.js';
+import { projectIssuedTask, type IssuedTask } from './issued-task.js';
 
 /** Число разных тем, достаточное для первичного ранжирования предмета. */
 export const TRIAGE_TARGET = 12;

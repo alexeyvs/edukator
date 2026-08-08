@@ -16,7 +16,7 @@
  * засчитается сразу.
  */
 import type { Database } from 'better-sqlite3';
-import type { AnswerFormat, Topic, TopicGraph } from './curriculum.js';
+import type { Topic, TopicGraph } from './curriculum.js';
 import type { Subject } from './db.js';
 import {
   readTopicState,
@@ -28,36 +28,16 @@ import { checkAnswer, type CheckResult, type RejectReason } from './normalize.js
 import { activeTopics } from './scheduler.js';
 import { issuedTask, type BankTask } from './codex/bank.js';
 import { takeTaskOrSeed } from './codex/seed-bank.js';
-import { duplicateKey, fitsAccept, taskPromptText } from './codex/task-schema.js';
+import { duplicateKey, fitsAccept } from './codex/task-schema.js';
 import type { DisputeContext, DisputeReviewer } from './codex/dispute.js';
 import { runProgress, type RunProgress } from './run.js';
 import { SessionError, type SessionErrorCode } from './session-error.js';
 import { taskXp } from './xp.js';
+import { projectIssuedTask, type IssuedTask } from './issued-task.js';
+
+export type { IssuedTask } from './issued-task.js';
 
 export { SessionError, type SessionErrorCode };
-
-/**
- * Задание в том виде, в каком его получает ученик. Ни `answer`, ни `accept[]`
- * здесь нет и быть не может: сверка идёт на сервере, а приехавший в браузер
- * ответ означал бы, что смотреть его проще, чем решать.
- *
- * `explain` и `joke` тоже остаются на сервере до ответа: разбор пересказывает
- * решение целиком, то есть содержит тот же ответ другими словами.
- */
-export interface IssuedTask {
-  id: number;
-  topicId: string;
-  subject: Subject;
-  topicTitle: string;
-  question: string;
-  instruction?: string;
-  material?: string;
-  materialFormat?: 'none' | 'text' | 'math';
-  choices?: string[];
-  hint: string;
-  difficulty: number;
-  answerFormat: AnswerFormat;
-}
 
 export type NextTaskResult =
   | { status: 'ok'; task: IssuedTask }
@@ -111,25 +91,6 @@ function balanceRunTopics(db: Database, runId: number, topics: Topic[]): Topic[]
     .map((topic, order) => ({ topic, order, allocated: allocated.get(topic.id) ?? 0 }))
     .sort((left, right) => left.allocated - right.allocated || left.order - right.order)
     .map(({ topic }) => topic);
-}
-
-export function projectIssuedTask(topic: Topic, task: BankTask): IssuedTask {
-  return {
-      id: task.id,
-      topicId: topic.id,
-      subject: topic.subject,
-      topicTitle: topic.title,
-      question: taskPromptText(task),
-      ...(task.instruction === undefined ? {} : {
-        instruction: task.instruction,
-        material: task.material ?? '',
-        materialFormat: task.material_format ?? 'none',
-        choices: task.choices ?? [],
-      }),
-      hint: task.hint,
-      difficulty: task.difficulty,
-      answerFormat: topic.answerFormat,
-  };
 }
 
 function issuedResult(topic: Topic, task: BankTask): NextTaskResult {

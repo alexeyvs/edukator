@@ -41,7 +41,7 @@ export type TaskPromptFields =
   | Pick<GeneratedTask, 'instruction' | 'material' | 'material_format' | 'choices'>
   | { question: string; instruction?: undefined };
 
-/** Stable plain-text form used anywhere the whole prompt must be compared or reviewed. */
+/** Стабильное текстовое представление полного условия для сравнения и проверки. */
 export function taskPromptText(task: TaskPromptFields): string {
   if (task.instruction === undefined) return task.question?.trim() ?? '';
   const parts = [task.instruction.trim()];

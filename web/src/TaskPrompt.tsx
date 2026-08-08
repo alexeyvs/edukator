@@ -1,6 +1,6 @@
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
-import type { ChangeEvent } from 'react';
+import { memo, type ChangeEvent } from 'react';
 import type { RunTask } from './run-api';
 
 export interface TaskPromptProps {
@@ -11,11 +11,11 @@ export interface TaskPromptProps {
   headingId: string;
   hint?: string;
   hintVisible?: boolean;
-  /** Keep the prompt visible after submission without offering a second answer. */
+  /** Оставляет условие после отправки, не позволяя ответить второй раз. */
   readOnly?: boolean;
 }
 
-function MathMaterial({ source }: { source: string }) {
+const MathMaterial = memo(function MathMaterial({ source }: { source: string }) {
   try {
     const html = katex.renderToString(source, {
       displayMode: true,
@@ -30,7 +30,7 @@ function MathMaterial({ source }: { source: string }) {
   } catch {
     return <pre className="task-math-source" aria-label="Формула в исходной записи">{source}</pre>;
   }
-}
+});
 
 function ChoiceAnswer({ task, answer, onAnswerChange, readOnly }: Pick<TaskPromptProps, 'task' | 'answer' | 'onAnswerChange' | 'readOnly'>) {
   return (

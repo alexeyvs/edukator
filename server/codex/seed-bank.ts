@@ -440,8 +440,8 @@ export function collectSeedTasks(db: Database, graph: TopicGraph, subject: Subje
     if (!Array.isArray(choices) || choices.some((item) => typeof item !== 'string')) {
       throw new Error(`Посевной банк: choices задания «${row.question}» не массив строк`);
     }
-    // Legacy rows remain queryable for attempts, but are never exported back
-    // into the strictly structured seed bank.
+    // Старые строки остаются доступны для истории попыток, но обратно в строго
+    // структурированный посевной банк не выгружаются.
     if (row.instruction === null) continue;
     const task: GeneratedTask = {
       instruction: row.instruction,

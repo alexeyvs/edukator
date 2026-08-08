@@ -1,4 +1,4 @@
-import type { IssuedTask } from '../session.js';
+import type { IssuedTask } from '../issued-task.js';
 
 export function issuedTaskJson(task: IssuedTask, includeHint = true): Record<string, unknown> {
   return {
