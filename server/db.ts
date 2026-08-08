@@ -9,7 +9,7 @@ const projectRoot = resolve(here, '..');
  * Версия схемы. Хранится в `PRAGMA user_version`; миграция сравнивает её со
  * своей и пропускает работу, если база уже актуальна.
  */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /** Семь таблиц из спеки. Тесты сверяют состав базы именно с этим списком. */
 export const TABLES = [
@@ -113,6 +113,10 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY,
     subject     TEXT    NOT NULL CHECK (subject IN (${subjectCheck})),
+    kind        TEXT    NOT NULL DEFAULT 'run' CHECK (kind IN ('run', 'triage')),
+    -- Тема, ради которой забег начат. Внутри забега задания могут относиться к
+    -- другим темам предмета; это поле читают планировочные эвристики
+    -- activeRunTopics, topicsUsedToday и lastRunSubject.
     topic_id    TEXT    NOT NULL REFERENCES topic_state (topic_id) ON DELETE CASCADE,
     started_at  TEXT    NOT NULL,
     finished_at TEXT,
@@ -366,6 +370,19 @@ export function migrate(db: Database.Database): void {
       `);
     }
 
+    if (version <= 5) {
+      const runColumns = db
+        .prepare<[], { name: string }>('PRAGMA table_info(runs)')
+        .all()
+        .map((column) => column.name);
+      if (!runColumns.includes('kind')) {
+        db.exec(`
+          ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'run'
+            CHECK (kind IN ('run', 'triage'));
+        `);
+      }
+    }
+
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   }).immediate();
 }
@@ -374,7 +391,7 @@ const REQUIRED_COLUMNS: Readonly<Record<(typeof TABLES)[number], readonly string
   profile: ['id', 'name', 'interests', 'exam_date', 'partner_name'],
   topic_state: ['topic_id', 'mastery', 'confidence', 'attempts', 'last_seen', 'next_review'],
   task_bank: ['id', 'topic_id', 'question', 'answer', 'accept', 'hint', 'explain', 'joke', 'difficulty', 'status', 'fingerprint', 'created_at'],
-  runs: ['id', 'subject', 'topic_id', 'started_at', 'finished_at', 'total', 'correct'],
+  runs: ['id', 'subject', 'kind', 'topic_id', 'started_at', 'finished_at', 'total', 'correct'],
   attempts: ['id', 'task_id', 'topic_id', 'run_id', 'answer', 'is_correct', 'hint_used', 'duration_ms', 'created_at'],
   disputes: ['id', 'attempt_id', 'status', 'resolution', 'created_at', 'resolved_at'],
   forecast_snapshots: ['id', 'subject', 'score', 'band', 'created_at'],

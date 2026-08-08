@@ -137,6 +137,14 @@ function createVersionTwoDatabase(path: string): Database {
   return legacy;
 }
 
+/** Схема версии 5 отличается от текущей только отсутствием вида забега. */
+function createVersionFiveDatabase(path: string): Database {
+  const legacy = openDatabase(path);
+  legacy.exec('ALTER TABLE runs DROP COLUMN kind;');
+  legacy.pragma('user_version = 5');
+  return legacy;
+}
+
 describe('база данных', () => {
   let tempDir: string;
   let dbFile: string;
@@ -161,7 +169,7 @@ describe('база данных', () => {
     // рабочую базу, поэтому число прибито буквально и меняется только вместе с
     // новой ступенью и её тестом обновления.
     it('держит номер версии схемы', () => {
-      expect(SCHEMA_VERSION).toBe(5);
+      expect(SCHEMA_VERSION).toBe(6);
     });
 
     it('создаёт все семь таблиц на пустой базе', () => {
@@ -540,6 +548,36 @@ describe('база данных', () => {
       }
     });
 
+    it('добавляет вид забега базе версии 5 и сохраняет старые строки обычными забегами', () => {
+      const path = join(tempDir, 'версия-5.db');
+      const legacy = createVersionFiveDatabase(path);
+      const topicId = seedTopic(legacy);
+      legacy
+        .prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+        .run('math', topicId, '2026-08-07T10:00:00.000Z');
+      legacy.close();
+
+      const migrated = openDatabase(path);
+      try {
+        const [version] = migrated.pragma('user_version') as [{ user_version: number }];
+        const columns = migrated
+          .prepare<[], { name: string; notnull: number; dflt_value: string | null }>(
+            'PRAGMA table_info(runs)',
+          )
+          .all();
+        const run = migrated.prepare<[], { kind: string }>('SELECT kind FROM runs').get();
+
+        expect(version.user_version).toBe(SCHEMA_VERSION);
+        expect(columns.find((column) => column.name === 'kind')).toMatchObject({
+          notnull: 1,
+          dflt_value: "'run'",
+        });
+        expect(run).toEqual({ kind: 'run' });
+      } finally {
+        migrated.close();
+      }
+    });
+
     it('не объявляет текущей непустую базу без номера версии', () => {
       const path = join(tempDir, 'неизвестная.db');
       const unknown = new BetterSqlite3(path);
@@ -558,6 +596,16 @@ describe('база данных', () => {
       db.pragma(`user_version = ${SCHEMA_VERSION + 1}`);
 
       expect(() => migrate(db)).toThrow(/более новой версией схемы/);
+    });
+
+    it('отвергает неизвестный вид забега', () => {
+      const topicId = seedTopic(db);
+
+      expect(() =>
+        db
+          .prepare('INSERT INTO runs (subject, kind, topic_id, started_at) VALUES (?, ?, ?, ?)')
+          .run('math', 'экзамен', topicId, '2026-08-07T10:00:00.000Z'),
+      ).toThrow(/CHECK constraint failed/);
     });
 
     it('не оставляет открытое соединение, если миграция упала', () => {
