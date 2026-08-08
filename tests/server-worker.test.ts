@@ -8,7 +8,11 @@ import { openDatabase } from '../server/db.js';
 import { loadCurriculum } from '../server/curriculum.js';
 import { activeTopics } from '../server/scheduler.js';
 import { storeTasks } from '../server/codex/bank.js';
-import { CodexConcurrency, MAX_CODEX_CONCURRENCY } from '../server/codex/concurrency.js';
+import {
+  CodexConcurrency,
+  MAX_CODEX_CONCURRENCY,
+  MAX_DISPUTE_CONCURRENCY,
+} from '../server/codex/concurrency.js';
 import { CodexUnavailableError } from '../server/codex/client.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import type { DisputeReview } from '../server/codex/dispute.js';
@@ -41,32 +45,35 @@ describe('воркер рабочего сервера', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('делит предел с разбором спора и при закрытии дописывает банк до закрытия базы', async () => {
+  it('запускает спор в отдельном слоте при занятом воркере', async () => {
     expect(MAX_CODEX_CONCURRENCY).toBe(2);
+    expect(MAX_DISPUTE_CONCURRENCY).toBe(1);
     const budget = new CodexConcurrency(MAX_CODEX_CONCURRENCY);
-    let releaseProduce: ((tasks: GeneratedTask[]) => void) | undefined;
+    const disputes = new CodexConcurrency(MAX_DISPUTE_CONCURRENCY);
+    const releaseProduce: ((tasks: GeneratedTask[]) => void)[] = [];
     let releaseReview: ((review: DisputeReview) => void) | undefined;
-    let producingTopic = '';
+    const producingTopics: string[] = [];
     let peak = 0;
     const startedProduce = new Promise<void>((resolve) => {
       app = buildServer(undefined, {
         seedDir: join(tempDir, 'seed-bank'),
         codexBudget: budget,
+        disputeBudget: disputes,
         worker: {
-          topics: 1,
+          topics: 2,
           target: 2,
           threshold: 2,
           produce: (request) => {
-            producingTopic = request.topic.id;
-            peak = Math.max(peak, budget.active);
-            resolve();
+            producingTopics.push(request.topic.id);
+            peak = Math.max(peak, budget.active + disputes.active);
+            if (producingTopics.length === MAX_CODEX_CONCURRENCY) resolve();
             return new Promise<GeneratedTask[]>((done) => {
-              releaseProduce = done;
+              releaseProduce.push(done);
             });
           },
         },
         review: () => {
-          peak = Math.max(peak, budget.active);
+          peak = Math.max(peak, budget.active + disputes.active);
           return new Promise<DisputeReview>((done) => {
             releaseReview = done;
           });
@@ -104,10 +111,12 @@ describe('воркер рабочего сервера', () => {
 
     expect(dispute.statusCode).toBe(202);
     await viWaitFor(() => releaseReview !== undefined);
-    expect(producingTopic).toBe(topic.id);
-    expect(budget.active).toBe(2);
-    expect(peak).toBe(2);
-    expect(budget.tryRun(() => Promise.resolve())).toBeUndefined();
+    expect(producingTopics).toHaveLength(MAX_CODEX_CONCURRENCY);
+    expect(producingTopics).toContain(topic.id);
+    expect(budget.active).toBe(MAX_CODEX_CONCURRENCY);
+    expect(disputes.active).toBe(1);
+    expect(peak).toBe(MAX_CODEX_CONCURRENCY + MAX_DISPUTE_CONCURRENCY);
+    expect(disputes.tryRun(() => Promise.resolve())).toBeUndefined();
 
     let closed = false;
     const closing = server.close().then(() => {
@@ -117,10 +126,12 @@ describe('воркер рабочего сервера', () => {
     expect(closed).toBe(false);
 
     releaseReview?.({ studentCorrect: false, note: 'ответ отличается' });
-    releaseProduce?.([
-      generated('В коробке 90 деталей, половину забрали. Сколько осталось?'),
-      generated('Из 90 страниц прочитали половину. Сколько страниц осталось?'),
-    ]);
+    releaseProduce.forEach((release, index) => {
+      release([
+        generated(`Задание для прогрева ${index + 1}, вариант 1`),
+        generated(`Задание для прогрева ${index + 1}, вариант 2`),
+      ]);
+    });
     await closing;
 
     const reopened = openDatabase(process.env.EDUKATOR_DB);

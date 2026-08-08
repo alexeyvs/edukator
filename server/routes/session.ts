@@ -11,7 +11,7 @@ import type { Database } from 'better-sqlite3';
 import type { TopicGraph } from '../curriculum.js';
 import { disputeReviewer, type DisputeReviewer } from '../codex/dispute.js';
 import { MAX_ANSWER_LENGTH } from '../codex/prompt.js';
-import { codexConcurrency, type CodexConcurrency } from '../codex/concurrency.js';
+import { disputeConcurrency, type CodexConcurrency } from '../codex/concurrency.js';
 import {
   nextTask,
   openDispute,
@@ -70,8 +70,8 @@ export interface SessionRoutesOptions {
   seedDir?: string;
   /** Соединение всё ещё привязано к текущему файлу базы. */
   available?: () => boolean;
-  /** Общий с воркером бюджет вызовов codex. */
-  codexBudget?: CodexConcurrency;
+  /** Отдельный бюджет разбора споров. */
+  disputeBudget?: CodexConcurrency;
   /** Пауза перед автоматическим повтором незакрытого спора. */
   disputeRetryMs?: number;
 }
@@ -125,7 +125,7 @@ export function registerSessionRoutes(
   const log = options.log ?? defaultLog;
   const background: BackgroundRunner = options.background ?? ((task) => void task());
   const now = options.now ?? ((): Date => new Date());
-  const budget = options.codexBudget ?? codexConcurrency;
+  const budget = options.disputeBudget ?? disputeConcurrency;
   const disputeRetryMs = options.disputeRetryMs ?? 1_000;
   // Короткие повторы быстро переживают случайный отказ, но постоянная поломка
   // codex не должна запускать сотни внешних процессов в час на каждый спор.
@@ -151,8 +151,9 @@ export function registerSessionRoutes(
    * занимает минуты. Ошибка разбора спор не закрывает — он остаётся открытым, и
    * следующее нажатие кнопки ставит его на разбор заново.
    *
-   * Одновременных разборов вместе с воркером не больше общего бюджета: набор `reviewing`
-   * держит только повтор по одному и тому же спору, а разных открытых споров
+   * Разборы не делят бюджет с воркером: фоновый прогрев не должен задерживать
+   * ответ ученику. Набор `reviewing` держит только повтор по одному
+   * и тому же спору, а разных споров
    * бывает сколько угодно, и каждый — это ещё один процесс codex на минуты.
    * Сверх предела спор остаётся открытым и попадёт на разбор со следующим
    * запросом — ровно тот же сценарий, что и при недоступном codex.

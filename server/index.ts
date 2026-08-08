@@ -23,7 +23,7 @@ import {
   registerUnavailableTriage,
 } from './routes/triage.js';
 import { registerProfileRoutes, registerUnavailableProfile } from './routes/profile.js';
-import { codexConcurrency, type CodexConcurrency } from './codex/concurrency.js';
+import { codexConcurrency, disputeConcurrency, type CodexConcurrency } from './codex/concurrency.js';
 import { startWorker, type StartWorkerOptions, type WorkerHandle } from './codex/worker.js';
 
 export { databasePath };
@@ -220,7 +220,7 @@ export type ServerOptions = Omit<SessionRoutesOptions, 'db' | 'graph' | 'availab
   personaPath?: string;
   /** Подмена настроек воркера в тестах; false отключает его для служебного сервера. */
   worker?: false | Omit<StartWorkerOptions, 'db' | 'graph' | 'budget'>;
-  /** Подменяемый общий бюджет; рабочий сервер использует процессный singleton. */
+  /** Подменяемый бюджет фонового воркера. */
   codexBudget?: CodexConcurrency;
   /** false оставляет статику Vite dev-серверу; строка подменяет каталог в тестах. */
   webDist?: string | false;
@@ -330,6 +330,7 @@ export function buildServer(
   if (graph !== undefined && opened !== undefined) {
     const sessionDb = opened.db;
     const budget = options.codexBudget ?? codexConcurrency;
+    const disputes = options.disputeBudget ?? disputeConcurrency;
     let worker: WorkerHandle | undefined;
     const sessionAvailable = (): boolean => fileIdentity(databasePath()) === opened.file;
     const waitForReviews = registerSessionRoutes(app, {
@@ -337,7 +338,7 @@ export function buildServer(
       db: sessionDb,
       graph,
       available: sessionAvailable,
-      codexBudget: budget,
+      disputeBudget: disputes,
     });
     registerRunRoutes(app, {
       db: sessionDb,

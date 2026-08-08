@@ -11,7 +11,7 @@ import { storeTasks } from '../server/codex/bank.js';
 import type { DisputeContext, DisputeReview } from '../server/codex/dispute.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import { DISPUTE_RETRY_MAX_MS, MAX_ANSWER_LENGTH } from '../server/routes/session.js';
-import { MAX_CODEX_CONCURRENCY } from '../server/codex/worker.js';
+import { MAX_DISPUTE_CONCURRENCY } from '../server/codex/concurrency.js';
 
 /** Карта из одной темы на предмет: без всех трёх файлов карта не грузится. */
 function writeCurriculum(dir: string): void {
@@ -393,7 +393,7 @@ describe('маршруты занятия', () => {
     // Набор «уже разбирается» держит только повтор по одному и тому же спору, а
     // разных открытых споров бывает сколько угодно — и каждый это ещё один
     // процесс codex на минуты.
-    it('не заводит больше одновременных разборов, чем предел вызовов codex', async () => {
+    it('не заводит больше одного разбора в выделенном слоте', async () => {
       const release: (() => void)[] = [];
       const blocking = extraServer({
         seedDir,
@@ -413,7 +413,7 @@ describe('маршруты занятия', () => {
       await blocking.ready();
 
       const attempts: number[] = [];
-      for (let index = 0; index <= MAX_CODEX_CONCURRENCY; index += 1) {
+      for (let index = 0; index <= MAX_DISPUTE_CONCURRENCY; index += 1) {
         attempts.push((await wrongAnswer()).attemptId);
       }
       const disputeAt = (attemptId: number) =>
@@ -424,7 +424,7 @@ describe('маршруты занятия', () => {
         });
       for (const attemptId of attempts) await disputeAt(attemptId);
 
-      expect(reviewed).toHaveLength(MAX_CODEX_CONCURRENCY);
+      expect(reviewed).toHaveLength(MAX_DISPUTE_CONCURRENCY);
       expect(logged.some((message) => message.includes('отложен'))).toBe(true);
 
       for (const resolve of release) resolve();
@@ -432,12 +432,12 @@ describe('маршруты занятия', () => {
 
       // Отложенный спор остался открытым и попадает на разбор со следующим
       // нажатием кнопки — места к тому времени освободились.
-      const retry = await disputeAt(attempts[MAX_CODEX_CONCURRENCY] ?? 0);
+      const retry = await disputeAt(attempts[MAX_DISPUTE_CONCURRENCY] ?? 0);
       expect((retry.json() as { status: string }).status).toBe('open');
       release[release.length - 1]?.();
       await Promise.all(pending);
 
-      expect(reviewed).toHaveLength(MAX_CODEX_CONCURRENCY + 1);
+      expect(reviewed).toHaveLength(MAX_DISPUTE_CONCURRENCY + 1);
     });
 
     it('отвечает 404 на несуществующую попытку и 400 на засчитанную', async () => {
