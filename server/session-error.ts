@@ -11,6 +11,9 @@ export type SessionErrorCode =
   /** Цель достигнута, но итог ещё не зафиксирован через finish. */
   | 'run-complete'
   | 'run-not-ready'
+  | 'run-topic-unavailable'
+  | 'boss-dispute-open'
+  | 'boss-mistake-pending'
   | 'task-not-in-run'
   /** Задание отбраковано при приёме ответа: сверить его не по чему. */
   | 'task-defective';

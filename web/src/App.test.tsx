@@ -41,9 +41,11 @@ describe('App', () => {
 
   it('маршрутизирует kind=boss отдельно от обычного забега и триажа', async () => {
     window.history.replaceState({}, '', '/?runId=7&kind=boss');
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({
+    vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => Promise.resolve({
       ok: true,
-      json: () => Promise.resolve({
+      json: () => Promise.resolve(String(input).includes('/api/boss/7/state') ? {
+        outcome: 'active', progress: { total: 0, correct: 0, target: 5, done: false },
+      } : {
         name: 'Ученик',
         interests: [],
         examDate: null,

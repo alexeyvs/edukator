@@ -187,6 +187,26 @@ describe('занятие', () => {
       expect(reloaded.task).toMatchObject({ id: shown.task.id });
     });
 
+    it('не восстанавливает и не принимает выданное задание после закрытия темы', () => {
+      const runId = Number(
+        db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+          .run('math', 'math.a', new Date().toISOString()).lastInsertRowid,
+      );
+      storeTasks(db, 'math.a', [task()]);
+      const shown = nextTask(db, graph, { runId, seedDir });
+      expect(shown.status).toBe('ok');
+      if (shown.status !== 'ok') return;
+      db.prepare('UPDATE topic_state SET closed_at = ? WHERE topic_id = ?')
+        .run(new Date().toISOString(), 'math.a');
+
+      expect(nextTask(db, graph, { runId, seedDir })).not.toMatchObject({
+        status: 'ok', task: { id: shown.task.id },
+      });
+      expect(() => submitAnswer(db, graph, {
+        runId, taskId: shown.task.id, answer: '45',
+      })).toThrow(/тема.*закрыта/ui);
+    });
+
     it('не выдаёт одно задание дважды после ответа на него', () => {
       storeTasks(db, 'math.a', [task(), task()]);
       storeTasks(db, 'russian.a', [task(), task()]);

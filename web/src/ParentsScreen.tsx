@@ -1,13 +1,6 @@
 import { useEffect, useState } from 'react';
 import { browserParentsApi, type ParentsApi, type ParentsDashboard } from './parents-api';
-import type { Subject } from './home-api';
-
-const SUBJECT_NAMES: Record<Subject, string> = {
-  math: 'Математика',
-  russian: 'Русский язык',
-  english: 'Английский язык',
-};
-const SUBJECTS = Object.keys(SUBJECT_NAMES) as Subject[];
+import { SUBJECT_NAMES, SUBJECTS } from './subject-meta';
 
 const KIND_NAMES = {
   run: 'Обычный забег',
@@ -31,13 +24,21 @@ function previousDay(day: string, count: number): string {
     .toISOString().slice(0, 10);
 }
 
-function sevenDays(dashboard: ParentsDashboard): Array<{ date: string; minutes: number }> {
-  const today = dayFormatter.format(new Date(dashboard.generatedAt));
-  const values = new Map(dashboard.time.daily.map((item) => [item.date, item.minutes]));
-  return Array.from({ length: 7 }, (_, index) => {
-    const date = previousDay(today, 6 - index);
-    return { date, minutes: values.get(date) ?? 0 };
-  });
+function windowDays(dashboard: ParentsDashboard): Array<{ date: string; minutes: number }> {
+  const last = dayFormatter.format(new Date(dashboard.window.until));
+  const days = Array.from({ length: 7 }, (_, index) => ({
+    date: previousDay(last, 6 - index),
+    minutes: 0,
+  }));
+  const position = new Map(days.map((day, index) => [day.date, index]));
+  for (const item of dashboard.time.daily) {
+    // Скользящее окно в 168 часов захватывает восемь дат: неполный первый день
+    // складываем с самой старой из семи колонок графика.
+    const index = position.get(item.date) ?? 0;
+    const day = days[index];
+    if (day !== undefined) day.minutes += item.minutes;
+  }
+  return days;
 }
 
 function signed(value: number): string {
@@ -86,7 +87,7 @@ export function ParentsScreen({ api = browserParentsApi }: { api?: ParentsApi })
     return <main className="parents-state" role="status"><p>Собираю сводку за неделю…</p></main>;
   }
 
-  const days = sevenDays(dashboard);
+  const days = windowDays(dashboard);
   const maxMinutes = Math.max(1, ...days.map((item) => item.minutes));
 
   return (

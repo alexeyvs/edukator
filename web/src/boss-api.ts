@@ -1,4 +1,5 @@
 import type { DisputeResponse, RunProgress, RunTask } from './run-api';
+import { jsonRequest, requestJson } from './http';
 
 export type BossTask = Omit<RunTask, 'hint'>;
 
@@ -28,7 +29,13 @@ export interface ConcedeBossResponse {
   replacementBatchId: number;
 }
 
+export type BossFightStateResponse =
+  | { outcome: 'active'; progress: RunProgress }
+  | { outcome: 'mistake' | 'dispute'; attemptId: number; progress: RunProgress }
+  | { outcome: 'won' | 'lost'; progress: RunProgress };
+
 export interface BossApi {
+  state(runId: number): Promise<BossFightStateResponse>;
   next(runId: number): Promise<NextBossTaskResponse>;
   answer(input: {
     runId: number;
@@ -51,40 +58,21 @@ export class BossApiError extends Error {
   }
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
-  const body = await response.json() as unknown;
-  if (!response.ok) {
-    const record = typeof body === 'object' && body !== null
-      ? body as Record<string, unknown>
-      : {};
-    const message = typeof record['error'] === 'string'
-      ? record['error']
-      : 'Сервер не смог обработать бой';
-    const code = typeof record['code'] === 'string' ? record['code'] : undefined;
-    throw new BossApiError(message, response.status, code);
-  }
-  return body as T;
-}
-
-const jsonPost = (body?: unknown): RequestInit => ({
-  method: 'POST',
-  ...(body === undefined ? {} : {
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  }),
-});
+const request = <T>(url: string, init?: RequestInit): Promise<T> =>
+  requestJson<T>(url, init, 'Сервер не смог обработать бой', ({ message, status, code }) =>
+    new BossApiError(message, status, code));
 
 export const browserBossApi: BossApi = {
+  state: (runId) => request<BossFightStateResponse>(`/api/boss/${runId}/state`),
   next: (runId) => request<NextBossTaskResponse>(`/api/boss/${runId}/next`),
-  answer: (input) => request<BossAnswerResponse>(`/api/boss/${input.runId}/answer`, jsonPost({
+  answer: (input) => request<BossAnswerResponse>(`/api/boss/${input.runId}/answer`, jsonRequest('POST', {
     task_id: input.taskId,
     answer: input.answer,
     hint_used: false,
     duration_ms: input.durationMs,
   })),
-  dispute: (attemptId) => request<DisputeResponse>('/api/session/dispute', jsonPost({
+  dispute: (attemptId) => request<DisputeResponse>('/api/session/dispute', jsonRequest('POST', {
     attempt_id: attemptId,
   })),
-  concede: (runId) => request<ConcedeBossResponse>(`/api/boss/${runId}/concede`, jsonPost()),
+  concede: (runId) => request<ConcedeBossResponse>(`/api/boss/${runId}/concede`, jsonRequest('POST')),
 };

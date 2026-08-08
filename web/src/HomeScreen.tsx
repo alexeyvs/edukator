@@ -10,12 +10,7 @@ import {
 } from './home-api';
 import type { FinishRunResponse } from './run-api';
 import { isPreliminaryForecast } from './forecast-presentation';
-
-const SUBJECT_NAMES: Record<Subject, string> = {
-  math: 'Математика',
-  russian: 'Русский язык',
-  english: 'Английский язык',
-};
+import { SUBJECT_NAMES, SUBJECTS } from './subject-meta';
 
 export interface HomeScreenProps {
   api?: HomeApi;
@@ -27,10 +22,17 @@ function defaultNavigate(url: string): void {
   window.location.assign(url);
 }
 
+const moscowDateFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Europe/Moscow', year: 'numeric', month: '2-digit', day: '2-digit',
+});
+
+function dayNumber(date: string): number {
+  const [year, month, day] = date.split('-').map(Number);
+  return Math.floor(Date.UTC(year as number, (month as number) - 1, day) / 86_400_000);
+}
+
 function daysUntil(examDate: string, now: Date): number {
-  const exam = Date.parse(`${examDate}T00:00:00.000Z`);
-  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-  return Math.ceil((exam - today) / 86_400_000);
+  return dayNumber(examDate) - dayNumber(moscowDateFormatter.format(now));
 }
 
 function ExamCountdown({ examDate, now }: { examDate: string | null; now: Date }) {
@@ -68,7 +70,7 @@ function StreakCard({ streak }: { streak: DayPlanResponse['streak'] }) {
 function topicStatus(topic: HomeTopic): string {
   switch (topic.readiness.status) {
     case 'preparing': return 'Босс готовится';
-    case 'ready': return 'Можно вызвать босса';
+    case 'ready': return topic.readiness.eligible ? 'Можно вызвать босса' : 'В работе';
     case 'active': return 'Бой уже начат';
     case 'closed': return 'Закрыта';
     case 'working': return topic.readiness.eligible ? 'Босс готовится' : 'В работе';
@@ -104,13 +106,17 @@ export function HomeScreen({
     return () => { active = false; };
   }, [api]);
 
-  async function start(subject: Subject, kind: 'run' | 'triage'): Promise<void> {
+  async function start(subject: Subject, kind: 'run' | 'triage', topicId?: string): Promise<void> {
     setStarting(subject);
     setProblem(null);
     try {
-      const started = kind === 'triage'
-        ? await api.startTriage(subject)
-        : await api.start(subject);
+      let started;
+      if (kind === 'triage') {
+        started = await api.startTriage(subject);
+      } else {
+        if (topicId === undefined) throw new Error('Не выбрана тема занятия');
+        started = await api.start(subject, topicId);
+      }
       if (started.progress.done) {
         setFinish({ result: await api.finish(started.runId), kind });
         return;
@@ -199,7 +205,7 @@ export function HomeScreen({
               <h2 id="forecast-title">Прогноз по предметам</h2>
             </div>
             <div className="forecast-cards">
-              {(Object.keys(SUBJECT_NAMES) as Subject[]).map((subject) => {
+              {SUBJECTS.map((subject) => {
                 const forecast = plan.forecasts.find((item) => item.subject === subject);
                 const preliminary = forecast !== undefined && isPreliminaryForecast(forecast);
                 return (
@@ -245,7 +251,7 @@ export function HomeScreen({
                       className="primary"
                       type="button"
                       disabled={starting !== null}
-                      onClick={() => void start(item.subject, 'run')}
+                      onClick={() => void start(item.subject, 'run', item.topic.id)}
                     >
                       {starting === item.subject ? 'Начинаю…' : 'Начать'}
                     </button>
@@ -264,12 +270,13 @@ export function HomeScreen({
             <h2 id="topic-map-title">Карта тем</h2>
           </div>
           <div className="topic-map-subjects">
-            {(Object.keys(SUBJECT_NAMES) as Subject[]).map((subject) => (
+            {SUBJECTS.map((subject) => (
               <section key={subject} aria-labelledby={`topic-map-${subject}`}>
                 <h3 id={`topic-map-${subject}`}>{SUBJECT_NAMES[subject]}</h3>
                 <ul>
                   {plan.topics.filter((topic) => topic.subject === subject).map((topic) => {
-                    const canStart = topic.readiness.status === 'ready' || topic.readiness.status === 'active';
+                    const canStart = topic.readiness.status === 'active' ||
+                      (topic.readiness.status === 'ready' && topic.readiness.eligible);
                     return (
                       <li
                         className={topic.readiness.status === 'closed' ? 'topic-closed' : undefined}

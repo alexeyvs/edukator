@@ -6,7 +6,11 @@ export default defineConfig({
     include: ['tests/**/*.test.ts', 'web/**/*.test.ts', 'web/**/*.test.tsx'],
     coverage: {
       provider: 'v8',
-      include: ['server/**/*.ts', 'scripts/**/*.ts', 'web/src/{home,profile,run}-api.ts'],
+      include: [
+        'server/**/*.ts', 'scripts/**/*.ts',
+        'web/src/{home,profile,run,boss,parents}-api.ts',
+        'web/src/{BossScreen,ParentsScreen}.tsx', 'web/src/http.ts',
+      ],
       // Порог держится на ядре, занятии и генерации: все они детерминированы —
       // внешние процессы подменяются через `run`/`produce`/`review`, — и дефект
       // в них тихо портит учебный план, не роняя ничего. Скрипты извлечения и
@@ -33,6 +37,18 @@ export default defineConfig({
         // общий бюджет codex. Среднее с давно покрытым ядром скрыло бы
         // непроверенную ветку именно в новом пользовательском потоке.
         'server/{run,triage,xp,session-error}.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        'server/{boss-fight,boss-loss,boss-prep,boss-rules,parents,streak}.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        'server/boss.ts': {
           statements: 80,
           branches: 80,
           functions: 80,
@@ -65,7 +81,19 @@ export default defineConfig({
           functions: 80,
           lines: 80,
         },
-        'web/src/{home,profile,run}-api.ts': {
+        'web/src/{home,profile,run,boss,parents}-api.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        'web/src/{BossScreen,ParentsScreen}.tsx': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        'web/src/http.ts': {
           statements: 80,
           branches: 80,
           functions: 80,

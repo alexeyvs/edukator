@@ -7,7 +7,8 @@ import { type TopicState } from './mastery.js';
 import { type RejectReason } from './normalize.js';
 import { submitAnswer } from './session.js';
 import { SessionError } from './session-error.js';
-import { finishBossLoss } from './boss-loss.js';
+import { finishBossLoss, hasPriorBossLoss } from './boss-loss.js';
+import { bossFightConsistent, readBossFight, type BossFight } from './boss-fight.js';
 import type { IssuedTask } from './issued-task.js';
 export { BOSS_MASTERY, BOSS_TARGET } from './boss-rules.js';
 import { BOSS_MASTERY, BOSS_TARGET } from './boss-rules.js';
@@ -51,20 +52,6 @@ interface BatchRow {
   status: 'preparing' | 'ready' | 'active' | 'won' | 'lost' | 'failed';
 }
 
-interface ActiveFightRow {
-  batch_id: number;
-  batch_topic_id: string;
-  batch_status: string;
-  batch_run_id: number | null;
-  run_id: number;
-  run_topic_id: string;
-  subject: string;
-  kind: string;
-  finished_at: string | null;
-  total: number;
-  correct: number;
-}
-
 function topicRow(db: Database, topicId: string): TopicStateRow {
   const row = db.prepare<[string], TopicStateRow>(
     'SELECT mastery, closed_at FROM topic_state WHERE topic_id = ?',
@@ -85,8 +72,10 @@ function liveBatch(db: Database, topicId: string): BatchRow | undefined {
 export function bossTopicState(db: Database, topicId: string): BossTopicState {
   const state = topicRow(db, topicId);
   if (state.closed_at !== null) return { status: 'closed', eligible: false };
-  const eligible = state.mastery > BOSS_MASTERY;
   const batch = liveBatch(db, topicId);
+  const eligible = state.mastery > BOSS_MASTERY || (
+    batch !== undefined && hasPriorBossLoss(db, topicId, batch.id)
+  );
   if (batch === undefined) return { status: 'working', eligible };
   if (batch.status === 'active') {
     if (batch.run_id === null) {
@@ -148,9 +137,10 @@ export function startBoss(
     if (batch?.status === 'active') {
       const fight = readFight(db, batch.run_id ?? -1);
       validateFight(fight, topic);
-      return { batchId: batch.id, runId: fight.run_id, resumed: true };
+      return { batchId: batch.id, runId: fight.runId, resumed: true };
     }
-    if (state.mastery <= BOSS_MASTERY) {
+    const retry = batch !== undefined && hasPriorBossLoss(db, topicId, batch.id);
+    if (state.mastery <= BOSS_MASTERY && !retry) {
       throw new BossError('boss-not-eligible', `Босс: тема «${topicId}» пока недоступна`);
     }
     if (batch === undefined || batch.status !== 'ready') {
@@ -177,66 +167,34 @@ export function startBoss(
   }).immediate();
 }
 
-function readFight(db: Database, runId: number): ActiveFightRow {
-  const row = db.prepare<[number], ActiveFightRow>(
-    `SELECT boss_batches.id AS batch_id, boss_batches.topic_id AS batch_topic_id,
-            boss_batches.status AS batch_status, boss_batches.run_id AS batch_run_id,
-            runs.id AS run_id, runs.topic_id AS run_topic_id, runs.subject, runs.kind,
-            runs.finished_at, runs.total, runs.correct
-       FROM runs
-       LEFT JOIN boss_batches ON boss_batches.run_id = runs.id
-      WHERE runs.id = ?`,
-  ).get(runId);
-  if (row === undefined || row.batch_id === null) {
+function readFight(db: Database, runId: number): BossFight {
+  const fight = readBossFight(db, runId);
+  if (fight === undefined) {
     throw new BossError('boss-not-found', `Босс: бой ${runId} не найден`);
   }
-  return row;
+  return fight;
 }
 
-function validateFight(fight: ActiveFightRow, topic: Topic): void {
-  if (fight.finished_at !== null) {
-    throw new BossError('boss-finished', `Босс: бой ${fight.run_id} уже завершён`);
+function validateFight(fight: BossFight, topic: Pick<Topic, 'id' | 'subject'>): void {
+  if (fight.finishedAt !== null) {
+    throw new BossError('boss-finished', `Босс: бой ${fight.runId} уже завершён`);
   }
-  if (
-    fight.kind !== 'boss' || fight.batch_status !== 'active' ||
-    fight.batch_run_id !== fight.run_id || fight.batch_topic_id !== fight.run_topic_id ||
-    fight.run_topic_id !== topic.id || fight.subject !== topic.subject
-  ) {
-    throw new BossError('boss-inconsistent', `Босс: batch и run боя ${fight.run_id} несогласованы`);
+  if (fight.batchStatus !== 'active' || !bossFightConsistent(fight, topic)) {
+    throw new BossError('boss-inconsistent', `Босс: batch и run боя ${fight.runId} несогласованы`);
   }
   if (fight.total < 0 || fight.correct < 0 || fight.correct > fight.total || fight.total > BOSS_TARGET) {
-    throw new BossError('boss-inconsistent', `Босс: счёт боя ${fight.run_id} несогласован`);
+    throw new BossError('boss-inconsistent', `Босс: счёт боя ${fight.runId} несогласован`);
   }
 }
 
-interface FightAttemptSummary { total: number; correct: number; wrong: number; open_disputes: number }
-
-function attemptSummary(db: Database, runId: number): FightAttemptSummary {
-  return db.prepare<[number], FightAttemptSummary>(
-    `SELECT COUNT(DISTINCT attempts.id) AS total,
-            COALESCE(SUM(attempts.is_correct), 0) AS correct,
-            COALESCE(SUM(CASE WHEN attempts.is_correct = 0 THEN 1 ELSE 0 END), 0) AS wrong,
-            COUNT(DISTINCT CASE WHEN disputes.status = 'open' THEN disputes.id END) AS open_disputes
-       FROM attempts
-       LEFT JOIN disputes ON disputes.attempt_id = attempts.id
-      WHERE attempts.run_id = ?`,
-  ).get(runId) ?? { total: 0, correct: 0, wrong: 0, open_disputes: 0 };
-}
-
-function ensureProgress(fight: ActiveFightRow, summary: FightAttemptSummary): void {
-  if (fight.total >= BOSS_TARGET || summary.total >= BOSS_TARGET) {
-    throw new BossError('boss-complete', `Босс: пять ответов боя ${fight.run_id} уже исчерпаны`);
+function ensureProgress(fight: BossFight): void {
+  if (fight.total >= BOSS_TARGET) {
+    throw new BossError('boss-complete', `Босс: пять ответов боя ${fight.runId} уже исчерпаны`);
   }
-  if (fight.total !== summary.total || fight.correct !== summary.correct) {
-    throw new BossError(
-      'boss-inconsistent',
-      `Босс: сохранённый счёт боя ${fight.run_id} несогласован с попытками`,
-    );
+  if (fight.openDisputes > 0) {
+    throw new BossError('boss-dispute-open', `Босс: бой ${fight.runId} приостановлен открытым спором`);
   }
-  if (summary.open_disputes > 0) {
-    throw new BossError('boss-dispute-open', `Босс: бой ${fight.run_id} приостановлен открытым спором`);
-  }
-  if (summary.wrong > 0) {
+  if (fight.wrong > 0) {
     throw new BossError('boss-mistake-pending', `Босс: после ошибки нужно признать поражение или открыть спор`);
   }
 }
@@ -263,26 +221,62 @@ function projectBossTask(topic: Topic, task: BankTask): BossIssuedTask {
 
 export interface NextBossTaskResult { batchId: number; runId: number; position: number; task: BossIssuedTask }
 
+export type BossFightState =
+  | { outcome: 'active'; progress: { total: number; correct: number; target: number; done: false } }
+  | { outcome: 'mistake' | 'dispute'; attemptId: number; progress: { total: number; correct: number; target: number; done: false } }
+  | { outcome: 'won' | 'lost'; progress: { total: number; correct: number; target: number; done: true } };
+
+/** Снимок боя для безопасного восстановления экрана после reload. */
+export function bossFightState(db: Database, graph: TopicGraph, runId: number): BossFightState {
+  const fight = readBossFight(db, runId);
+  if (fight === undefined) throw new BossError('boss-not-found', `Босс: бой ${runId} не найден`);
+  const topic = topicOf(graph, fight.runTopicId);
+  if (!bossFightConsistent(fight, topic)) {
+    throw new BossError('boss-inconsistent', `Босс: batch и run боя ${runId} несогласованы`);
+  }
+  const progress = {
+    total: fight.total, correct: fight.correct, target: BOSS_TARGET,
+    done: fight.batchStatus === 'won' || fight.batchStatus === 'lost',
+  };
+  if (fight.batchStatus === 'won' || fight.batchStatus === 'lost') {
+    return { outcome: fight.batchStatus, progress: { ...progress, done: true } };
+  }
+  if (fight.batchStatus !== 'active' || fight.finishedAt !== null) {
+    throw new BossError('boss-inconsistent', `Босс: состояние боя ${runId} несогласовано`);
+  }
+  if (fight.openDisputes > 0 || fight.wrong > 0) {
+    if (fight.lastAttemptId === null) throw new BossError('boss-inconsistent', `Босс: попытка боя ${runId} потеряна`);
+    return {
+      outcome: fight.openDisputes > 0 ? 'dispute' : 'mistake',
+      attemptId: fight.lastAttemptId,
+      progress: { ...progress, done: false },
+    };
+  }
+  return { outcome: 'active', progress: { ...progress, done: false } };
+}
+
 /** Возвращает только очередную позицию и никогда не раскрывает решение или подсказку. */
 export function nextBossTask(db: Database, graph: TopicGraph, runId: number): NextBossTaskResult {
   return db.transaction((): NextBossTaskResult => {
     const fight = readFight(db, runId);
-    const topic = topicOf(graph, fight.run_topic_id);
+    const topic = topicOf(graph, fight.runTopicId);
+    if (fight.finishedAt !== null) {
+      throw new BossError('boss-finished', `Босс: бой ${fight.runId} уже завершён`);
+    }
+    ensureProgress(fight);
     validateFight(fight, topic);
-    const summary = attemptSummary(db, runId);
-    ensureProgress(fight, summary);
-    const position = summary.total + 1;
-    const task = bossTaskAtPosition(db, fight.batch_id, position);
+    const position = fight.attemptTotal + 1;
+    const task = bossTaskAtPosition(db, fight.batchId, position);
     if (task === null) {
       throw new BossError(
         'boss-inconsistent',
-        `Босс: в батче ${fight.batch_id} нет неотвеченного задания позиции ${position}`,
+        `Босс: в батче ${fight.batchId} нет неотвеченного задания позиции ${position}`,
       );
     }
     if (task.topicId !== topic.id) {
       throw new BossError('boss-inconsistent', `Босс: задание ${task.id} относится к другой теме`);
     }
-    return { batchId: fight.batch_id, runId, position, task: projectBossTask(topic, task) };
+    return { batchId: fight.batchId, runId, position, task: projectBossTask(topic, task) };
   }).immediate();
 }
 
@@ -330,12 +324,8 @@ export function submitBossAnswer(
     if (error.code === 'run-not-found') throw new BossError('boss-not-found', error.message);
     if (error.code === 'run-finished') throw new BossError('boss-finished', error.message);
     if (error.code === 'run-complete') throw new BossError('boss-complete', error.message);
-    if (error.code === 'run-not-ready') {
-      throw new BossError(
-        error.message.includes('спор') ? 'boss-dispute-open' : 'boss-mistake-pending',
-        error.message,
-      );
-    }
+    if (error.code === 'boss-dispute-open') throw new BossError('boss-dispute-open', error.message);
+    if (error.code === 'boss-mistake-pending') throw new BossError('boss-mistake-pending', error.message);
     if (request.hintUsed === true && error.code === 'task-not-in-run') {
       throw new BossError('boss-hint-forbidden', error.message);
     }
@@ -378,22 +368,17 @@ export function concedeBoss(
   if (!Number.isFinite(now.getTime())) throw new Error(`Босс: некорректное время поражения (${String(now)})`);
   return db.transaction((): ConcedeBossResult => {
     const fight = readFight(db, runId);
-    const state = topicRow(db, fight.run_topic_id);
-    const topic: Topic = {
-      id: fight.run_topic_id,
-      subject: fight.subject as Topic['subject'],
-      title: '', examWeight: 0, difficulty: 1, prereqs: [], answerFormat: 'text', promptSeed: '',
-    };
+    const state = topicRow(db, fight.runTopicId);
+    const topic = { id: fight.runTopicId, subject: fight.subject as Topic['subject'] };
     validateFight(fight, topic);
-    const summary = attemptSummary(db, runId);
-    if (summary.open_disputes > 0) {
+    if (fight.openDisputes > 0) {
       throw new BossError('boss-dispute-open', `Босс: бой ${runId} приостановлен открытым спором`);
     }
-    if (summary.wrong === 0) {
+    if (fight.wrong === 0) {
       throw new BossError('boss-mistake-pending', `Босс: поражение можно признать только после ошибки`);
     }
     if (state.closed_at !== null) {
-      throw new BossError('boss-inconsistent', `Босс: проигрываемая тема «${fight.run_topic_id}» уже закрыта`);
+      throw new BossError('boss-inconsistent', `Босс: проигрываемая тема «${fight.runTopicId}» уже закрыта`);
     }
     return finishBossLoss(db, runId, now.toISOString());
   }).immediate();

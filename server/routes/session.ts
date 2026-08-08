@@ -38,6 +38,9 @@ const STATUS_BY_CODE: Record<SessionErrorCode, number> = {
   'run-finished': 409,
   'run-complete': 409,
   'run-not-ready': 409,
+  'run-topic-unavailable': 409,
+  'boss-dispute-open': 409,
+  'boss-mistake-pending': 409,
   'task-not-in-run': 409,
   // 409, а не 500: задание оказалось негодным, но занятие цело — клиенту надо
   // просто запросить следующее.
@@ -141,8 +144,12 @@ export function registerSessionRoutes(
   const retryDelays = new Map<number, number>();
   let stopped = false;
 
+  function isAvailable(): boolean {
+    return options.available?.() !== false;
+  }
+
   function unavailable(reply: FastifyReply): FastifyReply | undefined {
-    if (options.available?.() !== false) return undefined;
+    if (isAvailable()) return undefined;
     return reply.code(503).send({ error: 'Занятие недоступно: файл базы заменён, нужен перезапуск' });
   }
 
@@ -159,8 +166,21 @@ export function registerSessionRoutes(
    * запросом — ровно тот же сценарий, что и при недоступном codex.
    */
   function scheduleReview(id: number): void {
-    if (stopped || reviewing.has(id)) return;
-    const pending = budget.tryRun(() => resolveDispute(db, graph, id, review));
+    if (stopped || !isAvailable() || reviewing.has(id)) return;
+    const pending = budget.tryRun(() =>
+      resolveDispute(db, graph, id, async (context) => {
+        const verdict = await review(context);
+        // За минуты внешнего разбора файл по EDUKATOR_DB могли
+        // заменить. После await ещё раз сверяем inode: дальше
+        // `resolveDispute` сразу и без нового await пишет вердикт транзакцией.
+        // Писать в отвязанный inode нельзя: вердикт и boss-переходы
+        // не попадут в базу, которая теперь лежит по этому пути.
+        if (!isAvailable()) {
+          throw new Error('файл базы заменён во время разбора');
+        }
+        return verdict;
+      }),
+    );
     if (pending === undefined) {
       log(`разбор спора ${id} отложен: заняты все ${budget.limit} места codex`);
       scheduleRetry(id);
@@ -177,7 +197,9 @@ export function registerSessionRoutes(
         retryDelays.delete(id);
       } catch (error) {
         log(`разбор спора ${id} не выполнен: ${(error as Error).message}`);
-        scheduleRetry(id);
+        // Заменённую базу этот процесс всё равно не переоткроет, поэтому
+        // повторы до перезапуска лишь занимали бы бюджет Codex.
+        if (isAvailable()) scheduleRetry(id);
       } finally {
         pendingReviews.delete(pending);
         // Именно в `finally`: снятая только при успехе пометка навсегда
@@ -189,7 +211,7 @@ export function registerSessionRoutes(
   }
 
   function scheduleRetry(id: number): void {
-    if (stopped || retryTimers.has(id)) return;
+    if (stopped || !isAvailable() || retryTimers.has(id)) return;
     const delay = retryDelays.get(id) ?? disputeRetryMs;
     retryDelays.set(id, Math.min(delay * 2, DISPUTE_RETRY_MAX_MS));
     const timer = setTimeout(() => {

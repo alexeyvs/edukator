@@ -86,6 +86,8 @@ describe('маршруты босса', () => {
     ]) });
 
     const runId = await start();
+    expect((await app.inject({ method: 'GET', url: `/api/boss/${runId}/state` })).json())
+      .toMatchObject({ outcome: 'active', progress: { total: 0, correct: 0 } });
     for (let position = 1; position <= 5; position += 1) {
       const next = await app.inject({ method: 'GET', url: `/api/boss/${runId}/next` });
       expect(next.statusCode).toBe(200);
@@ -114,6 +116,8 @@ describe('маршруты босса', () => {
       .toMatchObject({ topics: expect.arrayContaining([
         expect.objectContaining({ id: TOPIC, readiness: expect.objectContaining({ status: 'closed' }) }),
       ]) });
+    expect((await app.inject({ method: 'GET', url: `/api/boss/${runId}/state` })).json())
+      .toMatchObject({ outcome: 'won', progress: { total: 5, correct: 5, done: true } });
   });
 
   it('отображает недоступность, ошибки запроса и конфликты состояния стабильными кодами', async () => {
@@ -207,6 +211,7 @@ describe('маршруты босса', () => {
           { method: 'GET' as const, url: '/api/boss/topics' },
           { method: 'POST' as const, url: '/api/boss/start' },
           { method: 'GET' as const, url: '/api/boss/1/next' },
+          { method: 'GET' as const, url: '/api/boss/1/state' },
           { method: 'POST' as const, url: '/api/boss/1/answer' },
           { method: 'POST' as const, url: '/api/boss/1/concede' },
         ]) expect((await instance.inject(request)).statusCode).toBe(503);

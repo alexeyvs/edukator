@@ -9,7 +9,7 @@
 Планы этапов: [`docs/plans/20260807-edukator-core.md`](docs/plans/20260807-edukator-core.md) (этап 1),
 [`docs/plans/20260807-edukator-generation.md`](docs/plans/20260807-edukator-generation.md) (этап 2),
 [`docs/plans/completed/20260808-edukator-run-triage.md`](docs/plans/completed/20260808-edukator-run-triage.md) (этап 3),
-[`docs/plans/completed/20260808-edukator-game-parents.md`](docs/plans/completed/20260808-edukator-game-parents.md) (этап 4).
+[`docs/plans/20260808-edukator-game-parents.md`](docs/plans/20260808-edukator-game-parents.md) (этап 4; перенос в completed выполняется после финальной проверки).
 
 ## Что уже есть
 
@@ -91,7 +91,8 @@ npm install
   поддержка структурированного вывода. Иначе
   `npm run build-curriculum` падает сразу, не тратя попыток
   (`codex не найден: ожидался исполняемый файл «codex» в PATH`), а
-  `npm run prefetch` не пополняет банк и занятие живёт на посевном банке
+  `npm run prefetch` не пополняет банк и занятие живёт на посевном банке;
+  подготовка боссов и разбор споров тоже требуют доступного Codex CLI
   (см. [Генерация заданий](#генерация-заданий));
 - **macOS с Command Line Tools (`swift`)** — распознавание сканов идёт через
   системный Vision. На другой системе `npm run extract-toc` работает только с
@@ -148,14 +149,15 @@ Vite — `localhost:5173`. Рабочий путь ученика:
 | Маршрут | Что делает |
 |---|---|
 | `GET /api/health` | состояние базы, карты тем и занятия |
-| `GET /api/run/plan` | план дня, прогнозы и состояние триажа по предметам |
-| `POST /api/run/start` | `{ subject }` → начать или продолжить сегодняшний забег |
+| `GET /api/run/plan` | план дня, прогнозы, триаж, серия и состояния тем/боссов |
+| `POST /api/run/start` | `{ subject, topic_id }` → начать или продолжить забег по выбранной карточке плана |
 | `POST /api/run/:id/finish` | закрыть забег или триаж и получить итог |
 | `POST /api/triage/start` | `{ subject }` → начать или продолжить триаж |
 | `GET /api/triage/:id/next` | следующее диагностическое задание без подсказки |
 | `GET /api/boss/topics` | карта тем и готовность босса каждой темы |
 | `POST /api/boss/start` | `{ topic_id }` → начать или продолжить готовый бой |
 | `GET /api/boss/:id/next` | следующее из пяти заданий боя, без подсказки |
+| `GET /api/boss/:id/state` | сохранённый исход/прогресс боя для восстановления после перезагрузки |
 | `POST /api/boss/:id/answer` | `{ task_id, answer, duration_ms?, hint_used? }` → результат ответа, XP, исход и прогресс боя |
 | `POST /api/boss/:id/concede` | признать поражение после ошибки и заказать новый набор |
 | `GET /api/session/next` | задание по выбору планировщика; в забеге — `?runId=<id>`, **без** `answer`, `accept[]`, `explain` и `joke` |
@@ -166,8 +168,9 @@ Vite — `localhost:5173`. Рабочий путь ученика:
 
 Формы успешных ответов:
 
-- `POST /api/run/start` и `POST /api/triage/start` с `{ subject: "math" |
-  "russian" | "english" }` → `{ runId, resumed, progress }`;
+- `POST /api/run/start` с `{ subject: "math" | "russian" | "english",
+  topic_id: "math.fractions" }` и `POST /api/triage/start` с `{ subject }` →
+  `{ runId, resumed, progress }`;
 - `GET /api/session/next?runId=<id>` → `{ task: { id, topic_id, topic_title,
   subject, question, hint, difficulty, answer_format }, progress: { total,
   correct, target, done } }`; без `runId` поле `progress` отсутствует;

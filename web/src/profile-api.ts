@@ -18,24 +18,8 @@ export interface ProfileApi {
   save(profile: ProfilePatch): Promise<Profile>;
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
-  const body = await response.json() as unknown;
-  if (!response.ok) {
-    const message = typeof body === 'object' && body !== null &&
-      typeof (body as Record<string, unknown>)['error'] === 'string'
-      ? (body as Record<string, string>)['error']
-      : 'Не получилось сохранить профиль';
-    throw new Error(message);
-  }
-  return body as T;
-}
-
 export const browserProfileApi: ProfileApi = {
-  read: () => request<Profile>('/api/profile'),
-  save: (profile) => request<Profile>('/api/profile', {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(profile),
-  }),
+  read: () => requestJson<Profile>('/api/profile', undefined, 'Не получилось сохранить профиль'),
+  save: (profile) => requestJson<Profile>('/api/profile', jsonRequest('PUT', profile), 'Не получилось сохранить профиль'),
 };
+import { jsonRequest, requestJson } from './http';

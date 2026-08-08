@@ -24,9 +24,14 @@ function addRun(
   kind: 'run' | 'triage' | 'boss' = 'run',
 ): void {
   db.prepare(
-    `INSERT INTO runs (subject, kind, topic_id, started_at, finished_at)
-     VALUES ('math', ?, 'math.fractions', ?, ?)`,
-  ).run(kind, finishedAt ?? '2026-08-01T00:00:00.000Z', finishedAt);
+    `INSERT INTO runs (subject, kind, topic_id, started_at, finished_at, summary)
+     VALUES ('math', ?, 'math.fractions', ?, ?, ?)`,
+  ).run(
+    kind,
+    finishedAt ?? '2026-08-01T00:00:00.000Z',
+    finishedAt,
+    finishedAt !== null && kind === 'run' ? '{}' : null,
+  );
 }
 
 afterEach(() => {
@@ -128,6 +133,30 @@ describe('readStreak', () => {
       current: 0,
       best: 1,
       completedToday: false,
+    });
+  });
+
+  it('не считает автозакрытый брошенный run завершённым', () => {
+    const db = setup();
+    addRun(db, '2026-08-07T12:00:00.000Z');
+    db.prepare(
+      `INSERT INTO runs (subject, kind, topic_id, started_at, finished_at, summary)
+       VALUES ('math', 'run', 'math.fractions', ?, ?, NULL)`,
+    ).run('2026-08-08T08:00:00.000Z', '2026-08-08T08:00:00.000Z');
+
+    expect(readStreak(db, new Date('2026-08-08T13:00:00.000Z'))).toEqual({
+      current: 1, best: 1, completedToday: false,
+    });
+  });
+
+  it('не включает будущие завершения в исторический рекорд', () => {
+    const db = setup();
+    addRun(db, '2026-08-07T12:00:00.000Z');
+    addRun(db, '2026-08-09T12:00:00.000Z');
+    addRun(db, '2026-08-10T12:00:00.000Z');
+
+    expect(readStreak(db, new Date('2026-08-08T12:00:00.000Z'))).toEqual({
+      current: 1, best: 1, completedToday: false,
     });
   });
 });

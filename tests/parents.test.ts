@@ -39,8 +39,13 @@ function task(db: Database, topicId: string): number {
 function run(db: Database, subject: Topic['subject'], topicId: string, kind: 'run' | 'triage' | 'boss',
   startedAt: string, finishedAt: string, total = 1, correct = 1): number {
   return Number(db.prepare(
-    'INSERT INTO runs (subject, kind, topic_id, started_at, finished_at, total, correct) VALUES (?, ?, ?, ?, ?, ?, ?)',
-  ).run(subject, kind, topicId, startedAt, finishedAt, total, correct).lastInsertRowid);
+    `INSERT INTO runs
+       (subject, kind, topic_id, started_at, finished_at, summary, total, correct)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    subject, kind, topicId, startedAt, finishedAt,
+    kind === 'boss' ? null : '{}', total, correct,
+  ).lastInsertRowid);
 }
 
 function attempt(db: Database, topicId: string, at: string, durationMs: number, runId: number | null = null): void {
@@ -124,6 +129,23 @@ describe('readParentsDashboard', () => {
     });
   });
 
+  it('согласует округление суточных столбцов с общим временем на долях минуты', () => {
+    const { db, graph } = setup();
+    attempt(db, 'math.fractions', '2026-08-06T10:00:00.000Z', 299);
+    attempt(db, 'math.fractions', '2026-08-07T10:00:00.000Z', 299);
+
+    const time = readParentsDashboard(db, graph, NOW).time;
+    expect(time).toEqual({
+      plannedMinutes: 630,
+      actualMinutes: 0.01,
+      daily: [
+        { date: '2026-08-06', minutes: 0.01 },
+        { date: '2026-08-07', minutes: 0 },
+      ],
+    });
+    expect(time.daily.reduce((sum, day) => sum + day.minutes, 0)).toBe(time.actualMinutes);
+  });
+
   it('ранжирует только проверенные темы с confidence и не раскрывает topic_id', () => {
     const topics = Array.from({ length: 7 }, (_, index) =>
       topic(`math.t${index}`, 'math', `Тема ${index}`, index === 6 ? 0 : 3 - (index % 3)));
@@ -160,6 +182,22 @@ describe('readParentsDashboard', () => {
     ]);
   });
 
+  it('показывает полное активное время завершённого в окне забега', () => {
+    const { db, graph } = setup();
+    const completed = run(
+      db, 'math', 'math.fractions', 'run',
+      '2026-08-01T11:00:00.000Z', '2026-08-01T12:30:00.000Z', 2, 2,
+    );
+    attempt(db, 'math.fractions', '2026-08-01T11:30:00.000Z', 45_000, completed);
+    attempt(db, 'math.fractions', '2026-08-01T12:15:00.000Z', 30_000, completed);
+
+    const dashboard = readParentsDashboard(db, graph, NOW);
+    expect(dashboard.time.actualMinutes).toBe(0.5);
+    expect(dashboard.activity).toEqual([
+      expect.objectContaining({ kind: 'run', activeMinutes: 1.25 }),
+    ]);
+  });
+
   it('ставит флаг только после трёх полных московских дней без обычного run', () => {
     const { db, graph } = setup();
     run(db, 'math', 'math.fractions', 'triage', '2026-08-07T10:00:00.000Z', '2026-08-07T11:00:00.000Z');
@@ -170,6 +208,29 @@ describe('readParentsDashboard', () => {
 
     run(db, 'math', 'math.fractions', 'run', '2026-08-05T20:00:00.000Z', '2026-08-05T21:00:00.000Z');
     expect(readParentsDashboard(db, graph, NOW).flags.threeFullDaysWithoutRun).toBe(false);
+  });
+
+  it('не считает брошенный автозакрытый run обычным занятием', () => {
+    const { db, graph } = setup();
+    snapshot(db, 'math', 3.6, 0.3, '2026-08-03T12:00:00.000Z');
+    snapshot(db, 'math', 3.5, 0.2, '2026-08-08T11:00:00.000Z');
+    const abandoned = run(
+      db, 'math', 'math.fractions', 'run',
+      '2026-08-05T09:00:00.000Z', '2026-08-05T09:00:00.000Z', 0, 0,
+    );
+    db.prepare('UPDATE runs SET summary = NULL WHERE id = ?').run(abandoned);
+    const abandonedTriage = run(
+      db, 'russian', 'russian.not', 'triage',
+      '2026-08-06T09:00:00.000Z', '2026-08-06T09:00:00.000Z', 0, 0,
+    );
+    db.prepare('UPDATE runs SET summary = NULL WHERE id = ?').run(abandonedTriage);
+
+    const dashboard = readParentsDashboard(db, graph, NOW);
+    expect(dashboard.flags).toMatchObject({
+      threeFullDaysWithoutRun: true,
+      forecastNotGrowing: [],
+    });
+    expect(dashboard.activity).toEqual([]);
   });
 
   it('ставит пятисуточный флаг только с обычным занятием и двумя достаточными снимками', () => {

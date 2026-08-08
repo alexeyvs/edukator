@@ -1,4 +1,5 @@
 import type { Database } from 'better-sqlite3';
+import { moscowDayBounds } from './moscow-time.js';
 import { readProfile, type Subject } from './db.js';
 import type { Topic, TopicGraph } from './curriculum.js';
 import {
@@ -351,33 +352,20 @@ export function lastRunSubject(db: Database): Subject | null {
  * идёт, делёж дня начинается заново.
  */
 export function runsAssignedToday(db: Database, now: Date = new Date()): Map<Subject, number> {
-  const start = new Date(now);
-  start.setHours(0, 0, 0, 0);
-  // Прибавляется календарный день, а не 24 часа: перевод часов не сдвигает границу.
-  const next = new Date(start);
-  next.setDate(next.getDate() + 1);
+  const [start, next] = moscowDayBounds(now);
   const rows = db
     .prepare<[string, string], { subject: Subject; runs: number }>(
       `SELECT subject, COUNT(*) AS runs FROM runs
        WHERE started_at >= ? AND started_at < ? GROUP BY subject`,
     )
-    .all(start.toISOString(), next.toISOString());
+    .all(start, next);
 
   return new Map(rows.map((row) => [row.subject, row.runs]));
 }
 
-/** Границы текущих местных суток в ISO: обе колонки времени сравниваются строками. */
-function dayBounds(now: Date): [string, string] {
-  const start = new Date(now);
-  start.setHours(0, 0, 0, 0);
-  const next = new Date(start);
-  next.setDate(next.getDate() + 1);
-  return [start.toISOString(), next.toISOString()];
-}
-
-/** Темы забегов, уже начатых в текущие местные сутки. */
+/** Темы забегов, уже начатых в текущие московские сутки. */
 export function topicsUsedToday(db: Database, now: Date = new Date()): Set<string> {
-  const [start, next] = dayBounds(now);
+  const [start, next] = moscowDayBounds(now);
   const rows = db
     .prepare<[string, string], { topic_id: string }>(
       'SELECT DISTINCT topic_id FROM runs WHERE started_at >= ? AND started_at < ?',
@@ -401,7 +389,7 @@ export function topicsUsedToday(db: Database, now: Date = new Date()): Set<strin
  * начатый только что.
  */
 export function activeRunTopics(db: Database, now: Date = new Date()): string[] {
-  const [start, next] = dayBounds(now);
+  const [start, next] = moscowDayBounds(now);
   const rows = db
     .prepare<[string, string], { topic_id: string }>(
       `SELECT topic_id FROM runs

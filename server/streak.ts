@@ -38,14 +38,16 @@ function dayNumber(date: string): number {
   return Math.floor(Date.UTC(year, month - 1, day) / 86_400_000);
 }
 
-function completedDays(db: Database): number[] {
+function completedDays(db: Database, now: Date): number[] {
   const rows = db
-    .prepare<[], FinishedRunRow>(
+    .prepare<[string], FinishedRunRow>(
       `SELECT finished_at
          FROM runs
-        WHERE kind = 'run' AND finished_at IS NOT NULL AND finished_at <> ''`,
+        WHERE kind = 'run' AND summary IS NOT NULL
+          AND finished_at IS NOT NULL AND finished_at <> ''
+          AND finished_at <= ?`,
     )
-    .all();
+    .all(now.toISOString());
 
   return [...new Set(rows.map((row) => dayNumber(moscowDate(new Date(row.finished_at)))))]
     .sort((left, right) => left - right);
@@ -53,7 +55,7 @@ function completedDays(db: Database): number[] {
 
 /** Считает серии по завершённым обычным забегам и московским календарным дням. */
 export function readStreak(db: Database, now: Date = new Date()): Streak {
-  const days = completedDays(db);
+  const days = completedDays(db, now);
   if (days.length === 0) return { current: 0, best: 0, completedToday: false };
 
   let best = 1;

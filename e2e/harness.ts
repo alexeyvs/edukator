@@ -9,6 +9,9 @@ import type { GeneratedTask } from '../server/codex/task-schema.js';
 import type { TaskProducer } from '../server/codex/worker.js';
 import { openDatabase, SUBJECTS, writeProfile, type Subject } from '../server/db.js';
 import { buildServer } from '../server/index.js';
+import { loadCurriculum } from '../server/curriculum.js';
+import { startRun } from '../server/run.js';
+import { submitAnswer } from '../server/session.js';
 
 const NOW = new Date('2026-08-08T12:00:00.000Z');
 const TOPICS_PER_SUBJECT = 12;
@@ -113,9 +116,9 @@ function seedTasks(db: Database): void {
 
 function markTriagePassed(db: Database, subject: Subject): void {
   db.prepare(
-    `INSERT INTO runs (subject, kind, topic_id, started_at, finished_at)
-     VALUES (?, 'triage', ?, ?, ?)`,
-  ).run(subject, `${subject}.1`, NOW.toISOString(), NOW.toISOString());
+    `INSERT INTO runs (subject, kind, topic_id, started_at, finished_at, summary)
+     VALUES (?, 'triage', ?, ?, ?, ?)`,
+  ).run(subject, `${subject}.1`, NOW.toISOString(), NOW.toISOString(), '{}');
 }
 
 function bossTask(topicId: string, serial: number, position: number): GeneratedTask {
@@ -192,6 +195,7 @@ export async function startE2eHarness(
     now: () => NOW,
   });
   const db = openDatabase(process.env.EDUKATOR_DB);
+  const graph = loadCurriculum(curriculumDir);
 
   try {
     writeProfile(db, {
@@ -216,10 +220,31 @@ export async function startE2eHarness(
       url,
       assertCodexNotCalled,
       async prepareBoss(topicId: string): Promise<void> {
-        db.prepare(
-          `UPDATE topic_state SET mastery = 0.76, confidence = 0.8, attempts = 4,
-             last_seen = ?, next_review = ? WHERE topic_id = ?`,
-        ).run(NOW.toISOString(), '2026-08-20T12:00:00.000Z', topicId);
+        const topic = graph.byId.get(topicId);
+        if (topic === undefined) throw new Error(`E2E: неизвестная тема ${topicId}`);
+        const run = startRun(db, graph, topic.subject, { now: NOW });
+        const rows = db.prepare<[string], { id: number; answer: string }>(
+          `SELECT id, answer FROM task_bank
+            WHERE topic_id = ? AND status IN ('valid', 'ready') ORDER BY id LIMIT 12`,
+        ).all(topicId);
+        for (const [index, row] of rows.entries()) {
+          db.prepare("UPDATE task_bank SET status = 'used', issued_run_id = ? WHERE id = ?")
+            .run(run.runId, row.id);
+          submitAnswer(db, graph, {
+            runId: run.runId, taskId: row.id, answer: row.answer,
+            at: new Date(NOW.getTime() + index),
+          });
+          const mastery = db.prepare<[string], { mastery: number }>(
+            'SELECT mastery FROM topic_state WHERE topic_id = ?',
+          ).get(topicId)?.mastery ?? 0;
+          if (mastery > 0.75) break;
+        }
+        const achieved = db.prepare<[string], { mastery: number }>(
+          'SELECT mastery FROM topic_state WHERE topic_id = ?',
+        ).get(topicId)?.mastery ?? 0;
+        if (achieved <= 0.75) {
+          throw new Error(`E2E: обычные ответы не открыли босса ${topicId}, mastery=${achieved}`);
+        }
         await waitUntil(
           () => db.prepare<[string], { status: string }>(
             "SELECT status FROM boss_batches WHERE topic_id = ? AND status = 'ready'",
@@ -242,17 +267,21 @@ export async function startE2eHarness(
         ).run();
 
         const insertRun = db.prepare(
-          `INSERT INTO runs (subject, kind, topic_id, started_at, finished_at, total, correct)
-           VALUES (?, ?, ?, ?, ?, 1, ?)`,
+          `INSERT INTO runs
+             (subject, kind, topic_id, started_at, finished_at, summary, total, correct)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
         );
         const ordinary = Number(insertRun.run(
-          'math', 'run', 'math.1', '2026-08-07T09:00:00.000Z', '2026-08-07T09:10:00.000Z', 1,
+          'math', 'run', 'math.1', '2026-08-07T09:00:00.000Z',
+          '2026-08-07T09:10:00.000Z', '{}', 1,
         ).lastInsertRowid);
         const triage = Number(insertRun.run(
-          'russian', 'triage', 'russian.1', '2026-08-06T09:00:00.000Z', '2026-08-06T09:10:00.000Z', 1,
+          'russian', 'triage', 'russian.1', '2026-08-06T09:00:00.000Z',
+          '2026-08-06T09:10:00.000Z', '{}', 1,
         ).lastInsertRowid);
         const boss = Number(insertRun.run(
-          'english', 'boss', 'english.1', '2026-08-08T09:00:00.000Z', '2026-08-08T09:10:00.000Z', 1,
+          'english', 'boss', 'english.1', '2026-08-08T09:00:00.000Z',
+          '2026-08-08T09:10:00.000Z', null, 1,
         ).lastInsertRowid);
         db.prepare(
           "INSERT INTO boss_batches (topic_id, run_id, status, created_at, activated_at, finished_at) VALUES ('english.1', ?, 'won', ?, ?, ?)",

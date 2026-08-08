@@ -1,4 +1,5 @@
 import type { Subject } from './home-api';
+import { requestJson } from './http';
 
 export type ParentsRunKind = 'run' | 'triage' | 'boss';
 
@@ -44,19 +45,6 @@ export interface ParentsApi {
   read(): Promise<ParentsDashboard>;
 }
 
-async function request<T>(url: string): Promise<T> {
-  const response = await fetch(url);
-  const body = await response.json() as unknown;
-  if (!response.ok) {
-    const message = typeof body === 'object' && body !== null &&
-      typeof (body as Record<string, unknown>)['error'] === 'string'
-      ? (body as Record<string, string>)['error']
-      : 'Не получилось загрузить сводку';
-    throw new Error(message);
-  }
-  return body as T;
-}
-
 export const browserParentsApi: ParentsApi = {
-  read: () => request<ParentsDashboard>('/api/parents'),
+  read: () => requestJson<ParentsDashboard>('/api/parents', undefined, 'Не получилось загрузить сводку'),
 };

@@ -636,27 +636,14 @@ describe('планировщик', () => {
       expect(topicsUsedToday(db, at(-1))).toEqual(new Set(['math.t0']));
     });
 
-    it('считает сутки по местной полуночи, а не по UTC', () => {
-      // Пояс закреплён: в UTC+3 местная полночь — это 21:00 UTC предыдущего дня,
-      // и по границам UTC счётчик дня сбрасывался бы в 03:00 по часам ученика.
-      const saved = process.env.TZ;
-      // Пояс по умолчанию снимается до подмены: `resolvedOptions()` после неё
-      // вернул бы уже Москву, и незаданный `TZ` (обычный случай) «восстановился»
-      // бы московским — следующие тесты этого воркера считали бы сутки по UTC+3.
-      const fallback = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      process.env.TZ = 'Europe/Moscow';
-      try {
-        const insert = db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)');
-        insert.run('math', 'math.t0', '2026-08-07T10:00:00.000Z'); // 7 августа 13:00 — вчера
-        insert.run('russian', 'russian.t0', '2026-08-07T21:10:00.000Z'); // 8 августа 00:10 — сегодня
+    it('считает сутки по Москве независимо от пояса процесса', () => {
+      const insert = db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)');
+      insert.run('math', 'math.t0', '2026-08-07T10:00:00.000Z'); // 7 августа 13:00 — вчера
+      insert.run('russian', 'russian.t0', '2026-08-07T21:10:00.000Z'); // 8 августа 00:10 — сегодня
 
-        const now = new Date('2026-08-07T21:30:00.000Z'); // 8 августа 00:30 по Москве
-        expect([...runsAssignedToday(db, now)]).toEqual([['russian', 1]]);
-      } finally {
-        // `delete` не возвращает исходный пояс: Node запоминает последнее
-        // присваивание, и следующие тесты этого воркера остались бы в Москве.
-        process.env.TZ = saved ?? fallback;
-      }
+      const now = new Date('2026-08-07T21:30:00.000Z'); // 8 августа 00:30 по Москве
+      expect([...runsAssignedToday(db, now)]).toEqual([['russian', 1]]);
+      expect(topicsUsedToday(db, now)).toEqual(new Set(['russian.t0']));
     });
 
     it('учитывает дату экзамена из профиля', () => {

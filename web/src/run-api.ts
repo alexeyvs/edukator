@@ -102,44 +102,23 @@ export class RunApiError extends Error {
   }
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
-  const body = await response.json() as unknown;
-  if (!response.ok) {
-    const record = typeof body === 'object' && body !== null
-      ? body as Record<string, unknown>
-      : {};
-    const message = typeof record['error'] === 'string'
-      ? record['error']
-      : 'Сервер не смог обработать запрос';
-    const code = typeof record['code'] === 'string' ? record['code'] : undefined;
-    throw new RunApiError(message, response.status, code);
-  }
-  return body as T;
-}
+const request = <T>(url: string, init?: RequestInit): Promise<T> =>
+  requestJson<T>(url, init, 'Сервер не смог обработать запрос', ({ message, status, code }) =>
+    new RunApiError(message, status, code));
 
 export const browserRunApi: RunApi = {
   next: (runId, excludeTaskId) => request<NextTaskResponse>(
     `/api/session/next?runId=${runId}${excludeTaskId === undefined ? '' : `&excludeTaskId=${excludeTaskId}`}`,
   ),
-  answer: (input) => request<AnswerResponse>('/api/session/answer', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
+  answer: (input) => request<AnswerResponse>('/api/session/answer', jsonRequest('POST', {
       runId: input.runId,
       task_id: input.taskId,
       answer: input.answer,
       hint_used: input.hintUsed,
       duration_ms: input.durationMs,
-    }),
-  }),
-  dispute: (attemptId) => request<DisputeResponse>('/api/session/dispute', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ attempt_id: attemptId }),
-  }),
-  finish: (runId) => request<FinishRunResponse>(`/api/run/${runId}/finish`, {
-    method: 'POST',
-  }),
+  })),
+  dispute: (attemptId) => request<DisputeResponse>('/api/session/dispute', jsonRequest('POST', { attempt_id: attemptId })),
+  finish: (runId) => request<FinishRunResponse>(`/api/run/${runId}/finish`, jsonRequest('POST')),
   triageNext: (runId) => request<NextTriageResponse>(`/api/triage/${runId}/next`),
 };
+import { jsonRequest, requestJson } from './http';

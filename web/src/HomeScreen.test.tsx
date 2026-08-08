@@ -170,6 +170,23 @@ describe('главный экран', () => {
     expect(navigate).not.toHaveBeenCalled();
   });
 
+  it('запускает ровно тему выбранной карточки плана', async () => {
+    const api = apiWith(PLAN);
+    render(<HomeScreen api={api} navigate={vi.fn()} />);
+
+    fireEvent.click(await screen.findAllByRole('button', { name: 'Начать' }).then((items) => items[1]!));
+
+    await waitFor(() => expect(api.start).toHaveBeenCalledWith('russian', 'russian.vowels'));
+  });
+
+  it('считает дату экзамена от московской полуночи', async () => {
+    render(<HomeScreen api={apiWith(PLAN)} now={() => new Date('2026-08-07T21:30:00.000Z')} />);
+
+    const countdown = await screen.findByLabelText('Обратный отсчёт до экзамена');
+    expect(countdown).toHaveTextContent('10');
+    expect(countdown).not.toHaveTextContent('11');
+  });
+
   it('показывает рейтинг на финале подхваченного триажа', async () => {
     const api = apiWith({
       ...PLAN,
@@ -254,6 +271,23 @@ describe('главный экран', () => {
 
     await waitFor(() => expect(api.startBoss).toHaveBeenCalledWith('russian.syntax'));
     expect(navigate).toHaveBeenCalledWith('/?runId=10&kind=boss');
+  });
+
+  it('не предлагает старт готового батча, если тема больше не eligible', async () => {
+    const api = apiWith({
+      ...PLAN,
+      topics: PLAN.topics.map((topic) => topic.id === 'russian.syntax'
+        ? { ...topic, readiness: { ...topic.readiness, eligible: false } }
+        : topic),
+    });
+    render(<HomeScreen api={api} />);
+
+    const title = await screen.findByText('Синтаксис');
+    const item = title.closest('li');
+    expect(item).not.toBeNull();
+    expect(within(item!).getByText('В работе')).toBeInTheDocument();
+    expect(within(item!).queryByRole('button')).not.toBeInTheDocument();
+    expect(api.startBoss).not.toHaveBeenCalled();
   });
 
   it('показывает спокойную подготовку без кнопки и не блокирует обычный план', async () => {

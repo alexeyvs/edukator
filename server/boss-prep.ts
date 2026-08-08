@@ -1,6 +1,7 @@
 /** Фоновая подготовка полного свежего набора для боя с боссом. */
 import type { Database } from 'better-sqlite3';
-import { BOSS_MASTERY, BOSS_TARGET } from './boss.js';
+import { BOSS_MASTERY, BOSS_TARGET } from './boss-rules.js';
+import { hasPriorBossLoss } from './boss-loss.js';
 import type { Topic, TopicGraph } from './curriculum.js';
 import { readProfile } from './db.js';
 import { reserveBossTasks, recentQuestions } from './codex/bank.js';
@@ -103,7 +104,10 @@ function claimBoss(db: Database, graph: TopicGraph, now: Date): BatchClaim | und
       // переживал рассинхрон одной темы и продолжал греть остальные. Claim
       // босса не должен превращать этот мягкий отказ в падение всего цикла.
       if (state === undefined) return false;
-      if (state.mastery <= BOSS_MASTERY || state.closed_at !== null) return false;
+      if (
+        (state.mastery <= BOSS_MASTERY && !hasPriorBossLoss(db, topic.id)) ||
+        state.closed_at !== null
+      ) return false;
       const live = db.prepare<[string], { id: number }>(
         `SELECT id FROM boss_batches
           WHERE topic_id = ? AND status IN ('preparing', 'ready', 'active') LIMIT 1`,

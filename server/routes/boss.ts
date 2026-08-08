@@ -5,6 +5,7 @@ import type { TopicGraph } from '../curriculum.js';
 import {
   BossError,
   bossTopicState,
+  bossFightState,
   concedeBoss,
   nextBossTask,
   startBoss,
@@ -112,6 +113,16 @@ export function registerBossRoutes(app: FastifyInstance, options: BossRoutesOpti
     }
   });
 
+  app.get<{ Params: { id: string } }>('/api/boss/:id/state', (request, reply) => {
+    const stopped = unavailable(options, reply);
+    if (stopped !== undefined) return stopped;
+    try {
+      return reply.send(bossFightState(db, graph, readPathId(request.params.id)));
+    } catch (error) {
+      return fail(reply, error);
+    }
+  });
+
   app.post<{ Params: { id: string } }>('/api/boss/:id/answer', (request, reply) => {
     const stopped = unavailable(options, reply);
     if (stopped !== undefined) return stopped;
@@ -162,6 +173,7 @@ export function registerUnavailableBoss(app: FastifyInstance, reason: string): v
   app.get('/api/boss/topics', handler);
   app.post('/api/boss/start', handler);
   app.get('/api/boss/:id/next', handler);
+  app.get('/api/boss/:id/state', handler);
   app.post('/api/boss/:id/answer', handler);
   app.post('/api/boss/:id/concede', handler);
 }

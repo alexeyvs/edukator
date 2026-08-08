@@ -98,12 +98,16 @@ describe('подготовка боёв с боссом', () => {
   });
 
   it('после поражения готовит пять других отпечатков', async () => {
-    db.prepare('UPDATE topic_state SET mastery = 0.9 WHERE topic_id = ?').run(TOPIC);
+    db.prepare('UPDATE topic_state SET mastery = 0.76 WHERE topic_id = ?').run(TOPIC);
     await prepareNextBoss({ db, graph, produce: () => Promise.resolve(five('old')), now: NOW });
     const { runId } = startBoss(db, graph, TOPIC, { now: NOW });
     const first = nextBossTask(db, graph, runId);
     submitBossAnswer(db, graph, { runId, taskId: first.task.id, answer: '999', at: NOW });
     concedeBoss(db, runId, { now: new Date(NOW.getTime() + 1000) });
+    const masteryAfterLoss = db.prepare<[string], { mastery: number }>(
+      'SELECT mastery FROM topic_state WHERE topic_id = ?',
+    ).get(TOPIC)?.mastery;
+    expect(masteryAfterLoss).toBeLessThanOrEqual(BOSS_MASTERY);
 
     const old = db.prepare<[], { fingerprint: string }>(
       `SELECT fingerprint FROM task_bank WHERE status = 'boss_reserved'`,
@@ -119,6 +123,8 @@ describe('подготовка боёв с боссом', () => {
     expect(report).toMatchObject({ stored: 5, ready: true });
     expect(current).toHaveLength(5);
     expect(current.every((fingerprint) => !old.includes(fingerprint))).toBe(true);
+    expect(startBoss(db, graph, TOPIC, { now: new Date(NOW.getTime() + 3000) }))
+      .toMatchObject({ batchId: report.batchId, resumed: false });
   });
 
   it('оставляет preparing при недоступном codex и восстанавливает зависший claim', async () => {
@@ -138,6 +144,27 @@ describe('подготовка боёв с боссом', () => {
     expect(restored).toMatchObject({ ready: true, recovered: true, stored: 5 });
     expect(db.prepare('SELECT status FROM boss_batches WHERE id = ?').get(unavailable.batchId))
       .toEqual({ status: 'failed' });
+  });
+
+  it('восстанавливает зависшую подготовку реванша ниже исходного порога', async () => {
+    db.prepare('UPDATE topic_state SET mastery = 0.76 WHERE topic_id = ?').run(TOPIC);
+    await prepareNextBoss({ db, graph, produce: () => Promise.resolve(five('first-fight')), now: NOW });
+    const { runId } = startBoss(db, graph, TOPIC, { now: NOW });
+    const first = nextBossTask(db, graph, runId);
+    submitBossAnswer(db, graph, { runId, taskId: first.task.id, answer: '999', at: NOW });
+    const loss = concedeBoss(db, runId, { now: new Date(NOW.getTime() + 1000) });
+
+    const restored = await prepareNextBoss({
+      db, graph,
+      now: new Date(NOW.getTime() + PREPARING_STALE_MS + 2000),
+      produce: () => Promise.resolve(five('recovered-rematch')),
+    });
+
+    expect(restored).toMatchObject({ ready: true, recovered: true, stored: 5 });
+    expect(db.prepare('SELECT status FROM boss_batches WHERE id = ?').get(loss.replacementBatchId))
+      .toEqual({ status: 'failed' });
+    expect(startBoss(db, graph, TOPIC, { now: new Date(NOW.getTime() + PREPARING_STALE_MS + 3000) }))
+      .toMatchObject({ batchId: restored.batchId, resumed: false });
   });
 
   it('встроена в обычный цикл и делит с прогревом единый предел процессов', async () => {

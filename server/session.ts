@@ -36,6 +36,7 @@ import { taskXp } from './xp.js';
 import { projectIssuedTask, type IssuedTask } from './issued-task.js';
 import { BOSS_TARGET } from './boss-rules.js';
 import { finishBossLoss } from './boss-loss.js';
+import { bossFightConsistent, finishBossWin, readBossFight } from './boss-fight.js';
 
 export type { IssuedTask } from './issued-task.js';
 
@@ -158,7 +159,11 @@ export function nextTask(
     // ответа выпала из свежего плана. Сначала восстанавливаем любое выданное
     // задание предмета и лишь затем выбираем тему для новой выдачи.
     const recovery = new Map<string, Topic>();
+    const closed = new Set(db.prepare<[], { topic_id: string }>(
+      'SELECT topic_id FROM topic_state WHERE closed_at IS NOT NULL',
+    ).all().map((item) => item.topic_id));
     for (const topic of [...planned, ...(graph.bySubject.get(run.subject) ?? [])]) {
+      if (closed.has(topic.id)) continue;
       recovery.set(topic.id, topic);
     }
     for (const topic of recovery.values()) {
@@ -325,45 +330,37 @@ interface BossAnswerContext {
 }
 
 function bossAnswerContext(db: Database, run: SessionRun, taskId: number): BossAnswerContext {
-  const row = db.prepare<[number, number], BossAnswerContext>(
-    `SELECT boss_batches.id AS batch_id, boss_batches.topic_id AS batch_topic_id,
-            boss_batches.status AS batch_status, boss_tasks.position,
-            COUNT(DISTINCT attempts.id) AS total,
-            COALESCE(SUM(attempts.is_correct), 0) AS correct,
-            COALESCE(SUM(CASE WHEN attempts.is_correct = 0 THEN 1 ELSE 0 END), 0) AS wrong,
-            COUNT(DISTINCT CASE WHEN disputes.status = 'open' THEN disputes.id END) AS open_disputes
-       FROM boss_batches
-       LEFT JOIN boss_tasks ON boss_tasks.batch_id = boss_batches.id AND boss_tasks.task_id = ?
-       LEFT JOIN attempts ON attempts.run_id = boss_batches.run_id
-       LEFT JOIN disputes ON disputes.attempt_id = attempts.id
-      WHERE boss_batches.run_id = ?
-      GROUP BY boss_batches.id, boss_tasks.position`,
-  ).get(taskId, run.id);
+  const fight = readBossFight(db, run.id, taskId);
   if (
-    row === undefined || row.batch_status !== 'active' || row.batch_topic_id === '' ||
-    run.total !== row.total || run.correct !== row.correct
+    fight === undefined || fight.batchStatus !== 'active' ||
+    !bossFightConsistent(fight, { id: run.topic_id, subject: run.subject })
   ) {
     throw new SessionError('task-not-in-run', `Босс: batch и run боя ${run.id} несогласованы`);
   }
-  if (row.open_disputes > 0) {
-    throw new SessionError('run-not-ready', `Босс: бой ${run.id} приостановлен открытым спором`);
+  if (fight.openDisputes > 0) {
+    throw new SessionError('boss-dispute-open', `Босс: бой ${run.id} приостановлен открытым спором`);
   }
-  if (row.wrong > 0) {
+  if (fight.wrong > 0) {
     throw new SessionError(
-      'run-not-ready',
+      'boss-mistake-pending',
       `Босс: после ошибки нужно признать поражение или открыть спор`,
     );
   }
-  if (row.total >= BOSS_TARGET) {
+  if (fight.total >= BOSS_TARGET) {
     throw new SessionError('run-complete', `Босс: пять ответов боя ${run.id} уже исчерпаны`);
   }
-  if (row.position !== row.total + 1) {
+  if (fight.position !== fight.total + 1) {
     throw new SessionError(
       'task-not-in-run',
-      `Босс: ответ принимается только на текущее задание позиции ${row.total + 1}`,
+      `Босс: ответ принимается только на текущее задание позиции ${fight.total + 1}`,
     );
   }
-  return row;
+  return {
+    batch_id: fight.batchId, batch_topic_id: fight.batchTopicId,
+    batch_status: fight.batchStatus, position: fight.position,
+    total: fight.total, correct: fight.correct, wrong: fight.wrong,
+    open_disputes: fight.openDisputes,
+  };
 }
 
 /**
@@ -406,6 +403,15 @@ export function submitAnswer(
     const row = readTask(db, request.taskId);
     const topic = topicOf(graph, row.topic_id);
     const run = request.runId === undefined ? undefined : readActiveRun(db, request.runId);
+    const closed = db.prepare<[string], { closed_at: string | null }>(
+      'SELECT closed_at FROM topic_state WHERE topic_id = ?',
+    ).get(row.topic_id);
+    if (closed === undefined) {
+      throw new Error(`Занятие: тема «${row.topic_id}» не заведена в topic_state`);
+    }
+    if (closed.closed_at !== null) {
+      throw new SessionError('task-not-in-run', `Занятие: тема «${row.topic_id}» уже закрыта`);
+    }
     const boss = run?.kind === 'boss' ? bossAnswerContext(db, run, row.id) : undefined;
     if (
       boss !== undefined && run !== undefined &&
@@ -534,19 +540,11 @@ export function submitAnswer(
       bossOutcome = check.correct ? 'active' : 'mistake';
       if (check.correct && total === BOSS_TARGET) {
         const iso = at.toISOString();
-        const runChange = db.prepare(
-          "UPDATE runs SET finished_at = ? WHERE id = ? AND kind = 'boss' AND finished_at IS NULL",
-        ).run(iso, run.id);
-        const batchChange = db.prepare(
-          `UPDATE boss_batches SET status = 'won', finished_at = ?
-            WHERE id = ? AND run_id = ? AND status = 'active'`,
-        ).run(iso, boss?.batch_id, run.id);
-        const topicChange = db.prepare(
-          'UPDATE topic_state SET closed_at = COALESCE(closed_at, ?) WHERE topic_id = ?',
-        ).run(iso, row.topic_id);
-        if (runChange.changes !== 1 || batchChange.changes !== 1 || topicChange.changes !== 1) {
-          throw new Error(`Босс: победа в бою ${run.id} не записалась целиком`);
+        const fight = readBossFight(db, run.id);
+        if (fight === undefined || !bossFightConsistent(fight)) {
+          throw new Error(`Босс: бой ${run.id} несогласован перед победой`);
         }
+        finishBossWin(db, fight, iso);
         bossOutcome = 'won';
       }
       progress = { total, correct, target: BOSS_TARGET, done: bossOutcome === 'won' };
@@ -796,6 +794,15 @@ export async function resolveDispute(
     db.prepare('UPDATE attempts SET is_correct = 1 WHERE id = ?').run(fresh.attempt_id);
     if (fresh.run_id !== null) {
       db.prepare('UPDATE runs SET correct = correct + 1 WHERE id = ?').run(fresh.run_id);
+      if (fresh.run_kind === 'boss') {
+        const fight = readBossFight(db, fresh.run_id);
+        if (fight === undefined || !bossFightConsistent(fight)) {
+          throw new Error(`Босс: бой ${fresh.run_id} несогласован после спора`);
+        }
+        if (fight.total === BOSS_TARGET && fight.correct === BOSS_TARGET) {
+          finishBossWin(db, fight, resolvedAt);
+        }
+      }
     }
 
     return {

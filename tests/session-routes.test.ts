@@ -612,6 +612,56 @@ describe('маршруты занятия', () => {
       ).toBe('upheld');
     });
 
+    it('не пишет вердикт в отвязанную базу, если EDUKATOR_DB заменили за время разбора', async () => {
+      let release: (() => void) | undefined;
+      const slow = extraServer({
+        seedDir,
+        disputeRetryMs: 1,
+        review: (context): Promise<DisputeReview> => {
+          reviewed.push(context);
+          return new Promise<DisputeReview>((resolve) => {
+            release = (): void => resolve(verdict);
+          });
+        },
+        background: (job): void => {
+          pending.push(job());
+        },
+        log: (message): void => {
+          logged.push(message);
+        },
+      });
+      await slow.ready();
+      const { attemptId } = await wrongAnswer();
+
+      const response = await slow.inject({
+        method: 'POST',
+        url: '/api/session/dispute',
+        payload: { attempt_id: attemptId },
+      });
+      expect(response.statusCode).toBe(202);
+      const disputeId = (response.json() as { dispute_id: number }).dispute_id;
+      expect(reviewed).toHaveLength(1);
+
+      const path = join(tempDir, 'session.db');
+      rmSync(path, { force: true });
+      rmSync(`${path}-wal`, { force: true });
+      rmSync(`${path}-shm`, { force: true });
+      openDatabase(path).close();
+
+      release?.();
+      await Promise.all(pending);
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+      // Старое соединение всё ещё читает отвязанный inode, но не имеет
+      // права закрыть в нём спор: такая запись пропадёт после перезапуска.
+      expect(
+        db.prepare<[number], { status: string }>('SELECT status FROM disputes WHERE id = ?')
+          .get(disputeId)?.status,
+      ).toBe('open');
+      expect(reviewed).toHaveLength(1);
+      expect(logged.join('\n')).toContain('файл базы заменён во время разбора');
+    });
+
     it('перед закрытием сервера дожидается фонового разбора', async () => {
       let release: (() => void) | undefined;
       const slow = extraServer({

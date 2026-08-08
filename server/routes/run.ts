@@ -29,7 +29,7 @@ function triagedSubjects(db: Database): Set<Subject> {
   return new Set(
     db.prepare<[], { subject: Subject }>(
       `SELECT DISTINCT subject FROM runs
-        WHERE kind = 'triage' AND finished_at IS NOT NULL`,
+        WHERE kind = 'triage' AND finished_at IS NOT NULL AND summary IS NOT NULL`,
     ).all().map((row) => row.subject),
   );
 }
@@ -50,14 +50,18 @@ function fail(reply: FastifyReply, error: unknown): FastifyReply {
   throw error;
 }
 
-function readSubject(body: unknown): Subject {
+function readStart(body: unknown): { subject: Subject; topicId?: string } {
   const value = typeof body === 'object' && body !== null && !Array.isArray(body)
     ? (body as Record<string, unknown>)['subject']
     : undefined;
   if (typeof value !== 'string' || !SUBJECTS.includes(value as Subject)) {
     throw new BadRequest(`Поле subject должно быть одним из: ${SUBJECTS.join(', ')}`);
   }
-  return value as Subject;
+  const topicId = (body as Record<string, unknown>)['topic_id'];
+  if (topicId !== undefined && (typeof topicId !== 'string' || topicId.length === 0)) {
+    throw new BadRequest('Поле topic_id должно быть непустой строкой');
+  }
+  return { subject: value as Subject, ...(topicId === undefined ? {} : { topicId }) };
 }
 
 function readPathId(value: string): number {
@@ -110,7 +114,11 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
     const stopped = unavailable(options, reply);
     if (stopped !== undefined) return stopped;
     try {
-      return reply.send(startRun(db, graph, readSubject(request.body), { now: now() }));
+      const start = readStart(request.body);
+      return reply.send(startRun(db, graph, start.subject, {
+        now: now(),
+        ...(start.topicId === undefined ? {} : { topicId: start.topicId }),
+      }));
     } catch (error) {
       return fail(reply, error);
     }

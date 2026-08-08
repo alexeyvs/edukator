@@ -19,7 +19,11 @@ const DASHBOARD: ParentsDashboard = {
   time: {
     plannedMinutes: 630,
     actualMinutes: 35,
-    daily: [{ date: '2026-08-02', minutes: 10 }, { date: '2026-08-08', minutes: 25 }],
+    daily: [
+      { date: '2026-08-01', minutes: 4 },
+      { date: '2026-08-02', minutes: 6 },
+      { date: '2026-08-08', minutes: 25 },
+    ],
   },
   gaps: [
     { title: 'Слитное и раздельное написание НЕ', subject: 'russian' },
@@ -54,7 +58,10 @@ describe('родительский дашборд', () => {
     expect(screen.getByRole('region', { name: 'План и факт' })).toHaveTextContent('План630 минФакт35 мин');
     const bars = screen.getByLabelText('Активное время по дням');
     expect(within(bars).getAllByRole('time')).toHaveLength(7);
-    expect(within(bars).getAllByText('0')).toHaveLength(5);
+    const minutes = [...bars.querySelectorAll('.parents-bar-value')]
+      .map((item) => Number(item.textContent));
+    expect(minutes.reduce((sum, value) => sum + value, 0)).toBe(DASHBOARD.time.actualMinutes);
+    expect(minutes[0]).toBe(10);
 
     expect(screen.getByRole('region', { name: 'Что пока даётся труднее' }))
       .toHaveTextContent('Слитное и раздельное написание НЕ');

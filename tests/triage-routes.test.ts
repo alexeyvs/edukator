@@ -172,6 +172,24 @@ describe('маршруты триажа', () => {
     )).toBe(true);
   });
 
+  it('не засчитывает как пройденный брошенный вчерашний триаж', async () => {
+    const abandoned = Number(db.prepare(
+      `INSERT INTO runs (subject, kind, topic_id, started_at)
+       VALUES (?, 'triage', ?, ?)`,
+    ).run('math', 'math.1', '2026-08-07T12:00:00.000Z').lastInsertRowid);
+
+    await startTriage('russian');
+
+    expect(db.prepare('SELECT finished_at, summary FROM runs WHERE id = ?').get(abandoned))
+      .toEqual({ finished_at: '2026-08-07T12:00:00.000Z', summary: null });
+    const plan = (await app.inject({ method: 'GET', url: '/api/run/plan' })).json() as {
+      plan: Array<{ subject: Subject; triagePassed: boolean }>;
+      triage: Array<{ subject: Subject; passed: boolean }>;
+    };
+    expect(plan.plan.find((item) => item.subject === 'math')?.triagePassed).toBe(false);
+    expect(plan.triage.find((item) => item.subject === 'math')?.passed).toBe(false);
+  });
+
   it('возвращает завершение, когда диагностические темы исчерпаны', async () => {
     const runId = await startTriage('english');
     db.prepare("UPDATE task_bank SET status = 'rejected' WHERE topic_id LIKE 'english.%'").run();

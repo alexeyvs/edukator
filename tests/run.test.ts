@@ -119,6 +119,47 @@ describe('жизненный цикл забега', () => {
     });
   });
 
+  it('стартует тему выбранной карточки, а не первую тему того же предмета', () => {
+    const started = startRun(db, graph, 'math', { now: at(0, 9), topicId: 'math.b' });
+
+    expect(db.prepare('SELECT topic_id FROM runs WHERE id = ?').get(started.runId))
+      .toEqual({ topic_id: 'math.b' });
+  });
+
+  it('карточка другой темы возобновляет текущий забег по тому же предмету', () => {
+    const first = startRun(db, graph, 'math', { now: at(0, 9), topicId: 'math.a' });
+
+    const resumed = startRun(db, graph, 'math', { now: at(0, 18), topicId: 'math.b' });
+
+    expect(resumed).toMatchObject({ runId: first.runId, resumed: true });
+    expect(db.prepare('SELECT topic_id FROM runs WHERE id = ?').get(first.runId))
+      .toEqual({ topic_id: 'math.a' });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM runs').get()).toEqual({ count: 1 });
+  });
+
+  it('отвергает устаревшую карточку уже закрытой темы', () => {
+    db.prepare('UPDATE topic_state SET closed_at = ? WHERE topic_id = ?')
+      .run(at(0, 8).toISOString(), 'math.b');
+
+    expect(() => startRun(db, graph, 'math', { now: at(0, 9), topicId: 'math.b' }))
+      .toThrowError(expect.objectContaining({ code: 'run-topic-unavailable' }));
+    expect(db.prepare('SELECT COUNT(*) AS count FROM runs').get()).toEqual({ count: 0 });
+  });
+
+  it('переключает сутки забега по московской полуночи при UTC-поясе процесса', () => {
+    const first = startRun(db, graph, 'math', {
+      now: new Date('2026-08-07T20:50:00.000Z'), topicId: 'math.a',
+    });
+    const second = startRun(db, graph, 'math', {
+      now: new Date('2026-08-07T21:10:00.000Z'), topicId: 'math.a',
+    });
+
+    expect(second.resumed).toBe(false);
+    expect(second.runId).not.toBe(first.runId);
+    expect(db.prepare('SELECT finished_at FROM runs WHERE id = ?').get(first.runId))
+      .toEqual({ finished_at: '2026-08-07T20:50:00.000Z' });
+  });
+
   it('закрывает вчерашние забеги по последней попытке, а пустые — по старту', () => {
     const withAttempt = Number(db
       .prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
@@ -178,6 +219,24 @@ describe('жизненный цикл забега', () => {
     expect(db.prepare('SELECT finished_at FROM runs WHERE id = ?').get(runId)).toEqual({
       finished_at: null,
     });
+  });
+
+  it('не бросает активного босса при старте нового дня', () => {
+    const bossRun = Number(db.prepare(
+      `INSERT INTO runs (subject, kind, topic_id, started_at)
+       VALUES ('math', 'boss', 'math.a', ?)`,
+    ).run(at(-1, 9).toISOString()).lastInsertRowid);
+    db.prepare(
+      `INSERT INTO boss_batches (topic_id, run_id, status, activated_at)
+       VALUES ('math.a', ?, 'active', ?)`,
+    ).run(bossRun, at(-1, 9).toISOString());
+
+    startRun(db, graph, 'russian', { now: at(0) });
+
+    expect(db.prepare('SELECT finished_at FROM runs WHERE id = ?').get(bossRun))
+      .toEqual({ finished_at: null });
+    expect(db.prepare('SELECT status FROM boss_batches WHERE run_id = ?').get(bossRun))
+      .toEqual({ status: 'active' });
   });
 
   it('считает прогресс и готовность к закрытию по счётчикам забега', () => {

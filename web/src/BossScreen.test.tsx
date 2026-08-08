@@ -55,6 +55,10 @@ function bossAnswer(position: number, correct = true): BossAnswerResponse {
 
 function apiWith(overrides: Partial<BossApi> = {}): BossApi {
   return {
+    state: vi.fn(() => Promise.resolve({
+      outcome: 'active' as const,
+      progress: { total: 0, correct: 0, target: 5, done: false },
+    })),
     next: vi.fn(() => deferred<NextBossTaskResponse>()),
     answer: vi.fn(() => deferred<BossAnswerResponse>()),
     dispute: vi.fn(() => Promise.resolve({ dispute_id: 7, status: 'rejected' as const })),
@@ -219,6 +223,76 @@ describe('экран босса', () => {
     expect(await screen.findByRole('heading', { name: 'Задание номер 3' })).toBeInTheDocument();
     expect(screen.getByLabelText('Прогресс босса: 2 из 5')).toBeInTheDocument();
     expect(next).toHaveBeenCalledTimes(2);
+  });
+
+  it('после refresh восстанавливает неверный ответ и оставляет спор и concede доступными', async () => {
+    const api = apiWith({
+      state: vi.fn(() => Promise.resolve({
+        outcome: 'mistake' as const, attemptId: 205,
+        progress: { total: 3, correct: 2, target: 5, done: false },
+      })),
+    });
+    render(<BossScreen runId={9} api={api} />);
+
+    expect(await screen.findByRole('heading', { name: 'Ответ не засчитан' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Я всё-таки прав' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Признать поражение' })).toBeEnabled();
+  });
+
+  it('блокирует оба исхода восстановленной ошибки, пока concede не завершился', async () => {
+    const concede = vi.fn(() => deferred<{ runId: number; batchId: number; replacementBatchId: number }>());
+    const dispute = vi.fn(() => Promise.resolve({ dispute_id: 7, status: 'rejected' as const }));
+    const api = apiWith({
+      state: vi.fn(() => Promise.resolve({
+        outcome: 'mistake' as const, attemptId: 205,
+        progress: { total: 3, correct: 2, target: 5, done: false },
+      })),
+      concede,
+      dispute,
+    });
+    render(<BossScreen runId={9} api={api} />);
+
+    const concedeButton = await screen.findByRole('button', { name: 'Признать поражение' });
+    fireEvent.click(concedeButton);
+
+    expect(concedeButton).toBeDisabled();
+    const disputeButton = screen.getByRole('button', { name: 'Я всё-таки прав' });
+    expect(disputeButton).toBeDisabled();
+    fireEvent.click(disputeButton);
+    expect(concede).toHaveBeenCalledTimes(1);
+    expect(dispute).not.toHaveBeenCalled();
+  });
+
+  it('после refresh продолжает открытый спор и показывает победу после upheld на пятой позиции', async () => {
+    const api = apiWith({
+      state: vi.fn()
+        .mockResolvedValueOnce({
+          outcome: 'dispute' as const, attemptId: 205,
+          progress: { total: 5, correct: 4, target: 5, done: false },
+        })
+        .mockResolvedValueOnce({
+          outcome: 'won' as const,
+          progress: { total: 5, correct: 5, target: 5, done: true },
+        }),
+      dispute: vi.fn(() => Promise.resolve({ dispute_id: 7, status: 'upheld' as const })),
+    });
+    render(<BossScreen runId={9} api={api} />);
+
+    expect(await screen.findByRole('heading', { name: 'Босс побеждён' })).toBeInTheDocument();
+    expect(api.dispute).toHaveBeenCalledWith(205);
+  });
+
+  it('после refresh показывает сохранённую победу вместо подготовки нового батча', async () => {
+    const api = apiWith({
+      state: vi.fn(() => Promise.resolve({
+        outcome: 'won' as const,
+        progress: { total: 5, correct: 5, target: 5, done: true },
+      })),
+    });
+    render(<BossScreen runId={9} api={api} />);
+
+    expect(await screen.findByRole('heading', { name: 'Босс побеждён' })).toBeInTheDocument();
+    expect(api.next).not.toHaveBeenCalled();
   });
 
   it('объясняет недоступность нового батча без ложного наказания', async () => {

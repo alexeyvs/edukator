@@ -24,7 +24,7 @@ describe('браузерные API-адаптеры', () => {
 
     await browserHomeApi.plan();
     await browserHomeApi.profile();
-    await browserHomeApi.start('math');
+    await browserHomeApi.start('math', 'math.fractions');
     await browserHomeApi.startBoss('math.fractions');
     await browserHomeApi.startTriage('english');
     await browserHomeApi.finish(7);
@@ -38,16 +38,18 @@ describe('браузерные API-адаптеры', () => {
     });
 
     expect(fetch.mock.calls).toEqual([
-      ['/api/run/plan', undefined],
-      ['/api/profile', undefined],
-      ['/api/run/start', expect.objectContaining({ method: 'POST', body: '{"subject":"math"}' })],
+      ['/api/run/plan'],
+      ['/api/profile'],
+      ['/api/run/start', expect.objectContaining({
+        method: 'POST', body: '{"subject":"math","topic_id":"math.fractions"}',
+      })],
       ['/api/boss/start', expect.objectContaining({
         method: 'POST',
         body: '{"topic_id":"math.fractions"}',
       })],
       ['/api/triage/start', expect.objectContaining({ method: 'POST', body: '{"subject":"english"}' })],
       ['/api/run/7/finish', { method: 'POST' }],
-      ['/api/profile', undefined],
+      ['/api/profile'],
       ['/api/parents'],
       ['/api/profile', expect.objectContaining({ method: 'PUT', body: expect.stringContaining('Тимофей') })],
     ]);
@@ -71,8 +73,8 @@ describe('браузерные API-адаптеры', () => {
     await browserRunApi.triageNext(4);
 
     expect(fetch.mock.calls).toEqual([
-      ['/api/session/next?runId=3', undefined],
-      ['/api/session/next?runId=3&excludeTaskId=9', undefined],
+      ['/api/session/next?runId=3'],
+      ['/api/session/next?runId=3&excludeTaskId=9'],
       ['/api/session/answer', expect.objectContaining({
         method: 'POST',
         body: JSON.stringify({
@@ -88,7 +90,7 @@ describe('браузерные API-адаптеры', () => {
         body: '{"attempt_id":11}',
       })],
       ['/api/run/3/finish', { method: 'POST' }],
-      ['/api/triage/4/next', undefined],
+      ['/api/triage/4/next'],
     ]);
   });
 
@@ -102,7 +104,7 @@ describe('браузерные API-адаптеры', () => {
     await browserBossApi.concede(5);
 
     expect(fetch.mock.calls).toEqual([
-      ['/api/boss/5/next', undefined],
+      ['/api/boss/5/next'],
       ['/api/boss/5/answer', expect.objectContaining({
         method: 'POST',
         body: JSON.stringify({

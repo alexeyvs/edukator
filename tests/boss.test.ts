@@ -9,11 +9,13 @@ import { reserveBossTasks } from '../server/codex/bank.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import { openDispute, resolveDispute, submitAnswer } from '../server/session.js';
 import { finishRun } from '../server/run.js';
+import { finishBossLoss } from '../server/boss-loss.js';
 import {
   BOSS_MASTERY,
   BOSS_TARGET,
   BossError,
   bossTopicState,
+  bossFightState,
   concedeBoss,
   nextBossTask,
   startBoss,
@@ -23,9 +25,9 @@ import {
 const TOPIC = 'math.fractions';
 const NOW = new Date('2026-08-08T10:00:00.000Z');
 
-function tasks(): GeneratedTask[] {
+function tasks(prefix = 'Босс'): GeneratedTask[] {
   return Array.from({ length: 5 }, (_, index) => ({
-    instruction: `Босс ${index + 1}: сколько будет ${index + 1} + 10?`,
+    instruction: `${prefix} ${index + 1}: сколько будет ${index + 1} + 10?`,
     material: '', material_format: 'none', choices: [],
     answer: String(index + 11), accept: [String(index + 11)],
     hint: 'Секретная подсказка', explain: 'Складываем.', joke: 'Босс считает.', difficulty: 2,
@@ -162,10 +164,56 @@ describe('доменная модель босса', () => {
       runId, taskId: first.task.id, answer: '999', at: NOW,
     });
     openDispute(db, answer.attemptId);
+    expect(bossFightState(db, graph, runId)).toMatchObject({
+      outcome: 'dispute', attemptId: answer.attemptId,
+    });
     expect(() => nextBossTask(db, graph, runId)).toThrow(/спор/u);
     expect(() => submitBossAnswer(db, graph, {
       runId, taskId: first.task.id, answer: '11', at: NOW,
     })).toThrow(/спор/u);
+  });
+
+  it('восстанавливает ошибку и сохранённое поражение', () => {
+    const { runId } = active();
+    const first = nextBossTask(db, graph, runId);
+    const answer = submitBossAnswer(db, graph, {
+      runId, taskId: first.task.id, answer: '999', at: NOW,
+    });
+    expect(bossFightState(db, graph, runId)).toMatchObject({
+      outcome: 'mistake', attemptId: answer.attemptId,
+    });
+    concedeBoss(db, runId, { now: NOW });
+    expect(bossFightState(db, graph, runId)).toMatchObject({
+      outcome: 'lost', progress: { done: true },
+    });
+  });
+
+  it('отвергает некорректные времена и неизвестное состояние боя', () => {
+    prepare();
+    expect(() => startBoss(db, graph, TOPIC, { now: new Date('invalid') })).toThrow(/время старта/u);
+    const { runId } = startBoss(db, graph, TOPIC, { now: NOW });
+    expect(() => concedeBoss(db, runId, { now: new Date('invalid') })).toThrow(/время поражения/u);
+    db.prepare("UPDATE boss_batches SET status = 'failed' WHERE run_id = ?").run(runId);
+    expect(() => bossFightState(db, graph, runId)).toThrow(/состояние боя/u);
+  });
+
+  it('атомарный переход поражения отвергает неизвестный и уже закрытый бой', () => {
+    expect(() => bossFightState(db, graph, 999)).toThrow(/не найден/u);
+    expect(() => finishBossLoss(db, 999, NOW.toISOString())).toThrow(/не найден/u);
+    const { runId } = active();
+    db.prepare('UPDATE runs SET finished_at = ? WHERE id = ?').run(NOW.toISOString(), runId);
+    expect(() => finishBossLoss(db, runId, NOW.toISOString())).toThrow(/не найден/u);
+    db.prepare('UPDATE runs SET finished_at = NULL WHERE id = ?').run(runId);
+    db.prepare("UPDATE boss_batches SET status = 'failed' WHERE run_id = ?").run(runId);
+    expect(() => finishBossLoss(db, runId, NOW.toISOString())).toThrow(/не найден/u);
+  });
+
+  it('использует текущие часы по умолчанию для старта и поражения', () => {
+    prepare();
+    const { runId } = startBoss(db, graph, TOPIC);
+    const first = nextBossTask(db, graph, runId);
+    submitBossAnswer(db, graph, { runId, taskId: first.task.id, answer: '999' });
+    expect(concedeBoss(db, runId)).toMatchObject({ runId });
   });
 
   it('общий путь ответа учитывает boss и переиспользует запись попытки, mastery и XP', () => {
@@ -213,6 +261,30 @@ describe('доменная модель босса', () => {
       .toEqual({ total: 5, correct: 5, finished_at: NOW.toISOString() });
     expect(db.prepare('SELECT closed_at FROM topic_state WHERE topic_id = ?').get(TOPIC))
       .toEqual({ closed_at: NOW.toISOString() });
+  });
+
+  it('подтверждённый спор на пятой позиции атомарно завершает победу', async () => {
+    const { batchId, runId } = active();
+    for (const answer of ['11', '12', '13', '14']) {
+      const current = nextBossTask(db, graph, runId);
+      submitBossAnswer(db, graph, { runId, taskId: current.task.id, answer, at: NOW });
+    }
+    const fifth = nextBossTask(db, graph, runId);
+    const wrong = submitBossAnswer(db, graph, {
+      runId, taskId: fifth.task.id, answer: 'пятнадцать', at: NOW,
+    });
+    const dispute = openDispute(db, wrong.attemptId);
+
+    await resolveDispute(db, graph, dispute.id, () => Promise.resolve({
+      studentCorrect: true, note: 'число записано словами',
+    }));
+
+    expect(db.prepare('SELECT total, correct, finished_at FROM runs WHERE id = ?').get(runId))
+      .toEqual({ total: 5, correct: 5, finished_at: expect.any(String) });
+    expect(db.prepare('SELECT status FROM boss_batches WHERE id = ?').get(batchId))
+      .toEqual({ status: 'won' });
+    expect(db.prepare('SELECT closed_at FROM topic_state WHERE topic_id = ?').get(TOPIC))
+      .toEqual({ closed_at: expect.any(String) });
   });
 
   it('отклонённый спор атомарно завершает бой и повторный verdict не создаёт второй батч', async () => {
@@ -279,7 +351,13 @@ describe('доменная модель босса', () => {
       .toEqual({ finished_at: '2026-08-08T10:00:01.000Z' });
     expect(db.prepare('SELECT mastery FROM topic_state WHERE topic_id = ?').get(TOPIC))
       .toEqual({ mastery: masteryAfterAnswer });
-    expect(bossTopicState(db, TOPIC)).toMatchObject({ status: 'preparing' });
+    expect(masteryAfterAnswer).toBeLessThanOrEqual(BOSS_MASTERY);
+    expect(bossTopicState(db, TOPIC)).toMatchObject({ status: 'preparing', eligible: true });
+
+    expect(reserveBossTasks(db, result.replacementBatchId, tasks('Реванш')).ready).toBe(true);
+    expect(bossTopicState(db, TOPIC)).toMatchObject({ status: 'ready', eligible: true });
+    expect(startBoss(db, graph, TOPIC, { now: new Date(NOW.getTime() + 2000) }))
+      .toMatchObject({ batchId: result.replacementBatchId, resumed: false });
   });
 
   it('пятый верный ответ атомарно завершает победу, начисляет taskXp и закрывает тему', () => {

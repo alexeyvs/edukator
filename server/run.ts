@@ -12,10 +12,11 @@ import {
   recordForecasts,
   type ForecastSnapshot,
 } from './forecast.js';
-import { selectTopic, topicsUsedToday } from './scheduler.js';
+import { rankTopics, selectTopic, topicsUsedToday } from './scheduler.js';
 import { SessionError } from './session-error.js';
 import { taskXp } from './xp.js';
 import { TRIAGE_TARGET } from './triage.js';
+import { moscowDayBounds } from './moscow-time.js';
 
 /** Число ответов, после которого забег готов к финальному экрану. */
 export const RUN_TARGET = 12;
@@ -32,6 +33,8 @@ export interface RunProgress {
 export interface StartRunOptions {
   now?: Date;
   kind?: Exclude<RunKind, 'boss'>;
+  /** Тема конкретной карточки плана; для триажа тему выбирает его собственная политика. */
+  topicId?: string;
 }
 
 export interface StartRunResult {
@@ -88,14 +91,6 @@ interface RunAttemptRow {
   created_at: string;
 }
 
-function dayBounds(now: Date): [string, string] {
-  const start = new Date(now);
-  start.setHours(0, 0, 0, 0);
-  const next = new Date(start);
-  next.setDate(next.getDate() + 1);
-  return [start.toISOString(), next.toISOString()];
-}
-
 function progressFrom(row: RunCounters): RunProgress {
   return {
     total: row.total,
@@ -134,7 +129,7 @@ export function startRun(
   const kind = options.kind ?? 'run';
 
   return db.transaction((): StartRunResult => {
-    const [start, next] = dayBounds(now);
+    const [start, next] = moscowDayBounds(now);
 
     if ((graph.bySubject.get(subject) ?? []).length === 0) {
       throw new Error(`Забег: предмет «${subject}» отсутствует в карте тем`);
@@ -148,7 +143,7 @@ export function startRun(
             (SELECT MAX(attempts.created_at) FROM attempts WHERE attempts.run_id = runs.id),
             runs.started_at
           )
-        WHERE finished_at IS NULL AND started_at < ?
+        WHERE finished_at IS NULL AND kind IN ('run', 'triage') AND started_at < ?
           AND NOT EXISTS (
             SELECT 1 FROM attempts
             JOIN disputes ON disputes.attempt_id = attempts.id
@@ -160,6 +155,10 @@ export function startRun(
       .prepare<[Subject, Exclude<RunKind, 'boss'>, string, string], { id: number }>(
         `SELECT id FROM runs
           WHERE subject = ? AND kind = ? AND finished_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM topic_state
+               WHERE topic_state.topic_id = runs.topic_id AND topic_state.closed_at IS NULL
+            )
             AND started_at >= ? AND started_at < ?
           ORDER BY started_at DESC, id DESC LIMIT 1`,
       )
@@ -169,15 +168,25 @@ export function startRun(
     }
 
     const used = topicsUsedToday(db, now);
-    const chosen = selectTopic(
-      graph,
-      readTopicStates(db),
-      subject,
-      { now, examDate: readProfile(db).examDate, used },
-      used,
-    );
+    const states = readTopicStates(db);
+    const examDate = readProfile(db).examDate;
+    const requestedTopicOpen = options.topicId === undefined || db.prepare<
+      [string], { open: number }
+    >('SELECT 1 AS open FROM topic_state WHERE topic_id = ? AND closed_at IS NULL')
+      .get(options.topicId) !== undefined;
+    const chosen = options.topicId === undefined
+      ? selectTopic(graph, states, subject, { now, examDate, used }, used)
+      : rankTopics(graph, states, { now, examDate }, subject).find((item) =>
+          requestedTopicOpen && item.topic.id === options.topicId &&
+          item.priority > 0 && !used.has(item.topic.id),
+        ) ?? null;
     if (chosen === null) {
-      throw new Error(`Забег: для предмета «${subject}» нет доступной темы`);
+      throw new SessionError(
+        'run-topic-unavailable',
+        options.topicId === undefined
+          ? `Забег: для предмета «${subject}» нет доступной темы`
+          : `Забег: тема «${options.topicId}» больше недоступна в плане`,
+      );
     }
 
     const runId = Number(

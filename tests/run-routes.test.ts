@@ -209,6 +209,16 @@ describe('маршруты забега', () => {
       .toBe(400);
     expect((await app.inject({ method: 'POST', url: '/api/run/start', payload: { subject: 'art' } })).statusCode)
       .toBe(400);
+    expect((await app.inject({
+      method: 'POST', url: '/api/run/start', payload: { subject: 'math', topic_id: 42 },
+    })).statusCode).toBe(400);
+    const staleCard = await app.inject({
+      method: 'POST',
+      url: '/api/run/start',
+      payload: { subject: 'math', topic_id: 'russian.a' },
+    });
+    expect(staleCard.statusCode).toBe(409);
+    expect(staleCard.json()).toMatchObject({ code: 'run-topic-unavailable' });
     expect((await app.inject({ method: 'POST', url: '/api/run/nope/finish' })).statusCode)
       .toBe(400);
     expect((await app.inject({ method: 'POST', url: '/api/run/0/finish' })).statusCode)
