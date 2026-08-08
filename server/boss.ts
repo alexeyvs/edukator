@@ -3,14 +3,12 @@ import type { Database } from 'better-sqlite3';
 import type { Topic, TopicGraph } from './curriculum.js';
 import { bossTaskAtPosition, type BankTask } from './codex/bank.js';
 import { taskPromptText } from './codex/task-schema.js';
-import { readTopicState, recordAttempt, type TopicState } from './mastery.js';
-import { checkAnswer, type RejectReason } from './normalize.js';
-import { taskXp } from './xp.js';
-
-/** Босс появляется только выше этого значения, равенства недостаточно. */
-export const BOSS_MASTERY = 0.75;
-/** Победа требует пяти верных ответов подряд. */
-export const BOSS_TARGET = 5;
+import { type TopicState } from './mastery.js';
+import { type RejectReason } from './normalize.js';
+import { submitAnswer } from './session.js';
+import { finishBossLoss } from './boss-loss.js';
+export { BOSS_MASTERY, BOSS_TARGET } from './boss-rules.js';
+import { BOSS_MASTERY, BOSS_TARGET } from './boss-rules.js';
 
 export type BossTopicStatus = 'working' | 'preparing' | 'ready' | 'active' | 'closed';
 export type BossErrorCode =
@@ -321,118 +319,36 @@ export interface SubmitBossAnswerResult {
   progress: { total: number; correct: number; target: number; done: boolean };
 }
 
-function parseAccept(raw: string, taskId: number): string[] {
-  let parsed: unknown;
-  try { parsed = JSON.parse(raw); } catch {
-    throw new Error(`Босс: задание ${taskId} хранит accept[] не как JSON`);
-  }
-  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== 'string')) {
-    throw new Error(`Босс: accept[] задания ${taskId} должен быть массивом строк`);
-  }
-  return parsed as string[];
-}
-
 /** Принимает ответ текущей позиции и на пятом успехе закрывает тему одной записью. */
 export function submitBossAnswer(
   db: Database,
   graph: TopicGraph,
   request: SubmitBossAnswerRequest,
 ): SubmitBossAnswerResult {
-  if (request.hintUsed === true) {
-    throw new BossError('boss-hint-forbidden', 'Босс: в бою нельзя использовать подсказку');
+  const result = submitAnswer(db, graph, {
+    runId: request.runId,
+    taskId: request.taskId,
+    answer: request.answer,
+    ...(request.hintUsed === undefined ? {} : { hintUsed: request.hintUsed }),
+    ...(request.durationMs === undefined ? {} : { durationMs: request.durationMs }),
+    ...(request.at === undefined ? {} : { at: request.at }),
+  });
+  if (result.bossOutcome === undefined || result.progress === null) {
+    throw new BossError('boss-inconsistent', `Босс: ответ боя ${request.runId} прошёл не как boss`);
   }
-  const requestedAt = request.at ?? new Date();
-  if (!Number.isFinite(requestedAt.getTime())) {
-    throw new Error(`Босс: некорректное время ответа (${String(requestedAt)})`);
-  }
-  const durationMs = Math.max(0, Math.round(request.durationMs ?? 0));
-
-  return db.transaction((): SubmitBossAnswerResult => {
-    const fight = readFight(db, request.runId);
-    const topic = topicOf(graph, fight.run_topic_id);
-    validateFight(fight, topic);
-    const summary = attemptSummary(db, request.runId);
-    ensureProgress(fight, summary);
-    const position = summary.total + 1;
-    const row = db.prepare<[number, number], {
-      id: number; topic_id: string; answer: string; accept: string; explain: string | null;
-      joke: string | null; difficulty: number; status: string; issued_run_id: number | null;
-    }>(
-      `SELECT task_bank.id, task_bank.topic_id, task_bank.answer, task_bank.accept,
-              task_bank.explain, task_bank.joke, task_bank.difficulty,
-              task_bank.status, task_bank.issued_run_id
-         FROM boss_tasks
-         JOIN task_bank ON task_bank.id = boss_tasks.task_id
-        WHERE boss_tasks.batch_id = ? AND boss_tasks.position = ?`,
-    ).get(fight.batch_id, position);
-    if (row === undefined || row.id !== request.taskId) {
-      throw new BossError('boss-wrong-task', `Босс: ответ принимается только на текущее задание позиции ${position}`);
-    }
-    if (
-      row.topic_id !== topic.id || row.status !== 'boss_reserved' ||
-      row.issued_run_id !== request.runId
-    ) {
-      throw new BossError('boss-inconsistent', `Босс: batch, run и task ${request.taskId} несогласованы`);
-    }
-
-    const check = checkAnswer(
-      request.answer,
-      { answer: row.answer, accept: parseAccept(row.accept, row.id) },
-      topic.answerFormat,
-    );
-    const current = readTopicState(db, topic.id);
-    const previous = current.lastSeen === null ? Number.NEGATIVE_INFINITY : Date.parse(current.lastSeen);
-    const at = Number.isFinite(previous) && requestedAt.getTime() < previous
-      ? new Date(previous)
-      : requestedAt;
-    const info = db.prepare(
-      `INSERT INTO attempts
-        (task_id, topic_id, run_id, answer, is_correct, hint_used, duration_ms, created_at)
-       VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
-    ).run(row.id, topic.id, request.runId, request.answer.trim(), check.correct ? 1 : 0,
-      durationMs, at.toISOString());
-    const state = recordAttempt(db, topic.id, {
-      correct: check.correct, difficulty: row.difficulty, hintUsed: false, at,
-    });
-    db.prepare(
-      'UPDATE runs SET total = total + 1, correct = correct + ? WHERE id = ?',
-    ).run(check.correct ? 1 : 0, request.runId);
-
-    const total = summary.total + 1;
-    const correct = summary.correct + (check.correct ? 1 : 0);
-    let outcome: SubmitBossAnswerResult['outcome'] = check.correct ? 'active' : 'mistake';
-    if (check.correct && total === BOSS_TARGET) {
-      const iso = at.toISOString();
-      const runChange = db.prepare(
-        "UPDATE runs SET finished_at = ? WHERE id = ? AND kind = 'boss' AND finished_at IS NULL",
-      ).run(iso, request.runId);
-      const batchChange = db.prepare(
-        `UPDATE boss_batches SET status = 'won', finished_at = ?
-          WHERE id = ? AND run_id = ? AND status = 'active'`,
-      ).run(iso, fight.batch_id, request.runId);
-      const topicChange = db.prepare(
-        'UPDATE topic_state SET closed_at = COALESCE(closed_at, ?) WHERE topic_id = ?',
-      ).run(iso, topic.id);
-      if (runChange.changes !== 1 || batchChange.changes !== 1 || topicChange.changes !== 1) {
-        throw new BossError('boss-inconsistent', `Босс: победа в бою ${request.runId} не записалась целиком`);
-      }
-      outcome = 'won';
-    }
-
-    return {
-      attemptId: Number(info.lastInsertRowid),
-      correct: check.correct,
-      normalized: check.normalized,
-      ...(check.reason === undefined ? {} : { reason: check.reason }),
-      answer: row.answer,
-      explain: row.explain ?? '',
-      joke: row.joke ?? '',
-      state,
-      xp: taskXp({ difficulty: row.difficulty, correct: check.correct, hintUsed: false }),
-      outcome,
-      progress: { total, correct, target: BOSS_TARGET, done: outcome === 'won' },
-    };
-  }).immediate();
+  return {
+    attemptId: result.attemptId,
+    correct: result.correct,
+    normalized: result.normalized,
+    ...(result.reason === undefined ? {} : { reason: result.reason }),
+    answer: result.answer,
+    explain: result.explain,
+    joke: result.joke,
+    state: result.state,
+    xp: result.xp,
+    outcome: result.bossOutcome,
+    progress: result.progress,
+  };
 }
 
 export interface ConcedeBossOptions { now?: Date }
@@ -465,15 +381,6 @@ export function concedeBoss(
     if (state.closed_at !== null) {
       throw new BossError('boss-inconsistent', `Босс: проигрываемая тема «${fight.run_topic_id}» уже закрыта`);
     }
-    const iso = now.toISOString();
-    db.prepare('UPDATE runs SET finished_at = ? WHERE id = ? AND finished_at IS NULL').run(iso, runId);
-    db.prepare(
-      `UPDATE boss_batches SET status = 'lost', finished_at = ?
-        WHERE id = ? AND status = 'active'`,
-    ).run(iso, fight.batch_id);
-    const replacementBatchId = Number(db.prepare(
-      "INSERT INTO boss_batches (topic_id, status, created_at) VALUES (?, 'preparing', ?)",
-    ).run(fight.run_topic_id, iso).lastInsertRowid);
-    return { runId, batchId: fight.batch_id, replacementBatchId };
+    return finishBossLoss(db, runId, now.toISOString());
   }).immediate();
 }

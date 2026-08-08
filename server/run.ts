@@ -20,7 +20,7 @@ import { TRIAGE_TARGET } from './triage.js';
 /** Число ответов, после которого забег готов к финальному экрану. */
 export const RUN_TARGET = 12;
 
-export type RunKind = 'run' | 'triage';
+export type RunKind = 'run' | 'triage' | 'boss';
 
 export interface RunProgress {
   total: number;
@@ -31,7 +31,7 @@ export interface RunProgress {
 
 export interface StartRunOptions {
   now?: Date;
-  kind?: RunKind;
+  kind?: Exclude<RunKind, 'boss'>;
 }
 
 export interface StartRunResult {
@@ -157,7 +157,7 @@ export function startRun(
     ).run(start);
 
     const active = db
-      .prepare<[Subject, RunKind, string, string], { id: number }>(
+      .prepare<[Subject, Exclude<RunKind, 'boss'>, string, string], { id: number }>(
         `SELECT id FROM runs
           WHERE subject = ? AND kind = ? AND finished_at IS NULL
             AND started_at >= ? AND started_at < ?
@@ -289,6 +289,12 @@ export function finishRun(
         return JSON.parse(run.summary) as FinishRunResult;
       }
       throw new SessionError('run-finished', `Забег ${runId} уже завершён`);
+    }
+    if (run.kind === 'boss') {
+      throw new SessionError(
+        'run-not-ready',
+        `Бой с боссом ${runId} завершается только победой или поражением`,
+      );
     }
 
     const attempts = db

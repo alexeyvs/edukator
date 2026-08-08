@@ -34,6 +34,8 @@ import { runProgress, type RunProgress } from './run.js';
 import { SessionError, type SessionErrorCode } from './session-error.js';
 import { taskXp } from './xp.js';
 import { projectIssuedTask, type IssuedTask } from './issued-task.js';
+import { BOSS_TARGET } from './boss-rules.js';
+import { finishBossLoss } from './boss-loss.js';
 
 export type { IssuedTask } from './issued-task.js';
 
@@ -127,8 +129,13 @@ export function nextTask(
   const now = options.now ?? new Date();
   const log = options.log ?? ((message: string): void => void process.stderr.write(`${message}\n`));
   const run = options.runId === undefined ? undefined : readActiveRun(db, options.runId);
-  if (run?.kind === 'triage') {
-    throw new SessionError('task-not-in-run', `Забег ${run.id} является триажем`);
+  if (run?.kind !== undefined && run.kind !== 'run') {
+    throw new SessionError(
+      'task-not-in-run',
+      run.kind === 'boss'
+        ? `Бой с боссом ${run.id} выдаёт задания только из своего батча`
+        : `Забег ${run.id} является триажем`,
+    );
   }
   if (run !== undefined && runProgress(db, run.id).done) {
     throw new SessionError('run-complete', `Забег ${run.id} достиг цели и готов к завершению`);
@@ -231,18 +238,25 @@ export interface AnswerResult {
   xp: number;
   /** Счётчики забега после записи попытки либо null для обычного занятия. */
   progress: RunProgress | null;
+  /** Есть только у boss: обычный HTTP-путь ответа сохраняет доменный исход боя. */
+  bossOutcome?: 'active' | 'mistake' | 'won';
 }
 
 interface SessionRun {
   id: number;
   subject: Subject;
-  kind: 'run' | 'triage';
+  topic_id: string;
+  kind: 'run' | 'triage' | 'boss';
   finished_at: string | null;
+  total: number;
+  correct: number;
 }
 
 function readActiveRun(db: Database, runId: number): SessionRun {
   const run = db
-    .prepare<[number], SessionRun>('SELECT id, subject, kind, finished_at FROM runs WHERE id = ?')
+    .prepare<[number], SessionRun>(
+      'SELECT id, subject, topic_id, kind, finished_at, total, correct FROM runs WHERE id = ?',
+    )
     .get(runId);
   if (run === undefined) {
     throw new SessionError('run-not-found', `Занятие: забег ${runId} не найден`);
@@ -299,6 +313,59 @@ function topicOf(graph: TopicGraph, topicId: string): Topic {
   return topic;
 }
 
+interface BossAnswerContext {
+  batch_id: number;
+  batch_topic_id: string;
+  batch_status: string;
+  position: number | null;
+  total: number;
+  correct: number;
+  wrong: number;
+  open_disputes: number;
+}
+
+function bossAnswerContext(db: Database, run: SessionRun, taskId: number): BossAnswerContext {
+  const row = db.prepare<[number, number], BossAnswerContext>(
+    `SELECT boss_batches.id AS batch_id, boss_batches.topic_id AS batch_topic_id,
+            boss_batches.status AS batch_status, boss_tasks.position,
+            COUNT(DISTINCT attempts.id) AS total,
+            COALESCE(SUM(attempts.is_correct), 0) AS correct,
+            COALESCE(SUM(CASE WHEN attempts.is_correct = 0 THEN 1 ELSE 0 END), 0) AS wrong,
+            COUNT(DISTINCT CASE WHEN disputes.status = 'open' THEN disputes.id END) AS open_disputes
+       FROM boss_batches
+       LEFT JOIN boss_tasks ON boss_tasks.batch_id = boss_batches.id AND boss_tasks.task_id = ?
+       LEFT JOIN attempts ON attempts.run_id = boss_batches.run_id
+       LEFT JOIN disputes ON disputes.attempt_id = attempts.id
+      WHERE boss_batches.run_id = ?
+      GROUP BY boss_batches.id, boss_tasks.position`,
+  ).get(taskId, run.id);
+  if (
+    row === undefined || row.batch_status !== 'active' || row.batch_topic_id === '' ||
+    run.total !== row.total || run.correct !== row.correct
+  ) {
+    throw new SessionError('task-not-in-run', `Босс: batch и run боя ${run.id} несогласованы`);
+  }
+  if (row.open_disputes > 0) {
+    throw new SessionError('run-not-ready', `Босс: бой ${run.id} приостановлен открытым спором`);
+  }
+  if (row.wrong > 0) {
+    throw new SessionError(
+      'run-not-ready',
+      `Босс: после ошибки нужно признать поражение или открыть спор`,
+    );
+  }
+  if (row.total >= BOSS_TARGET) {
+    throw new SessionError('run-complete', `Босс: пять ответов боя ${run.id} уже исчерпаны`);
+  }
+  if (row.position !== row.total + 1) {
+    throw new SessionError(
+      'task-not-in-run',
+      `Босс: ответ принимается только на текущее задание позиции ${row.total + 1}`,
+    );
+  }
+  return row;
+}
+
 /**
  * Отметка попытки не раньше последней известной по теме. Нечитаемое `last_seen`
  * не чинится здесь: на нём осмысленно падает сам `applyAttempt`, назвав колонку.
@@ -324,6 +391,9 @@ export function submitAnswer(
   request: AnswerRequest,
 ): AnswerResult {
   const requestedAt = request.at ?? new Date();
+  if (!Number.isFinite(requestedAt.getTime())) {
+    throw new Error(`Занятие: некорректное время ответа (${String(requestedAt)})`);
+  }
   const hintUsed = request.hintUsed ?? false;
   const durationMs = Math.max(0, Math.round(request.durationMs ?? 0));
   const log =
@@ -336,6 +406,13 @@ export function submitAnswer(
     const row = readTask(db, request.taskId);
     const topic = topicOf(graph, row.topic_id);
     const run = request.runId === undefined ? undefined : readActiveRun(db, request.runId);
+    const boss = run?.kind === 'boss' ? bossAnswerContext(db, run, row.id) : undefined;
+    if (
+      boss !== undefined && run !== undefined &&
+      (boss.batch_topic_id !== run.topic_id || row.topic_id !== run.topic_id)
+    ) {
+      throw new SessionError('task-not-in-run', `Босс: batch, run и task ${request.taskId} несогласованы`);
+    }
     if (run?.kind === 'run' && runProgress(db, run.id).done) {
       throw new SessionError('run-complete', `Забег ${run.id} достиг цели и готов к завершению`);
     }
@@ -348,16 +425,21 @@ export function submitAnswer(
     if ((run?.id ?? null) !== row.issued_run_id) {
       throw new SessionError(
         'task-not-in-run',
-        `Занятие: задание ${request.taskId} выдано другому забегу`,
+        run?.kind === 'boss'
+          ? `Босс: batch, run и task ${request.taskId} несогласованы`
+          : `Занятие: задание ${request.taskId} выдано другому забегу`,
       );
     }
-    if (run?.kind === 'triage' && hintUsed) {
+    if ((run?.kind === 'triage' || run?.kind === 'boss') && hintUsed) {
       throw new SessionError(
         'task-not-in-run',
-        `Занятие: в триаже ${run.id} нельзя использовать подсказку`,
+        run.kind === 'boss'
+          ? `Босс: в бою ${run.id} нельзя использовать подсказку`
+          : `Занятие: в триаже ${run.id} нельзя использовать подсказку`,
       );
     }
-    if (row.status !== 'used') {
+    const expectedStatus = run?.kind === 'boss' ? 'boss_reserved' : 'used';
+    if (row.status !== expectedStatus) {
       throw new SessionError(
         'task-not-issued',
         `Занятие: задание ${request.taskId} ученику не выдавалось`,
@@ -403,6 +485,7 @@ export function submitAnswer(
         topic.answerFormat,
       );
     } catch (error) {
+      if (run?.kind === 'boss') throw error;
       db.prepare("UPDATE task_bank SET status = 'rejected' WHERE id = ?").run(row.id);
       return { defect: (error as Error).message };
     }
@@ -443,6 +526,32 @@ export function submitAnswer(
       ).run({ runId: run.id, correct: check.correct ? 1 : 0 });
     }
 
+    let progress = run === undefined ? null : runProgress(db, run.id);
+    let bossOutcome: AnswerResult['bossOutcome'];
+    if (run?.kind === 'boss') {
+      const total = (boss?.total ?? 0) + 1;
+      const correct = (boss?.correct ?? 0) + (check.correct ? 1 : 0);
+      bossOutcome = check.correct ? 'active' : 'mistake';
+      if (check.correct && total === BOSS_TARGET) {
+        const iso = at.toISOString();
+        const runChange = db.prepare(
+          "UPDATE runs SET finished_at = ? WHERE id = ? AND kind = 'boss' AND finished_at IS NULL",
+        ).run(iso, run.id);
+        const batchChange = db.prepare(
+          `UPDATE boss_batches SET status = 'won', finished_at = ?
+            WHERE id = ? AND run_id = ? AND status = 'active'`,
+        ).run(iso, boss?.batch_id, run.id);
+        const topicChange = db.prepare(
+          'UPDATE topic_state SET closed_at = COALESCE(closed_at, ?) WHERE topic_id = ?',
+        ).run(iso, row.topic_id);
+        if (runChange.changes !== 1 || batchChange.changes !== 1 || topicChange.changes !== 1) {
+          throw new Error(`Босс: победа в бою ${run.id} не записалась целиком`);
+        }
+        bossOutcome = 'won';
+      }
+      progress = { total, correct, target: BOSS_TARGET, done: bossOutcome === 'won' };
+    }
+
     return {
       attemptId: Number(info.lastInsertRowid),
       correct: check.correct,
@@ -453,7 +562,8 @@ export function submitAnswer(
       joke: row.joke ?? '',
       state,
       xp,
-      progress: run === undefined ? null : runProgress(db, run.id),
+      progress,
+      ...(bossOutcome === undefined ? {} : { bossOutcome }),
     };
   }).immediate();
 
@@ -490,9 +600,12 @@ export function openDispute(db: Database, attemptId: number): OpenDisputeResult 
     const attempt = db
       .prepare<
         [number],
-        { id: number; is_correct: number; run_id: number | null; finished_at: string | null }
+        {
+          id: number; is_correct: number; run_id: number | null;
+          finished_at: string | null; kind: string | null;
+        }
       >(
-        `SELECT attempts.id, attempts.is_correct, attempts.run_id, runs.finished_at
+        `SELECT attempts.id, attempts.is_correct, attempts.run_id, runs.finished_at, runs.kind
            FROM attempts
            LEFT JOIN runs ON runs.id = attempts.run_id
           WHERE attempts.id = ?`,
@@ -524,6 +637,18 @@ export function openDispute(db: Database, attemptId: number): OpenDisputeResult 
       );
     }
 
+    if (attempt.kind === 'boss' && attempt.run_id !== null) {
+      const another = db.prepare<[number, number], { id: number }>(
+        `SELECT disputes.id FROM disputes
+          JOIN attempts ON attempts.id = disputes.attempt_id
+         WHERE attempts.run_id = ? AND disputes.status = 'open'
+           AND attempts.id <> ? LIMIT 1`,
+      ).get(attempt.run_id, attempt.id);
+      if (another !== undefined) {
+        throw new SessionError('run-not-ready', `Босс: в бою ${attempt.run_id} уже открыт спор`);
+      }
+    }
+
     const info = db.prepare('INSERT INTO disputes (attempt_id) VALUES (?)').run(attemptId);
     return { id: Number(info.lastInsertRowid), status: 'open', created: true };
   }).immediate();
@@ -546,6 +671,7 @@ interface DisputeRow {
   resolution: string | null;
   attempt_id: number;
   run_id: number | null;
+  run_kind: string | null;
   topic_id: string;
   given: string;
   task_id: number;
@@ -558,11 +684,13 @@ function readDispute(db: Database, disputeId: number): DisputeRow {
   const row = db
     .prepare<[number], DisputeRow>(
       `SELECT disputes.id, disputes.status, disputes.resolution,
-              attempts.id AS attempt_id, attempts.run_id, attempts.topic_id,
+              attempts.id AS attempt_id, attempts.run_id, runs.kind AS run_kind,
+              attempts.topic_id,
               attempts.answer AS given,
               task_bank.id AS task_id, task_bank.question, task_bank.answer, task_bank.accept
          FROM disputes
          JOIN attempts ON attempts.id = disputes.attempt_id
+         LEFT JOIN runs ON runs.id = attempts.run_id
          JOIN task_bank ON task_bank.id = attempts.task_id
         WHERE disputes.id = ?`,
     )
@@ -636,14 +764,18 @@ export async function resolveDispute(
     }
 
     const status: DisputeStatus = verdict.studentCorrect ? 'upheld' : 'rejected';
+    const resolvedAt = new Date().toISOString();
     db.prepare(
       `UPDATE disputes
           SET status = @status, resolution = @resolution,
-              resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              resolved_at = @resolvedAt
         WHERE id = @id`,
-    ).run({ id: disputeId, status, resolution: verdict.note });
+    ).run({ id: disputeId, status, resolution: verdict.note, resolvedAt });
 
     if (!verdict.studentCorrect) {
+      if (fresh.run_kind === 'boss' && fresh.run_id !== null) {
+        finishBossLoss(db, fresh.run_id, resolvedAt);
+      }
       return { id: disputeId, status, resolution: verdict.note, accept: current, state: null };
     }
 

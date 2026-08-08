@@ -171,6 +171,17 @@ describe('маршруты забега', () => {
     const premature = await app.inject({ method: 'POST', url: `/api/run/${mathRun}/finish` });
     expect(premature.statusCode).toBe(409);
     expect(premature.json()).toMatchObject({ code: 'run-not-ready' });
+
+    const bossRun = Number(db.prepare(
+      "INSERT INTO runs (subject, kind, topic_id, started_at) VALUES (?, 'boss', ?, ?)",
+    ).run('math', 'math.a', NOW.toISOString()).lastInsertRowid);
+    const bossFinish = await app.inject({ method: 'POST', url: `/api/run/${bossRun}/finish` });
+    expect(bossFinish.statusCode).toBe(409);
+    expect(bossFinish.json()).toMatchObject({
+      code: 'run-not-ready',
+      error: expect.stringMatching(/только победой/u),
+    });
+
     db.prepare('UPDATE runs SET finished_at = ? WHERE id = ?').run(NOW.toISOString(), mathRun);
     const afterClose = await app.inject({
       method: 'GET',

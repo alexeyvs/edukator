@@ -7,7 +7,8 @@ import { openDatabase } from '../server/db.js';
 import { buildTopicGraph, syncTopicState, type TopicGraph } from '../server/curriculum.js';
 import { reserveBossTasks } from '../server/codex/bank.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
-import { openDispute } from '../server/session.js';
+import { openDispute, resolveDispute, submitAnswer } from '../server/session.js';
+import { finishRun } from '../server/run.js';
 import {
   BOSS_MASTERY,
   BOSS_TARGET,
@@ -162,6 +163,105 @@ describe('доменная модель босса', () => {
     });
     openDispute(db, answer.attemptId);
     expect(() => nextBossTask(db, graph, runId)).toThrow(/спор/u);
+    expect(() => submitBossAnswer(db, graph, {
+      runId, taskId: first.task.id, answer: '11', at: NOW,
+    })).toThrow(/спор/u);
+  });
+
+  it('общий путь ответа учитывает boss и переиспользует запись попытки, mastery и XP', () => {
+    const { runId } = active();
+    const first = nextBossTask(db, graph, runId);
+
+    const answer = submitAnswer(db, graph, {
+      runId, taskId: first.task.id, answer: '11', hintUsed: false, at: NOW,
+    });
+
+    expect(answer).toMatchObject({
+      correct: true,
+      xp: 25,
+      bossOutcome: 'active',
+      progress: { total: 1, correct: 1, target: 5, done: false },
+    });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM attempts WHERE run_id = ?').get(runId))
+      .toEqual({ n: 1 });
+  });
+
+  it('подтверждённый спор на третьей позиции продолжает с четвёртой и допускает победу', async () => {
+    const { runId } = active();
+    for (const answer of ['11', '12']) {
+      const current = nextBossTask(db, graph, runId);
+      submitBossAnswer(db, graph, { runId, taskId: current.task.id, answer, at: NOW });
+    }
+    const third = nextBossTask(db, graph, runId);
+    const wrong = submitBossAnswer(db, graph, {
+      runId, taskId: third.task.id, answer: 'тринадцать', at: NOW,
+    });
+    const dispute = openDispute(db, wrong.attemptId);
+
+    const verdict = await resolveDispute(db, graph, dispute.id, () => Promise.resolve({
+      studentCorrect: true,
+      note: 'число записано словами',
+    }));
+
+    expect(verdict.status).toBe('upheld');
+    expect(nextBossTask(db, graph, runId).position).toBe(4);
+    for (const answer of ['14', '15']) {
+      const current = nextBossTask(db, graph, runId);
+      submitBossAnswer(db, graph, { runId, taskId: current.task.id, answer, at: NOW });
+    }
+    expect(db.prepare('SELECT total, correct, finished_at FROM runs WHERE id = ?').get(runId))
+      .toEqual({ total: 5, correct: 5, finished_at: NOW.toISOString() });
+    expect(db.prepare('SELECT closed_at FROM topic_state WHERE topic_id = ?').get(TOPIC))
+      .toEqual({ closed_at: NOW.toISOString() });
+  });
+
+  it('отклонённый спор атомарно завершает бой и повторный verdict не создаёт второй батч', async () => {
+    const { batchId, runId } = active();
+    const first = nextBossTask(db, graph, runId);
+    const wrong = submitBossAnswer(db, graph, {
+      runId, taskId: first.task.id, answer: '999', at: NOW,
+    });
+    const dispute = openDispute(db, wrong.attemptId);
+    const rejected = await resolveDispute(db, graph, dispute.id, () => Promise.resolve({
+      studentCorrect: false,
+      note: 'ответ неверен',
+    }));
+
+    expect(rejected.status).toBe('rejected');
+    expect(db.prepare('SELECT status FROM boss_batches WHERE id = ?').get(batchId))
+      .toEqual({ status: 'lost' });
+    expect(db.prepare('SELECT finished_at FROM runs WHERE id = ?').get(runId))
+      .toEqual({ finished_at: expect.any(String) });
+    expect(db.prepare(
+      "SELECT COUNT(*) AS n FROM boss_batches WHERE topic_id = ? AND status = 'preparing'",
+    ).get(TOPIC)).toEqual({ n: 1 });
+
+    const repeat = await resolveDispute(db, graph, dispute.id, () => Promise.reject(
+      new Error('повторный разбор не должен вызываться'),
+    ));
+    expect(repeat.status).toBe('rejected');
+    expect(db.prepare(
+      "SELECT COUNT(*) AS n FROM boss_batches WHERE topic_id = ? AND status = 'preparing'",
+    ).get(TOPIC)).toEqual({ n: 1 });
+    expect(() => nextBossTask(db, graph, runId)).toThrow(/заверш/u);
+  });
+
+  it('повторное открытие не создаёт второй спор и ручной finish босса запрещён', () => {
+    const { runId } = active();
+    const first = nextBossTask(db, graph, runId);
+    const wrong = submitBossAnswer(db, graph, {
+      runId, taskId: first.task.id, answer: '999', at: NOW,
+    });
+    const dispute = openDispute(db, wrong.attemptId);
+
+    expect(openDispute(db, wrong.attemptId)).toEqual({
+      id: dispute.id,
+      status: 'open',
+      created: false,
+    });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM disputes WHERE status = 'open'").get())
+      .toEqual({ n: 1 });
+    expect(() => finishRun(db, graph, runId, { now: NOW })).toThrow(/только победой/u);
   });
 
   it('признание поражения закрывает бой без дополнительного штрафа и ставит новый батч', () => {
