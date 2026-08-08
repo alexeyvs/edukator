@@ -145,6 +145,31 @@ function createVersionFiveDatabase(path: string): Database {
   return legacy;
 }
 
+/** Версия 6 ещё считала runs.topic_id единственной темой всего забега. */
+function createVersionSixDatabase(path: string): Database {
+  const legacy = openDatabase(path);
+  legacy.exec(`
+    DROP TRIGGER attempts_topic_consistency_insert;
+    DROP TRIGGER attempts_topic_consistency_update;
+    CREATE TRIGGER attempts_topic_consistency_insert
+    BEFORE INSERT ON attempts
+    WHEN (SELECT topic_id FROM task_bank WHERE id = NEW.task_id) <> NEW.topic_id
+      OR (NEW.run_id IS NOT NULL AND (SELECT topic_id FROM runs WHERE id = NEW.run_id) <> NEW.topic_id)
+    BEGIN
+      SELECT RAISE(ABORT, 'attempt topic must match task and run topics');
+    END;
+    CREATE TRIGGER attempts_topic_consistency_update
+    BEFORE UPDATE OF task_id, topic_id, run_id ON attempts
+    WHEN (SELECT topic_id FROM task_bank WHERE id = NEW.task_id) <> NEW.topic_id
+      OR (NEW.run_id IS NOT NULL AND (SELECT topic_id FROM runs WHERE id = NEW.run_id) <> NEW.topic_id)
+    BEGIN
+      SELECT RAISE(ABORT, 'attempt topic must match task and run topics');
+    END;
+  `);
+  legacy.pragma('user_version = 6');
+  return legacy;
+}
+
 describe('база данных', () => {
   let tempDir: string;
   let dbFile: string;
@@ -169,7 +194,7 @@ describe('база данных', () => {
     // рабочую базу, поэтому число прибито буквально и меняется только вместе с
     // новой ступенью и её тестом обновления.
     it('держит номер версии схемы', () => {
-      expect(SCHEMA_VERSION).toBe(6);
+      expect(SCHEMA_VERSION).toBe(7);
     });
 
     it('создаёт все семь таблиц на пустой базе', () => {
@@ -578,6 +603,34 @@ describe('база данных', () => {
       }
     });
 
+    it('обновляет триггеры базы версии 6 для многотемного забега', () => {
+      const path = join(tempDir, 'версия-6.db');
+      const legacy = createVersionSixDatabase(path);
+      const firstTopic = seedTopic(legacy, 'math.first');
+      const nextTopic = seedTopic(legacy, 'math.next');
+      const taskId = seedTask(legacy, nextTopic);
+      const runId = Number(
+        legacy.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+          .run('math', firstTopic, '2026-08-08T10:00:00.000Z').lastInsertRowid,
+      );
+      legacy.close();
+
+      const migrated = openDatabase(path);
+      try {
+        expect(() =>
+          migrated.prepare(
+            `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct)
+             VALUES (?, ?, ?, ?, ?)`,
+          ).run(taskId, nextTopic, runId, '4', 1),
+        ).not.toThrow();
+        expect(
+          (migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version,
+        ).toBe(SCHEMA_VERSION);
+      } finally {
+        migrated.close();
+      }
+    });
+
     it('не объявляет текущей непустую базу без номера версии', () => {
       const path = join(tempDir, 'неизвестная.db');
       const unknown = new BetterSqlite3(path);
@@ -829,7 +882,7 @@ describe('база данных', () => {
       ).toThrow(/correct|CHECK/);
     });
 
-    it('требует совпадения темы попытки с заданием и забегом', () => {
+    it('требует совпадения темы попытки с заданием, но разрешает другую тему забега', () => {
       const math = seedTopic(db, 'math.fractions');
       const russian = seedTopic(db, 'russian.spelling');
       const taskId = seedTask(db, math);
@@ -842,7 +895,7 @@ describe('база данных', () => {
          VALUES (?, ?, ?, ?, ?)`,
       );
       expect(() => insert.run(taskId, russian, null, '4', 1)).toThrow(/attempt topic/);
-      expect(() => insert.run(taskId, math, runId, '4', 1)).toThrow(/attempt topic/);
+      expect(() => insert.run(taskId, math, runId, '4', 1)).not.toThrow();
     });
 
     it('не даёт испортить корректный забег обновлением', () => {

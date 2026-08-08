@@ -59,6 +59,7 @@ function readRunProgress(db: Database, runId: number): RunProgress {
 
 /** Возвращает сохранённые сервером счётчики забега и его готовность к закрытию. */
 export function runProgress(db: Database, runId: number): RunProgress {
+  if (db.inTransaction) return readRunProgress(db, runId);
   return db.transaction(() => readRunProgress(db, runId)).immediate();
 }
 

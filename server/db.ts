@@ -9,7 +9,7 @@ const projectRoot = resolve(here, '..');
  * Версия схемы. Хранится в `PRAGMA user_version`; миграция сравнивает её со
  * своей и пропускает работу, если база уже актуальна.
  */
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 /** Семь таблиц из спеки. Тесты сверяют состав базы именно с этим списком. */
 export const TABLES = [
@@ -155,17 +155,15 @@ const SCHEMA = `
   CREATE TRIGGER IF NOT EXISTS attempts_topic_consistency_insert
   BEFORE INSERT ON attempts
   WHEN (SELECT topic_id FROM task_bank WHERE id = NEW.task_id) <> NEW.topic_id
-    OR (NEW.run_id IS NOT NULL AND (SELECT topic_id FROM runs WHERE id = NEW.run_id) <> NEW.topic_id)
   BEGIN
-    SELECT RAISE(ABORT, 'attempt topic must match task and run topics');
+    SELECT RAISE(ABORT, 'attempt topic must match task topic');
   END;
 
   CREATE TRIGGER IF NOT EXISTS attempts_topic_consistency_update
   BEFORE UPDATE OF task_id, topic_id, run_id ON attempts
   WHEN (SELECT topic_id FROM task_bank WHERE id = NEW.task_id) <> NEW.topic_id
-    OR (NEW.run_id IS NOT NULL AND (SELECT topic_id FROM runs WHERE id = NEW.run_id) <> NEW.topic_id)
   BEGIN
-    SELECT RAISE(ABORT, 'attempt topic must match task and run topics');
+    SELECT RAISE(ABORT, 'attempt topic must match task topic');
   END;
 
   CREATE TABLE IF NOT EXISTS disputes (
@@ -381,6 +379,30 @@ export function migrate(db: Database.Database): void {
             CHECK (kind IN ('run', 'triage'));
         `);
       }
+    }
+
+    if (version <= 6) {
+      // До появления многотемных забегов триггер ошибочно считал runs.topic_id
+      // единственной допустимой темой. Теперь это стартовая тема забега, а
+      // принадлежность задания его предмету проверяет session до записи.
+      db.exec(`
+        DROP TRIGGER IF EXISTS attempts_topic_consistency_insert;
+        DROP TRIGGER IF EXISTS attempts_topic_consistency_update;
+
+        CREATE TRIGGER attempts_topic_consistency_insert
+        BEFORE INSERT ON attempts
+        WHEN (SELECT topic_id FROM task_bank WHERE id = NEW.task_id) <> NEW.topic_id
+        BEGIN
+          SELECT RAISE(ABORT, 'attempt topic must match task topic');
+        END;
+
+        CREATE TRIGGER attempts_topic_consistency_update
+        BEFORE UPDATE OF task_id, topic_id, run_id ON attempts
+        WHEN (SELECT topic_id FROM task_bank WHERE id = NEW.task_id) <> NEW.topic_id
+        BEGIN
+          SELECT RAISE(ABORT, 'attempt topic must match task topic');
+        END;
+      `);
     }
 
     db.pragma(`user_version = ${SCHEMA_VERSION}`);

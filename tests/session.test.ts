@@ -260,6 +260,26 @@ describe('занятие', () => {
 
       expect(nextTask(db, empty, { seedDir })).toEqual({ status: 'no-topic' });
     });
+
+    it('не выдаёт задание чужого предмета при ограничении предметом или забегом', () => {
+      storeTasks(db, 'russian.a', [task()]);
+      const runId = Number(
+        db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+          .run('math', 'math.a', new Date().toISOString()).lastInsertRowid,
+      );
+
+      expect(nextTask(db, graph, { subject: 'math', seedDir })).toEqual({
+        status: 'no-task',
+        topicId: 'math.a',
+      });
+      expect(nextTask(db, graph, { runId, seedDir })).toEqual({
+        status: 'no-task',
+        topicId: 'math.a',
+      });
+      expect(
+        db.prepare("SELECT status FROM task_bank WHERE topic_id = 'russian.a'").get(),
+      ).toEqual({ status: 'valid' });
+    });
   });
 
   describe('приём ответа', () => {
@@ -309,6 +329,85 @@ describe('занятие', () => {
         )
         .get(hinted.attemptId);
       expect(row).toEqual({ hint_used: 1, duration_ms: 4200 });
+    });
+
+    it('пишет попытку и счётчики забега вместе, начисляя XP и возвращая прогресс', () => {
+      const runGraph = buildTopicGraph([
+        topic('math.a'),
+        topic('math.b'),
+        topic('russian.a'),
+        topic('english.a'),
+      ]);
+      syncTopicState(db, runGraph);
+      const runId = Number(
+        db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+          .run('math', 'math.a', new Date().toISOString()).lastInsertRowid,
+      );
+      const taskId = issue('math.b', { difficulty: 3 });
+
+      const result = submitAnswer(db, runGraph, { taskId, runId, answer: '45' });
+
+      expect(result.xp).toBe(35);
+      expect(result.progress).toEqual({ total: 1, correct: 1, target: 12, done: false });
+      expect(
+        db.prepare<[number], { run_id: number }>('SELECT run_id FROM attempts WHERE id = ?')
+          .get(result.attemptId),
+      ).toEqual({ run_id: runId });
+      expect(
+        db.prepare<[number], { total: number; correct: number }>(
+          'SELECT total, correct FROM runs WHERE id = ?',
+        ).get(runId),
+      ).toEqual({ total: 1, correct: 1 });
+    });
+
+    it('не связывает задание чужого предмета с забегом и не принимает ответ в закрытый', () => {
+      const runId = Number(
+        db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+          .run('math', 'math.a', new Date().toISOString()).lastInsertRowid,
+      );
+      const foreignTask = issue('russian.a');
+
+      expect(() =>
+        submitAnswer(db, graph, { taskId: foreignTask, runId, answer: '45' }),
+      ).toThrow(expect.objectContaining({ code: 'task-not-in-run' }));
+      expect(db.prepare('SELECT COUNT(*) AS n FROM attempts').get()).toEqual({ n: 0 });
+      expect(db.prepare('SELECT total, correct FROM runs WHERE id = ?').get(runId)).toEqual({
+        total: 0,
+        correct: 0,
+      });
+
+      db.prepare('UPDATE runs SET finished_at = ? WHERE id = ?')
+        .run(new Date().toISOString(), runId);
+      const ownTask = issue('math.a');
+      expect(() =>
+        submitAnswer(db, graph, { taskId: ownTask, runId, answer: '45' }),
+      ).toThrow(expect.objectContaining({ code: 'run-finished' }));
+      expect(db.prepare('SELECT COUNT(*) AS n FROM attempts').get()).toEqual({ n: 0 });
+    });
+
+    it('откатывает попытку и модель, если счётчик забега записать не удалось', () => {
+      const runId = Number(
+        db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+          .run('math', 'math.a', new Date().toISOString()).lastInsertRowid,
+      );
+      const taskId = issue('math.a');
+      db.exec(`
+        CREATE TRIGGER тестовый_отказ_счётчика
+        BEFORE UPDATE ON runs
+        BEGIN
+          SELECT RAISE(ABORT, 'счётчик недоступен');
+        END;
+      `);
+
+      expect(() =>
+        submitAnswer(db, graph, { taskId, runId, answer: '45' }),
+      ).toThrow(/счётчик недоступен/u);
+      expect(db.prepare('SELECT COUNT(*) AS n FROM attempts').get()).toEqual({ n: 0 });
+      expect(readTopicState(db, 'math.a').attempts).toBe(0);
+      expect(db.prepare('SELECT total, correct FROM runs WHERE id = ?').get(runId)).toEqual({
+        total: 0,
+        correct: 0,
+      });
     });
 
     // Часы на ноутбуке ходят и назад: поправка NTP, ручной перевод времени.
@@ -444,6 +543,28 @@ describe('занятие', () => {
       // Модель пересчитана по истории: попытка стала верной, mastery выросла.
       expect(result.state?.mastery).toBeGreaterThan(mastery);
       expect(readTopicState(db, 'math.a').mastery).toBe(result.state?.mastery);
+    });
+
+    it('подтверждённый спор возвращает верный ответ в счётчик забега', async () => {
+      const runId = Number(
+        db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+          .run('math', 'math.a', new Date().toISOString()).lastInsertRowid,
+      );
+      const taskId = issue();
+      const attempt = submitAnswer(db, graph, {
+        taskId,
+        runId,
+        answer: 'сорок пять',
+      });
+      const dispute = openDispute(db, attempt.attemptId);
+      const { review } = reviewer({ studentCorrect: true, note: 'то же число словами' });
+
+      await resolveDispute(db, graph, dispute.id, review);
+
+      expect(db.prepare('SELECT total, correct FROM runs WHERE id = ?').get(runId)).toEqual({
+        total: 1,
+        correct: 1,
+      });
     });
 
     it('после подтверждения нормализатор засчитывает тот же ответ сам', async () => {

@@ -7,8 +7,8 @@
  * у модели полминуты.
  *
  * Ответ сверяется нормализатором, без обращения к модели, и попытка вместе со
- * сдвигом `mastery` пишется одной транзакцией: засчитанный ответ без сдвига
- * модели (или наоборот) — это молча разъехавшийся прогноз.
+ * сдвигом `mastery` и счётчиками забега пишется одной транзакцией: засчитанный
+ * ответ без сдвига модели или прогресса — это молча разъехавшийся прогноз.
  *
  * Спор ученик не ждёт: маршрут только ставит его в очередь, а разбор идёт фоном
  * и, при подтверждении, дописывает ответ в `accept[]` и пересчитывает модель по
@@ -30,6 +30,8 @@ import { issuedTask, type BankTask } from './codex/bank.js';
 import { takeTaskOrSeed } from './codex/seed-bank.js';
 import { duplicateKey, fitsAccept } from './codex/task-schema.js';
 import type { DisputeContext, DisputeReviewer } from './codex/dispute.js';
+import { runProgress, type RunProgress } from './run.js';
+import { taskXp } from './xp.js';
 
 /** Причина отказа: по ней маршрут выбирает код ответа. */
 export type SessionErrorCode =
@@ -39,6 +41,9 @@ export type SessionErrorCode =
   | 'attempt-not-found'
   | 'attempt-correct'
   | 'dispute-not-found'
+  | 'run-not-found'
+  | 'run-finished'
+  | 'task-not-in-run'
   /** Задание отбраковано при приёме ответа: сверить его не по чему. */
   | 'task-defective';
 
@@ -81,6 +86,10 @@ export type NextTaskResult =
 
 export interface NextTaskOptions {
   now?: Date;
+  /** Ограничивает перебор тем одним предметом. */
+  subject?: Subject;
+  /** Активный забег: из него берётся предмет и проверяется его состояние. */
+  runId?: number;
   /** Каталог посевного банка; по умолчанию репозиторный. */
   seedDir?: string;
   /** Куда писать про пропущенную тему; по умолчанию stderr. */
@@ -114,7 +123,17 @@ export function nextTask(
 ): NextTaskResult {
   const now = options.now ?? new Date();
   const log = options.log ?? ((message: string): void => void process.stderr.write(`${message}\n`));
-  const planned = activeTopics(db, graph, graph.byId.size, now);
+  const run = options.runId === undefined ? undefined : readActiveRun(db, options.runId);
+  if (run !== undefined && options.subject !== undefined && run.subject !== options.subject) {
+    throw new SessionError(
+      'task-not-in-run',
+      `Занятие: забег ${run.id} относится к другому предмету`,
+    );
+  }
+  const subject = run?.subject ?? options.subject;
+  const planned = activeTopics(db, graph, graph.byId.size, now).filter(
+    (topic) => subject === undefined || topic.subject === subject,
+  );
   const first = planned[0];
   if (first === undefined) return { status: 'no-topic' };
 
@@ -171,6 +190,7 @@ export function nextTask(
 export interface AnswerRequest {
   taskId: number;
   answer: string;
+  runId?: number;
   hintUsed?: boolean;
   durationMs?: number;
   /** Время попытки; по умолчанию — сейчас. Задаётся явно в тестах. */
@@ -190,6 +210,29 @@ export interface AnswerResult {
   explain: string;
   joke: string;
   state: TopicState;
+  /** Начисление за эту попытку; для неверного ответа равно нулю. */
+  xp: number;
+  /** Счётчики забега после записи попытки либо null для обычного занятия. */
+  progress: RunProgress | null;
+}
+
+interface SessionRun {
+  id: number;
+  subject: Subject;
+  finished_at: string | null;
+}
+
+function readActiveRun(db: Database, runId: number): SessionRun {
+  const run = db
+    .prepare<[number], SessionRun>('SELECT id, subject, finished_at FROM runs WHERE id = ?')
+    .get(runId);
+  if (run === undefined) {
+    throw new SessionError('run-not-found', `Занятие: забег ${runId} не найден`);
+  }
+  if (run.finished_at !== null) {
+    throw new SessionError('run-finished', `Занятие: забег ${runId} уже завершён`);
+  }
+  return run;
 }
 
 interface TaskRow {
@@ -272,6 +315,14 @@ export function submitAnswer(
   // на одно задание оба пройдут проверку и оба сдвинут `mastery`.
   const outcome = db.transaction((): AnswerResult | { defect: string } => {
     const row = readTask(db, request.taskId);
+    const topic = topicOf(graph, row.topic_id);
+    const run = request.runId === undefined ? undefined : readActiveRun(db, request.runId);
+    if (run !== undefined && run.subject !== topic.subject) {
+      throw new SessionError(
+        'task-not-in-run',
+        `Занятие: задание ${request.taskId} не относится к забегу ${run.id}`,
+      );
+    }
     if (row.status !== 'used') {
       throw new SessionError(
         'task-not-issued',
@@ -294,8 +345,6 @@ export function submitAnswer(
     // ничего не удаляет), а `rejected` выкинул бы их из выгружаемого посева
     // навсегда. Такое уходит пятисоткой; повторной выдачи она не вызовет —
     // темы вне карты в план не попадают.
-    const topic = topicOf(graph, row.topic_id);
-
     // Шаг часов назад (поправка NTP, ручной перевод времени на ноутбуке) не
     // имеет права стоить ученику ответа. `applyAttempt` требует неубывающего
     // времени и на нарушении бросает обычной ошибкой — а она изнутри этой
@@ -326,12 +375,15 @@ export function submitAnswer(
 
     const info = db
       .prepare(
-        `INSERT INTO attempts (task_id, topic_id, answer, is_correct, hint_used, duration_ms, created_at)
-         VALUES (@taskId, @topicId, @answer, @isCorrect, @hintUsed, @durationMs, @createdAt)`,
+        `INSERT INTO attempts
+          (task_id, topic_id, run_id, answer, is_correct, hint_used, duration_ms, created_at)
+         VALUES
+          (@taskId, @topicId, @runId, @answer, @isCorrect, @hintUsed, @durationMs, @createdAt)`,
       )
       .run({
         taskId: row.id,
         topicId: row.topic_id,
+        runId: run?.id ?? null,
         // Пишется то, что ученик набрал: нормализованную запись всегда можно
         // получить заново, а вот разбор спора смотрит именно на исходную.
         answer: request.answer.trim(),
@@ -347,6 +399,15 @@ export function submitAnswer(
       hintUsed,
       at,
     });
+    const xp = taskXp({ difficulty: row.difficulty, correct: check.correct, hintUsed });
+    if (run !== undefined) {
+      db.prepare(
+        `UPDATE runs
+            SET total = total + 1,
+                correct = correct + @correct
+          WHERE id = @runId`,
+      ).run({ runId: run.id, correct: check.correct ? 1 : 0 });
+    }
 
     return {
       attemptId: Number(info.lastInsertRowid),
@@ -357,6 +418,8 @@ export function submitAnswer(
       explain: row.explain ?? '',
       joke: row.joke ?? '',
       state,
+      xp,
+      progress: run === undefined ? null : runProgress(db, run.id),
     };
   }).immediate();
 
@@ -438,6 +501,7 @@ interface DisputeRow {
   status: DisputeStatus;
   resolution: string | null;
   attempt_id: number;
+  run_id: number | null;
   topic_id: string;
   given: string;
   task_id: number;
@@ -450,7 +514,8 @@ function readDispute(db: Database, disputeId: number): DisputeRow {
   const row = db
     .prepare<[number], DisputeRow>(
       `SELECT disputes.id, disputes.status, disputes.resolution,
-              attempts.id AS attempt_id, attempts.topic_id, attempts.answer AS given,
+              attempts.id AS attempt_id, attempts.run_id, attempts.topic_id,
+              attempts.answer AS given,
               task_bank.id AS task_id, task_bank.question, task_bank.answer, task_bank.accept
          FROM disputes
          JOIN attempts ON attempts.id = disputes.attempt_id
@@ -553,6 +618,9 @@ export async function resolveDispute(
       accept: JSON.stringify(next),
     });
     db.prepare('UPDATE attempts SET is_correct = 1 WHERE id = ?').run(fresh.attempt_id);
+    if (fresh.run_id !== null) {
+      db.prepare('UPDATE runs SET correct = correct + 1 WHERE id = ?').run(fresh.run_id);
+    }
 
     return {
       id: disputeId,
