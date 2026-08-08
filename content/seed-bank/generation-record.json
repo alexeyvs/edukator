@@ -1,0 +1,34 @@
+{
+  "generated_at": "2026-08-08",
+  "source_commit": "f8b0567",
+  "generator": "scripts/prefetch.ts via generateTaskBatch and validateTaskBatch",
+  "models": {
+    "generate": "gpt-5.6-sol",
+    "validate": "gpt-5.6-sol"
+  },
+  "command": "npm run prefetch -- --topics 18 --target 8 --threshold 8 --batches 4 --cycles 3 --seed-dir <empty> --db <fresh>/bank.sqlite --out <fresh>/out --export",
+  "result": {
+    "topics": 18,
+    "tasks": 168,
+    "minimum_tasks_per_topic": 8,
+    "rejected_tasks": 127,
+    "unsafe_hint_regenerations": 24,
+    "subjects": {
+      "math": {
+        "topics": 6,
+        "tasks": 59,
+        "sha256": "c8099f4c9bc4c34c79931eb2d2c099cc9f1c26a45de5476004d116d88959c0aa"
+      },
+      "russian": {
+        "topics": 6,
+        "tasks": 55,
+        "sha256": "324dfdde2a4a7495294c18971a817e70ca21130c7ad5a1378028acdf7ed64583"
+      },
+      "english": {
+        "topics": 6,
+        "tasks": 54,
+        "sha256": "ddd56f9c7d07e81f99c4b6fce972b6ad4425d73a5e61747ccc2e56d465449f91"
+      }
+    }
+  }
+}
