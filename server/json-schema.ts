@@ -29,7 +29,15 @@ export function schemaValidator<T>(path: string): ValidateFunction<T> {
   const cached = compiled.get(path);
   if (cached !== undefined) return cached as ValidateFunction<T>;
 
-  const schema = JSON.parse(readFileSync(path, 'utf8')) as object;
+  // Через свой текст, как и остальные читатели файлов проекта: голый `ENOENT`
+  // или `Unexpected token` не называет ни файл, ни то, что это схема, а сюда
+  // приходят все четыре — и разбираться пришлось бы по стеку.
+  let schema: object;
+  try {
+    schema = JSON.parse(readFileSync(path, 'utf8')) as object;
+  } catch (error) {
+    throw new Error(`Схема ${path} не читается или не разбирается как JSON: ${(error as Error).message}`);
+  }
   const validate = new Ajv({ allErrors: true, strict: true }).compile<T>(schema);
   compiled.set(path, validate as ValidateFunction);
   return validate;

@@ -158,13 +158,18 @@ function answerForms(parsed: ParsedNumber): number[] {
 /**
  * Текстовая нормализация: регистр, схлопывание пробелов, `ё` = `е` и
  * типографские апострофы. Сравниваются только нормализованные строки.
+ *
+ * U+0085 выписан отдельно, как и в `inlineField`: `\s` в JS его не покрывает ни
+ * с флагом `u`, ни без него, и `trim` тоже не снимает. Ответ, где вместо
+ * пробела приехал этот знак, иначе не сходился бы с эталоном — и ученик получал
+ * бы «неверно» за верный ответ.
  */
 export function normalizeText(value: string): string {
   return value
     .toLowerCase()
     .replaceAll('ё', 'е')
     .replace(APOSTROPHES, "'")
-    .replace(/\s+/g, ' ')
+    .replace(/[\s\u0085]+/g, ' ')
     .trim();
 }
 

@@ -206,6 +206,18 @@ describe('планировщик', () => {
       expect(topicPriority(topics[1] as Topic, states, { now: at(0) })).toBe(0);
       expect(selectTopic(graph, states, 'math', { now: at(0) })).toBeNull();
     });
+
+    it('отсеивает занятые сегодня темы, названные полем `used`', () => {
+      // Отсев работал только через позиционный аргумент, который заполняет один
+      // `planRuns`. Всякий другой вызывающий, прочитав описание поля, получал бы
+      // сегодняшнюю тему обратно молча — без ошибки и без признака.
+      const graph = graphOf([topic('math.weak'), topic('math.strong')]);
+      const states = stateMap(state('math.weak'), state('math.strong', { mastery: 0.9 }));
+      const used = new Set(['math.weak']);
+
+      expect(selectTopic(graph, states, 'math', { now: at(0), used })?.topic.id).toBe('math.strong');
+      expect(selectSubject(graph, states, { now: at(0), used: new Set(['math.weak', 'math.strong']) })).toBeNull();
+    });
   });
 
   describe('срочность повторения', () => {
@@ -546,6 +558,48 @@ describe('планировщик', () => {
       // дубль означал бы двойной долив одной темы за цикл.
       expect(new Set(active.map((item) => item.id)).size).toBe(active.length);
       expect(active).toHaveLength(3);
+    });
+
+    it('не ставит впереди тему законченного забега', () => {
+      // Закрытый забег занятие уже не ведёт, а первую тему `nextTask` и берёт:
+      // задания уходили бы из пройденной темы, а воркер грел бы её вместо той,
+      // по которой ученик занимается сейчас. Для `planRuns` она по-прежнему
+      // использована сегодня — отсев из плана этой правкой не трогается.
+      const [done, current] = planFromDatabase(db, graph, 2, at(0));
+      expect(done).toBeDefined();
+      expect(current).toBeDefined();
+      const startRun = db.prepare(
+        'INSERT INTO runs (subject, topic_id, started_at, finished_at) VALUES (?, ?, ?, ?)',
+      );
+      startRun.run(done?.subject, done?.topic.id, at(0).toISOString(), at(0).toISOString());
+      startRun.run(current?.subject, current?.topic.id, at(0).toISOString(), null);
+
+      const active = activeTopics(db, graph, 2, at(0));
+
+      expect(active[0]?.id).toBe(current?.topic.id);
+      expect(active.map((item) => item.id)).not.toContain(done?.topic.id);
+      expect(topicsUsedToday(db, at(0)).has(done?.topic.id ?? '')).toBe(true);
+    });
+
+    it('ставит впереди тему самого свежего незакрытого забега', () => {
+      // Забег, брошенный утром без отметки конца, висит незакрытым до полуночи.
+      // Без порядка по `started_at` он обходил бы начатый только что: `DISTINCT`
+      // отдаёт строки как придётся.
+      // Отметки строятся от местной полуночи: сутки у планировщика местные, и
+      // вычитание часов из UTC-полудня в поясе за океаном уехало бы во вчера.
+      const hour = (offset: number): Date => {
+        const moment = new Date(at(0));
+        moment.setHours(offset, 0, 0, 0);
+        return moment;
+      };
+      const [older, newer] = planFromDatabase(db, graph, 2, hour(3));
+      const startRun = db.prepare(
+        'INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)',
+      );
+      startRun.run(older?.subject, older?.topic.id, hour(1).toISOString());
+      startRun.run(newer?.subject, newer?.topic.id, hour(2).toISOString());
+
+      expect(activeTopics(db, graph, 1, hour(3))[0]?.id).toBe(newer?.topic.id);
     });
 
     it('без начатых забегов повторяет план', () => {

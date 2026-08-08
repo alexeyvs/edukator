@@ -45,8 +45,20 @@ describe('schemaValidator', () => {
     expect(schemaValidator<Payload>(path)).toBe(schemaValidator<Payload>(path));
   });
 
-  it('падает внятно на несуществующем файле схемы', () => {
-    expect(() => schemaValidator(join(dir, 'нет-такой.json'))).toThrow();
+  // Через этот вызов проходят все четыре схемы проекта, а голый `ENOENT` или
+  // `Unexpected token` не называет ни файл, ни то, что сломалась именно схема:
+  // разбираться пришлось бы по стеку.
+  it('падает внятно на несуществующем файле схемы, называя путь', () => {
+    const missing = join(dir, 'нет-такой.json');
+
+    expect(() => schemaValidator(missing)).toThrow(/Схема .*нет-такой\.json не читается/u);
+  });
+
+  it('падает внятно на неразбираемом файле схемы, называя путь', () => {
+    const broken = join(dir, 'битая.json');
+    writeFileSync(broken, '{ это не json');
+
+    expect(() => schemaValidator(broken)).toThrow(/Схема .*битая\.json не читается/u);
   });
 });
 

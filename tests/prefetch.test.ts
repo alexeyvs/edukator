@@ -363,6 +363,23 @@ describe('prefetch', () => {
       });
 
       expect(result.cycles).toHaveLength(2);
+      // И прогон при этом удачен. Долитая в первом цикле тема во втором уже
+      // тёплая и в голодные не попадает, так что во втором цикле остаётся ровно
+      // упавшая — «ни одна голодная тема не пополнена» становится истинным на
+      // прогоне, который наполнил банк. Меряя признак по каждому циклу,
+      // `--cycles 2` выходил единицей и рвал `&&`-цепочку, ради которой заведён.
+      expect(prefetchFailed(result)).toBe(false);
+      expect(result.cycles[1]?.refilled.every((refill) => refill.stored === 0)).toBe(true);
+    });
+
+    it('считает провалом прогон, не давший ни одного задания за все циклы', async () => {
+      const result = await run({
+        topics: 2,
+        cycles: 2,
+        produce: () => Promise.reject(new Error('codex завершился с кодом 1')),
+      });
+
+      expect(prefetchFailed(result)).toBe(true);
     });
 
     it('переживает битый посев и всё равно наполняет банк', async () => {

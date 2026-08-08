@@ -354,19 +354,35 @@ export function parseArgs(argv: string[]): PrefetchOptions {
   };
 }
 
+/** Сколько заданий прогон добавил в банк за все циклы. */
+function storedTotal(result: PrefetchResult): number {
+  return result.cycles.reduce(
+    (sum, cycle) => sum + cycle.refilled.reduce((inner, refill) => inner + refill.stored, 0),
+    0,
+  );
+}
+
 /**
- * Провалившийся прогон: codex не запускается, ни одна голодная тема цикла не
- * долилась либо снимок предмета не собрался. Нужен ради кода возврата —
+ * Провалившийся прогон: codex не запускается, прогон целиком не дал ни одного
+ * задания либо снимок предмета не собрался. Нужен ради кода возврата —
  * `prefetch` зовут из `&&`-цепочек и заданий по расписанию, а «0 новых заданий»
  * с нулём на выходе там неотличимо от «всё уже тёплое». Частичная неудача
  * (часть тем упала) успехом остаётся: очередь всё-таки пополнилась. Сорванная
  * выгрузка — нет: её зовут именно ради файлов, и молча недописанный снимок
  * заметить нечем.
+ *
+ * `everyRefillFailed` спрашивается по прогону, а не по каждому циклу: тема,
+ * долитая в первом цикле, во втором уже тёплая и в голодные не попадает, так
+ * что к последнему циклу в них остаются ровно нерешаемые — и признак «ни одна
+ * голодная тема не пополнена» становится истинным на удачном прогоне. Так
+ * `--cycles 2` выходил единицей, добавив полсотни заданий, то есть ломал ту
+ * самую `&&`-цепочку, ради которой признак и заведён.
  */
 export function prefetchFailed(result: PrefetchResult): boolean {
   return (
     result.exportFailed.length > 0 ||
-    result.cycles.some((cycle) => cycle.codexUnavailable || everyRefillFailed(cycle))
+    result.cycles.some((cycle) => cycle.codexUnavailable) ||
+    (storedTotal(result) === 0 && result.cycles.some(everyRefillFailed))
   );
 }
 
@@ -374,10 +390,7 @@ async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
   const result = await prefetch(options);
 
-  const stored = result.cycles.reduce(
-    (sum, cycle) => sum + cycle.refilled.reduce((inner, refill) => inner + refill.stored, 0),
-    0,
-  );
+  const stored = storedTotal(result);
   // Итог выгрузки печатается всегда, когда её просили, — в том числе нулевой:
   // пропуск предмета по осторожности («исходного файла не было, чужой снимок на
   // месте») прогон не красит, и умолчав о нём, `--export` выглядел бы

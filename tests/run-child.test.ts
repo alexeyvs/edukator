@@ -82,6 +82,54 @@ describe('runChild', () => {
     },
   );
 
+  // Внук, успевший завести свою сессию, из группы уходит: SIGKILL по `-pid` его
+  // не достаёт, а унаследованный stdout он держит — и `close`, которому нужны
+  // закрытые трубы, не приходит никогда. Без второго срока обещание оставалось
+  // бы неразрешённым: у занятия это навсегда занятое место в `reviewing` (спор
+  // больше не разберётся), у `prefetch` — процесс, сделавший всю работу и не
+  // завершающийся.
+  it.skipIf(process.platform === 'win32')(
+    'отказывает по сроку, даже когда сбежавший из группы внук держит трубу',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'edukator-escape-'));
+      tempDirs.push(dir);
+      const pidPath = join(dir, 'escaped.pid');
+      const bin = join(dir, 'escape.sh');
+      writeFileSync(
+        bin,
+        [
+          '#!/bin/sh',
+          // Трубу внук наследует и не закрывает — именно она держит `close`.
+          // `setsid` вынесен в perl: отдельной команды `setsid` в macOS нет.
+          'perl -MPOSIX -e \'POSIX::setsid(); open(my $f, ">", $ARGV[0]); print $f $$;' +
+            ' close($f); sleep 30;\' "$1" &',
+          "trap 'exit 0' TERM",
+          'while :; do sleep 1; done',
+        ].join('\n'),
+      );
+      chmodSync(bin, 0o755);
+
+      const started = Date.now();
+      await expect(
+        runChild({ bin, args: [pidPath], label: 'беглец', timeoutMs: 300 }),
+      ).rejects.toThrow(/превышен срок/);
+      // Отказ приходит по второму сроку, а не «когда-нибудь»: внук спит
+      // полминуты, и без второго срока обещание разрешилось бы только с ним.
+      expect(Date.now() - started).toBeLessThan(10_000);
+
+      // Уборка: снять беглеца больше некому — он в своей сессии.
+      if (existsSync(pidPath)) {
+        const escaped = Number(readFileSync(pidPath, 'utf8'));
+        if (Number.isInteger(escaped) && processExists(escaped)) {
+          process.kill(escaped, 'SIGKILL');
+        }
+      }
+    },
+    // Отказ приходит через срок плюс обе отсрочки; умолчание vitest в пять
+    // секунд слишком близко к этой сумме, чтобы краснеть от загрузки машины.
+    20_000,
+  );
+
   // `detached` уводит потомка из группы терминала — только так его снимает
   // `process.kill(-pid)` по сроку. Обратная сторона: Ctrl-C по `npm run prefetch`
   // до потомка не доходит, а таймер, который снял бы его по сроку, умирает

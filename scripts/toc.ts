@@ -22,7 +22,7 @@ export interface TocPageScore {
   density: number;
   /** На странице есть заголовок «Оглавление» / «Contents». */
   heading: boolean;
-  /** Плотность плюс единица за заголовок: по этой величине страницы и сравниваются. */
+  /** Плотность плюс единица за заголовок. */
   score: number;
 }
 
@@ -135,10 +135,31 @@ export function findTocPages(pages: PdfPage[]): TocSelection {
     );
   }
 
+  // Заголовок решает, а не прибавляет. Плотность у страницы предметного
+  // указателя и у оглавления одинаковая — обе сплошь «название … номер», — так
+  // что суммой правит длина куска, а указатели и ответы к упражнениям как раз
+  // длиннее оглавления и лежат ровно в конце книги, куда и смотрит просмотр
+  // краёв. Единица за заголовок этого не перебивала: четыре страницы указателя
+  // (4.0) обходили три страницы оглавления с заголовком (3.86), и подменённые
+  // страницы уезжали в `raw-toc` молча — сообщать о подмене нечему, а карта тем
+  // потом собирается по ним. «Оглавление» же на указателе не написано.
+  const weights = new Map<PdfPage[], [number, number]>(
+    runs.map((run) => {
+      const scores = run.map(scoreTocPage);
+      return [
+        run,
+        [
+          scores.some((score) => score.heading) ? 1 : 0,
+          scores.reduce((sum, score) => sum + score.density, 0),
+        ],
+      ];
+    }),
+  );
   const best = runs.reduce((champion, run) => {
-    const weight = (candidate: PdfPage[]): number =>
-      candidate.reduce((sum, page) => sum + scoreTocPage(page).score, 0);
-    return weight(run) > weight(champion) ? run : champion;
+    const [headed, density] = weights.get(run) ?? [0, 0];
+    const [bestHeaded, bestDensity] = weights.get(champion) ?? [0, 0];
+    if (headed !== bestHeaded) return headed > bestHeaded ? run : champion;
+    return density > bestDensity ? run : champion;
   });
 
   return {

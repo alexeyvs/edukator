@@ -375,7 +375,13 @@ export function parseArgs(argv: string[]): CliArgs {
 
   // Без проверки `Number('abc')` даёт NaN, окно просмотра выходит пустым, и
   // скрипт «не находит оглавление» вместо жалобы на аргумент.
-  if (scanEdge !== undefined && !/^[1-9]\d*$/.test(scanEdge)) {
+  // `Number.isSafeInteger` — как у `--attempts` и `--cycles`: двадцатизначное
+  // число проходит по виду, а `Math.min` дальше схлопывает его до размера книги,
+  // и `--scan` молча означает «распознать учебник целиком» — то есть срок OCR.
+  if (
+    scanEdge !== undefined &&
+    (!/^[1-9]\d*$/.test(scanEdge) || !Number.isSafeInteger(Number(scanEdge)))
+  ) {
     throw new Error(`--scan ожидает положительное число, получено «${scanEdge}»`);
   }
 

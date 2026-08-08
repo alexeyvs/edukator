@@ -2,6 +2,14 @@ import { spawn } from 'node:child_process';
 
 export const MAX_CHILD_OUTPUT_BYTES = 1024 * 1024;
 const KILL_GRACE_MS = 250;
+/**
+ * Сколько ждать `close` после SIGKILL, прежде чем бросить потомка. `close`
+ * приходит, только когда закрыты обе унаследованные трубы, а внук, успевший
+ * вызвать `setsid`, из группы уходит, SIGKILL по `-pid` его не достаёт и трубу
+ * он держит — обещание тогда не разрешалось бы никогда, и срок, ради которого
+ * всё и заведено, ничего не ограничивал бы.
+ */
+const ABANDON_GRACE_MS = 1000;
 
 export interface RunChildOptions {
   bin: string;
@@ -129,6 +137,14 @@ export function runChild(options: RunChildOptions): Promise<ChildOutput> {
     let bytes = 0;
     let failure: Error | undefined;
     let killTimer: NodeJS.Timeout | undefined;
+    let abandonTimer: NodeJS.Timeout | undefined;
+    let settled = false;
+
+    const clearTimers = (): void => {
+      clearTimeout(timeout);
+      if (killTimer !== undefined) clearTimeout(killTimer);
+      if (abandonTimer !== undefined) clearTimeout(abandonTimer);
+    };
 
     // Ошибка снятия не выбрасывается наружу ни в каком виде: `signal` зовётся из
     // таймера, из обработчика `data` и из `close`, а там исключение уже некому
@@ -150,6 +166,21 @@ export function runChild(options: RunChildOptions): Promise<ChildOutput> {
       failure = error;
       signal('SIGTERM');
       killTimer = setTimeout(() => signal('SIGKILL'), KILL_GRACE_MS);
+      // Второй срок — на сам `close`. Трубы рвутся руками: иначе оставшийся в
+      // живых внук держал бы их открытыми, `close` не пришёл бы, а вместе с ним
+      // не пришли бы ни `forgetGroup` (pid остался бы в `liveGroups`, а подписка
+      // на сигналы — держать цикл событий), ни отказ вызывающему. У занятия это
+      // навсегда занятое место в `reviewing`, у `prefetch` — незавершающийся
+      // процесс, сделавший всю работу.
+      abandonTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        clearTimers();
+        forgetGroup(child.pid);
+        child.stdout.destroy();
+        child.stderr.destroy();
+        reject(error);
+      }, KILL_GRACE_MS + ABANDON_GRACE_MS);
     };
 
     const append = (target: 'stdout' | 'stderr', chunk: string): void => {
@@ -166,6 +197,12 @@ export function runChild(options: RunChildOptions): Promise<ChildOutput> {
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => append('stdout', chunk));
     child.stderr.on('data', (chunk: string) => append('stderr', chunk));
+    // Труба без подписки на `error` валит процесс необработанным исключением, а
+    // разрыв её здесь — обычное дело: группу снимают SIGKILL'ом посреди чтения,
+    // и `EPIPE`/`ECONNRESET` прилетает именно сюда. Обещание закрывает `close`
+    // или срок, так что глотать нечего — читать всё равно больше нечего.
+    child.stdout.on('error', () => undefined);
+    child.stderr.on('error', () => undefined);
 
     const timeout = setTimeout(
       () => stop(new ChildTimeoutError(`${options.label}: превышен срок ${options.timeoutMs} мс`)),
@@ -173,23 +210,25 @@ export function runChild(options: RunChildOptions): Promise<ChildOutput> {
     );
 
     child.once('error', (error) => {
-      clearTimeout(timeout);
-      if (killTimer !== undefined) clearTimeout(killTimer);
+      if (settled) return;
+      settled = true;
+      clearTimers();
       forgetGroup(child.pid);
       reject(error);
     });
     child.once('close', (code) => {
-      clearTimeout(timeout);
+      if (settled) return;
+      settled = true;
       forgetGroup(child.pid);
       if (failure !== undefined) {
         // Лидер группы мог завершиться от SIGTERM раньше потомка, который
         // закрыл stdio и игнорирует TERM. `close` тогда приходит до таймера;
         // отменить эскалацию означало бы оставить потомка жить бесконечно.
         signal('SIGKILL');
-        if (killTimer !== undefined) clearTimeout(killTimer);
+        clearTimers();
         reject(failure);
       } else {
-        if (killTimer !== undefined) clearTimeout(killTimer);
+        clearTimers();
         resolve({ code, stdout, stderr });
       }
     });

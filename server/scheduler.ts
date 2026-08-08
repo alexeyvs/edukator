@@ -236,7 +236,11 @@ export function selectTopic(
   states: Map<string, TopicState>,
   subject: Subject,
   options: ScheduleOptions = {},
-  exclude: ReadonlySet<string> = new Set(),
+  // Умолчание из `options.used` — симметрично `assigned` у `selectSubject`.
+  // Поле описано как «темы, уже занятые сегодня», и читающий его вызывающий без
+  // этого получал бы их обратно молча: отсев работал только через позиционный
+  // аргумент, который заполняет один `planRuns`.
+  exclude: ReadonlySet<string> = options.used ?? new Set(),
 ): RankedTopic | null {
   const best = rankTopics(graph, states, options, subject).find(
     (item) => item.priority > 0 && !exclude.has(item.topic.id),
@@ -272,7 +276,7 @@ export function selectSubject(
   graph: TopicGraph,
   states: Map<string, TopicState>,
   options: ScheduleOptions = {},
-  exclude: ReadonlySet<string> = new Set(),
+  exclude: ReadonlySet<string> = options.used ?? new Set(),
   assigned: ReadonlyMap<Subject, number> = options.assigned ?? new Map(),
 ): Subject | null {
   const available = graph.subjects.filter(
@@ -362,18 +366,48 @@ export function runsAssignedToday(db: Database, now: Date = new Date()): Map<Sub
   return new Map(rows.map((row) => [row.subject, row.runs]));
 }
 
-/** Темы забегов, уже начатых в текущие местные сутки. */
-export function topicsUsedToday(db: Database, now: Date = new Date()): Set<string> {
+/** Границы текущих местных суток в ISO: обе колонки времени сравниваются строками. */
+function dayBounds(now: Date): [string, string] {
   const start = new Date(now);
   start.setHours(0, 0, 0, 0);
   const next = new Date(start);
   next.setDate(next.getDate() + 1);
+  return [start.toISOString(), next.toISOString()];
+}
+
+/** Темы забегов, уже начатых в текущие местные сутки. */
+export function topicsUsedToday(db: Database, now: Date = new Date()): Set<string> {
+  const [start, next] = dayBounds(now);
   const rows = db
     .prepare<[string, string], { topic_id: string }>(
       'SELECT DISTINCT topic_id FROM runs WHERE started_at >= ? AND started_at < ?',
     )
-    .all(start.toISOString(), next.toISOString());
+    .all(start, next);
   return new Set(rows.map((row) => row.topic_id));
+}
+
+/**
+ * Темы незакрытых забегов сегодняшнего дня, самый свежий первым. Отдельный
+ * запрос, а не `topicsUsedToday`: та отвечает на вопрос «что сегодня уже
+ * занято» и законно включает законченное, а здесь нужен ровно идущий забег.
+ * Законченная тема, оказавшись впереди, перехватывала бы выдачу заданий —
+ * `nextTask` берёт первую тему, по которой есть задание, — и грелась бы вместо
+ * той, по которой ученик занимается прямо сейчас.
+ *
+ * Порядок задан явно: `DISTINCT` без `ORDER BY` возвращает строки как придётся,
+ * а брошенный утром забег остаётся незакрытым до конца суток и обошёл бы
+ * начатый только что.
+ */
+export function activeRunTopics(db: Database, now: Date = new Date()): string[] {
+  const [start, next] = dayBounds(now);
+  const rows = db
+    .prepare<[string, string], { topic_id: string }>(
+      `SELECT topic_id FROM runs
+       WHERE started_at >= ? AND started_at < ? AND finished_at IS NULL
+       ORDER BY started_at DESC, id DESC`,
+    )
+    .all(start, next);
+  return [...new Set(rows.map((row) => row.topic_id))];
 }
 
 /**
@@ -397,10 +431,10 @@ export function planFromDatabase(
 }
 
 /**
- * Темы, по которым занятие идёт прямо сейчас: сначала темы уже начатых сегодня
- * забегов, потом план ближайших. Тема идущего забега для `planRuns` уже
- * «использована сегодня» и в план не попадёт — а задания прямо сейчас берутся
- * именно из неё, так что выдача и долив обязаны видеть её первой.
+ * Темы, по которым занятие идёт прямо сейчас: сначала темы незакрытых забегов
+ * сегодняшнего дня, потом план ближайших. Тема идущего забега для `planRuns`
+ * уже «использована сегодня» и в план не попадёт — а задания прямо сейчас
+ * берутся именно из неё, так что выдача и долив обязаны видеть её первой.
  *
  * Реализация одна на всех: и воркер, и выдача занятия спрашивают состав тем
  * здесь. Своя копия у любого из них означала бы, что греется одно, а
@@ -412,7 +446,7 @@ export function activeTopics(
   count: number,
   now: Date = new Date(),
 ): Topic[] {
-  const started = [...topicsUsedToday(db, now)]
+  const started = activeRunTopics(db, now)
     .map((id) => graph.byId.get(id))
     .filter((topic): topic is Topic => topic !== undefined);
   const planned = planFromDatabase(db, graph, count, now).map((run) => run.topic);

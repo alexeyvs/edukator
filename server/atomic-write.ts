@@ -5,7 +5,34 @@
  * PDF в репозитории нет, восстановить обрезанный файл нечем).
  */
 import { closeSync, fsyncSync, openSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
+
+/**
+ * Каталог сбрасывается отдельно: `fsync` дескриптора файла доносит до диска
+ * содержимое, но не запись о переименовании, и после отключения питания на
+ * месте снимка оказался бы прежний файл либо ничего. Восстановить нечем — PDF,
+ * по которым он собран, в репозитории нет.
+ *
+ * Отказ не выносится наружу: переименование к этому моменту уже состоялось,
+ * файл на месте, и превращать «не подтвердилось на диске» в отказ записи —
+ * значит заставить вызывающего откатывать удачную работу. На части файловых
+ * систем каталог и открыть-то нельзя.
+ */
+function syncDirectory(path: string): void {
+  try {
+    const handle = openSync(dirname(path), 'r');
+    // Закрытие в `finally`, а не после `fsyncSync`: иначе отказ сброса уносил бы
+    // дескриптор с собой, и каждая запись снимка подтекала бы на один.
+    try {
+      fsyncSync(handle);
+    } finally {
+      closeSync(handle);
+    }
+  } catch {
+    /* см. выше */
+  }
+}
 
 export function writeFileAtomic(path: string, content: string): void {
   const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -23,6 +50,7 @@ export function writeFileAtomic(path: string, content: string): void {
     handle = undefined;
     closeSync(written);
     renameSync(tempPath, path);
+    syncDirectory(path);
   } catch (error) {
     // Уборка не имеет права заслонить причину: на переполненном диске
     // `closeSync` выносит отложенную ошибку записи повторно, и без отдельного
