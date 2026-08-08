@@ -98,6 +98,8 @@ describe('маршруты забега', () => {
     const plan = planResponse.json() as {
       plan: Array<{ subject: string; topic: { id: string; title: string } }>;
       forecasts: Array<{ subject: string; score: number }>;
+      streak: { current: number; best: number; completedToday: boolean };
+      topics: Array<{ id: string; title: string; subject: string; readiness: Record<string, unknown> }>;
     };
     expect(plan.plan).toHaveLength(3);
     expect(new Set(plan.plan.map((item) => item.subject))).toEqual(new Set(SUBJECTS));
@@ -107,6 +109,14 @@ describe('маршруты забега', () => {
     });
     expect(plan.forecasts.map((item) => item.subject)).toEqual(SUBJECTS);
     expect(plan.forecasts.every((item) => item.score === 2)).toBe(true);
+    expect(plan.streak).toEqual({ current: 0, best: 0, completedToday: false });
+    expect(plan.topics).toHaveLength(3);
+    expect(plan.topics[0]).toMatchObject({
+      id: expect.stringMatching(/\.a$/), title: expect.stringContaining('Тема'),
+      subject: expect.stringMatching(/math|russian|english/),
+      readiness: { status: 'working', eligible: false },
+    });
+    expect(JSON.stringify(plan.topics)).not.toContain('mastery');
 
     const runId = await start('math');
     for (let index = 0; index < 12; index += 1) {

@@ -6,7 +6,9 @@ import { taskPromptText } from './codex/task-schema.js';
 import { type TopicState } from './mastery.js';
 import { type RejectReason } from './normalize.js';
 import { submitAnswer } from './session.js';
+import { SessionError } from './session-error.js';
 import { finishBossLoss } from './boss-loss.js';
+import type { IssuedTask } from './issued-task.js';
 export { BOSS_MASTERY, BOSS_TARGET } from './boss-rules.js';
 import { BOSS_MASTERY, BOSS_TARGET } from './boss-rules.js';
 
@@ -100,7 +102,7 @@ export function bossTopicState(db: Database, topicId: string): BossTopicState {
 
 function topicOf(graph: TopicGraph, topicId: string): Topic {
   const topic = graph.byId.get(topicId);
-  if (topic === undefined) throw new Error(`Босс: темы «${topicId}» нет в карте`);
+  if (topic === undefined) throw new BossError('boss-not-found', `Босс: темы «${topicId}» нет в карте`);
   return topic;
 }
 
@@ -239,19 +241,7 @@ function ensureProgress(fight: ActiveFightRow, summary: FightAttemptSummary): vo
   }
 }
 
-export interface BossIssuedTask {
-  id: number;
-  topicId: string;
-  subject: Topic['subject'];
-  topicTitle: string;
-  question: string;
-  instruction?: string;
-  material?: string;
-  materialFormat?: 'none' | 'text' | 'math';
-  choices?: string[];
-  difficulty: number;
-  answerFormat: Topic['answerFormat'];
-}
+export type BossIssuedTask = Omit<IssuedTask, 'hint'>;
 
 function projectBossTask(topic: Topic, task: BankTask): BossIssuedTask {
   return {
@@ -325,14 +315,38 @@ export function submitBossAnswer(
   graph: TopicGraph,
   request: SubmitBossAnswerRequest,
 ): SubmitBossAnswerResult {
-  const result = submitAnswer(db, graph, {
-    runId: request.runId,
-    taskId: request.taskId,
-    answer: request.answer,
-    ...(request.hintUsed === undefined ? {} : { hintUsed: request.hintUsed }),
-    ...(request.durationMs === undefined ? {} : { durationMs: request.durationMs }),
-    ...(request.at === undefined ? {} : { at: request.at }),
-  });
+  let result;
+  try {
+    result = submitAnswer(db, graph, {
+      runId: request.runId,
+      taskId: request.taskId,
+      answer: request.answer,
+      ...(request.hintUsed === undefined ? {} : { hintUsed: request.hintUsed }),
+      ...(request.durationMs === undefined ? {} : { durationMs: request.durationMs }),
+      ...(request.at === undefined ? {} : { at: request.at }),
+    });
+  } catch (error) {
+    if (!(error instanceof SessionError)) throw error;
+    if (error.code === 'run-not-found') throw new BossError('boss-not-found', error.message);
+    if (error.code === 'run-finished') throw new BossError('boss-finished', error.message);
+    if (error.code === 'run-complete') throw new BossError('boss-complete', error.message);
+    if (error.code === 'run-not-ready') {
+      throw new BossError(
+        error.message.includes('спор') ? 'boss-dispute-open' : 'boss-mistake-pending',
+        error.message,
+      );
+    }
+    if (request.hintUsed === true && error.code === 'task-not-in-run') {
+      throw new BossError('boss-hint-forbidden', error.message);
+    }
+    if (
+      error.code === 'task-not-found' || error.code === 'task-not-issued' ||
+      error.code === 'task-not-in-run' || error.code === 'already-answered'
+    ) {
+      throw new BossError('boss-wrong-task', error.message);
+    }
+    throw new BossError('boss-inconsistent', error.message);
+  }
   if (result.bossOutcome === undefined || result.progress === null) {
     throw new BossError('boss-inconsistent', `Босс: ответ боя ${request.runId} прошёл не как boss`);
   }

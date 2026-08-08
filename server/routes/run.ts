@@ -11,6 +11,8 @@ import { readTopicStates } from '../mastery.js';
 import { finishRun, startRun } from '../run.js';
 import { planFromDatabase } from '../scheduler.js';
 import { SessionError } from '../session-error.js';
+import { readStreak } from '../streak.js';
+import { bossTopicState } from '../boss.js';
 
 /** День состоит из 2–3 забегов; главный экран показывает верхние три. */
 export const DAILY_RUNS = 3;
@@ -94,7 +96,14 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
       passed: triaged.has(subject),
     }));
 
-    return reply.send({ plan, forecasts, triage });
+    const topics = graph.order.map((topic) => ({
+      id: topic.id,
+      title: topic.title,
+      subject: topic.subject,
+      readiness: bossTopicState(db, topic.id),
+    }));
+
+    return reply.send({ plan, forecasts, triage, streak: readStreak(db, at), topics });
   });
 
   app.post('/api/run/start', (request, reply) => {
