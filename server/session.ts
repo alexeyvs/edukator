@@ -28,7 +28,7 @@ import { checkAnswer, type CheckResult, type RejectReason } from './normalize.js
 import { activeTopics } from './scheduler.js';
 import { issuedTask, type BankTask } from './codex/bank.js';
 import { takeTaskOrSeed } from './codex/seed-bank.js';
-import { duplicateKey, fitsAccept } from './codex/task-schema.js';
+import { duplicateKey, fitsAccept, taskPromptText } from './codex/task-schema.js';
 import type { DisputeContext, DisputeReviewer } from './codex/dispute.js';
 import { runProgress, type RunProgress } from './run.js';
 import { SessionError, type SessionErrorCode } from './session-error.js';
@@ -117,7 +117,7 @@ function issuedResult(topic: Topic, task: BankTask): NextTaskResult {
       topicId: topic.id,
       subject: topic.subject,
       topicTitle: topic.title,
-      question: task.question,
+      question: taskPromptText(task),
       hint: task.hint,
       difficulty: task.difficulty,
       answerFormat: topic.answerFormat,

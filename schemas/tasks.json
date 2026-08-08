@@ -18,12 +18,28 @@
     "task": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["question", "answer", "accept", "hint", "explain", "joke", "difficulty"],
+      "required": ["instruction", "material", "material_format", "choices", "answer", "accept", "hint", "explain", "joke", "difficulty"],
       "properties": {
-        "question": {
-          "description": "Условие целиком, без ответа и без подсказки. Одна задача — один вопрос.",
+        "instruction": {
+          "description": "Краткое указание, что нужно сделать. Не дублирует материал.",
           "type": "string",
           "minLength": 1
+        },
+        "material": {
+          "description": "Текст или display-LaTeX, к которому относится инструкция. Пустая строка допустима только при material_format=none.",
+          "type": "string"
+        },
+        "material_format": {
+          "description": "none без материала, text для обычного текста, math для display-LaTeX без разделителей $.",
+          "type": "string",
+          "enum": ["none", "text", "math"]
+        },
+        "choices": {
+          "description": "Для choice — от 2 до 6 уникальных вариантов, один из которых буквально равен answer. Для number/text — пустой массив.",
+          "type": "array",
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
         },
         "answer": {
           "description": "Эталонный ответ в самой короткой записи. Для числовой темы — ровно одно число, без пояснений.",
@@ -38,7 +54,7 @@
           "items": { "type": "string", "minLength": 1 }
         },
         "hint": {
-          "description": "Подсказка, которая направляет к решению и не содержит самого ответа.",
+          "description": "Подсказка из 2-4 предложений: правило, применимость, путь решения и самопроверка. Не содержит ответ, заполненный пропуск, правильный вариант или его позицию.",
           "type": "string",
           "minLength": 1
         },

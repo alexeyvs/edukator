@@ -46,6 +46,7 @@ export interface Verdict {
   natural: boolean;
   onTopic: boolean;
   ageAppropriate: boolean;
+  hintSafe: boolean;
   note: string;
 }
 
@@ -56,6 +57,7 @@ interface VerdictJson {
   natural: boolean;
   on_topic: boolean;
   age_appropriate: boolean;
+  hint_safe: boolean;
   note: string;
 }
 
@@ -84,7 +86,7 @@ export interface ValidateTasksOptions {
 }
 
 /** Четыре оценки спеки: всё, кроме собственного ответа проверяющего и замечания. */
-type VerdictCheck = 'unambiguous' | 'natural' | 'onTopic' | 'ageAppropriate';
+type VerdictCheck = 'unambiguous' | 'natural' | 'onTopic' | 'ageAppropriate' | 'hintSafe';
 
 /** Оценки вердикта и текст отбраковки, когда оценка провалена. */
 const CHECKS: { key: VerdictCheck; problem: string }[] = [
@@ -92,6 +94,7 @@ const CHECKS: { key: VerdictCheck; problem: string }[] = [
   { key: 'natural', problem: 'ситуация натянута' },
   { key: 'onTopic', problem: 'задание не о заявленной теме' },
   { key: 'ageAppropriate', problem: 'содержание не годится подростку' },
+  { key: 'hintSafe', problem: 'подсказка раскрывает ответ прямо или однозначно' },
 ];
 
 /** Разбирает ответ валидатора. `expected` — сколько заданий ушло на проверку. */
@@ -114,6 +117,7 @@ export function parseVerdictBatch(raw: unknown, expected: number): Verdict[] {
     natural: item.natural,
     onTopic: item.on_topic,
     ageAppropriate: item.age_appropriate,
+    hintSafe: item.hint_safe,
     note: item.note,
   }));
 }
@@ -181,7 +185,7 @@ export async function validateTaskBatch(
   let verdicts: Verdict[];
   try {
     const answer = await run({
-      prompt: buildValidationPrompt({ topic, questions: tasks.map((task) => task.question) }),
+      prompt: buildValidationPrompt({ topic, tasks }),
       schemaPath: writeCodexSchema(workDir, VERDICTS_SCHEMA_PATH),
       outPath: join(workDir, 'verdicts.json'),
       model: options.model ?? modelForRole('validate'),

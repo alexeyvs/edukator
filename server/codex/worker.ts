@@ -20,7 +20,7 @@ import { activeTopics } from '../scheduler.js';
 import { countAvailable, recentQuestions, storeTasks } from './bank.js';
 import { CodexUnavailableError, type CodexRunner } from './client.js';
 import { generateTaskBatch } from './generate.js';
-import type { GeneratedTask } from './task-schema.js';
+import { taskPromptText, type GeneratedTask } from './task-schema.js';
 import { validateTaskBatch } from './validate.js';
 import {
   codexConcurrency,
@@ -156,21 +156,20 @@ export function createValidatingProducer(options: ProducerOptions = {}): TaskPro
 
   return async (request: ProduceRequest): Promise<GeneratedTask[]> => {
     const { topic } = request;
-    const { tasks } = await generateTaskBatch({
-      topic,
-      difficulty: request.difficulty,
-      profile: request.profile,
-      recent: request.recent,
-      ...codex,
-    });
-
-    const { accepted, rejected } = await validateTaskBatch({ topic, tasks, ...codex });
-
-    for (const { task, reason } of rejected) {
-      log(`воркер: тема «${topic.id}», задание отбраковано (${reason}): ${task.question}`);
+    for (let safetyAttempt = 1; safetyAttempt <= 3; safetyAttempt += 1) {
+      const { tasks } = await generateTaskBatch({
+        topic, difficulty: request.difficulty, profile: request.profile,
+        recent: request.recent, ...codex,
+      });
+      const { accepted, rejected } = await validateTaskBatch({ topic, tasks, ...codex });
+      for (const { task, reason } of rejected) {
+        log(`воркер: тема «${topic.id}», задание отбраковано (${reason}): ${taskPromptText(task)}`);
+      }
+      const unsafeHint = rejected.some(({ reason }) => reason.includes('подсказка раскрывает'));
+      if (!unsafeHint || safetyAttempt === 3) return accepted;
+      log(`воркер: тема «${topic.id}», небезопасная подсказка — перегенерация батча`);
     }
-
-    return accepted;
+    return [];
   };
 }
 

@@ -2,6 +2,7 @@ import type { Database } from 'better-sqlite3';
 import type { AnswerFormat, Topic, TopicGraph } from './curriculum.js';
 import type { Subject } from './db.js';
 import { issuedTask, takeTask, type BankTask } from './codex/bank.js';
+import { taskPromptText } from './codex/task-schema.js';
 
 /** Число разных тем, достаточное для первичного ранжирования предмета. */
 export const TRIAGE_TARGET = 12;
@@ -42,7 +43,7 @@ function issued(task: BankTask, topic: Topic): TriageIssuedTask {
     topicId: topic.id,
     subject: topic.subject,
     topicTitle: topic.title,
-    question: task.question,
+    question: taskPromptText(task),
     hint: task.hint,
     difficulty: task.difficulty,
     answerFormat: topic.answerFormat,

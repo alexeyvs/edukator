@@ -52,6 +52,7 @@ function verdict(patch: Partial<Verdict> = {}): unknown {
     natural: true,
     onTopic: true,
     ageAppropriate: true,
+    hintSafe: true,
     note: '',
     ...patch,
   };
@@ -62,6 +63,7 @@ function verdict(patch: Partial<Verdict> = {}): unknown {
     natural: full.natural,
     on_topic: full.onTopic,
     age_appropriate: full.ageAppropriate,
+    hint_safe: full.hintSafe,
     note: full.note,
   };
 }
@@ -124,14 +126,15 @@ describe('validateTaskBatch: совпадающие ответы', () => {
     expect(requests[0]?.model).toBe(CODEX_MODEL);
   });
 
-  it('отдаёт проверяющему только условия: ни ответов, ни подсказок, ни разборов', async () => {
+  it('отдаёт проверяющему условие и подсказку, но не ответ и разбор', async () => {
     const { requests, run } = recorder(verdicts(verdict()));
 
     await validateTaskBatch({ topic: topic(), tasks: [task()], run });
 
     const prompt = requests[0]?.prompt ?? '';
     expect(prompt).toContain('В инвентаре 90 монет');
-    expect(prompt).not.toContain('Половина от девяноста');
+    expect(prompt).toContain('Половина от девяноста');
+    expect(prompt).toContain('hint_safe');
     expect(prompt).not.toContain('90 : 2 = 45');
     expect(prompt).not.toContain('новый скин');
     // «45» встречается в условии как часть числа 90 не может, поэтому проверка
@@ -246,7 +249,14 @@ describe('validateTaskBatch: сверка идёт нормализатором'
   });
 });
 
-describe('validateTaskBatch: отбраковка', () => {
+  describe('validateTaskBatch: отбраковка', () => {
+    it('отбраковывает весь небезопасный по смыслу элемент батча', async () => {
+      const { run } = recorder(verdicts(verdict({ hintSafe: false, note: 'названа позиция варианта' })));
+      const result = await validateTaskBatch({ topic: topic(), tasks: [task()], run });
+      expect(result.accepted).toEqual([]);
+      expect(result.rejected[0]?.reason).toMatch(/подсказка раскрывает.*позиция варианта/s);
+    });
+
   it('отбраковывает задание при расхождении ответов и называет оба', async () => {
     const { run } = recorder(verdicts(verdict({ answer: '46' }), verdict()));
 
@@ -391,6 +401,7 @@ describe('parseVerdictBatch', () => {
       natural: true,
       onTopic: false,
       ageAppropriate: true,
+      hintSafe: true,
       note: 'это про проценты',
     });
   });

@@ -52,6 +52,21 @@ describe('банк заданий', () => {
   });
 
   describe('запись и выдача', () => {
+    it('считает fingerprint и историю по полному структурированному тексту', () => {
+      const structured = (material: string): GeneratedTask => ({
+        instruction: 'Вычисли значение.', material, material_format: 'math', choices: [],
+        answer: '4', accept: ['4'],
+        hint: 'Сначала выполни действие. Затем проверь обратным действием.',
+        explain: 'Получается четыре.', joke: 'Сошлось.', difficulty: 2,
+      });
+
+      expect(storeTasks(db, TOPIC, [structured('2+2'), structured('3+1')]).stored).toHaveLength(2);
+      expect(recentQuestions(db, TOPIC)).toEqual([
+        'Вычисли значение.\n\n2+2',
+        'Вычисли значение.\n\n3+1',
+      ]);
+    });
+
     it('записывает задание, выдаёт его целиком и второй раз не предлагает', () => {
       const { stored, duplicates } = storeTasks(db, TOPIC, [task()]);
 

@@ -20,7 +20,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import type { Database } from 'better-sqlite3';
-import type { Topic, TopicGraph } from '../curriculum.js';
+import type { AnswerFormat, Topic, TopicGraph } from '../curriculum.js';
 import { SUBJECTS, type Subject } from '../db.js';
 import { storeTasks, takeTask, type BankTask, type TakeTaskOptions } from './bank.js';
 import { parseTaskBatch, type GeneratedTask } from './task-schema.js';
@@ -50,6 +50,18 @@ export interface SeedBank {
 interface SeedTopicJson {
   topic_id: string;
   tasks: GeneratedTask[];
+}
+
+function parseSeedTasks(tasks: GeneratedTask[], format: AnswerFormat): GeneratedTask[] {
+  const legacy = tasks.some((task) => task.question !== undefined);
+  const structured = legacy
+    ? tasks.map((task) => {
+        const { question, ...rest } = task;
+        return { ...rest, instruction: question ?? '', material: '', material_format: 'none' as const, choices: [] };
+      })
+    : tasks;
+  const parsed = parseTaskBatch({ items: structured }, format, { allowLegacyHintAndChoices: legacy });
+  return legacy ? tasks.map((task) => ({ ...task, accept: [...task.accept] })) : parsed;
 }
 
 export interface LoadSeedBankResult {
@@ -154,7 +166,7 @@ export function parseSeedBank(
     const { tasks } = entry as unknown as SeedTopicJson;
     let parsed: GeneratedTask[];
     try {
-      parsed = parseTaskBatch({ items: tasks }, topic.answerFormat);
+      parsed = parseSeedTasks(tasks, topic.answerFormat);
     } catch (error) {
       problems.push(`Посевной банк ${where}, тема «${topicId}»: ${(error as Error).message}`);
       return;
@@ -447,7 +459,7 @@ export function collectSeedTasks(db: Database, graph: TopicGraph, subject: Subje
     // отвергнет, а `loadSeedBank` ловит такую порчу по предмету целиком: снимок
     // оказался бы переписан нечитаемым, и предмет остался бы без посева.
     try {
-      parseTaskBatch({ items: tasks }, topic.answerFormat);
+      parseSeedTasks(tasks, topic.answerFormat);
     } catch (error) {
       throw new Error(
         `Посевной банк: тема «${topic.id}» не пройдёт обратный разбор: ${(error as Error).message}`,

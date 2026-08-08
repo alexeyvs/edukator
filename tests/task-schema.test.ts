@@ -6,6 +6,7 @@ import {
   fitsAccept,
   MIN_REVEAL_LENGTH,
   parseTaskBatch,
+  taskPromptText,
   TASKS_SCHEMA_PATH,
   type GeneratedTask,
 } from '../server/codex/task-schema.js';
@@ -13,10 +14,13 @@ import {
 /** Задание по числовой теме: от него отталкиваются все проверки инвариантов. */
 function task(patch: Partial<GeneratedTask> = {}): unknown {
   return {
-    question: 'В инвентаре 90 монет, половину потратил. Сколько осталось?',
+    instruction: 'Сколько осталось?',
+    material: 'В инвентаре 90 монет, половину потратили.',
+    material_format: 'text',
+    choices: [],
     answer: '45',
     accept: ['45', '45 монет'],
-    hint: 'Половина от девяноста',
+    hint: 'Найди половину исходного количества. Проверь, что две равные части дают целое.',
     explain: '90 : 2 = 45',
     joke: 'Кошелёк похудел вдвое — как и шансы на новый скин',
     difficulty: 2,
@@ -41,7 +45,10 @@ describe('схема батча', () => {
     }
     expect(stripped.required).toEqual(['items']);
     expect(stripped.$defs.task.required).toEqual([
-      'question',
+      'instruction',
+      'material',
+      'material_format',
+      'choices',
       'answer',
       'accept',
       'hint',
@@ -53,15 +60,25 @@ describe('схема батча', () => {
 });
 
 describe('parseTaskBatch: успешный разбор', () => {
+  it('собирает стабильное полное представление инструкции, материала и вариантов', () => {
+    expect(taskPromptText({
+      instruction: 'Выбери дробь', material: String.raw`\frac{1}{2}`,
+      material_format: 'math', choices: ['1/2', '2'],
+    })).toBe('Выбери дробь\n\n\\frac{1}{2}\n\nA. 1/2\nB. 2');
+  });
+
   it('разбирает корректный батч', () => {
     const parsed = parseTaskBatch(batch(task(), task({ answer: '30', accept: ['30'] })), 'number');
 
     expect(parsed).toHaveLength(2);
     expect(parsed[0]).toEqual({
-      question: 'В инвентаре 90 монет, половину потратил. Сколько осталось?',
+      instruction: 'Сколько осталось?',
+      material: 'В инвентаре 90 монет, половину потратили.',
+      material_format: 'text',
+      choices: [],
       answer: '45',
       accept: ['45', '45 монет'],
-      hint: 'Половина от девяноста',
+      hint: 'Найди половину исходного количества. Проверь, что две равные части дают целое.',
       explain: '90 : 2 = 45',
       joke: 'Кошелёк похудел вдвое — как и шансы на новый скин',
       difficulty: 2,
@@ -73,10 +90,10 @@ describe('parseTaskBatch: успешный разбор', () => {
     const parsed = parseTaskBatch(
       batch(
         task({
-          question: 'Кто съел жука?',
+          instruction: 'Кто съел жука?',
           answer: 'Ёж',
           accept: ['еж'],
-          hint: 'Колючий',
+          hint: 'Вспомни признаки животного. Сопоставь их с условием.',
           explain: 'Ёж',
           difficulty: 1,
         }),
@@ -141,6 +158,30 @@ describe('parseTaskBatch: нарушения схемы', () => {
 });
 
 describe('parseTaskBatch: нарушения инвариантов', () => {
+  it('проверяет согласованность формата и материала', () => {
+    expect(() => parseTaskBatch(batch(task({ material: 'лишнее', material_format: 'none' })), 'number'))
+      .toThrow(/material_format=none/s);
+    expect(() => parseTaskBatch(batch(task({ material: '', material_format: 'text' })), 'number'))
+      .toThrow(/material_format=text/s);
+    expect(() => parseTaskBatch(batch(task({ material: '$x+1$', material_format: 'math' })), 'number'))
+      .toThrow(/LaTeX.*без разделителей/s);
+  });
+
+  it('требует варианты только для choice и буквальное совпадение answer', () => {
+    expect(() => parseTaskBatch(batch(task({ choices: ['4', '5'] })), 'number')).toThrow(/пустым массивом/s);
+    expect(() => parseTaskBatch(batch(task({ answer: '4', accept: ['4'], choices: ['четыре', '5'] })), 'choice'))
+      .toThrow(/буквально совпадать/s);
+    expect(() => parseTaskBatch(batch(task({ answer: '4', accept: ['4'], choices: ['4', ' 4 '] })), 'choice'))
+      .toThrow(/уникальными после нормализации/s);
+  });
+
+  it('требует содержательную подсказку из 2–4 предложений', () => {
+    expect(() => parseTaskBatch(batch(task({ hint: 'Только одно предложение.' })), 'number'))
+      .toThrow(/2–4 предложений/s);
+    expect(() => parseTaskBatch(batch(task({ hint: 'Раз. Два. Три. Четыре. Пять.' })), 'number'))
+      .toThrow(/2–4 предложений/s);
+  });
+
   it('отвергает задание, у которого answer не входит в accept', () => {
     // Словесная запись: числовое расхождение ловится раньше и своей причиной,
     // а здесь проверяется именно отсутствие эталона среди записей.
@@ -187,7 +228,7 @@ describe('parseTaskBatch: нарушения инвариантов', () => {
 
   it('не считает ответ раскрытым, когда он лишь часть другого числа', () => {
     expect(() =>
-      parseTaskBatch(batch(task({ hint: 'Начни с 450 монет и подумай' })), 'number'),
+      parseTaskBatch(batch(task({ hint: 'Начни с 450 монет и подумай. Проверь вычисление.' })), 'number'),
     ).not.toThrow();
   });
 
@@ -200,7 +241,7 @@ describe('parseTaskBatch: нарушения инвариантов', () => {
     expect(() =>
       parseTaskBatch(
         batch(
-          task({ answer: 'о', accept: ['о'], hint: 'Подумай о проверочном слове', explain: 'о' }),
+          task({ answer: 'о', accept: ['о'], hint: 'Подумай о проверочном слове. Проверь ударение.', explain: 'о' }),
         ),
         'text',
       ),
@@ -211,7 +252,7 @@ describe('parseTaskBatch: нарушения инвариантов', () => {
           task({
             answer: 'an',
             accept: ['an'],
-            hint: 'Перед гласным звуком ставится an, а не a',
+            hint: 'Перед гласным звуком ставится an, а не a. Проверь первый звук.',
             explain: 'an',
           }),
         ),
@@ -227,7 +268,7 @@ describe('parseTaskBatch: нарушения инвариантов', () => {
           task({
             answer: 'did',
             accept: ['did'],
-            hint: 'Вспомогательный глагол прошедшего — did',
+            hint: 'Вспомогательный глагол прошедшего — did. Проверь время предложения.',
             explain: 'did',
           }),
         ),
@@ -256,15 +297,15 @@ describe('parseTaskBatch: нарушения инвариантов', () => {
   it('не считает раскрытием ответ, склеенный в подсказке в другое число', () => {
     expect(() =>
       parseTaskBatch(
-        batch(task({ answer: '45', hint: 'Цена выросла с 45,5 до 60 рублей' })),
+        batch(task({ answer: '45', hint: 'Цена выросла с 45,5 до 60 рублей. Сравни величины.' })),
         'number',
       ),
     ).not.toThrow();
     expect(() =>
-      parseTaskBatch(batch(task({ answer: '45', hint: 'Начни с 1,45 метра' })), 'number'),
+      parseTaskBatch(batch(task({ answer: '45', hint: 'Начни с 1,45 метра. Проверь единицы.' })), 'number'),
     ).not.toThrow();
     expect(() =>
-      parseTaskBatch(batch(task({ answer: '45', hint: 'Приведи дробь к 45/2' })), 'number'),
+      parseTaskBatch(batch(task({ answer: '45', hint: 'Приведи дробь к 45/2. Проверь знаменатель.' })), 'number'),
     ).not.toThrow();
   });
 
@@ -285,7 +326,7 @@ describe('parseTaskBatch: нарушения инвариантов', () => {
           task({
             answer: 'did',
             accept: ['did'],
-            hint: 'Вспомни про did, дальше сам',
+            hint: 'Вспомни про did, дальше сам. Проверь время.',
             explain: 'did',
           }),
         ),
@@ -300,7 +341,7 @@ describe('parseTaskBatch: нарушения инвариантов', () => {
   it('не считает раскрытием совпадение по метасимволам ответа', () => {
     expect(() =>
       parseTaskBatch(
-        batch(task({ answer: '2.5', accept: ['2.5'], hint: 'Начни с 275 граммов', explain: '2.5' })),
+        batch(task({ answer: '2.5', accept: ['2.5'], hint: 'Начни с 275 граммов. Проверь единицы.', explain: '2.5' })),
         'number',
       ),
     ).not.toThrow();
@@ -311,7 +352,7 @@ describe('parseTaskBatch: нарушения инвариантов', () => {
     // регулярке — `SyntaxError` наружу из разбора, то есть весь батч в мусор.
     expect(() =>
       parseTaskBatch(
-        batch(task({ answer: '2)', accept: ['2)'], hint: 'Сравни знаменатели', explain: 'второй' })),
+        batch(task({ answer: '2)', accept: ['2)'], choices: ['1)', '2)'], hint: 'Сравни знаменатели. Проверь каждый вариант.', explain: 'второй' })),
         'choice',
       ),
     ).not.toThrow();

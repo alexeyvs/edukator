@@ -43,10 +43,13 @@ function topic(patch: Partial<Topic> = {}): Topic {
 
 function task(index: number, patch: Partial<GeneratedTask> = {}): GeneratedTask {
   return {
-    question: `Задание №${index}: сколько монет останется?`,
+    instruction: `Задание №${index}: сколько монет останется?`,
+    material: '',
+    material_format: 'none',
+    choices: [],
     answer: '45',
     accept: ['45', '45 монет'],
-    hint: 'Приведи дроби к общему знаменателю и вычти.',
+    hint: 'Приведи дроби к общему знаменателю. Затем вычти и проверь обратным действием.',
     explain: 'Общий знаменатель 6, дальше обычное вычитание.',
     joke: 'Дроби целы, монеты тоже.',
     difficulty: 2,

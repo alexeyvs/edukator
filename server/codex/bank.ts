@@ -14,7 +14,7 @@
 import type { Database } from 'better-sqlite3';
 import { questionFingerprint } from '../normalize.js';
 import { RECENT_LIMIT } from './prompt.js';
-import type { GeneratedTask } from './task-schema.js';
+import { taskPromptText, type GeneratedTask } from './task-schema.js';
 
 /** Задание, лежащее в банке: поля генератора плюс то, чем его различает база. */
 export interface BankTask extends GeneratedTask {
@@ -120,11 +120,12 @@ export function storeTasks(
   tasks: readonly GeneratedTask[],
 ): StoreTasksResult {
   const prepared = tasks.map((task) => {
-    const fingerprint = questionFingerprint(task.question);
+    const prompt = taskPromptText(task);
+    const fingerprint = questionFingerprint(prompt);
     if (fingerprint === '') {
-      throw new Error(`Банк заданий: формулировка «${task.question}» пуста после нормализации`);
+      throw new Error(`Банк заданий: формулировка «${prompt}» пуста после нормализации`);
     }
-    return { task, fingerprint };
+    return { task, fingerprint, prompt };
   });
 
   // `ON CONFLICT DO NOTHING` вместо «прочитать отпечатки, потом вставить»:
@@ -157,10 +158,10 @@ export function storeTasks(
     const stored: BankTask[] = [];
     const duplicates: GeneratedTask[] = [];
 
-    for (const { task, fingerprint } of prepared) {
+    for (const { task, fingerprint, prompt } of prepared) {
       const row = insert.get({
         topicId,
-        question: task.question,
+        question: prompt,
         answer: task.answer,
         accept: JSON.stringify(task.accept),
         hint: task.hint,

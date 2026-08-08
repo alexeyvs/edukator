@@ -21,7 +21,12 @@ export const TASKS_SCHEMA_PATH = resolve(here, '..', '..', 'schemas', 'tasks.jso
 
 /** Задание, каким его отдаёт генератор: ровно поля схемы, до записи в банк. */
 export interface GeneratedTask {
-  question: string;
+  /** @deprecated Transitional DB fallback; newly generated tasks use structured fields. */
+  question?: string;
+  instruction?: string;
+  material?: string;
+  material_format?: MaterialFormat;
+  choices?: string[];
   answer: string;
   /** Равноправные записи ответа, включая сам `answer`: с ними сверяется нормализатор. */
   accept: string[];
@@ -30,6 +35,21 @@ export interface GeneratedTask {
   joke: string;
   /** 1-3. */
   difficulty: number;
+}
+
+export type MaterialFormat = 'none' | 'text' | 'math';
+
+export type TaskPromptFields = Pick<GeneratedTask, 'question' | 'instruction' | 'material' | 'material_format' | 'choices'>;
+
+/** Stable plain-text form used anywhere the whole prompt must be compared or reviewed. */
+export function taskPromptText(task: TaskPromptFields): string {
+  if (task.instruction === undefined) return task.question?.trim() ?? '';
+  const parts = [task.instruction.trim()];
+  if (task.material_format !== 'none') parts.push(task.material?.trim() ?? '');
+  if ((task.choices?.length ?? 0) > 0) {
+    parts.push((task.choices ?? []).map((choice, index) => `${String.fromCharCode(65 + index)}. ${choice.trim()}`).join('\n'));
+  }
+  return parts.filter(Boolean).join('\n\n');
 }
 
 interface TaskBatchJson {
@@ -161,8 +181,33 @@ function revealsAnswer(hint: string, answer: string): boolean {
   return boundary.test(normalizeText(hint));
 }
 
-function taskProblems(task: GeneratedTask, format: AnswerFormat): string[] {
+function taskProblems(task: GeneratedTask, format: AnswerFormat, allowLegacy = false): string[] {
   const problems: string[] = [];
+
+  if (task.instruction?.trim() === '') problems.push('поле instruction состоит из одних пробелов');
+  if (task.material_format === 'none' && task.material !== '') {
+    problems.push('при material_format=none поле material должно быть пустым');
+  }
+  if (task.material_format !== 'none' && task.material?.trim() === '') {
+    problems.push(`при material_format=${task.material_format} поле material не может быть пустым`);
+  }
+  if (task.material_format === 'math' && task.material?.includes('$')) {
+    problems.push('математический материал должен быть display-LaTeX без разделителей $');
+  }
+  const choiceKeys = (task.choices ?? []).map(normalizeText);
+  if (choiceKeys.some((choice) => choice === '') || new Set(choiceKeys).size !== choiceKeys.length) {
+    problems.push('варианты choices должны быть непустыми и уникальными после нормализации');
+  }
+  if (format === 'choice' && !allowLegacy) {
+    if ((task.choices?.length ?? 0) < 2 || (task.choices?.length ?? 0) > 6) {
+      problems.push('для choice требуется от 2 до 6 вариантов');
+    }
+    if (!task.choices?.some((choice) => choice === task.answer)) {
+      problems.push(`ответ «${task.answer}» должен буквально совпадать с одним из choices`);
+    }
+  } else if (format !== 'choice' && (task.choices?.length ?? 0) !== 0) {
+    problems.push(`для формата ${format} поле choices должно быть пустым массивом`);
+  }
 
   // Числовая пригодность проверяется первой: сверка `answer` с `accept[]` идёт
   // нормализатором, а он на нечисловом эталоне числовой темы бросает.
@@ -237,6 +282,11 @@ function taskProblems(task: GeneratedTask, format: AnswerFormat): string[] {
     problems.push(`подсказка содержит ответ «${task.answer}»`);
   }
 
+  const sentences = task.hint.trim().split(/(?<=[.!?])(?:\s+|$)/u).filter(Boolean);
+  if (!allowLegacy && (sentences.length < 2 || sentences.length > 4)) {
+    problems.push('подсказка должна состоять из 2–4 предложений');
+  }
+
   return problems;
 }
 
@@ -244,14 +294,19 @@ function taskProblems(task: GeneratedTask, format: AnswerFormat): string[] {
  * Разбирает ответ codex в задания. `format` — `answer_format` темы, под которую
  * шла генерация: от него зависит, чем сверяется `accept[]`.
  */
-export function parseTaskBatch(raw: unknown, format: AnswerFormat): GeneratedTask[] {
+export function parseTaskBatch(
+  raw: unknown,
+  format: AnswerFormat,
+  options: { allowLegacyHintAndChoices?: boolean } = {},
+): GeneratedTask[] {
   const validate = schemaValidator<TaskBatchJson>(TASKS_SCHEMA_PATH);
   if (!validate(raw)) {
     throw new Error(`Батч заданий не соответствует схеме: ${describeSchemaErrors(validate.errors)}`);
   }
 
   const problems = raw.items.flatMap((task, index) =>
-    taskProblems(task, format).map((problem) => `задание ${index + 1}: ${problem}`),
+    taskProblems(task, format, options.allowLegacyHintAndChoices === true)
+      .map((problem) => `задание ${index + 1}: ${problem}`),
   );
   if (problems.length > 0) {
     throw new Error(`Батч заданий: ${problems.join('; ')}`);

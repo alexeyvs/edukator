@@ -70,10 +70,13 @@ let counter = 0;
 function task(topicId: string, patch: Partial<GeneratedTask> = {}): GeneratedTask {
   counter += 1;
   return {
-    question: `Задание ${counter} по теме ${topicId}: сколько монет останется?`,
+    instruction: `Задание ${counter} по теме ${topicId}: сколько монет останется?`,
+    material: '',
+    material_format: 'none',
+    choices: [],
     answer: '45',
     accept: ['45', '45 монет'],
-    hint: 'Посчитай по шагам.',
+    hint: 'Выдели известные величины. Посчитай по шагам и проверь результат.',
     explain: 'Сорок пять — то, что осталось.',
     joke: 'Не Нобелевка, но зачёт.',
     difficulty: 2,
@@ -170,7 +173,7 @@ describe('воркер тёплой очереди', () => {
     it('передаёт производителю тему, её сложность, профиль и прошлые формулировки', async () => {
       const graph = graphOf([topic('math.a', { difficulty: 3 })]);
       writeProfile(db, { name: 'Тимофей', interests: ['Minecraft'] });
-      storeTasks(db, 'math.a', [task('math.a', { question: 'Старая формулировка про монеты?' })]);
+      storeTasks(db, 'math.a', [task('math.a', { instruction: 'Старая формулировка про монеты?' })]);
       const { requests, produce } = producer(7);
 
       await runWarmupCycle({ db, graph, produce, log });
@@ -342,6 +345,7 @@ describe('воркер тёплой очереди', () => {
         natural: true,
         on_topic: true,
         age_appropriate: true,
+        hint_safe: true,
         note: '',
         ...patch,
       };
@@ -370,6 +374,24 @@ describe('воркер тёплой очереди', () => {
       expect(countAvailable(db, 'math.a')).toBe(1);
       expect(logged.join('\n')).toMatch(/отбраковано.*проверяющий ответил «46»/u);
       expect(logged.join('\n')).toMatch(/отбраковано.*ситуация натянута/u);
+    });
+
+    it('перегенерирует батч, если независимая проверка сочла подсказку раскрывающей ответ', async () => {
+      const graph = graphOf([topic('math.a')]);
+      const first = batchOf('math.a', 1);
+      const second = batchOf('math.a', 1);
+      const stub = codexStub([
+        JSON.stringify({ items: first }),
+        JSON.stringify({ items: [verdict('45', { hint_safe: false })] }),
+        JSON.stringify({ items: second }),
+        JSON.stringify({ items: [verdict('45')] }),
+      ]);
+
+      const report = await runWarmupCycle({ db, graph, log, maxBatches: 1, run: stub.run });
+
+      expect(stub.calls).toBe(4);
+      expect(report.refilled[0]).toMatchObject({ stored: 1 });
+      expect(logged.join('\n')).toMatch(/небезопасная подсказка — перегенерация/u);
     });
 
     it('докладывает о недоступности codex, а не глотает её', async () => {
@@ -490,7 +512,7 @@ describe('воркер тёплой очереди', () => {
           // Формулировка, пустая после нормализации: `storeTasks` бросает на ней
           // ещё до транзакции, то есть мимо перехвата вокруг генерации.
           return Promise.resolve(
-            call === 1 ? batchOf(request.topic.id, 3) : [task(request.topic.id, { question: '???' })],
+            call === 1 ? batchOf(request.topic.id, 3) : [task(request.topic.id, { instruction: '???' })],
           );
         },
       });

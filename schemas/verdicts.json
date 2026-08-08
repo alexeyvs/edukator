@@ -18,7 +18,7 @@
     "verdict": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["answer", "unambiguous", "natural", "on_topic", "age_appropriate", "note"],
+      "required": ["answer", "unambiguous", "natural", "on_topic", "age_appropriate", "hint_safe", "note"],
       "properties": {
         "answer": {
           "description": "Твой собственный ответ на задание, в самой короткой записи. Для числовой темы — ровно одно число.",
@@ -39,6 +39,10 @@
         },
         "age_appropriate": {
           "description": "Содержание уместно для тринадцатилетнего.",
+          "type": "boolean"
+        },
+        "hint_safe": {
+          "description": "Подсказка не раскрывает ответ прямо, через позицию варианта, заполненный пропуск или однозначный пересказ.",
           "type": "boolean"
         },
         "note": {
