@@ -76,6 +76,55 @@ export interface NextTaskOptions {
   log?: (message: string) => void;
 }
 
+interface TopicAllocationRow {
+  topic_id: string;
+  allocated: number;
+}
+
+/**
+ * Темы забега остаются в порядке планировщика, но новая выдача идёт по наименее
+ * представленной теме. В счёт входят и ответы, и уже зарезервированная
+ * предзагрузка: иначе каждый запрос предзагрузки выбирал бы тему показанного,
+ * но ещё не отвеченного задания заново.
+ */
+function balanceRunTopics(db: Database, runId: number, topics: Topic[]): Topic[] {
+  const rows = db.prepare<[number, number], TopicAllocationRow>(
+    `SELECT topic_id, COUNT(*) AS allocated
+       FROM (
+         SELECT topic_id FROM attempts WHERE run_id = ?
+         UNION ALL
+         SELECT topic_id FROM task_bank
+          WHERE issued_run_id = ? AND status = 'used'
+            AND NOT EXISTS (
+              SELECT 1 FROM attempts WHERE attempts.task_id = task_bank.id
+            )
+       )
+      GROUP BY topic_id`,
+  ).all(runId, runId);
+  const allocated = new Map(rows.map((row) => [row.topic_id, row.allocated]));
+
+  return topics
+    .map((topic, order) => ({ topic, order, allocated: allocated.get(topic.id) ?? 0 }))
+    .sort((left, right) => left.allocated - right.allocated || left.order - right.order)
+    .map(({ topic }) => topic);
+}
+
+function issuedResult(topic: Topic, task: BankTask): NextTaskResult {
+  return {
+    status: 'ok',
+    task: {
+      id: task.id,
+      topicId: topic.id,
+      subject: topic.subject,
+      topicTitle: topic.title,
+      question: task.question,
+      hint: task.hint,
+      difficulty: task.difficulty,
+      answerFormat: topic.answerFormat,
+    },
+  };
+}
+
 /**
  * Следующее задание: тема от планировщика, задание из банка. Целевая сложность —
  * базовая сложность темы; подстройку под точность ученика делает триаж этапа 3.
@@ -87,8 +136,10 @@ export interface NextTaskOptions {
  * окно фиксированного размера регулярно целиком состоит из пустых тем, а
  * остальной банк остаётся недостижимым. Перебор дешёвый: план строится в памяти.
  *
- * Уже выданное, но неотвеченное задание темы возвращается повторно: перезагрузка
- * страницы не должна сжигать очередь.
+ * Уже выданное, но неотвеченное задание любой темы забега возвращается повторно:
+ * перезагрузка страницы не должна сжигать очередь. Только новая выдача
+ * балансируется между темами в порядке планировщика — `runs.topic_id` задаёт
+ * стартовую тему, а не прикрепляет к ней все двенадцать заданий.
  *
  * Состав тем берётся `activeTopics`, а не голым планом: тему идущего забега
  * планировщик считает использованной сегодня и в план не включает, так что на
@@ -117,11 +168,30 @@ export function nextTask(
     );
   }
   const subject = run?.subject ?? options.subject;
-  const planned = activeTopics(db, graph, graph.byId.size, now).filter(
+  let planned = activeTopics(db, graph, graph.byId.size, now).filter(
     (topic) => subject === undefined || topic.subject === subject,
   );
   const first = planned[0];
   if (first === undefined) return { status: 'no-topic' };
+
+  if (run !== undefined) {
+    // Предзагрузка могла быть зарезервирована по теме, которая после предыдущего
+    // ответа выпала из свежего плана. Сначала восстанавливаем любое выданное
+    // задание предмета и лишь затем выбираем тему для новой выдачи.
+    const recovery = new Map<string, Topic>();
+    for (const topic of [...planned, ...(graph.bySubject.get(run.subject) ?? [])]) {
+      recovery.set(topic.id, topic);
+    }
+    for (const topic of recovery.values()) {
+      try {
+        const task = issuedTask(db, topic.id, run.id, options.excludeTaskId);
+        if (task !== null) return issuedResult(topic, task);
+      } catch (error) {
+        log(`выданная тема «${topic.id}» пропущена: ${(error as Error).message}`);
+      }
+    }
+    planned = balanceRunTopics(db, run.id, planned);
+  }
 
   // Один набор на весь перебор: посев предмета дозаливается целиком, и второй
   // раз за запрос это только разбор того же файла впустую.
@@ -138,7 +208,7 @@ export function nextTask(
     // запросе значит остановить занятие целиком, хотя соседние темы полны.
     try {
       task =
-        issuedTask(db, topic.id, run?.id, options.excludeTaskId) ??
+        (run === undefined ? issuedTask(db, topic.id, undefined, options.excludeTaskId) : null) ??
         takeTaskOrSeed(db, graph, topic.id, {
           difficulty: topic.difficulty,
           ...(run === undefined ? {} : { runId: run.id }),
@@ -153,25 +223,13 @@ export function nextTask(
     }
     if (task === null) continue;
 
-    return {
-      status: 'ok',
-      task: {
-        id: task.id,
-        topicId: topic.id,
-        subject: topic.subject,
-        topicTitle: topic.title,
-        question: task.question,
-        hint: task.hint,
-        difficulty: task.difficulty,
-        answerFormat: topic.answerFormat,
-      },
-    };
+    return issuedResult(topic, task);
   }
 
   if (firstFailure !== undefined && failed === planned.length) throw firstFailure;
 
   // Тема первого забега: она же осталась бы выбранной и на следующем запросе.
-  return { status: 'no-task', topicId: first.id };
+  return { status: 'no-task', topicId: planned[0]?.id ?? first.id };
 }
 
 export interface AnswerRequest {

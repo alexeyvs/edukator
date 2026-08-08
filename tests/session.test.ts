@@ -258,26 +258,54 @@ describe('занятие', () => {
       expect(result).toEqual({ status: 'no-task', topicId: expect.any(String) });
     });
 
-    // Занятие идёт забегами по одной теме, а начатый забег планировщик считает
-    // темой, использованной сегодня, и в план больше не включает. По голому
-    // плану выдача перескочила бы с начатой темы на чужую прямо посреди забега,
-    // а выданное по ней задание осталось бы висеть неотвеченным навсегда.
-    it('продолжает тему начатого забега, хотя план её сегодня больше не предложит', () => {
+    // `runs.topic_id` — тема, ради которой забег начат. Планировщик считает её
+    // использованной сегодня, поэтому выдача должна явно вернуть её в начало
+    // плана, но не закреплять за ней весь забег.
+    it('начинает с темы забега, хотя план её сегодня больше не предложит', () => {
       const now = new Date('2026-08-07T18:00:00.000Z');
       storeTasks(db, 'russian.a', [task(), task()]);
       storeTasks(db, 'math.a', [task()]);
       storeTasks(db, 'english.a', [task()]);
-      db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)').run(
-        'russian',
-        'russian.a',
-        now.toISOString(),
+      const runId = Number(
+        db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)').run(
+          'russian',
+          'russian.a',
+          now.toISOString(),
+        ).lastInsertRowid,
       );
 
-      const result = nextTask(db, graph, { seedDir, now });
+      const result = nextTask(db, graph, { runId, seedDir, now });
 
       expect(result.status).toBe('ok');
       if (result.status !== 'ok') return;
       expect(result.task.topicId).toBe('russian.a');
+    });
+
+    it('распределяет полный забег между темами предмета', () => {
+      const runGraph = buildTopicGraph([
+        topic('math.a'),
+        topic('math.b'),
+        topic('math.c'),
+      ]);
+      syncTopicState(db, runGraph);
+      for (const topicId of ['math.a', 'math.b', 'math.c']) {
+        storeTasks(db, topicId, Array.from({ length: 12 }, () => task()));
+      }
+      const runId = Number(
+        db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+          .run('math', 'math.a', new Date().toISOString()).lastInsertRowid,
+      );
+      const used = new Set<string>();
+
+      for (let answered = 0; answered < 12; answered += 1) {
+        const result = nextTask(db, runGraph, { runId, seedDir });
+        expect(result.status).toBe('ok');
+        if (result.status !== 'ok') return;
+        used.add(result.task.topicId);
+        submitAnswer(db, runGraph, { taskId: result.task.id, runId, answer: 'не знаю' });
+      }
+
+      expect([...used].sort()).toEqual(['math.a', 'math.b', 'math.c']);
     });
 
     it('сообщает «нет темы», когда планировщику нечего предложить', () => {
