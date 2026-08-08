@@ -2,6 +2,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
+import fastifyStatic from '@fastify/static';
 import { databasePath, openDatabase } from './db.js';
 import {
   CURRICULUM_DIR,
@@ -29,6 +30,7 @@ export { databasePath };
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
+export const WEB_DIST_DIR = resolve(projectRoot, 'web', 'dist');
 
 /**
  * Версия приложения из package.json — отдаётся в /api/health. Нечитаемый или
@@ -220,12 +222,27 @@ export type ServerOptions = Omit<SessionRoutesOptions, 'db' | 'graph' | 'availab
   worker?: false | Omit<StartWorkerOptions, 'db' | 'graph' | 'budget'>;
   /** Подменяемый общий бюджет; рабочий сервер использует процессный singleton. */
   codexBudget?: CodexConcurrency;
+  /** false оставляет статику Vite dev-серверу; строка подменяет каталог в тестах. */
+  webDist?: string | false;
 };
 
 export function buildServer(
   curriculumDir: string = CURRICULUM_DIR,
   options: ServerOptions = {},
 ): FastifyInstance {
+  const webDist = options.webDist
+    ?? (process.env.EDUKATOR_WEB_DEV === '1' ? false : WEB_DIST_DIR);
+  if (webDist !== false) {
+    try {
+      if (!statSync(webDist).isDirectory()) throw new Error('не каталог');
+      if (!statSync(resolve(webDist, 'index.html')).isFile()) throw new Error('нет index.html');
+    } catch {
+      throw new Error(
+        `интерфейс не собран в ${webDist}; выполните npm run build:web`,
+      );
+    }
+  }
+
   const app = Fastify({ logger: false });
 
   // Fastify по умолчанию отдаёт текст исключения в теле ответа, а внутренние
@@ -430,6 +447,12 @@ export function buildServer(
         session: sessionNow,
       });
   });
+
+  if (webDist !== false) {
+    void app.register(fastifyStatic, {
+      root: webDist,
+    });
+  }
 
   return app;
 }

@@ -5,6 +5,7 @@ node_modules/
 .env
 content/cache/
 coverage/
+web/dist/
 .tmp/
 # `writeFileAtomic` кладёт временный файл рядом с целевым, то есть внутри
 # отслеживаемых `content/`. Оборванная запись (Ctrl-C, кончившееся место) убрать
