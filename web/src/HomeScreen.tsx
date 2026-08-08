@@ -8,6 +8,7 @@ import {
   type Subject,
 } from './home-api';
 import type { FinishRunResponse } from './run-api';
+import { isPreliminaryForecast } from './forecast-presentation';
 
 const SUBJECT_NAMES: Record<Subject, string> = {
   math: 'Математика',
@@ -144,13 +145,18 @@ export function HomeScreen({
             <div className="forecast-cards">
               {(Object.keys(SUBJECT_NAMES) as Subject[]).map((subject) => {
                 const forecast = plan.forecasts.find((item) => item.subject === subject);
+                const preliminary = forecast !== undefined && isPreliminaryForecast(forecast);
                 return (
                   <article key={subject}>
                     <span>{SUBJECT_NAMES[subject]}</span>
-                    <strong>{forecast === undefined ? '—' : forecast.score.toFixed(1)}</strong>
+                    <strong className={preliminary ? 'forecast-pending' : undefined}>{forecast === undefined
+                      ? '—'
+                      : preliminary ? 'Собираем данные' : forecast.score.toFixed(1)}</strong>
                     <small>{forecast === undefined
                       ? 'Пока нет прогноза'
-                      : `диапазон ${forecast.low.toFixed(1)}–${forecast.high.toFixed(1)}`}</small>
+                      : preliminary
+                        ? 'Оценка появится после ещё нескольких тем'
+                        : `диапазон ${forecast.low.toFixed(1)}–${forecast.high.toFixed(1)}`}</small>
                   </article>
                 );
               })}

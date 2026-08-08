@@ -241,6 +241,16 @@ button:disabled {
   font-size: 1.8rem;
 }
 
+.forecast-cards strong:not(:only-child) {
+  text-align: right;
+}
+
+.forecast-cards .forecast-pending {
+  max-width: 9rem;
+  font-size: 1rem;
+  line-height: 1.15;
+}
+
 .forecast-cards small {
   grid-column: 1 / -1;
   color: #7a8782;
@@ -641,6 +651,16 @@ button:disabled {
   grid-column: 1 / -1;
   margin: 0;
   color: #52625c;
+}
+
+.finish-encouragement {
+  margin: -.25rem 0 1.25rem;
+  color: #075b45;
+  font-weight: 750;
+}
+
+.forecast-result .forecast-pending {
+  font-size: 1.15rem;
 }
 
 .triage-ranking {

@@ -47,6 +47,24 @@ describe('финальный экран', () => {
     expect(screen.getByText('Ни одна тема не просела.')).toBeInTheDocument();
   });
 
+  it('поддерживает после большей половины верных и скрывает незрелую оценку', () => {
+    render(<FinishScreen result={summary({
+      total: 12,
+      correct: 7,
+      forecast: {
+        id: 3,
+        subject: 'math',
+        score: 2,
+        band: .9,
+        createdAt: '2026-08-08T12:00:00.000Z',
+      },
+    })} />);
+
+    expect(screen.getByText('Больше половины уже получается — хороший старт.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Предварительный прогноз')).toHaveTextContent('Оценку пока не ставим');
+    expect(screen.queryByText('2.0')).not.toBeInTheDocument();
+  });
+
   it('ранжирует темы триажа от худшей к лучшей', () => {
     render(<FinishScreen kind="triage" result={summary({
       touchedTopics: [

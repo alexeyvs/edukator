@@ -1,4 +1,5 @@
 import type { FinishRunResponse, RunTopicChange } from './run-api';
+import { isPreliminaryForecast, runResultMessage } from './forecast-presentation';
 
 export interface FinishScreenProps {
   result: FinishRunResponse;
@@ -17,6 +18,8 @@ function TopicList({ topics, empty }: { topics: RunTopicChange[]; empty: string 
 function RunFinish({ result }: { result: FinishRunResponse }) {
   const hasDelta = Object.hasOwn(result, 'forecastDelta');
   const delta = result.forecastDelta ?? 0;
+  const preliminary = isPreliminaryForecast(result.forecast);
+  const resultMessage = runResultMessage(result.total, result.correct);
 
   return (
     <>
@@ -27,6 +30,7 @@ function RunFinish({ result }: { result: FinishRunResponse }) {
         <div><strong>{result.correct}</strong><span>верно</span></div>
         <div><strong>{result.xp}</strong><span>XP</span></div>
       </div>
+      {resultMessage !== null && <p className="finish-encouragement">{resultMessage}</p>}
 
       <div className="finish-grid">
         <section>
@@ -39,10 +43,13 @@ function RunFinish({ result }: { result: FinishRunResponse }) {
         </section>
       </div>
 
-      <section className="forecast-result" aria-label="Прогноз оценки">
-        <span>Прогноз</span>
-        <strong>{result.forecast.score.toFixed(1)}</strong>
-        {hasDelta && (
+      <section className="forecast-result" aria-label={preliminary ? 'Предварительный прогноз' : 'Прогноз оценки'}>
+        <span>{preliminary ? 'Предварительный прогноз' : 'Прогноз'}</span>
+        {preliminary
+          ? <strong className="forecast-pending">Оценку пока не ставим</strong>
+          : <strong>{result.forecast.score.toFixed(1)}</strong>}
+        {preliminary && <p>Нужно познакомиться ещё с несколькими темами.</p>}
+        {!preliminary && hasDelta && (
           <p>
             Сдвиг прогноза: {delta > 0 ? '+' : ''}{delta.toFixed(1)}
           </p>

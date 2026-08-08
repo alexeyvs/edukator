@@ -73,6 +73,21 @@ describe('главный экран', () => {
     expect(screen.queryByRole('button', { name: 'Начать' })).not.toBeInTheDocument();
   });
 
+  it('не показывает двойку, пока данных по предмету слишком мало', async () => {
+    render(<HomeScreen api={apiWith({
+      ...PLAN,
+      forecasts: PLAN.forecasts.map((forecast) => forecast.subject === 'math'
+        ? { ...forecast, score: 2, band: .9, low: 2, high: 2.9 }
+        : forecast),
+    })} />);
+
+    const card = await screen.findByText('Собираем данные').then((value) => value.closest('article'));
+    expect(card).toHaveTextContent('Собираем данные');
+    expect(card).toHaveTextContent('Оценка появится после ещё нескольких тем');
+    expect(card).not.toHaveTextContent('2.0');
+    expect(card).not.toHaveTextContent('диапазон 2.0–2.9');
+  });
+
   it('ведёт на финал, если подхваченный забег уже достиг цели', async () => {
     const api = apiWith(PLAN);
     vi.mocked(api.start).mockResolvedValue({
