@@ -23,6 +23,15 @@ export interface RunRoutesOptions {
   available?: () => boolean;
 }
 
+function triagedSubjects(db: Database): Set<Subject> {
+  return new Set(
+    db.prepare<[], { subject: Subject }>(
+      `SELECT DISTINCT subject FROM runs
+        WHERE kind = 'triage' AND finished_at IS NOT NULL`,
+    ).all().map((row) => row.subject),
+  );
+}
+
 class BadRequest extends Error {}
 
 function unavailable(options: RunRoutesOptions, reply: FastifyReply): FastifyReply | undefined {
@@ -68,18 +77,24 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
     if (stopped !== undefined) return stopped;
 
     const at = now();
+    const triaged = triagedSubjects(db);
     const plan = planFromDatabase(db, graph, DAILY_RUNS, at).map((item) => ({
       subject: item.subject,
       topic: { id: item.topic.id, title: item.topic.title },
       priority: item.priority,
+      triagePassed: triaged.has(item.subject),
     }));
     const states = readTopicStates(db);
     const forecasts = SUBJECTS.flatMap((subject) => {
       const forecast = forecastFor(graph, states, subject, at);
       return forecast === null ? [] : [forecast];
     });
+    const triage = SUBJECTS.map((subject) => ({
+      subject,
+      passed: triaged.has(subject),
+    }));
 
-    return reply.send({ plan, forecasts });
+    return reply.send({ plan, forecasts, triage });
   });
 
   app.post('/api/run/start', (request, reply) => {
