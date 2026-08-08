@@ -140,7 +140,7 @@ describe('воркер рабочего сервера', () => {
     reopened.close();
   });
 
-  it('логирует недоступный codex, увеличивает паузу и оставляет сервер живым', async () => {
+  it('при недоступном codex откладывает воркер, но оставляет обычное занятие рабочим', async () => {
     const logged: string[] = [];
     let firstDelay: number | undefined;
     let reachedWait: (() => void) | undefined;
@@ -161,11 +161,27 @@ describe('воркер рабочего сервера', () => {
       },
     });
 
+    const db = openDatabase(process.env.EDUKATOR_DB);
+    const topic = activeTopics(db, loadCurriculum(), 1)[0];
+    if (topic === undefined) throw new Error('планировщик не выбрал тему для теста');
+    storeTasks(db, topic.id, [generated('В инвентаре 90 монет, половину потратили. Сколько осталось?')]);
+    db.close();
+
     await app.listen({ host: HOST, port: 0 });
     await waiting;
     const health = await app.inject({ method: 'GET', url: '/api/health' });
+    const next = await app.inject({ method: 'GET', url: '/api/session/next' });
+    const taskId = (next.json() as { task: { id: number } }).task.id;
+    const answer = await app.inject({
+      method: 'POST',
+      url: '/api/session/answer',
+      payload: { task_id: taskId, answer: '45' },
+    });
 
     expect(health.statusCode).toBe(200);
+    expect(next.statusCode).toBe(200);
+    expect(answer.statusCode).toBe(200);
+    expect(answer.json()).toMatchObject({ correct: true });
     expect(firstDelay).toBe(60_000);
     expect(logged.join('\n')).toMatch(/codex недоступен.*пополнение отложено/su);
   });
