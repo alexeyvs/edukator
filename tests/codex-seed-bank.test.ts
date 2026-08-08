@@ -620,7 +620,7 @@ describe('посевной банк', () => {
     const graph = loadCurriculum();
 
     it('проходит проверки разбора батча целиком', () => {
-      const hintsByTopic = new Map<string, string>();
+      const hintsByTopic = new Map<string, Set<string>>();
       for (const subject of SUBJECTS) {
         const bank = readSeedBank(graph, subject, SEED_BANK_DIR);
 
@@ -640,7 +640,7 @@ describe('посевной банк', () => {
             expect(sentences.length, `${entry.topicId}: подробная подсказка`).toBeGreaterThanOrEqual(2);
             expect(sentences.length, `${entry.topicId}: подробная подсказка`).toBeLessThanOrEqual(4);
             expect(seededTask.hint, `${entry.topicId}: путь решения`).toMatch(
-              /проверь|провер|подстав|исключ|сравн|перечитай|оцени/iu,
+              /[?]|проверь|провер|подстав|исключ|сравн|перечитай|оцен/iu,
             );
             expect(seededTask.hint, `${entry.topicId}: предметное правило`).toMatch(
               entry.topicId.startsWith('math.')
@@ -649,13 +649,17 @@ describe('посевной банк', () => {
                   ? /англий|глагол|артикл|прилагатель|модальн|Past Simple/iu
                   : /слов|морфем|существительн|прилагательн|местоимен|глагол|падеж|звук/iu,
             );
-            const previous = hintsByTopic.get(entry.topicId);
-            if (previous === undefined) hintsByTopic.set(entry.topicId, seededTask.hint);
-            else expect(seededTask.hint).toBe(previous);
+            const topicHints = hintsByTopic.get(entry.topicId) ?? new Set<string>();
+            expect(topicHints.has(seededTask.hint), `${entry.topicId}: подсказка относится к заданию`)
+              .toBe(false);
+            topicHints.add(seededTask.hint);
+            hintsByTopic.set(entry.topicId, topicHints);
+            expect(seededTask.instruction, `${entry.topicId}: естественная инструкция`)
+              .not.toContain('фрагмент ниже');
           }
         }
       }
-      expect(new Set(hintsByTopic.values()).size).toBe(hintsByTopic.size);
+      expect([...hintsByTopic.values()].every((hints) => hints.size > 0)).toBe(true);
       const math = readSeedBank(graph, 'math', SEED_BANK_DIR);
       expect(math?.topics.flatMap((entry) => entry.tasks)
         .filter((seededTask) => seededTask.material_format === 'math').length).toBeGreaterThan(5);

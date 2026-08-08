@@ -175,6 +175,15 @@ describe('parseTaskBatch: нарушения инвариантов', () => {
       .toThrow(/уникальными после нормализации/s);
   });
 
+  it('не позволяет accept[] засчитать неправильную choice-карточку', () => {
+    expect(() =>
+      parseTaskBatch(
+        batch(task({ answer: '4', accept: ['4', '5'], choices: ['4', '5'] })),
+        'choice',
+      ),
+    ).toThrow(/для choice.*accept «5».*совпадать с ответом «4»/s);
+  });
+
   it('требует содержательную подсказку из 2–4 предложений', () => {
     expect(() => parseTaskBatch(batch(task({ hint: 'Только одно предложение.' })), 'number'))
       .toThrow(/2–4 предложений/s);
