@@ -619,6 +619,25 @@ describe('занятие', () => {
       });
     });
 
+    it('не открывает новый спор после завершения забега', () => {
+      const runId = Number(
+        db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+          .run('math', 'math.a', new Date().toISOString()).lastInsertRowid,
+      );
+      const taskId = issue('math.a', {}, runId);
+      const attempt = submitAnswer(db, graph, {
+        taskId,
+        runId,
+        answer: 'сорок пять',
+      });
+      db.prepare('UPDATE runs SET finished_at = ? WHERE id = ?')
+        .run(new Date().toISOString(), runId);
+
+      expect(() => openDispute(db, attempt.attemptId))
+        .toThrow(expect.objectContaining({ code: 'run-finished' }));
+      expect(db.prepare('SELECT COUNT(*) AS n FROM disputes').get()).toEqual({ n: 0 });
+    });
+
     it('после подтверждения нормализатор засчитывает тот же ответ сам', async () => {
       const { attemptId, taskId } = disputed();
       const { review } = reviewer({ studentCorrect: true, note: 'то же число словами' });

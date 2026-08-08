@@ -9,7 +9,7 @@ const projectRoot = resolve(here, '..');
  * Версия схемы. Хранится в `PRAGMA user_version`; миграция сравнивает её со
  * своей и пропускает работу, если база уже актуальна.
  */
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 /** Семь таблиц из спеки. Тесты сверяют состав базы именно с этим списком. */
 export const TABLES = [
@@ -53,6 +53,13 @@ export const DEFAULT_PROFILE: Profile = {
   examDate: null,
   partnerName: 'Напарник',
 };
+
+/** Пределы профиля одновременно берегут базу, HTTP и аргумент запуска codex. */
+export const PROFILE_NAME_MAX_LENGTH = 200;
+export const PROFILE_INTERESTS_MAX = 12;
+export const PROFILE_INTEREST_MAX_LENGTH = 200;
+
+export class ProfileValidationError extends Error {}
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -121,6 +128,7 @@ const SCHEMA = `
     topic_id    TEXT    NOT NULL REFERENCES topic_state (topic_id) ON DELETE CASCADE,
     started_at  TEXT    NOT NULL,
     finished_at TEXT,
+    summary     TEXT,
     total       INTEGER NOT NULL DEFAULT 0 CHECK (total >= 0),
     correct     INTEGER NOT NULL DEFAULT 0 CHECK (correct >= 0 AND correct <= total)
   );
@@ -424,6 +432,16 @@ export function migrate(db: Database.Database): void {
       }
     }
 
+    if (version <= 8) {
+      const columns = db
+        .prepare<[], { name: string }>('PRAGMA table_info(runs)')
+        .all()
+        .map((column) => column.name);
+      if (!columns.includes('summary')) {
+        db.exec('ALTER TABLE runs ADD COLUMN summary TEXT;');
+      }
+    }
+
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   }).immediate();
 }
@@ -432,7 +450,7 @@ const REQUIRED_COLUMNS: Readonly<Record<(typeof TABLES)[number], readonly string
   profile: ['id', 'name', 'interests', 'exam_date', 'partner_name'],
   topic_state: ['topic_id', 'mastery', 'confidence', 'attempts', 'last_seen', 'next_review'],
   task_bank: ['id', 'topic_id', 'question', 'answer', 'accept', 'hint', 'explain', 'joke', 'difficulty', 'status', 'fingerprint', 'issued_run_id', 'created_at'],
-  runs: ['id', 'subject', 'kind', 'topic_id', 'started_at', 'finished_at', 'total', 'correct'],
+  runs: ['id', 'subject', 'kind', 'topic_id', 'started_at', 'finished_at', 'summary', 'total', 'correct'],
   attempts: ['id', 'task_id', 'topic_id', 'run_id', 'answer', 'is_correct', 'hint_used', 'duration_ms', 'created_at'],
   disputes: ['id', 'attempt_id', 'status', 'resolution', 'created_at', 'resolved_at'],
   forecast_snapshots: ['id', 'subject', 'score', 'band', 'created_at'],
@@ -596,7 +614,29 @@ export function writeProfile(db: Database.Database, patch: Partial<Profile>): Pr
     patch.interests !== undefined &&
     (!Array.isArray(patch.interests) || patch.interests.some((item) => typeof item !== 'string'))
   ) {
-    throw new Error('Некорректные интересы (interests): ожидается массив строк');
+    throw new ProfileValidationError('Некорректные интересы (interests): ожидается массив строк');
+  }
+  if (patch.name !== undefined && patch.name.length > PROFILE_NAME_MAX_LENGTH) {
+    throw new ProfileValidationError(
+      `Имя ученика длиннее ${PROFILE_NAME_MAX_LENGTH} знаков`,
+    );
+  }
+  if (patch.partnerName !== undefined && patch.partnerName.length > PROFILE_NAME_MAX_LENGTH) {
+    throw new ProfileValidationError(
+      `Имя напарника длиннее ${PROFILE_NAME_MAX_LENGTH} знаков`,
+    );
+  }
+  if (patch.interests !== undefined && patch.interests.length > PROFILE_INTERESTS_MAX) {
+    throw new ProfileValidationError(
+      `Интересов должно быть не больше ${PROFILE_INTERESTS_MAX}`,
+    );
+  }
+  if (
+    patch.interests?.some((interest) => interest.length > PROFILE_INTEREST_MAX_LENGTH) === true
+  ) {
+    throw new ProfileValidationError(
+      `Каждый интерес должен быть не длиннее ${PROFILE_INTEREST_MAX_LENGTH} знаков`,
+    );
   }
 
   // Чтение и запись одной `immediate`-транзакцией: патч накладывается на текущий

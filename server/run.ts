@@ -75,6 +75,7 @@ interface FinishableRun {
   subject: Subject;
   kind: RunKind;
   finished_at: string | null;
+  summary: string | null;
 }
 
 interface RunAttemptRow {
@@ -272,13 +273,16 @@ export function finishRun(
   return db.transaction((): FinishRunResult => {
     const run = db
       .prepare<[number], FinishableRun>(
-        'SELECT id, subject, kind, finished_at FROM runs WHERE id = ?',
+        'SELECT id, subject, kind, finished_at, summary FROM runs WHERE id = ?',
       )
       .get(runId);
     if (run === undefined) {
       throw new SessionError('run-not-found', `Забег ${runId} не найден`);
     }
     if (run.finished_at !== null) {
+      if (run.summary !== null) {
+        return JSON.parse(run.summary) as FinishRunResult;
+      }
       throw new SessionError('run-finished', `Забег ${runId} уже завершён`);
     }
 
@@ -345,7 +349,6 @@ export function finishRun(
     const changes = topicChanges(db, graph, runId);
     const previous = readSnapshots(db, run.subject).at(-1);
 
-    db.prepare('UPDATE runs SET finished_at = ? WHERE id = ?').run(now.toISOString(), runId);
     const forecast = recordForecasts(db, graph, now).find(
       (snapshot) => snapshot.subject === run.subject,
     );
@@ -353,7 +356,7 @@ export function finishRun(
       throw new Error(`Забег: для предмета «${run.subject}» прогноз не посчитан`);
     }
 
-    return {
+    const result: FinishRunResult = {
       runId,
       total,
       correct,
@@ -362,5 +365,8 @@ export function finishRun(
       forecast,
       ...(previous === undefined ? {} : { forecastDelta: forecast.score - previous.score }),
     };
+    db.prepare('UPDATE runs SET finished_at = ?, summary = ? WHERE id = ?')
+      .run(now.toISOString(), JSON.stringify(result), runId);
+    return result;
   }).immediate();
 }

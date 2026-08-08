@@ -5,7 +5,12 @@
 import type { Database } from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { readPersonaIntroduction } from '../codex/prompt.js';
-import { readProfile, writeProfile, type Profile } from '../db.js';
+import {
+  ProfileValidationError,
+  readProfile,
+  writeProfile,
+  type Profile,
+} from '../db.js';
 
 export interface ProfileRoutesOptions {
   db: Database;
@@ -79,7 +84,11 @@ export function registerProfileRoutes(app: FastifyInstance, options: ProfileRout
     try {
       return reply.send(response(writeProfile(options.db, readPatch(request.body)), options));
     } catch (error) {
-      if (error instanceof BadRequest || (error instanceof Error && /exam_date/u.test(error.message))) {
+      if (
+        error instanceof BadRequest ||
+        error instanceof ProfileValidationError ||
+        (error instanceof Error && /exam_date/u.test(error.message))
+      ) {
         return reply.code(400).send({ error: (error as Error).message });
       }
       throw error;

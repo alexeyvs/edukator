@@ -7,6 +7,9 @@ import type { Database } from 'better-sqlite3';
 import BetterSqlite3 from 'better-sqlite3';
 import {
   DEFAULT_PROFILE,
+  PROFILE_INTEREST_MAX_LENGTH,
+  PROFILE_INTERESTS_MAX,
+  PROFILE_NAME_MAX_LENGTH,
   SCHEMA_VERSION,
   TABLES,
   databasePath,
@@ -178,6 +181,14 @@ function createVersionSevenDatabase(path: string): Database {
   return legacy;
 }
 
+/** Версия 8 ещё не хранила итог забега для безопасного повтора finish. */
+function createVersionEightDatabase(path: string): Database {
+  const legacy = openDatabase(path);
+  legacy.exec('ALTER TABLE runs DROP COLUMN summary;');
+  legacy.pragma('user_version = 8');
+  return legacy;
+}
+
 describe('база данных', () => {
   let tempDir: string;
   let dbFile: string;
@@ -202,7 +213,7 @@ describe('база данных', () => {
     // рабочую базу, поэтому число прибито буквально и меняется только вместе с
     // новой ступенью и её тестом обновления.
     it('держит номер версии схемы', () => {
-      expect(SCHEMA_VERSION).toBe(8);
+      expect(SCHEMA_VERSION).toBe(9);
     });
 
     it('создаёт все семь таблиц на пустой базе', () => {
@@ -660,6 +671,28 @@ describe('база данных', () => {
       }
     });
 
+    it('добавляет сохранённый итог базе версии 8 и сохраняет забеги', () => {
+      const path = join(tempDir, 'версия-8.db');
+      const legacy = createVersionEightDatabase(path);
+      const topicId = seedTopic(legacy);
+      const runId = Number(
+        legacy.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+          .run('math', topicId, '2026-08-08T10:00:00.000Z').lastInsertRowid,
+      );
+      legacy.close();
+
+      const migrated = openDatabase(path);
+      try {
+        expect(migrated.prepare('SELECT id, summary FROM runs WHERE id = ?').get(runId))
+          .toEqual({ id: runId, summary: null });
+        expect(
+          (migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version,
+        ).toBe(SCHEMA_VERSION);
+      } finally {
+        migrated.close();
+      }
+    });
+
     it('не объявляет текущей непустую базу без номера версии', () => {
       const path = join(tempDir, 'неизвестная.db');
       const unknown = new BetterSqlite3(path);
@@ -838,6 +871,22 @@ describe('база данных', () => {
       // невосстановимым — writeProfile сам начинается с readProfile.
       expect(readProfile(db).interests).toEqual(['Minecraft']);
       expect(writeProfile(db, { interests: ['скейт'] }).interests).toEqual(['скейт']);
+    });
+
+    it('ограничивает размер профиля до безопасного для промпта', () => {
+      const tooManyInterests = Array.from(
+        { length: PROFILE_INTERESTS_MAX + 1 },
+        (_, index) => `интерес ${index}`,
+      );
+      const cases: Partial<Parameters<typeof writeProfile>[1]>[] = [
+        { name: 'я'.repeat(PROFILE_NAME_MAX_LENGTH + 1) },
+        { partnerName: 'н'.repeat(PROFILE_NAME_MAX_LENGTH + 1) },
+        { interests: tooManyInterests },
+        { interests: ['и'.repeat(PROFILE_INTEREST_MAX_LENGTH + 1)] },
+      ];
+
+      for (const patch of cases) expect(() => writeProfile(db, patch)).toThrow();
+      expect(readProfile(db)).toEqual({ ...DEFAULT_PROFILE, partnerName: '' });
     });
 
     it('принимает сброс даты экзамена в null', () => {

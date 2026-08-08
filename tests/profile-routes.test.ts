@@ -168,6 +168,20 @@ describe('маршруты профиля', () => {
     }
   });
 
+  it('отвергает слишком большой профиль и не сохраняет его', async () => {
+    const before = (await app.inject({ method: 'GET', url: '/api/profile' })).json();
+    for (const payload of [
+      { name: 'я'.repeat(201) },
+      { partnerName: 'н'.repeat(201) },
+      { interests: Array.from({ length: 13 }, (_, index) => `интерес ${index}`) },
+      { interests: ['и'.repeat(201)] },
+    ]) {
+      const response = await app.inject({ method: 'PUT', url: '/api/profile', payload });
+      expect(response.statusCode, JSON.stringify(payload)).toBe(400);
+    }
+    expect((await app.inject({ method: 'GET', url: '/api/profile' })).json()).toEqual(before);
+  });
+
   it('считает отсутствующую персону ошибкой настройки, а не пусым текстом', async () => {
     const broken = buildServer(curriculumDir, {
       seedDir,

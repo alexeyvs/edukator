@@ -254,21 +254,18 @@ describe('жизненный цикл забега', () => {
     ]);
   });
 
-  it('отвергает повторное закрытие и неизвестный забег кодами состояния', () => {
+  it('повторно отдаёт тот же итог и отвергает неизвестный забег', () => {
     const { runId } = startRun(db, graph, 'math', { now: at(0, 9), kind: 'triage' });
-    finishRun(db, graph, runId, { now: at(0, 10) });
+    const first = finishRun(db, graph, runId, { now: at(0, 10) });
 
-    for (const [id, code] of [
-      [runId, 'run-finished'],
-      [999, 'run-not-found'],
-    ] as const) {
-      try {
-        finishRun(db, graph, id, { now: at(0, 11) });
-        throw new Error('фикстура: закрытие должно быть отвергнуто');
-      } catch (error) {
-        expect(error).toBeInstanceOf(SessionError);
-        expect((error as SessionError).code).toBe(code);
-      }
+    expect(finishRun(db, graph, runId, { now: at(0, 11) })).toEqual(first);
+    expect(readSnapshots(db, 'math')).toHaveLength(1);
+    try {
+      finishRun(db, graph, 999, { now: at(0, 11) });
+      throw new Error('фикстура: неизвестный забег должен быть отвергнут');
+    } catch (error) {
+      expect(error).toBeInstanceOf(SessionError);
+      expect((error as SessionError).code).toBe('run-not-found');
     }
   });
 

@@ -17,7 +17,13 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import type { AnswerFormat, Topic } from '../curriculum.js';
-import { DEFAULT_PROFILE, SUBJECT_TITLES, type Profile } from '../db.js';
+import {
+  DEFAULT_PROFILE,
+  PROFILE_INTEREST_MAX_LENGTH,
+  PROFILE_INTERESTS_MAX,
+  SUBJECT_TITLES,
+  type Profile,
+} from '../db.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -30,11 +36,11 @@ export const TASK_BATCH_SIZE = 5;
 /** Сколько прошлых формулировок темы уходит в промпт как запрет на повтор. */
 export const RECENT_LIMIT = 20;
 
-/** Верхняя граница числа интересов: профиль редактирует человек, предела там нет. */
-export const MAX_INTERESTS = 12;
+/** Верхняя граница числа интересов: единый предел хранения и сборки промпта. */
+export const MAX_INTERESTS = PROFILE_INTERESTS_MAX;
 
 /** Предел длины одной записи профиля или формулировки — чтобы промпт не распух. */
-export const MAX_ITEM_LENGTH = 200;
+export const MAX_ITEM_LENGTH = PROFILE_INTEREST_MAX_LENGTH;
 
 /**
  * Предел длины ответа ученика: он же ограничивает поле `answer` маршрута
@@ -192,7 +198,8 @@ function cleanItems(values: readonly string[]): string[] {
 
 /** Пустая строка в профиле — это умолчание схемы базы, а не осмысленное имя. */
 function nonEmpty(value: string, fallback: string): string {
-  return value.trim() === '' ? fallback : value.trim();
+  const trimmed = value.trim();
+  return trimmed === '' ? fallback : trimmed.slice(0, MAX_ITEM_LENGTH);
 }
 
 function clampDifficulty(value: number): number {

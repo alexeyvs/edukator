@@ -456,8 +456,14 @@ export interface OpenDisputeResult {
 export function openDispute(db: Database, attemptId: number): OpenDisputeResult {
   return db.transaction((): OpenDisputeResult => {
     const attempt = db
-      .prepare<[number], { id: number; is_correct: number }>(
-        'SELECT id, is_correct FROM attempts WHERE id = ?',
+      .prepare<
+        [number],
+        { id: number; is_correct: number; run_id: number | null; finished_at: string | null }
+      >(
+        `SELECT attempts.id, attempts.is_correct, attempts.run_id, runs.finished_at
+           FROM attempts
+           LEFT JOIN runs ON runs.id = attempts.run_id
+          WHERE attempts.id = ?`,
       )
       .get(attemptId);
     if (attempt === undefined) {
@@ -473,6 +479,10 @@ export function openDispute(db: Database, attemptId: number): OpenDisputeResult 
       .get(attemptId);
     if (existing !== undefined) {
       return { id: existing.id, status: existing.status, created: false };
+    }
+
+    if (attempt.run_id !== null && attempt.finished_at !== null) {
+      throw new SessionError('run-finished', `Забег ${attempt.run_id} уже завершён`);
     }
 
     if (attempt.is_correct === 1) {

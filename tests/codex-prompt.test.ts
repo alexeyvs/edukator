@@ -304,6 +304,18 @@ describe('buildGenerationPrompt: недоверенные данные', () => {
     expect(prompt).not.toContain('а'.repeat(500));
     expect(prompt).not.toContain(`хобби${MAX_INTERESTS + 4}`);
   });
+
+  it('защитно обрезает имена из старого профиля', () => {
+    const prompt = buildGenerationPrompt({
+      topic: topic(),
+      difficulty: 2,
+      profile: profile({ name: 'я'.repeat(500), partnerName: 'н'.repeat(500) }),
+      persona: PERSONA,
+    });
+
+    expect(prompt).not.toContain('я'.repeat(MAX_ITEM_LENGTH + 1));
+    expect(prompt).not.toContain('н'.repeat(MAX_ITEM_LENGTH + 1));
+  });
 });
 
 describe('buildValidationPrompt', () => {
