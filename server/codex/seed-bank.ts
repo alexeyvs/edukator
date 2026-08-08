@@ -23,7 +23,7 @@ import type { Database } from 'better-sqlite3';
 import type { AnswerFormat, Topic, TopicGraph } from '../curriculum.js';
 import { SUBJECTS, type Subject } from '../db.js';
 import { storeTasks, takeTask, type BankTask, type TakeTaskOptions } from './bank.js';
-import { parseTaskBatch, type GeneratedTask } from './task-schema.js';
+import { parseTaskBatch, type GeneratedTask, type MaterialFormat } from './task-schema.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -370,6 +370,10 @@ export function takeTaskOrSeed(
 interface SeedRow {
   topic_id: string;
   question: string;
+  instruction: string | null;
+  material: string | null;
+  material_format: MaterialFormat | null;
+  choices: string | null;
   answer: string;
   accept: string;
   hint: string | null;
@@ -411,9 +415,11 @@ export function collectSeedTasks(db: Database, graph: TopicGraph, subject: Subje
 
   const rows = db
     .prepare<string[], SeedRow>(
-      `SELECT topic_id, question, answer, accept, hint, explain, joke, difficulty
+      `SELECT topic_id, question, instruction, material, material_format, choices,
+              answer, accept, hint, explain, joke, difficulty
          FROM task_bank
-        WHERE topic_id IN (${ids.map(() => '?').join(', ')}) AND status <> 'rejected'
+        WHERE topic_id IN (${ids.map(() => '?').join(', ')})
+          AND status <> 'rejected'
         ORDER BY topic_id, id`,
     )
     .all(...ids);
@@ -421,6 +427,7 @@ export function collectSeedTasks(db: Database, graph: TopicGraph, subject: Subje
   const byTopic = new Map<string, GeneratedTask[]>();
   for (const row of rows) {
     let accept: unknown;
+    let choices: unknown;
     try {
       accept = JSON.parse(row.accept);
     } catch (error) {
@@ -431,8 +438,26 @@ export function collectSeedTasks(db: Database, graph: TopicGraph, subject: Subje
     if (!Array.isArray(accept) || accept.some((item) => typeof item !== 'string')) {
       throw new Error(`Посевной банк: accept[] задания «${row.question}» не массив строк`);
     }
+    try {
+      choices = JSON.parse(row.choices ?? '[]');
+    } catch (error) {
+      throw new Error(
+        `Посевной банк: choices задания «${row.question}» не разбирается как JSON: ${(error as Error).message}`,
+      );
+    }
+    if (!Array.isArray(choices) || choices.some((item) => typeof item !== 'string')) {
+      throw new Error(`Посевной банк: choices задания «${row.question}» не массив строк`);
+    }
+    const prompt = row.instruction === null
+      ? { question: row.question }
+      : {
+          instruction: row.instruction,
+          material: row.material ?? '',
+          material_format: row.material_format ?? 'none',
+          choices: choices as string[],
+        };
     const task: GeneratedTask = {
-      question: row.question,
+      ...prompt,
       answer: row.answer,
       accept: accept as string[],
       hint: requireSeedText(row.hint, 'hint', row.question),

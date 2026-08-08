@@ -9,7 +9,7 @@ const projectRoot = resolve(here, '..');
  * Версия схемы. Хранится в `PRAGMA user_version`; миграция сравнивает её со
  * своей и пропускает работу, если база уже актуальна.
  */
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 /** Семь таблиц из спеки. Тесты сверяют состав базы именно с этим списком. */
 export const TABLES = [
@@ -95,6 +95,10 @@ const SCHEMA = `
     id         INTEGER PRIMARY KEY,
     topic_id   TEXT    NOT NULL REFERENCES topic_state (topic_id) ON DELETE CASCADE,
     question   TEXT    NOT NULL,
+    instruction TEXT,
+    material   TEXT,
+    material_format TEXT CHECK (material_format IN ('none', 'text', 'math')),
+    choices    TEXT,
     answer     TEXT    NOT NULL,
     accept     TEXT    NOT NULL DEFAULT '[]',
     hint       TEXT,
@@ -442,6 +446,34 @@ export function migrate(db: Database.Database): void {
       }
     }
 
+    if (version <= 9) {
+      const columns = db
+        .prepare<[], { name: string }>('PRAGMA table_info(task_bank)')
+        .all()
+        .map((column) => column.name);
+      if (!columns.includes('instruction')) {
+        db.exec(`
+          ALTER TABLE task_bank ADD COLUMN instruction TEXT;
+          ALTER TABLE task_bank ADD COLUMN material TEXT;
+          ALTER TABLE task_bank ADD COLUMN material_format TEXT
+            CHECK (material_format IN ('none', 'text', 'math'));
+          ALTER TABLE task_bank ADD COLUMN choices TEXT;
+        `);
+      }
+      // Старую очередь нельзя показать новым интерфейсом без надёжного деления
+      // question на инструкцию и материал. Уже выданные строки остаются ради
+      // попыток, споров и восстановления открытого задания.
+      if (version === 9) {
+        db.exec(`
+          DELETE FROM task_bank
+           WHERE status IN ('pending', 'valid')
+             AND NOT EXISTS (
+               SELECT 1 FROM attempts WHERE attempts.task_id = task_bank.id
+             );
+        `);
+      }
+    }
+
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   }).immediate();
 }
@@ -449,7 +481,7 @@ export function migrate(db: Database.Database): void {
 const REQUIRED_COLUMNS: Readonly<Record<(typeof TABLES)[number], readonly string[]>> = {
   profile: ['id', 'name', 'interests', 'exam_date', 'partner_name'],
   topic_state: ['topic_id', 'mastery', 'confidence', 'attempts', 'last_seen', 'next_review'],
-  task_bank: ['id', 'topic_id', 'question', 'answer', 'accept', 'hint', 'explain', 'joke', 'difficulty', 'status', 'fingerprint', 'issued_run_id', 'created_at'],
+  task_bank: ['id', 'topic_id', 'question', 'instruction', 'material', 'material_format', 'choices', 'answer', 'accept', 'hint', 'explain', 'joke', 'difficulty', 'status', 'fingerprint', 'issued_run_id', 'created_at'],
   runs: ['id', 'subject', 'kind', 'topic_id', 'started_at', 'finished_at', 'summary', 'total', 'correct'],
   attempts: ['id', 'task_id', 'topic_id', 'run_id', 'answer', 'is_correct', 'hint_used', 'duration_ms', 'created_at'],
   disputes: ['id', 'attempt_id', 'status', 'resolution', 'created_at', 'resolved_at'],

@@ -52,7 +52,7 @@ function task(patch: Partial<GeneratedTask> = {}): GeneratedTask {
     question: 'Сколько будет 2 + 2?',
     answer: '4',
     accept: ['4', '4 штуки'],
-    hint: 'Сложи столбиком.',
+    hint: 'Сложи числа по разрядам. Проверь результат обратным действием.',
     explain: 'Два плюс два — четыре.',
     joke: 'Не Нобелевка, но зачёт.',
     difficulty: 2,
@@ -582,7 +582,10 @@ describe('посевной банк', () => {
           new RegExp(`пустое поле ${column}`, 'u'),
         );
 
-        db.prepare(`UPDATE task_bank SET ${column} = 'что-то' WHERE id = ?`).run(id);
+        const restored = column === 'hint'
+          ? 'Вспомни правило сложения. Проверь результат обратным действием.'
+          : 'что-то';
+        db.prepare(`UPDATE task_bank SET ${column} = ? WHERE id = ?`).run(restored, id);
       }
 
       expect(collectSeedTasks(db, GRAPH, 'math')).toHaveLength(1);
@@ -599,7 +602,7 @@ describe('посевной банк', () => {
           question: 'Запиши ответ словами.',
           answer: 'сорок пять',
           accept: ['сорок пять'],
-          hint: 'Между сорока и пятьюдесятью.',
+          hint: 'Определи соседние десятки. Затем запиши число словами.',
         }),
       ]);
 

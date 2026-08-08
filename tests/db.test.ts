@@ -213,7 +213,7 @@ describe('база данных', () => {
     // рабочую базу, поэтому число прибито буквально и меняется только вместе с
     // новой ступенью и её тестом обновления.
     it('держит номер версии схемы', () => {
-      expect(SCHEMA_VERSION).toBe(9);
+      expect(SCHEMA_VERSION).toBe(10);
     });
 
     it('создаёт все семь таблиц на пустой базе', () => {
@@ -690,6 +690,73 @@ describe('база данных', () => {
         ).toBe(SCHEMA_VERSION);
       } finally {
         migrated.close();
+      }
+    });
+
+    it('мигрирует очередь 9→10, сохраняя выданное задание и исторические связи', () => {
+      const path = join(tempDir, 'версия-9.db');
+      const legacy = openDatabase(path);
+      const topicId = seedTopic(legacy);
+      const queued = seedTask(legacy, topicId);
+      legacy.prepare("UPDATE task_bank SET status = 'valid' WHERE id = ?").run(queued);
+      const used = seedTask(legacy, topicId);
+      legacy.prepare("UPDATE task_bank SET status = 'used' WHERE id = ?").run(used);
+      const runId = Number(legacy.prepare(
+        'INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)',
+      ).run('math', topicId, '2026-08-08T10:00:00.000Z').lastInsertRowid);
+      const attemptId = Number(legacy.prepare(
+        `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(used, topicId, runId, '4', 1).lastInsertRowid);
+      legacy.prepare('INSERT INTO disputes (attempt_id) VALUES (?)').run(attemptId);
+      legacy.exec(`
+        ALTER TABLE task_bank DROP COLUMN instruction;
+        ALTER TABLE task_bank DROP COLUMN material;
+        ALTER TABLE task_bank DROP COLUMN material_format;
+        ALTER TABLE task_bank DROP COLUMN choices;
+        PRAGMA user_version = 9;
+      `);
+      legacy.close();
+
+      const migrated = openDatabase(path);
+      try {
+        expect(migrated.prepare('SELECT id, status, instruction FROM task_bank').all())
+          .toEqual([{ id: used, status: 'used', instruction: null }]);
+        expect(migrated.prepare('SELECT task_id, run_id FROM attempts').get())
+          .toEqual({ task_id: used, run_id: runId });
+        expect(migrated.prepare('SELECT attempt_id FROM disputes').get())
+          .toEqual({ attempt_id: attemptId });
+      } finally {
+        migrated.close();
+      }
+    });
+
+    it('атомарно откатывает DDL миграции 9→10 при отказе очистки очереди', () => {
+      const path = join(tempDir, 'версия-9-откат.db');
+      const legacy = openDatabase(path);
+      const topicId = seedTopic(legacy);
+      seedTask(legacy, topicId);
+      legacy.exec(`
+        ALTER TABLE task_bank DROP COLUMN instruction;
+        ALTER TABLE task_bank DROP COLUMN material;
+        ALTER TABLE task_bank DROP COLUMN material_format;
+        ALTER TABLE task_bank DROP COLUMN choices;
+        CREATE TRIGGER stop_queue_cleanup BEFORE DELETE ON task_bank
+        BEGIN SELECT RAISE(ABORT, 'не удалять'); END;
+        PRAGMA user_version = 9;
+      `);
+      legacy.close();
+
+      expect(() => openDatabase(path)).toThrow(/не удалять/u);
+      const reopened = new BetterSqlite3(path);
+      try {
+        expect((reopened.pragma('user_version') as [{ user_version: number }])[0]?.user_version)
+          .toBe(9);
+        expect(reopened.prepare<[], { name: string }>('PRAGMA table_info(task_bank)').all()
+          .map((column) => column.name)).not.toContain('instruction');
+        expect(reopened.prepare('SELECT COUNT(*) AS n FROM task_bank').get()).toEqual({ n: 1 });
+      } finally {
+        reopened.close();
       }
     });
 

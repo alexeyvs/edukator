@@ -65,6 +65,25 @@ describe('банк заданий', () => {
         'Вычисли значение.\n\n2+2',
         'Вычисли значение.\n\n3+1',
       ]);
+      expect(takeTask(db, TOPIC)).toMatchObject({
+        instruction: 'Вычисли значение.',
+        material: '2+2',
+        material_format: 'math',
+        choices: [],
+      });
+    });
+
+    it('хранит варианты как JSON и отвергает повреждённую строку', () => {
+      const { stored } = storeTasks(db, TOPIC, [{
+        instruction: 'Выбери ответ.', material: '', material_format: 'none', choices: ['3', '4'],
+        answer: '4', accept: ['4'],
+        hint: 'Сравни варианты по очереди. Проверь выбранное сложением.',
+        explain: 'Верный вариант — четыре.', joke: 'Карточка сошлась.', difficulty: 1,
+      }]);
+      db.prepare('UPDATE task_bank SET choices = ? WHERE id = ?').run('{', stored[0]?.id);
+
+      expect(() => takeTask(db, TOPIC)).toThrow(/choices.*не как JSON/u);
+      expect(takeTask(db, TOPIC)).toBeNull();
     });
 
     it('записывает задание, выдаёт его целиком и второй раз не предлагает', () => {

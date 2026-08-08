@@ -14,7 +14,7 @@
 import type { Database } from 'better-sqlite3';
 import { questionFingerprint } from '../normalize.js';
 import { RECENT_LIMIT } from './prompt.js';
-import { taskPromptText, type GeneratedTask } from './task-schema.js';
+import { taskPromptText, type GeneratedTask, type MaterialFormat } from './task-schema.js';
 
 /** Задание, лежащее в банке: поля генератора плюс то, чем его различает база. */
 export interface BankTask extends GeneratedTask {
@@ -43,6 +43,10 @@ interface TaskRow {
   id: number;
   topic_id: string;
   question: string;
+  instruction: string | null;
+  material: string | null;
+  material_format: MaterialFormat | null;
+  choices: string | null;
   answer: string;
   accept: string;
   hint: string | null;
@@ -78,11 +82,34 @@ function parseAccept(raw: string, id: number): string[] {
   return parsed as string[];
 }
 
+function parseChoices(raw: string | null, id: number): string[] {
+  if (raw === null) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`Банк заданий: задание ${id} хранит choices не как JSON (${raw})`);
+  }
+  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== 'string')) {
+    throw new Error(`Банк заданий: choices задания ${id} должен быть массивом строк`);
+  }
+  return parsed as string[];
+}
+
 function toBankTask(row: TaskRow): BankTask {
+  const structured = row.instruction === null
+    ? { question: row.question }
+    : {
+        question: row.question,
+        instruction: row.instruction,
+        material: row.material ?? '',
+        material_format: row.material_format ?? 'none',
+        choices: parseChoices(row.choices, row.id),
+      };
   return {
     id: row.id,
     topicId: row.topic_id,
-    question: row.question,
+    ...structured,
     answer: row.answer,
     accept: parseAccept(row.accept, row.id),
     hint: row.hint ?? '',
@@ -107,7 +134,8 @@ function toBankTaskOrReject(db: Database, row: TaskRow): BankTask {
   }
 }
 
-const TASK_COLUMNS = 'id, topic_id, question, answer, accept, hint, explain, joke, difficulty';
+const TASK_COLUMNS = `id, topic_id, question, instruction, material, material_format, choices,
+  answer, accept, hint, explain, joke, difficulty`;
 
 /**
  * Кладёт провалидированные задания в банк и отдельно возвращает отсеянные
@@ -135,6 +163,10 @@ export function storeTasks(
     {
       topicId: string;
       question: string;
+      instruction: string | null;
+      material: string | null;
+      materialFormat: MaterialFormat | null;
+      choices: string | null;
       answer: string;
       accept: string;
       hint: string;
@@ -146,8 +178,10 @@ export function storeTasks(
     { id: number }
   >(
     `INSERT INTO task_bank
-       (topic_id, question, answer, accept, hint, explain, joke, difficulty, status, fingerprint)
-     VALUES (@topicId, @question, @answer, @accept, @hint, @explain, @joke, @difficulty, 'valid', @fingerprint)
+       (topic_id, question, instruction, material, material_format, choices,
+        answer, accept, hint, explain, joke, difficulty, status, fingerprint)
+     VALUES (@topicId, @question, @instruction, @material, @materialFormat, @choices,
+             @answer, @accept, @hint, @explain, @joke, @difficulty, 'valid', @fingerprint)
      ON CONFLICT DO NOTHING
      RETURNING id`,
   );
@@ -162,6 +196,10 @@ export function storeTasks(
       const row = insert.get({
         topicId,
         question: prompt,
+        instruction: task.instruction ?? null,
+        material: task.instruction === undefined ? null : task.material ?? '',
+        materialFormat: task.instruction === undefined ? null : task.material_format ?? 'none',
+        choices: task.instruction === undefined ? null : JSON.stringify(task.choices ?? []),
         answer: task.answer,
         accept: JSON.stringify(task.accept),
         hint: task.hint,
