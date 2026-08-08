@@ -44,10 +44,10 @@ let counter = 0;
 function task(topicId: string): GeneratedTask {
   counter += 1;
   return {
-    question: `Задание ${counter} по теме ${topicId}: сколько монет останется?`,
+    instruction: `Задание ${counter} по теме ${topicId}: сколько монет останется?`, material: '', material_format: 'none', choices: [],
     answer: '45',
     accept: ['45', '45 монет'],
-    hint: 'Посчитай по шагам.',
+    hint: 'Определи нужные действия. Проверь вычисление обратным действием.',
     explain: 'Сорок пять — то, что осталось.',
     joke: 'Не Нобелевка, но зачёт.',
     difficulty: 2,
@@ -141,7 +141,7 @@ describe('prefetch', () => {
               topic_id: 'math.a',
               tasks: Array.from({ length: 8 }, (_, index) => ({
                 ...task('math.a'),
-                question: `Посевное задание ${index + 1}: сколько будет ${index + 1} + 2?`,
+                instruction: `Посевное задание ${index + 1}: сколько будет ${index + 1} + 2?`,
               })),
             },
           ],

@@ -33,7 +33,7 @@ function topic(patch: Partial<Topic> = {}): Topic {
 
 function task(patch: Partial<GeneratedTask> = {}): GeneratedTask {
   return {
-    question: 'В инвентаре 90 монет, половину потратил. Сколько осталось?',
+    instruction: 'Реши задачу.', material: 'В инвентаре 90 монет, половину потратил. Сколько осталось?', material_format: 'text', choices: [],
     answer: '45',
     accept: ['45', '45 монет'],
     hint: 'Половина от девяноста',
@@ -228,7 +228,7 @@ describe('validateTaskBatch: сверка идёт нормализатором'
 
     const result = await validateTaskBatch({
       topic: topic({ answerFormat: 'text' }),
-      tasks: [task({ question: 'Кто съел жука?', answer: 'Ёж', accept: ['Ёж'] })],
+      tasks: [task({ instruction: 'Кто съел жука?', answer: 'Ёж', accept: ['Ёж'] })],
       run,
     });
 
@@ -262,14 +262,14 @@ describe('validateTaskBatch: сверка идёт нормализатором'
 
     const result = await validateTaskBatch({
       topic: topic(),
-      tasks: [task({ question: 'Первое' }), task({ question: 'Второе' })],
+      tasks: [task({ instruction: 'Первое' }), task({ instruction: 'Второе' })],
       run,
     });
 
     expect(result.accepted).toHaveLength(1);
-    expect(result.accepted[0]?.question).toBe('Второе');
+    expect(result.accepted[0]?.instruction).toBe('Второе');
     expect(result.rejected).toHaveLength(1);
-    expect(result.rejected[0]?.task.question).toBe('Первое');
+    expect(result.rejected[0]?.task.instruction).toBe('Первое');
     expect(result.rejected[0]?.reason).toContain('«46»');
     expect(result.rejected[0]?.reason).toContain('«45»');
   });
@@ -333,7 +333,7 @@ describe('validateTaskBatch: ошибочные сценарии', () => {
     const { run } = recorder(verdicts(verdict()));
 
     await expect(
-      validateTaskBatch({ topic: topic(), tasks: [task(), task({ question: 'Второе' })], run }),
+      validateTaskBatch({ topic: topic(), tasks: [task(), task({ instruction: 'Второе' })], run }),
     ).rejects.toThrow(/1 вердикт.*на 2 задани/su);
   });
 

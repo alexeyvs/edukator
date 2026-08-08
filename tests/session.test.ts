@@ -44,7 +44,7 @@ let counter = 0;
 function task(patch: Partial<GeneratedTask> = {}): GeneratedTask {
   counter += 1;
   return {
-    question: `Задание ${counter}: в инвентаре 90 монет, половину потратил. Сколько осталось?`,
+    instruction: `Задание ${counter}: в инвентаре 90 монет, половину потратил. Сколько осталось?`, material: '', material_format: 'none', choices: [],
     answer: '45',
     accept: ['45', '45 монет'],
     hint: 'Половина от девяноста.',
@@ -115,9 +115,13 @@ describe('занятие', () => {
       // смотреть их проще, чем решать.
       expect(Object.keys(result.task).sort()).toEqual([
         'answerFormat',
+        'choices',
         'difficulty',
         'hint',
         'id',
+        'instruction',
+        'material',
+        'materialFormat',
         'question',
         'subject',
         'topicId',
@@ -609,7 +613,7 @@ describe('занятие', () => {
       // `seedDir` обязателен: без него перебор уходит в посев репозитория,
       // тем которого в синтетической карте нет, и `no-task` прошёл бы за
       // «выдано другое».
-      const spare = storeTasks(db, 'math.a', [task({ question: 'Сколько будет 20 + 25?' })]);
+      const spare = storeTasks(db, 'math.a', [task({ instruction: 'Сколько будет 20 + 25?' })]);
       const next = nextTask(db, graph, { seedDir });
       expect(next.status).toBe('ok');
       expect(next.status === 'ok' ? next.task.id : 0).toBe(spare.stored[0]?.id);

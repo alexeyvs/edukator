@@ -49,7 +49,7 @@ const GRAPH: TopicGraph = buildTopicGraph([
 
 function task(patch: Partial<GeneratedTask> = {}): GeneratedTask {
   return {
-    question: 'Сколько будет 2 + 2?',
+    instruction: 'Сколько будет 2 + 2?', material: '', material_format: 'none', choices: [],
     answer: '4',
     accept: ['4', '4 штуки'],
     hint: 'Сложи числа по разрядам. Проверь результат обратным действием.',
@@ -62,7 +62,7 @@ function task(patch: Partial<GeneratedTask> = {}): GeneratedTask {
 
 function batch(count: number): GeneratedTask[] {
   return Array.from({ length: count }, (_, index) =>
-    task({ question: `Задание ${index + 1}: сколько будет ${index + 1} + 2?` }),
+    task({ instruction: `Задание ${index + 1}: сколько будет ${index + 1} + 2?` }),
   );
 }
 
@@ -447,7 +447,7 @@ describe('посевной банк', () => {
 
     it('берёт из очереди, пока она не пуста, и посев не трогает', () => {
       writeSeed('math', seedJson([{ topic_id: 'math.a', tasks: batch(2) }]));
-      storeTasks(db, 'math.a', [task({ question: 'Свежее задание: сколько будет 9 + 9?' })]);
+      storeTasks(db, 'math.a', [task({ instruction: 'Свежее задание: сколько будет 9 + 9?' })]);
 
       const given = takeTaskOrSeed(db, GRAPH, 'math.a', { dir: seedDir });
 
@@ -547,7 +547,7 @@ describe('посевной банк', () => {
     it('не берёт в посев отбракованные задания', () => {
       const { stored } = storeTasks(db, 'math.a', [
         task(),
-        task({ question: 'Второе задание: сколько будет 3 + 3?', answer: '6', accept: ['6'] }),
+        task({ instruction: 'Второе задание: сколько будет 3 + 3?', answer: '6', accept: ['6'] }),
       ]);
       db.prepare("UPDATE task_bank SET status = 'rejected' WHERE id = ?").run(stored[0]?.id);
 
@@ -599,7 +599,7 @@ describe('посевной банк', () => {
     it('падает, когда задания не пройдут разбор под текущим answer_format темы', () => {
       storeTasks(db, 'russian.a', [
         task({
-          question: 'Запиши ответ словами.',
+          instruction: 'Запиши ответ словами.',
           answer: 'сорок пять',
           accept: ['сорок пять'],
           hint: 'Определи соседние десятки. Затем запиши число словами.',
@@ -620,6 +620,7 @@ describe('посевной банк', () => {
     const graph = loadCurriculum();
 
     it('проходит проверки разбора батча целиком', () => {
+      const hintsByTopic = new Map<string, string>();
       for (const subject of SUBJECTS) {
         const bank = readSeedBank(graph, subject, SEED_BANK_DIR);
 
@@ -630,7 +631,6 @@ describe('посевной банк', () => {
         expect(bank?.problems, `посев предмета ${subject}`).toEqual([]);
         for (const entry of bank?.topics ?? []) {
           for (const seededTask of entry.tasks) {
-            expect(seededTask.question, `${entry.topicId}: legacy question`).toBeUndefined();
             expect(seededTask.instruction, `${entry.topicId}: instruction`).not.toBe('');
             expect(seededTask.material_format, `${entry.topicId}: material_format`).toMatch(
               /^(none|text|math)$/u,
@@ -639,9 +639,26 @@ describe('посевной банк', () => {
             const sentences = seededTask.hint.trim().split(/(?<=[.!?])(?:\s+|$)/u).filter(Boolean);
             expect(sentences.length, `${entry.topicId}: подробная подсказка`).toBeGreaterThanOrEqual(2);
             expect(sentences.length, `${entry.topicId}: подробная подсказка`).toBeLessThanOrEqual(4);
+            expect(seededTask.hint, `${entry.topicId}: путь решения`).toMatch(
+              /проверь|провер|подстав|исключ|сравн|перечитай|оцени/iu,
+            );
+            expect(seededTask.hint, `${entry.topicId}: предметное правило`).toMatch(
+              entry.topicId.startsWith('math.')
+                ? /действ|формул|делител|дроб|уравнен|знаменател|запят/iu
+                : entry.topicId.startsWith('english.')
+                  ? /англий|глагол|артикл|прилагатель|модальн|Past Simple/iu
+                  : /слов|морфем|существительн|прилагательн|местоимен|глагол|падеж|звук/iu,
+            );
+            const previous = hintsByTopic.get(entry.topicId);
+            if (previous === undefined) hintsByTopic.set(entry.topicId, seededTask.hint);
+            else expect(seededTask.hint).toBe(previous);
           }
         }
       }
+      expect(new Set(hintsByTopic.values()).size).toBe(hintsByTopic.size);
+      const math = readSeedBank(graph, 'math', SEED_BANK_DIR);
+      expect(math?.topics.flatMap((entry) => entry.tasks)
+        .filter((seededTask) => seededTask.material_format === 'math').length).toBeGreaterThan(5);
     });
 
     it('содержит не меньше 30 заданий на предмет', () => {

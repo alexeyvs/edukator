@@ -1,8 +1,8 @@
 import type { Database } from 'better-sqlite3';
-import type { AnswerFormat, Topic, TopicGraph } from './curriculum.js';
+import type { Topic, TopicGraph } from './curriculum.js';
 import type { Subject } from './db.js';
 import { issuedTask, takeTask, type BankTask } from './codex/bank.js';
-import { taskPromptText } from './codex/task-schema.js';
+import { projectIssuedTask, type IssuedTask } from './session.js';
 
 /** Число разных тем, достаточное для первичного ранжирования предмета. */
 export const TRIAGE_TARGET = 12;
@@ -18,20 +18,7 @@ export interface TriageOptions {
   subject: Subject;
 }
 
-export interface TriageIssuedTask {
-  id: number;
-  topicId: string;
-  subject: Subject;
-  topicTitle: string;
-  question: string;
-  instruction?: string;
-  material?: string;
-  materialFormat?: 'none' | 'text' | 'math';
-  choices?: string[];
-  hint: string;
-  difficulty: number;
-  answerFormat: AnswerFormat;
-}
+export type TriageIssuedTask = IssuedTask;
 
 export type NextTriageTaskResult =
   | { status: 'ok'; task: TriageIssuedTask }
@@ -42,22 +29,7 @@ function clampDifficulty(value: number): number {
 }
 
 function issued(task: BankTask, topic: Topic): TriageIssuedTask {
-  return {
-    id: task.id,
-    topicId: topic.id,
-    subject: topic.subject,
-    topicTitle: topic.title,
-    question: taskPromptText(task),
-    ...(task.instruction === undefined ? {} : {
-      instruction: task.instruction,
-      material: task.material ?? '',
-      materialFormat: task.material_format ?? 'none',
-      choices: task.choices ?? [],
-    }),
-    hint: task.hint,
-    difficulty: task.difficulty,
-    answerFormat: topic.answerFormat,
-  };
+  return projectIssuedTask(topic, task);
 }
 
 /**

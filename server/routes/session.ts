@@ -19,10 +19,10 @@ import {
   resolveDispute,
   submitAnswer,
   SessionError,
-  type IssuedTask,
   type SessionErrorCode,
 } from '../session.js';
 import { runProgress } from '../run.js';
+import { issuedTaskJson } from './task-json.js';
 
 /** Код ответа на отказ по состоянию занятия. */
 const STATUS_BY_CODE: Record<SessionErrorCode, number> = {
@@ -107,25 +107,6 @@ function readQueryId(query: unknown, field: string): number | undefined {
 }
 
 class BadRequest extends Error {}
-
-function taskJson(task: IssuedTask): Record<string, unknown> {
-  return {
-    id: task.id,
-    topic_id: task.topicId,
-    topic_title: task.topicTitle,
-    subject: task.subject,
-    question: task.question,
-    ...(task.instruction === undefined ? {} : {
-      instruction: task.instruction,
-      material: task.material,
-      material_format: task.materialFormat,
-      choices: task.choices,
-    }),
-    hint: task.hint,
-    difficulty: task.difficulty,
-    answer_format: task.answerFormat,
-  };
-}
 
 function fail(reply: FastifyReply, error: unknown): FastifyReply {
   if (error instanceof BadRequest) return reply.code(400).send({ error: error.message });
@@ -253,7 +234,7 @@ export function registerSessionRoutes(
       }
 
       return reply.send({
-        task: taskJson(result.task),
+        task: issuedTaskJson(result.task),
         ...(runId === undefined ? {} : { progress: runProgress(db, runId) }),
       });
     } catch (error) {

@@ -17,7 +17,7 @@ const TOPIC = 'math.fractions';
 
 function task(patch: Partial<GeneratedTask> = {}): GeneratedTask {
   return {
-    question: 'Сколько будет 2 + 2?',
+    instruction: 'Сколько будет 2 + 2?', material: '', material_format: 'none', choices: [],
     answer: '4',
     accept: ['4', 'четыре'],
     hint: 'Сложи столбиком',
@@ -31,7 +31,7 @@ function task(patch: Partial<GeneratedTask> = {}): GeneratedTask {
 /** Пять формулировок, различимых отпечатком: только они и годятся банку. */
 function batch(count: number, difficulty = 2): GeneratedTask[] {
   return Array.from({ length: count }, (_, index) =>
-    task({ question: `Задание номер ${index + 1}: сколько будет ${index + 1} + 2?`, difficulty }),
+    task({ instruction: `Задание номер ${index + 1}: сколько будет ${index + 1} + 2?`, difficulty }),
   );
 }
 
@@ -128,13 +128,13 @@ describe('банк заданий', () => {
         (given) => given?.question,
       );
 
-      expect(questions).toEqual(batch(3).map((item) => item.question));
+      expect(questions).toEqual(batch(3).map((item) => item.instruction));
     });
 
     it('при заданной сложности берёт ближайшую по ней, а не первую попавшуюся', () => {
       storeTasks(db, TOPIC, [
-        task({ question: 'Лёгкое: 1 + 1?', difficulty: 1 }),
-        task({ question: 'Трудное: 17 * 24 - 8?', difficulty: 3 }),
+        task({ instruction: 'Лёгкое: 1 + 1?', difficulty: 1 }),
+        task({ instruction: 'Трудное: 17 * 24 - 8?', difficulty: 3 }),
       ]);
 
       expect(takeTask(db, TOPIC, { difficulty: 3 })?.difficulty).toBe(3);
@@ -184,7 +184,7 @@ describe('банк заданий', () => {
     it('не пускает в банк формулировку, отличающуюся только регистром и пунктуацией', () => {
       storeTasks(db, TOPIC, [task()]);
 
-      const repeat = task({ question: '  сколько будет 2+2 ' });
+      const repeat = task({ instruction: '  сколько будет 2+2 ' });
       const { stored, duplicates } = storeTasks(db, TOPIC, [repeat]);
 
       expect(stored).toEqual([]);
@@ -194,9 +194,9 @@ describe('банк заданий', () => {
 
     it('отсеивает дубль внутри одного батча, сохраняя остальные задания', () => {
       const { stored, duplicates } = storeTasks(db, TOPIC, [
-        task({ question: 'Сколько будет 2 + 2?' }),
-        task({ question: 'Сколько будет 2+2?' }),
-        task({ question: 'Сколько будет 3 + 5?' }),
+        task({ instruction: 'Сколько будет 2 + 2?' }),
+        task({ instruction: 'Сколько будет 2+2?' }),
+        task({ instruction: 'Сколько будет 3 + 5?' }),
       ]);
 
       expect(stored.map((item) => item.question)).toEqual([
@@ -208,8 +208,8 @@ describe('банк заданий', () => {
 
     it('различает задания, отличающиеся только числами', () => {
       const { duplicates } = storeTasks(db, TOPIC, [
-        task({ question: 'Сколько будет 2 + 2?' }),
-        task({ question: 'Сколько будет 7 + 2?' }),
+        task({ instruction: 'Сколько будет 2 + 2?' }),
+        task({ instruction: 'Сколько будет 7 + 2?' }),
       ]);
 
       expect(duplicates).toEqual([]);
@@ -224,7 +224,7 @@ describe('банк заданий', () => {
     });
 
     it('не записывает батч частично, если задание в нём непригодно', () => {
-      expect(() => storeTasks(db, TOPIC, [task(), task({ question: '???' })])).toThrow(
+      expect(() => storeTasks(db, TOPIC, [task(), task({ instruction: '???' })])).toThrow(
         /формулировка.*пуста/i,
       );
       expect(countAvailable(db, TOPIC)).toBe(0);

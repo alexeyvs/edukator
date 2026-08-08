@@ -256,6 +256,17 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
             </div>
           </form>
         ) : (
+          <>
+          <TaskPrompt
+            task={current.task}
+            answer={answer}
+            onAnswerChange={setAnswer}
+            answerId="run-answer-result"
+            headingId="task-question"
+            readOnly
+            hint={current.task.hint}
+            hintVisible={hintUsed}
+          />
           <div className={`answer-result ${result.correct ? 'correct' : 'wrong'}`}>
             <p className="verdict">{result.correct ? 'Верно' : 'Пока не сошлось'} <strong>+{result.xp} XP</strong></p>
             <dl>
@@ -282,6 +293,7 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
               </button>
             </div>
           </div>
+          </>
         )}
       </section>
     </main>

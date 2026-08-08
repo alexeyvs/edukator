@@ -15,7 +15,7 @@ import type { DisputeReview } from '../server/codex/dispute.js';
 
 function generated(question: string): GeneratedTask {
   return {
-    question,
+    instruction: question, material: '', material_format: 'none', choices: [],
     answer: '45',
     accept: ['45'],
     hint: 'Раздели девяносто пополам.',

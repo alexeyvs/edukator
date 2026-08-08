@@ -164,6 +164,15 @@ export function TriageScreen({ runId, api = browserRunApi, wait = defaultWait }:
             </div>
           </form>
         ) : (
+          <>
+          <TaskPrompt
+            task={next.task}
+            answer={answer}
+            onAnswerChange={setAnswer}
+            answerId="triage-answer-result"
+            headingId="triage-question"
+            readOnly
+          />
           <div className={`answer-result ${result.correct ? 'correct' : 'wrong'}`}>
             <p className="verdict"><span>{result.correct ? 'Верно' : 'Пока не сошлось'}</span> <strong>+{result.xp} XP</strong></p>
             <dl>
@@ -190,6 +199,7 @@ export function TriageScreen({ runId, api = browserRunApi, wait = defaultWait }:
               </button>
             </div>
           </div>
+          </>
         )}
       </section>
     </main>

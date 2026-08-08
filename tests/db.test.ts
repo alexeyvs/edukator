@@ -547,7 +547,7 @@ describe('база данных', () => {
       }
     });
 
-    it('добавляет отпечаток формулировки базе версии 4, сохраняя задания', () => {
+    it('добавляет отпечаток формулировки базе версии 4 и очищает старую очередь', () => {
       const path = join(tempDir, 'версия-4.db');
       const legacy = openDatabase(path);
       const topicId = seedTopic(legacy);
@@ -568,7 +568,7 @@ describe('база данных', () => {
           .all();
 
         expect(version.user_version).toBe(SCHEMA_VERSION);
-        expect(rows).toEqual([{ question: 'Сколько будет 2 + 2?', fingerprint: '' }]);
+        expect(rows).toEqual([]);
 
         // Отпечатков у старых строк нет, и пустое значение не считается дублем;
         // новые записи уникальны по теме.
@@ -622,26 +622,19 @@ describe('база данных', () => {
       }
     });
 
-    it('обновляет триггеры базы версии 6 для многотемного забега', () => {
+    it('обновляет триггеры базы версии 6 и очищает старую очередь', () => {
       const path = join(tempDir, 'версия-6.db');
       const legacy = createVersionSixDatabase(path);
       const firstTopic = seedTopic(legacy, 'math.first');
       const nextTopic = seedTopic(legacy, 'math.next');
       const taskId = seedTask(legacy, nextTopic);
-      const runId = Number(
-        legacy.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
-          .run('math', firstTopic, '2026-08-08T10:00:00.000Z').lastInsertRowid,
-      );
+      legacy.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+        .run('math', firstTopic, '2026-08-08T10:00:00.000Z');
       legacy.close();
 
       const migrated = openDatabase(path);
       try {
-        expect(() =>
-          migrated.prepare(
-            `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct)
-             VALUES (?, ?, ?, ?, ?)`,
-          ).run(taskId, nextTopic, runId, '4', 1),
-        ).not.toThrow();
+        expect(migrated.prepare('SELECT id FROM task_bank WHERE id = ?').get(taskId)).toBeUndefined();
         expect(
           (migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version,
         ).toBe(SCHEMA_VERSION);
@@ -650,7 +643,7 @@ describe('база данных', () => {
       }
     });
 
-    it('добавляет владельца выдачи базе версии 7 и сохраняет задания', () => {
+    it('добавляет владельца выдачи базе версии 7 и очищает незавершённую выдачу', () => {
       const path = join(tempDir, 'версия-7.db');
       const legacy = createVersionSevenDatabase(path);
       const topicId = seedTopic(legacy);
@@ -662,7 +655,7 @@ describe('база данных', () => {
       try {
         expect(migrated.prepare(
           'SELECT issued_run_id, status FROM task_bank WHERE id = ?',
-        ).get(taskId)).toEqual({ issued_run_id: null, status: 'valid' });
+        ).get(taskId)).toBeUndefined();
         expect(
           (migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version,
         ).toBe(SCHEMA_VERSION);

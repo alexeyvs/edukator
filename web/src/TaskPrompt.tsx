@@ -11,6 +11,8 @@ export interface TaskPromptProps {
   headingId: string;
   hint?: string;
   hintVisible?: boolean;
+  /** Keep the prompt visible after submission without offering a second answer. */
+  readOnly?: boolean;
 }
 
 function MathMaterial({ source }: { source: string }) {
@@ -30,7 +32,7 @@ function MathMaterial({ source }: { source: string }) {
   }
 }
 
-function ChoiceAnswer({ task, answer, onAnswerChange }: Pick<TaskPromptProps, 'task' | 'answer' | 'onAnswerChange'>) {
+function ChoiceAnswer({ task, answer, onAnswerChange, readOnly }: Pick<TaskPromptProps, 'task' | 'answer' | 'onAnswerChange' | 'readOnly'>) {
   return (
     <fieldset className="choice-group">
       <legend>Выбери один вариант</legend>
@@ -44,6 +46,7 @@ function ChoiceAnswer({ task, answer, onAnswerChange }: Pick<TaskPromptProps, 't
               name={`task-${task.id}-choice`}
               value={choice}
               checked={answer === choice}
+              disabled={readOnly}
               onChange={(event: ChangeEvent<HTMLInputElement>) => onAnswerChange(event.target.value)}
             />
             <span className="choice-letter" aria-hidden="true">{String.fromCharCode(65 + index)}</span>
@@ -55,7 +58,7 @@ function ChoiceAnswer({ task, answer, onAnswerChange }: Pick<TaskPromptProps, 't
   );
 }
 
-export function TaskPrompt({ task, answer, onAnswerChange, answerId, headingId, hint, hintVisible = false }: TaskPromptProps) {
+export function TaskPrompt({ task, answer, onAnswerChange, answerId, headingId, hint, hintVisible = false, readOnly = false }: TaskPromptProps) {
   const instruction = task.instruction ?? task.question;
   const materialFormat = task.material_format ?? 'none';
   const material = task.material ?? '';
@@ -72,7 +75,7 @@ export function TaskPrompt({ task, answer, onAnswerChange, answerId, headingId, 
         </section>
       )}
       {task.answer_format === 'choice' && (task.choices?.length ?? 0) > 0 ? (
-        <ChoiceAnswer task={task} answer={answer} onAnswerChange={onAnswerChange} />
+        <ChoiceAnswer task={task} answer={answer} onAnswerChange={onAnswerChange} readOnly={readOnly} />
       ) : (
         <div className="answer-field">
           <label htmlFor={answerId}>{label}</label>
@@ -82,6 +85,7 @@ export function TaskPrompt({ task, answer, onAnswerChange, answerId, headingId, 
             inputMode={task.answer_format === 'number' ? 'decimal' : undefined}
             placeholder={task.answer_format === 'number' ? 'Введи число' : 'Напиши ответ'}
             value={answer}
+            readOnly={readOnly}
             onChange={(event) => onAnswerChange(event.target.value)}
           />
         </div>

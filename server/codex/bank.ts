@@ -17,10 +17,11 @@ import { RECENT_LIMIT } from './prompt.js';
 import { taskPromptText, type GeneratedTask, type MaterialFormat } from './task-schema.js';
 
 /** Задание, лежащее в банке: поля генератора плюс то, чем его различает база. */
-export interface BankTask extends GeneratedTask {
-  id: number;
-  topicId: string;
-}
+type StoredTaskBody = Omit<GeneratedTask, 'instruction' | 'material' | 'material_format' | 'choices'>;
+export type BankTask = StoredTaskBody & { id: number; topicId: string; question: string } & (
+  | Pick<GeneratedTask, 'instruction' | 'material' | 'material_format' | 'choices'>
+  | { question: string; instruction?: undefined }
+);
 
 export interface StoreTasksResult {
   stored: BankTask[];
@@ -196,10 +197,10 @@ export function storeTasks(
       const row = insert.get({
         topicId,
         question: prompt,
-        instruction: task.instruction ?? null,
-        material: task.instruction === undefined ? null : task.material ?? '',
-        materialFormat: task.instruction === undefined ? null : task.material_format ?? 'none',
-        choices: task.instruction === undefined ? null : JSON.stringify(task.choices ?? []),
+        instruction: task.instruction,
+        material: task.material,
+        materialFormat: task.material_format,
+        choices: JSON.stringify(task.choices),
         answer: task.answer,
         accept: JSON.stringify(task.accept),
         hint: task.hint,
@@ -210,7 +211,7 @@ export function storeTasks(
       });
 
       if (row === undefined) duplicates.push(task);
-      else stored.push({ ...task, accept: [...task.accept], id: row.id, topicId });
+      else stored.push({ ...task, question: prompt, accept: [...task.accept], id: row.id, topicId });
     }
 
     return { stored, duplicates };

@@ -21,12 +21,10 @@ export const TASKS_SCHEMA_PATH = resolve(here, '..', '..', 'schemas', 'tasks.jso
 
 /** Задание, каким его отдаёт генератор: ровно поля схемы, до записи в банк. */
 export interface GeneratedTask {
-  /** @deprecated Transitional DB fallback; newly generated tasks use structured fields. */
-  question?: string;
-  instruction?: string;
-  material?: string;
-  material_format?: MaterialFormat;
-  choices?: string[];
+  instruction: string;
+  material: string;
+  material_format: MaterialFormat;
+  choices: string[];
   answer: string;
   /** Равноправные записи ответа, включая сам `answer`: с ними сверяется нормализатор. */
   accept: string[];
@@ -39,7 +37,9 @@ export interface GeneratedTask {
 
 export type MaterialFormat = 'none' | 'text' | 'math';
 
-export type TaskPromptFields = Pick<GeneratedTask, 'question' | 'instruction' | 'material' | 'material_format' | 'choices'>;
+export type TaskPromptFields =
+  | Pick<GeneratedTask, 'instruction' | 'material' | 'material_format' | 'choices'>
+  | { question: string; instruction?: undefined };
 
 /** Stable plain-text form used anywhere the whole prompt must be compared or reviewed. */
 export function taskPromptText(task: TaskPromptFields): string {
@@ -181,7 +181,7 @@ function revealsAnswer(hint: string, answer: string): boolean {
   return boundary.test(normalizeText(hint));
 }
 
-function taskProblems(task: GeneratedTask, format: AnswerFormat, allowLegacy = false): string[] {
+function taskProblems(task: GeneratedTask, format: AnswerFormat): string[] {
   const problems: string[] = [];
 
   if (task.instruction?.trim() === '') problems.push('поле instruction состоит из одних пробелов');
@@ -198,14 +198,14 @@ function taskProblems(task: GeneratedTask, format: AnswerFormat, allowLegacy = f
   if (choiceKeys.some((choice) => choice === '') || new Set(choiceKeys).size !== choiceKeys.length) {
     problems.push('варианты choices должны быть непустыми и уникальными после нормализации');
   }
-  if (format === 'choice' && !allowLegacy) {
+  if (format === 'choice') {
     if ((task.choices?.length ?? 0) < 2 || (task.choices?.length ?? 0) > 6) {
       problems.push('для choice требуется от 2 до 6 вариантов');
     }
     if (!task.choices?.some((choice) => choice === task.answer)) {
       problems.push(`ответ «${task.answer}» должен буквально совпадать с одним из choices`);
     }
-  } else if (format !== 'choice' && (task.choices?.length ?? 0) !== 0) {
+  } else if ((task.choices?.length ?? 0) !== 0) {
     problems.push(`для формата ${format} поле choices должно быть пустым массивом`);
   }
 
@@ -283,7 +283,7 @@ function taskProblems(task: GeneratedTask, format: AnswerFormat, allowLegacy = f
   }
 
   const sentences = task.hint.trim().split(/(?<=[.!?])(?:\s+|$)/u).filter(Boolean);
-  if (!allowLegacy && (sentences.length < 2 || sentences.length > 4)) {
+  if (sentences.length < 2 || sentences.length > 4) {
     problems.push('подсказка должна состоять из 2–4 предложений');
   }
 
@@ -297,7 +297,6 @@ function taskProblems(task: GeneratedTask, format: AnswerFormat, allowLegacy = f
 export function parseTaskBatch(
   raw: unknown,
   format: AnswerFormat,
-  options: { allowLegacyHintAndChoices?: boolean } = {},
 ): GeneratedTask[] {
   const validate = schemaValidator<TaskBatchJson>(TASKS_SCHEMA_PATH);
   if (!validate(raw)) {
@@ -305,7 +304,7 @@ export function parseTaskBatch(
   }
 
   const problems = raw.items.flatMap((task, index) =>
-    taskProblems(task, format, options.allowLegacyHintAndChoices === true)
+    taskProblems(task, format)
       .map((problem) => `задание ${index + 1}: ${problem}`),
   );
   if (problems.length > 0) {

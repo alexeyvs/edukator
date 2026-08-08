@@ -113,10 +113,8 @@ function balanceRunTopics(db: Database, runId: number, topics: Topic[]): Topic[]
     .map(({ topic }) => topic);
 }
 
-function issuedResult(topic: Topic, task: BankTask): NextTaskResult {
+export function projectIssuedTask(topic: Topic, task: BankTask): IssuedTask {
   return {
-    status: 'ok',
-    task: {
       id: task.id,
       topicId: topic.id,
       subject: topic.subject,
@@ -131,8 +129,11 @@ function issuedResult(topic: Topic, task: BankTask): NextTaskResult {
       hint: task.hint,
       difficulty: task.difficulty,
       answerFormat: topic.answerFormat,
-    },
   };
+}
+
+function issuedResult(topic: Topic, task: BankTask): NextTaskResult {
+  return { status: 'ok', task: projectIssuedTask(topic, task) };
 }
 
 /**

@@ -42,7 +42,7 @@ let counter = 0;
 function task(patch: Partial<GeneratedTask> = {}): GeneratedTask {
   counter += 1;
   return {
-    question: `Задание ${counter}: в инвентаре 90 монет, половину потратил. Сколько осталось?`,
+    instruction: `Задание ${counter}: в инвентаре 90 монет, половину потратил. Сколько осталось?`, material: '', material_format: 'none', choices: [],
     answer: '45',
     accept: ['45', '45 монет'],
     hint: 'Половина от девяноста.',
@@ -136,9 +136,13 @@ describe('маршруты занятия', () => {
 
       expect(Object.keys(issued).sort()).toEqual([
         'answer_format',
+        'choices',
         'difficulty',
         'hint',
         'id',
+        'instruction',
+        'material',
+        'material_format',
         'question',
         'subject',
         'topic_id',

@@ -37,7 +37,7 @@ let taskNumber = 0;
 function task(difficulty: number): GeneratedTask {
   taskNumber += 1;
   return {
-    question: `Задание ${taskNumber}: сколько будет ${difficulty} + 1?`,
+    instruction: `Задание ${taskNumber}: сколько будет ${difficulty} + 1?`, material: '', material_format: 'none', choices: [],
     answer: String(difficulty + 1),
     accept: [String(difficulty + 1)],
     hint: 'Сложи числа.',

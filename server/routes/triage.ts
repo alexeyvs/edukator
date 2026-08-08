@@ -6,6 +6,7 @@ import { SUBJECTS, type Subject } from '../db.js';
 import { runProgress, startRun } from '../run.js';
 import { SessionError } from '../session-error.js';
 import { nextTriageTask } from '../triage.js';
+import { issuedTaskJson } from './task-json.js';
 
 export interface TriageRoutesOptions {
   db: Database;
@@ -100,21 +101,7 @@ export function registerTriageRoutes(app: FastifyInstance, options: TriageRoutes
       return reply.send({
         status: 'ok',
         progress: runProgress(db, id),
-        task: {
-          id: result.task.id,
-          topic_id: result.task.topicId,
-          topic_title: result.task.topicTitle,
-          subject: result.task.subject,
-          question: result.task.question,
-          ...(result.task.instruction === undefined ? {} : {
-            instruction: result.task.instruction,
-            material: result.task.material,
-            material_format: result.task.materialFormat,
-            choices: result.task.choices,
-          }),
-          difficulty: result.task.difficulty,
-          answer_format: result.task.answerFormat,
-        },
+        task: issuedTaskJson(result.task, false),
       });
     } catch (error) {
       return fail(reply, error);

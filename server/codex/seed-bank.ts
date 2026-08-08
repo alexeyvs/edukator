@@ -53,15 +53,7 @@ interface SeedTopicJson {
 }
 
 function parseSeedTasks(tasks: GeneratedTask[], format: AnswerFormat): GeneratedTask[] {
-  const legacy = tasks.some((task) => task.question !== undefined);
-  const structured = legacy
-    ? tasks.map((task) => {
-        const { question, ...rest } = task;
-        return { ...rest, instruction: question ?? '', material: '', material_format: 'none' as const, choices: [] };
-      })
-    : tasks;
-  const parsed = parseTaskBatch({ items: structured }, format, { allowLegacyHintAndChoices: legacy });
-  return legacy ? tasks.map((task) => ({ ...task, accept: [...task.accept] })) : parsed;
+  return parseTaskBatch({ items: tasks }, format);
 }
 
 export interface LoadSeedBankResult {
@@ -448,16 +440,14 @@ export function collectSeedTasks(db: Database, graph: TopicGraph, subject: Subje
     if (!Array.isArray(choices) || choices.some((item) => typeof item !== 'string')) {
       throw new Error(`Посевной банк: choices задания «${row.question}» не массив строк`);
     }
-    const prompt = row.instruction === null
-      ? { question: row.question }
-      : {
-          instruction: row.instruction,
-          material: row.material ?? '',
-          material_format: row.material_format ?? 'none',
-          choices: choices as string[],
-        };
+    // Legacy rows remain queryable for attempts, but are never exported back
+    // into the strictly structured seed bank.
+    if (row.instruction === null) continue;
     const task: GeneratedTask = {
-      ...prompt,
+      instruction: row.instruction,
+      material: row.material ?? '',
+      material_format: row.material_format ?? 'none',
+      choices: choices as string[],
       answer: row.answer,
       accept: accept as string[],
       hint: requireSeedText(row.hint, 'hint', row.question),

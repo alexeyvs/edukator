@@ -119,7 +119,7 @@ describe('маршруты профиля', () => {
           count: 1,
         });
         return [{
-          question: 'Сколько будет 2 + 2?',
+          instruction: 'Сколько будет 2 + 2?', material: '', material_format: 'none' as const, choices: [],
           answer: '4',
           accept: ['4'],
           hint: 'Сложи две двойки.',
