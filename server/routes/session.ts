@@ -21,6 +21,7 @@ import {
   type IssuedTask,
   type SessionErrorCode,
 } from '../session.js';
+import { runProgress } from '../run.js';
 
 /** Код ответа на отказ по состоянию занятия. */
 const STATUS_BY_CODE: Record<SessionErrorCode, number> = {
@@ -80,6 +81,19 @@ function readId(body: unknown, field: string): number {
     throw new BadRequest(`Поле ${field} должно быть положительным целым числом`);
   }
   return value;
+}
+
+function readQueryId(query: unknown, field: string): number | undefined {
+  const value = isObject(query) ? query[field] : undefined;
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) {
+    throw new BadRequest(`Параметр ${field} должен быть положительным целым числом`);
+  }
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new BadRequest(`Параметр ${field} должен быть положительным целым числом`);
+  }
+  return id;
 }
 
 class BadRequest extends Error {}
@@ -163,13 +177,15 @@ export function registerSessionRoutes(
     });
   }
 
-  app.get('/api/session/next', (_request, reply) => {
+  app.get('/api/session/next', (request, reply) => {
     const stopped = unavailable(reply);
     if (stopped !== undefined) return stopped;
     try {
+      const runId = readQueryId(request.query, 'runId');
       const result = nextTask(db, graph, {
         now: now(),
         log,
+        ...(runId === undefined ? {} : { runId }),
         ...(options.seedDir === undefined ? {} : { seedDir: options.seedDir }),
       });
 
@@ -187,7 +203,10 @@ export function registerSessionRoutes(
           .send({ error: `По теме «${result.topicId}» нет готовых заданий` });
       }
 
-      return reply.send({ task: taskJson(result.task) });
+      return reply.send({
+        task: taskJson(result.task),
+        ...(runId === undefined ? {} : { progress: runProgress(db, runId) }),
+      });
     } catch (error) {
       return fail(reply, error);
     }
@@ -199,6 +218,7 @@ export function registerSessionRoutes(
     try {
       const body = request.body;
       const taskId = readId(body, 'task_id');
+      const runId = isObject(body) && body['runId'] !== undefined ? readId(body, 'runId') : undefined;
       const answer = isObject(body) ? body['answer'] : undefined;
       if (typeof answer !== 'string') {
         throw new BadRequest('Поле answer должно быть строкой');
@@ -232,6 +252,7 @@ export function registerSessionRoutes(
         answer,
         at: now(),
         log,
+        ...(runId === undefined ? {} : { runId }),
         ...(hintUsed === undefined ? {} : { hintUsed }),
         ...(durationMs === undefined ? {} : { durationMs }),
       });
@@ -244,6 +265,8 @@ export function registerSessionRoutes(
         answer: result.answer,
         explain: result.explain,
         joke: result.joke,
+        xp: result.xp,
+        progress: result.progress,
         topic: {
           id: result.state.topicId,
           mastery: result.state.mastery,

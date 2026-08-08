@@ -16,6 +16,7 @@ import {
   registerUnavailableSession,
   type SessionRoutesOptions,
 } from './routes/session.js';
+import { registerRunRoutes, registerUnavailableRun } from './routes/run.js';
 
 export { databasePath };
 
@@ -304,12 +305,22 @@ export function buildServer(
       graph,
       available: sessionAvailable,
     });
+    registerRunRoutes(app, {
+      db: sessionDb,
+      graph,
+      available: sessionAvailable,
+      ...(options.now === undefined ? {} : { now: options.now }),
+    });
     app.addHook('onClose', async () => {
       await waitForReviews();
       sessionDb.close();
     });
   } else {
     registerUnavailableSession(
+      app,
+      graph === undefined ? 'карта тем не загружена' : 'база недоступна',
+    );
+    registerUnavailableRun(
       app,
       graph === undefined ? 'карта тем не загружена' : 'база недоступна',
     );
