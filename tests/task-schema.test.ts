@@ -164,6 +164,21 @@ describe('parseTaskBatch: нарушения инвариантов', () => {
     ).toThrow(/задание 1.*дубл/s);
   });
 
+  // `minLength` схемы считает знаки, а не смысл, и пробел проходит. Дальше по
+  // пути такое задание никто не смотрит — до выгрузки посева, где оно роняет
+  // предмет целиком, и снимок перестаёт обновляться навсегда.
+  it('отвергает пробельные hint, explain и joke', () => {
+    expect(() => parseTaskBatch(batch(task({ hint: '   ' })), 'number')).toThrow(
+      /задание 1.*поле hint состоит из одних пробелов/s,
+    );
+    expect(() => parseTaskBatch(batch(task({ explain: '\n\t' })), 'number')).toThrow(
+      /задание 1.*поле explain состоит из одних пробелов/s,
+    );
+    expect(() => parseTaskBatch(batch(task({ joke: ' ' })), 'number')).toThrow(
+      /задание 1.*поле joke состоит из одних пробелов/s,
+    );
+  });
+
   it('отвергает подсказку, в которой уже есть ответ', () => {
     expect(() =>
       parseTaskBatch(batch(task({ hint: 'Тут всё просто: останется 45 монет' })), 'number'),

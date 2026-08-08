@@ -220,6 +220,19 @@ function taskProblems(task: GeneratedTask, format: AnswerFormat): string[] {
     problems.push(`ответ «${task.answer}» отсутствует в accept[]`);
   }
 
+  // Пробельные `hint`, `explain` и `joke` схема пропускает: `minLength` считает
+  // знаки, а не смысл. Дальше на них никто не смотрит — до выгрузки посева, где
+  // `requireSeedText` роняет предмет целиком, и снимок в репозитории перестаёт
+  // обновляться навсегда: строку из банка руками не достать. Отсекается там же,
+  // где `fitsAccept` отсекает пустую запись `accept[]`, и ровно по той причине.
+  for (const [field, value] of [
+    ['hint', task.hint],
+    ['explain', task.explain],
+    ['joke', task.joke],
+  ] as const) {
+    if (value.trim() === '') problems.push(`поле ${field} состоит из одних пробелов`);
+  }
+
   if (revealsAnswer(task.hint, task.answer)) {
     problems.push(`подсказка содержит ответ «${task.answer}»`);
   }

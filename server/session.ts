@@ -564,7 +564,12 @@ export async function resolveDispute(
   }).immediate();
 }
 
-/** Споры, ждущие разбора: по ним фоновая очередь и работает. */
+/**
+ * Споры, ждущие разбора. Отдельной очереди по ним нет: спор ставит на разбор
+ * маршрут, и он же переставляет его на следующем нажатии кнопки, если разбор не
+ * состоялся (codex недоступен, ответ не разобрался, сервер перезапустился).
+ * Список нужен, чтобы такой спор было видно снаружи занятия.
+ */
 export function openDisputes(db: Database): number[] {
   return db
     .prepare<[], { id: number }>("SELECT id FROM disputes WHERE status = 'open' ORDER BY id")

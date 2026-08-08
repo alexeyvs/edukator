@@ -438,7 +438,16 @@ export function openDatabase(
 ): Database.Database {
   const db = new Database(path, { fileMustExist: options.fileMustExist ?? false });
   try {
-    db.pragma('journal_mode = WAL');
+    // Результат прагмы проверяется, а не отбрасывается: на недоступный WAL
+    // SQLite не ошибается, а молча возвращает журнал, который остался в силе
+    // (сетевой том, база в памяти). А на WAL держится вся расстановка
+    // транзакций: без него запись `npm run prefetch` берёт эксклюзивную
+    // блокировку на весь файл, и ответ ученика теряется по `SQLITE_BUSY` под
+    // общей пятисоткой — без единого следа о причине.
+    const journal = db.pragma('journal_mode = WAL', { simple: true });
+    if (journal !== 'wal') {
+      throw new Error(`База ${path}: WAL не включился, журнал остался «${String(journal)}»`);
+    }
     db.pragma('foreign_keys = ON');
     migrate(db);
     validateSchema(db);
@@ -446,7 +455,11 @@ export function openDatabase(
     // Соединение уже открыто, а наружу уходит только исключение — закрывать его
     // вызывающему нечем. Без этого каждая неудачная миграция (их делает и
     // /api/health на каждый запрос) утекает дескриптором до EMFILE.
-    db.close();
+    try {
+      db.close();
+    } catch {
+      // Отказ закрытия не имеет права заслонить причину: наружу уходит она.
+    }
     throw error;
   }
   return db;
