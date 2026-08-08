@@ -5,10 +5,12 @@ import {
   type AnswerFormat,
   type AnswerResponse,
   type DisputeStatus,
+  type FinishRunResponse,
   type NextTaskResponse,
   type RunApi,
   type RunProgress,
 } from './run-api';
+import { FinishScreen } from './FinishScreen';
 
 const NO_TASK_RETRY_MS = 2_000;
 const DISPUTE_FIRST_DELAY_MS = 1_000;
@@ -72,6 +74,7 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
   const [submitting, setSubmitting] = useState(false);
   const [disputeStatus, setDisputeStatus] = useState<DisputeStatus | null>(null);
   const [disputing, setDisputing] = useState(false);
+  const [finish, setFinish] = useState<FinishRunResponse | null>(null);
   const shownAt = useRef(Date.now());
   const prefetched = useRef<NextTaskResponse | null>(null);
   const prefetching = useRef<Promise<void> | null>(null);
@@ -102,7 +105,7 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
     setDisputeStatus(null);
     setProblem(null);
     shownAt.current = Date.now();
-    prefetchNext(next.task.id);
+    if (next.progress.total + 1 < next.progress.target) prefetchNext(next.task.id);
   }, [prefetchNext]);
 
   const load = useCallback(async (): Promise<void> => {
@@ -160,6 +163,18 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
     await load();
   }
 
+  async function finishRun(): Promise<void> {
+    setSubmitting(true);
+    try {
+      const summary = await api.finish(runId);
+      if (alive.current) setFinish(summary);
+    } catch (error) {
+      if (alive.current) setProblem(problemOf(error));
+    } finally {
+      if (alive.current) setSubmitting(false);
+    }
+  }
+
   async function dispute(): Promise<void> {
     if (result === null || disputing) return;
     setDisputing(true);
@@ -180,6 +195,7 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
     }
   }
 
+  if (finish !== null) return <FinishScreen result={finish} />;
   if (problem !== null) return <Problem problem={problem} />;
   if (current === null || progress === null) {
     return <section className="run-card run-state" aria-label="Загрузка задания">Подбираю задание…</section>;
@@ -246,8 +262,13 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
                   Я всё-таки прав
                 </button>
               )}
-              <button className="primary" type="button" onClick={() => void nextTask()}>
-                Следующее задание
+              <button
+                className="primary"
+                type="button"
+                disabled={submitting}
+                onClick={() => void (result.progress.done ? finishRun() : nextTask())}
+              >
+                {result.progress.done ? 'Завершить забег' : 'Следующее задание'}
               </button>
             </div>
           </div>

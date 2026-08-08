@@ -1,8 +1,14 @@
 import { RunScreen } from './RunScreen';
+import { TriageScreen } from './TriageScreen';
 
 export function App() {
-  const runId = Number(new URLSearchParams(window.location.search).get('runId'));
-  if (Number.isSafeInteger(runId) && runId > 0) return <RunScreen runId={runId} />;
+  const params = new URLSearchParams(window.location.search);
+  const runId = Number(params.get('runId'));
+  if (Number.isSafeInteger(runId) && runId > 0) {
+    return params.get('kind') === 'triage'
+      ? <TriageScreen runId={runId} />
+      : <RunScreen runId={runId} />;
+  }
 
   return (
     <main className="mx-auto flex min-h-screen max-w-3xl items-center px-6 py-12">

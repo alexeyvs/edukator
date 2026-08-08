@@ -35,6 +35,37 @@ export interface AnswerResponse {
   progress: RunProgress;
 }
 
+export interface RunTopicChange {
+  topicId: string;
+  title: string;
+  before: number;
+  after: number;
+}
+
+export interface ForecastSnapshot {
+  id: number;
+  subject: 'math' | 'russian' | 'english' | 'overall';
+  score: number;
+  band: number;
+  createdAt: string;
+}
+
+export interface FinishRunResponse {
+  runId: number;
+  total: number;
+  correct: number;
+  xp: number;
+  touchedTopics: RunTopicChange[];
+  closedTopics: RunTopicChange[];
+  declinedTopics: RunTopicChange[];
+  forecast: ForecastSnapshot;
+  forecastDelta?: number;
+}
+
+export type NextTriageResponse =
+  | { status: 'ok'; task: Omit<RunTask, 'hint'>; progress: RunProgress }
+  | { status: 'done'; total: number; target: number };
+
 export type DisputeStatus = 'open' | 'upheld' | 'rejected';
 
 export interface DisputeResponse {
@@ -52,6 +83,8 @@ export interface RunApi {
     durationMs: number;
   }): Promise<AnswerResponse>;
   dispute(attemptId: number): Promise<DisputeResponse>;
+  finish(runId: number): Promise<FinishRunResponse>;
+  triageNext(runId: number): Promise<NextTriageResponse>;
 }
 
 export class RunApiError extends Error {
@@ -99,4 +132,8 @@ export const browserRunApi: RunApi = {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ attempt_id: attemptId }),
   }),
+  finish: (runId) => request<FinishRunResponse>(`/api/run/${runId}/finish`, {
+    method: 'POST',
+  }),
+  triageNext: (runId) => request<NextTriageResponse>(`/api/triage/${runId}/next`),
 };

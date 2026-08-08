@@ -268,6 +268,160 @@ button:disabled {
   line-height: 1.6;
 }
 
+.finish-card h1 {
+  margin-bottom: 1rem;
+}
+
+.finish-kicker,
+.finish-lead {
+  color: #52625c;
+}
+
+.finish-kicker {
+  margin: 0 0 .45rem;
+  color: #0b7c5d;
+  font-size: .82rem;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.finish-lead {
+  max-width: 38rem;
+  margin: -.25rem 0 1.75rem;
+  line-height: 1.6;
+}
+
+.finish-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: .75rem;
+  margin: 1.75rem 0;
+}
+
+.finish-stats div {
+  padding: 1.15rem;
+  border-radius: 1.1rem;
+  background: #e3f1eb;
+}
+
+.finish-stats strong,
+.finish-stats span {
+  display: block;
+}
+
+.finish-stats strong {
+  color: #075b45;
+  font-size: 1.8rem;
+}
+
+.finish-stats span {
+  margin-top: .15rem;
+  color: #52625c;
+  font-size: .82rem;
+  font-weight: 700;
+}
+
+.finish-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+}
+
+.finish-grid section,
+.forecast-result {
+  padding: 1.2rem;
+  border: 1px solid #e2e8e3;
+  border-radius: 1.1rem;
+}
+
+.finish-grid h2 {
+  margin: 0 0 .8rem;
+  font-size: 1rem;
+}
+
+.topic-results {
+  margin: 0;
+  padding-left: 1.25rem;
+  line-height: 1.7;
+}
+
+.empty-result {
+  margin: 0;
+  color: #66756f;
+  line-height: 1.55;
+}
+
+.forecast-result {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  gap: .25rem 1rem;
+  margin-top: 1rem;
+  background: #fff8e7;
+}
+
+.forecast-result span {
+  color: #72520c;
+  font-weight: 750;
+}
+
+.forecast-result strong {
+  font-size: 1.75rem;
+}
+
+.forecast-result p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #52625c;
+}
+
+.triage-ranking {
+  display: grid;
+  gap: .65rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.triage-ranking li {
+  display: flex;
+  align-items: center;
+  gap: .9rem;
+  padding: .9rem 1rem;
+  border-radius: 1rem;
+  background: #f1f4f1;
+}
+
+.triage-ranking li > span {
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  border-radius: 50%;
+  color: white;
+  background: #075b45;
+  font-weight: 800;
+}
+
+.triage-ranking strong,
+.triage-ranking small {
+  display: block;
+}
+
+.triage-ranking small {
+  margin-top: .15rem;
+  color: #66756f;
+}
+
+.finish-home {
+  display: inline-block;
+  margin-top: 1.5rem;
+  padding: .85rem 1.2rem;
+  border-radius: .9rem;
+  text-decoration: none;
+}
+
 .state-mark {
   display: grid;
   width: 3rem;
@@ -293,5 +447,10 @@ button:disabled {
 
   .task-actions button {
     flex: 1 1 100%;
+  }
+
+  .finish-stats,
+  .finish-grid {
+    grid-template-columns: 1fr;
   }
 }

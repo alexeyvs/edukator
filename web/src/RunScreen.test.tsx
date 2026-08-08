@@ -6,7 +6,9 @@ import { RunScreen } from './RunScreen';
 import {
   RunApiError,
   type AnswerResponse,
+  type FinishRunResponse,
   type NextTaskResponse,
+  type NextTriageResponse,
   type RunApi,
 } from './run-api';
 import './test-setup';
@@ -42,6 +44,25 @@ function answer(correct = true): AnswerResponse {
   };
 }
 
+function finishSummary(): FinishRunResponse {
+  return {
+    runId: 9,
+    total: 12,
+    correct: 10,
+    xp: 245,
+    touchedTopics: [],
+    closedTopics: [],
+    declinedTopics: [],
+    forecast: {
+      id: 2,
+      subject: 'math',
+      score: 3.5,
+      band: 0.4,
+      createdAt: '2026-08-08T12:00:00.000Z',
+    },
+  };
+}
+
 function deferred<T>(): Promise<T> {
   return new Promise(() => undefined);
 }
@@ -51,6 +72,8 @@ function apiWith(overrides: Partial<RunApi> = {}): RunApi {
     next: vi.fn(() => deferred<NextTaskResponse>()),
     answer: vi.fn(() => Promise.resolve(answer())),
     dispute: vi.fn(() => Promise.resolve({ dispute_id: 7, status: 'rejected' as const })),
+    finish: vi.fn(() => deferred<FinishRunResponse>()),
+    triageNext: vi.fn(() => deferred<NextTriageResponse>()),
     ...overrides,
   };
 }
@@ -102,6 +125,28 @@ describe('экран забега', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Следующее задание' }));
     expect(await screen.findByRole('heading', { name: 'Следующее задание' })).toBeInTheDocument();
+  });
+
+  it('после целевого ответа закрывает забег и показывает финал', async () => {
+    const last = task(12, 'Последнее задание');
+    last.progress = { total: 11, correct: 9, target: 12, done: false };
+    const finalAnswer = answer(true);
+    finalAnswer.progress = { total: 12, correct: 10, target: 12, done: true };
+    const api = apiWith({
+      next: vi.fn(() => Promise.resolve(last)),
+      answer: vi.fn(() => Promise.resolve(finalAnswer)),
+      finish: vi.fn(() => Promise.resolve(finishSummary())),
+    });
+    render(<RunScreen runId={9} api={api} />);
+
+    await screen.findByRole('heading', { name: 'Последнее задание' });
+    fireEvent.change(screen.getByLabelText('Число'), { target: { value: '24' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Завершить забег' }));
+
+    expect(await screen.findByRole('heading', { name: 'Вот что получилось' })).toBeInTheDocument();
+    expect(api.finish).toHaveBeenCalledWith(9);
+    expect(api.next).toHaveBeenCalledTimes(1);
   });
 
   it('опрашивает спор до первого закрытого статуса с нарастающей паузой', async () => {

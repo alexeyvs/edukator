@@ -57,6 +57,8 @@ export interface FinishRunResult {
   xp: number;
   closedTopics: RunTopicChange[];
   declinedTopics: RunTopicChange[];
+  /** Все затронутые темы; финал триажа ранжирует их независимо от порогов. */
+  touchedTopics: RunTopicChange[];
   forecast: ForecastSnapshot;
   /** Нет у первого снимка: отсутствие истории не равно нулевому сдвигу. */
   forecastDelta?: number;
@@ -184,14 +186,20 @@ function topicChanges(
   db: Database,
   graph: TopicGraph,
   runId: number,
-): { closedTopics: RunTopicChange[]; declinedTopics: RunTopicChange[] } {
+): {
+  touchedTopics: RunTopicChange[];
+  closedTopics: RunTopicChange[];
+  declinedTopics: RunTopicChange[];
+} {
   const touched = db
     .prepare<[number], { topic_id: string }>(
       'SELECT DISTINCT topic_id FROM attempts WHERE run_id = ? ORDER BY topic_id',
     )
     .all(runId)
     .map((row) => row.topic_id);
-  if (touched.length === 0) return { closedTopics: [], declinedTopics: [] };
+  if (touched.length === 0) {
+    return { touchedTopics: [], closedTopics: [], declinedTopics: [] };
+  }
 
   const placeholders = touched.map(() => '?').join(', ');
   const rows = db
@@ -212,6 +220,7 @@ function topicChanges(
     byTopic.set(row.topic_id, history);
   }
 
+  const touchedTopics: RunTopicChange[] = [];
   const closedTopics: RunTopicChange[] = [];
   const declinedTopics: RunTopicChange[] = [];
   for (const topicId of touched) {
@@ -234,11 +243,12 @@ function topicChanges(
     if (before === undefined) continue;
 
     const change = { topicId, title: topic.title, before, after: state.mastery };
+    touchedTopics.push(change);
     if (before < GAP_MASTERY && state.mastery >= GAP_MASTERY) closedTopics.push(change);
     if (state.mastery < before) declinedTopics.push(change);
   }
 
-  return { closedTopics, declinedTopics };
+  return { touchedTopics, closedTopics, declinedTopics };
 }
 
 /**

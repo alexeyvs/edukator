@@ -3,7 +3,7 @@ import type { Database } from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { TopicGraph } from '../curriculum.js';
 import { SUBJECTS, type Subject } from '../db.js';
-import { startRun } from '../run.js';
+import { runProgress, startRun } from '../run.js';
 import { SessionError } from '../session-error.js';
 import { nextTriageTask } from '../triage.js';
 
@@ -99,6 +99,7 @@ export function registerTriageRoutes(app: FastifyInstance, options: TriageRoutes
       // клиенте не должна позволять подсмотреть её через ответ API.
       return reply.send({
         status: 'ok',
+        progress: runProgress(db, id),
         task: {
           id: result.task.id,
           topic_id: result.task.topicId,

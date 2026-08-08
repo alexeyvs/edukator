@@ -201,6 +201,10 @@ describe('жизненный цикл забега', () => {
     expect(result.total).toBe(3);
     expect(result.correct).toBe(2);
     expect(result.xp).toBe(55);
+    expect(result.touchedTopics).toEqual([
+      expect.objectContaining({ topicId: 'math.a', title: 'math.a' }),
+      expect.objectContaining({ topicId: 'math.b', title: 'math.b' }),
+    ]);
     expect(result.closedTopics).toEqual([
       {
         topicId: 'math.a',
