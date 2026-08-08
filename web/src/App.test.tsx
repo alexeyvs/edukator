@@ -15,6 +15,6 @@ describe('App', () => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => undefined)));
     render(<App />);
 
-    expect(screen.getByText('Эдукатор')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Эдукатор' })).toBeInTheDocument();
   });
 });
