@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { browserHomeApi } from './home-api';
+import { browserBossApi } from './boss-api';
 import { browserProfileApi } from './profile-api';
 import { browserRunApi, RunApiError } from './run-api';
 
@@ -85,6 +86,34 @@ describe('браузерные API-адаптеры', () => {
       })],
       ['/api/run/3/finish', { method: 'POST' }],
       ['/api/triage/4/next', undefined],
+    ]);
+  });
+
+  it('собирает boss-запросы без подсказок и с общим спором занятия', async () => {
+    const fetch = vi.fn().mockResolvedValue(response({ ok: true }));
+    vi.stubGlobal('fetch', fetch);
+
+    await browserBossApi.next(5);
+    await browserBossApi.answer({ runId: 5, taskId: 17, answer: '42', durationMs: 900 });
+    await browserBossApi.dispute(23);
+    await browserBossApi.concede(5);
+
+    expect(fetch.mock.calls).toEqual([
+      ['/api/boss/5/next', undefined],
+      ['/api/boss/5/answer', expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          task_id: 17,
+          answer: '42',
+          hint_used: false,
+          duration_ms: 900,
+        }),
+      })],
+      ['/api/session/dispute', expect.objectContaining({
+        method: 'POST',
+        body: '{"attempt_id":23}',
+      })],
+      ['/api/boss/5/concede', { method: 'POST' }],
     ]);
   });
 

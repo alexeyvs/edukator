@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { HomeScreen } from './HomeScreen';
+import { BossScreen } from './BossScreen';
 import { ProfileScreen } from './ProfileScreen';
 import { RunScreen } from './RunScreen';
 import { TriageScreen } from './TriageScreen';
@@ -47,9 +48,10 @@ export function App() {
   const runId = Number(params.get('runId'));
   let screen: ReactNode;
   if (Number.isSafeInteger(runId) && runId > 0) {
-    screen = params.get('kind') === 'triage'
+    const kind = params.get('kind');
+    screen = kind === 'triage'
       ? <TriageScreen runId={runId} />
-      : <RunScreen runId={runId} />;
+      : kind === 'boss' ? <BossScreen runId={runId} /> : <RunScreen runId={runId} />;
   } else if (params.get('screen') === 'profile') {
     screen = <ProfileScreen />;
   } else {

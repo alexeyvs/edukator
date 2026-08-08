@@ -38,4 +38,24 @@ describe('App', () => {
       .toBeInTheDocument();
     expect(screen.queryByLabelText('Загрузка задания')).not.toBeInTheDocument();
   });
+
+  it('маршрутизирует kind=boss отдельно от обычного забега и триажа', async () => {
+    window.history.replaceState({}, '', '/?runId=7&kind=boss');
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        name: 'Ученик',
+        interests: [],
+        examDate: null,
+        partnerName: 'Кекс',
+        introduction: 'Готовы.',
+      }),
+    })));
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'Пять подряд — и тема закрыта' }))
+      .toBeInTheDocument();
+    expect(screen.queryByText('Подбираю задание…')).not.toBeInTheDocument();
+  });
 });

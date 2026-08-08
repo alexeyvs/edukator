@@ -472,6 +472,56 @@ button:disabled {
   transition: width .25s ease;
 }
 
+.boss-progress {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: .45rem;
+}
+
+.boss-progress span {
+  height: .65rem;
+  border-radius: 999px;
+  background: #dce4dd;
+}
+
+.boss-progress span.complete {
+  background: linear-gradient(90deg, #0b7c5d, #e3a31b);
+}
+
+.boss-kicker {
+  color: #9a3f27;
+  font-size: .75rem;
+  font-weight: 850;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.boss-rules ul {
+  display: grid;
+  gap: .65rem;
+  margin: 0 0 1.75rem;
+  padding: 0;
+  color: #52625c;
+  line-height: 1.5;
+  list-style: none;
+}
+
+.boss-rules button {
+  min-height: 3rem;
+  padding: .75rem 1.2rem;
+  border-radius: .9rem;
+  font-weight: 800;
+}
+
+.boss-home-link {
+  display: inline-block;
+  margin-top: 1.5rem;
+  padding: .8rem 1.1rem;
+  border-radius: .9rem;
+  font-weight: 800;
+  text-decoration: none;
+}
+
 .run-card {
   padding: clamp(1.5rem, 5vw, 3.5rem);
   border: 1px solid rgb(7 91 69 / 10%);
