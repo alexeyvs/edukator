@@ -14,6 +14,7 @@
  * продолжать отдавать то, что уже лежит в банке.
  */
 import type { Database } from 'better-sqlite3';
+import { prepareNextBoss, type BossPreparationReport } from '../boss-prep.js';
 import type { Topic, TopicGraph } from '../curriculum.js';
 import { readProfile, type Profile } from '../db.js';
 import { activeTopics } from '../scheduler.js';
@@ -124,6 +125,8 @@ export interface CycleReport {
   refilled: RefillReport[];
   /** codex не запускается: следующий цикл откладывается с возрастающей паузой. */
   codexUnavailable: boolean;
+  /** Подготовка босса входит в тот же проход и тот же расчёт отступа. */
+  bossPreparation?: BossPreparationReport;
 }
 
 function defaultLog(message: string): void {
@@ -324,6 +327,18 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.run === undefined ? {} : { run: options.run }),
     });
+  const budget = options.budget ?? codexConcurrency;
+  const boss = await prepareNextBoss({
+    db,
+    graph,
+    produce,
+    budget,
+    ...(options.now === undefined ? {} : { now: options.now() }),
+    log,
+  });
+  if (boss.codexUnavailable) {
+    return { topics: [], refilled: [], codexUnavailable: true, bossPreparation: boss };
+  }
   const topics = activeTopics(db, graph, options.topics ?? WARM_TOPICS, options.now?.());
 
   const profile = readProfile(db);
@@ -345,7 +360,7 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
     maxBatches: options.maxBatches ?? MAX_BATCHES_PER_TOPIC,
     log,
     aborted: () => unavailable,
-    budget: options.budget ?? codexConcurrency,
+    budget,
   };
 
   await pool(hungry, concurrency, async (topic) => {
@@ -383,6 +398,11 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
     topics: topics.map((topic) => topic.id),
     refilled,
     codexUnavailable: unavailable,
+    ...(
+      boss.topicId === undefined
+        ? {}
+        : { bossPreparation: boss }
+    ),
   };
 }
 
@@ -403,10 +423,13 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
  * тогда, когда очередь пополняется.
  */
 export function everyRefillFailed(report: CycleReport): boolean {
-  return (
-    report.refilled.length > 0 &&
-    report.refilled.every((refill) => refill.error !== undefined && refill.stored === 0)
+  const bossFailed = report.bossPreparation?.error !== undefined
+    && report.bossPreparation.stored === 0;
+  const attempts = report.refilled.length + (bossFailed ? 1 : 0);
+  const ordinaryFailed = report.refilled.every(
+    (refill) => refill.error !== undefined && refill.stored === 0,
   );
+  return attempts > 0 && ordinaryFailed && (report.bossPreparation === undefined || bossFailed);
 }
 
 /**
