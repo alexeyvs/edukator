@@ -5,6 +5,8 @@ node_modules/
 .env
 content/cache/
 coverage/
+playwright-report/
+test-results/
 web/dist/
 .tmp/
 # `writeFileAtomic` кладёт временный файл рядом с целевым, то есть внутри

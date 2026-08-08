@@ -19,5 +19,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["server/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts", "*.config.ts"]
+  "include": ["server/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts", "e2e/**/*.ts", "*.config.ts"]
 }

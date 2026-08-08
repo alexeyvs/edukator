@@ -15,6 +15,7 @@
     "build-curriculum": "tsx scripts/build-curriculum.ts",
     "prefetch": "tsx scripts/prefetch.ts",
     "test": "npm run build:web && vitest run",
+    "test:e2e": "npm run build:web && playwright test",
     "coverage": "npm run build:web && vitest run --coverage",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
     "lint": "eslint .",
@@ -32,6 +33,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/vite": "^4.3.3",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
