@@ -10,7 +10,7 @@ import { loadCurriculum } from '../server/curriculum.js';
 import { storeTasks } from '../server/codex/bank.js';
 import type { DisputeContext, DisputeReview } from '../server/codex/dispute.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
-import { MAX_ANSWER_LENGTH } from '../server/routes/session.js';
+import { DISPUTE_RETRY_MAX_MS, MAX_ANSWER_LENGTH } from '../server/routes/session.js';
 import { MAX_CODEX_CONCURRENCY } from '../server/codex/worker.js';
 
 /** Карта из одной темы на предмет: без всех трёх файлов карта не грузится. */
@@ -473,6 +473,10 @@ describe('маршруты занятия', () => {
       expect(
         db.prepare<[], { status: string }>('SELECT status FROM disputes').get()?.status,
       ).toBe('open');
+    });
+
+    it('держит долгий предел автоматических повторов спора', () => {
+      expect(DISPUTE_RETRY_MAX_MS).toBe(15 * 60_000);
     });
 
     it('после перезапуска сам подхватывает оставшийся открытым спор', async () => {

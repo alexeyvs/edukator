@@ -52,6 +52,9 @@ const STATUS_BY_CODE: Record<SessionErrorCode, number> = {
  */
 export { MAX_ANSWER_LENGTH };
 
+/** Потолок отступа: при долгом отказе — не больше четырёх запусков в час. */
+export const DISPUTE_RETRY_MAX_MS = 15 * 60_000;
+
 /** Запуск фоновой работы: тесты подменяют её, чтобы дождаться разбора. */
 export type BackgroundRunner = (task: () => Promise<void>) => void;
 
@@ -137,6 +140,8 @@ export function registerSessionRoutes(
   const now = options.now ?? ((): Date => new Date());
   const budget = options.codexBudget ?? codexConcurrency;
   const disputeRetryMs = options.disputeRetryMs ?? 1_000;
+  // Короткие повторы быстро переживают случайный отказ, но постоянная поломка
+  // codex не должна запускать сотни внешних процессов в час на каждый спор.
 
   /**
    * Споры, разбор которых уже идёт. Без этого набора каждое повторное нажатие
@@ -198,7 +203,7 @@ export function registerSessionRoutes(
   function scheduleRetry(id: number): void {
     if (stopped || retryTimers.has(id)) return;
     const delay = retryDelays.get(id) ?? disputeRetryMs;
-    retryDelays.set(id, Math.min(delay * 2, disputeRetryMs * 16));
+    retryDelays.set(id, Math.min(delay * 2, DISPUTE_RETRY_MAX_MS));
     const timer = setTimeout(() => {
       retryTimers.delete(id);
       scheduleReview(id);
