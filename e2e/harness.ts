@@ -6,6 +6,7 @@ import type { FastifyInstance } from 'fastify';
 import { storeTasks } from '../server/codex/bank.js';
 import type { DisputeReviewer } from '../server/codex/dispute.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
+import type { TaskProducer } from '../server/codex/worker.js';
 import { openDatabase, SUBJECTS, writeProfile, type Subject } from '../server/db.js';
 import { buildServer } from '../server/index.js';
 
@@ -17,7 +18,17 @@ export interface E2eHarness {
   app: FastifyInstance;
   db: Database;
   url: string;
+  assertCodexNotCalled(): void;
+  prepareBoss(topicId: string): Promise<void>;
+  seedParentsDashboard(): void;
+  upholdDispute(): void;
   close(): Promise<void>;
+}
+
+interface HarnessOptions {
+  triagePassed?: Subject;
+  controlledWorker?: boolean;
+  controlledDispute?: boolean;
 }
 
 function writeCurriculum(directory: string): void {
@@ -107,8 +118,39 @@ function markTriagePassed(db: Database, subject: Subject): void {
   ).run(subject, `${subject}.1`, NOW.toISOString(), NOW.toISOString());
 }
 
+function bossTask(topicId: string, serial: number, position: number): GeneratedTask {
+  return {
+    instruction: `Босс ${topicId}: реши уникальное задание ${serial}.${position}.`,
+    material: `40 + ${position}`,
+    material_format: 'math',
+    choices: [],
+    answer: String(40 + position),
+    accept: [String(40 + position)],
+    hint: 'У босса подсказка не показывается.',
+    explain: `40 + ${position} = ${40 + position}.`,
+    joke: `Босс потерял деление номер ${position}.`,
+    difficulty: 2,
+  };
+}
+
+function controlledProducer(): TaskProducer {
+  let serial = 0;
+  return async ({ topic }) => {
+    serial += 1;
+    return Array.from({ length: 5 }, (_, index) => bossTask(topic.id, serial, index + 1));
+  };
+}
+
+async function waitUntil(check: () => boolean, label: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!check()) {
+    if (Date.now() >= deadline) throw new Error(`E2E не дождался состояния: ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 export async function startE2eHarness(
-  options: { triagePassed?: Subject } = {},
+  options: HarnessOptions = {},
 ): Promise<E2eHarness> {
   const tempDir = mkdtempSync(join(tmpdir(), 'edukator-e2e-'));
   const curriculumDir = join(tempDir, 'curriculum');
@@ -129,12 +171,22 @@ export async function startE2eHarness(
   process.env.EDUKATOR_DB = join(tempDir, 'edukator.db');
   process.env.PATH = `${binDir}:${previousPath ?? ''}`;
 
-  const review: DisputeReviewer = async () => ({
-    studentCorrect: true,
-    note: 'Ответ ученика равнозначен эталону.',
-  });
+  let releaseDispute: (() => void) | undefined;
+  const disputeGate = new Promise<void>((resolve) => { releaseDispute = resolve; });
+  const review: DisputeReviewer = async () => {
+    if (options.controlledDispute === true) await disputeGate;
+    return {
+      studentCorrect: true,
+      note: 'Ответ ученика равнозначен эталону.',
+    };
+  };
   const app = buildServer(curriculumDir, {
-    worker: false,
+    worker: options.controlledWorker === true
+      ? {
+          produce: controlledProducer(),
+          wait: async () => new Promise((resolve) => setTimeout(resolve, 10)),
+        }
+      : false,
     seedDir,
     review,
     now: () => NOW,
@@ -152,11 +204,76 @@ export async function startE2eHarness(
     if (options.triagePassed !== undefined) markTriagePassed(db, options.triagePassed);
     const url = await app.listen({ host: '127.0.0.1', port: 0 });
 
+    function assertCodexNotCalled(): void {
+      if (existsSync(codexMarker)) {
+        throw new Error('E2E вызвал настоящий путь codex вместо тестовой подмены');
+      }
+    }
+
     return {
       app,
       db,
       url,
+      assertCodexNotCalled,
+      async prepareBoss(topicId: string): Promise<void> {
+        db.prepare(
+          `UPDATE topic_state SET mastery = 0.76, confidence = 0.8, attempts = 4,
+             last_seen = ?, next_review = ? WHERE topic_id = ?`,
+        ).run(NOW.toISOString(), '2026-08-20T12:00:00.000Z', topicId);
+        await waitUntil(
+          () => db.prepare<[string], { status: string }>(
+            "SELECT status FROM boss_batches WHERE topic_id = ? AND status = 'ready'",
+          ).get(topicId)?.status === 'ready',
+          `готовый boss-батч ${topicId}`,
+        );
+      },
+      seedParentsDashboard(): void {
+        db.prepare(
+          `UPDATE topic_state SET mastery = 0.4, confidence = 0.8, attempts = 4,
+             last_seen = '2026-08-08T10:00:00.000Z', next_review = '2026-08-10T10:00:00.000Z'
+           WHERE topic_id IN ('math.1', 'russian.1', 'english.1')`,
+        ).run();
+        db.prepare(
+          `INSERT INTO forecast_snapshots (subject, score, band, created_at) VALUES
+             ('math', 3.4, 0.4, '2026-08-01T12:00:00.000Z'),
+             ('math', 3.3, 0.3, '2026-08-08T11:00:00.000Z'),
+             ('russian', 3.0, 0.5, '2026-08-01T12:00:00.000Z'),
+             ('english', 3.1, 0.5, '2026-08-01T12:00:00.000Z')`,
+        ).run();
+
+        const insertRun = db.prepare(
+          `INSERT INTO runs (subject, kind, topic_id, started_at, finished_at, total, correct)
+           VALUES (?, ?, ?, ?, ?, 1, ?)`,
+        );
+        const ordinary = Number(insertRun.run(
+          'math', 'run', 'math.1', '2026-08-07T09:00:00.000Z', '2026-08-07T09:10:00.000Z', 1,
+        ).lastInsertRowid);
+        const triage = Number(insertRun.run(
+          'russian', 'triage', 'russian.1', '2026-08-06T09:00:00.000Z', '2026-08-06T09:10:00.000Z', 1,
+        ).lastInsertRowid);
+        const boss = Number(insertRun.run(
+          'english', 'boss', 'english.1', '2026-08-08T09:00:00.000Z', '2026-08-08T09:10:00.000Z', 1,
+        ).lastInsertRowid);
+        db.prepare(
+          "INSERT INTO boss_batches (topic_id, run_id, status, created_at, activated_at, finished_at) VALUES ('english.1', ?, 'won', ?, ?, ?)",
+        ).run(boss, '2026-08-08T08:50:00.000Z', '2026-08-08T09:00:00.000Z', '2026-08-08T09:10:00.000Z');
+
+        const taskId = db.prepare<[string], { id: number }>(
+          'SELECT id FROM task_bank WHERE topic_id = ? ORDER BY id LIMIT 1',
+        );
+        const insertAttempt = db.prepare(
+          `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct, duration_ms, created_at)
+           VALUES (?, ?, ?, ?, 1, ?, ?)`,
+        );
+        insertAttempt.run(taskId.get('math.1')?.id, 'math.1', ordinary, '45', 60_000, '2026-08-07T09:05:00.000Z');
+        insertAttempt.run(taskId.get('russian.1')?.id, 'russian.1', triage, 'учебник', 120_000, '2026-08-06T09:05:00.000Z');
+        insertAttempt.run(taskId.get('english.1')?.id, 'english.1', boss, 'окно', 180_000, '2026-08-08T09:05:00.000Z');
+      },
+      upholdDispute(): void {
+        releaseDispute?.();
+      },
       async close(): Promise<void> {
+        releaseDispute?.();
         await app.close();
         db.close();
         if (previousDatabase === undefined) delete process.env.EDUKATOR_DB;

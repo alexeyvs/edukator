@@ -475,6 +475,7 @@ export function buildServer(
     void app.register(fastifyStatic, {
       root: webDist,
     });
+    app.get('/parents', (_request, reply) => reply.sendFile('index.html'));
   }
 
   return app;

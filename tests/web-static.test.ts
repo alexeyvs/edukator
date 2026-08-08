@@ -37,6 +37,16 @@ describe('статика интерфейса', () => {
     expect(health.json()).toMatchObject({ status: 'ok' });
   });
 
+  it('отдаёт SPA на прямом маршруте родительской сводки', async () => {
+    app = buildServer(undefined, { worker: false, webDist });
+
+    const page = await app.inject({ method: 'GET', url: '/parents' });
+
+    expect(page.statusCode).toBe(200);
+    expect(page.headers['content-type']).toContain('text/html');
+    expect(page.body).toContain('Собранный интерфейс');
+  });
+
   it('объясняет ошибку запуска, когда интерфейс не собран', () => {
     const missing = join(tempDir, 'нет-сборки');
 

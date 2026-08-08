@@ -1,6 +1,22 @@
 import { expect, test } from '@playwright/test';
 import { startE2eHarness } from './harness.js';
 
+async function startReadyBoss(page: import('@playwright/test').Page, url: string): Promise<void> {
+  await page.goto(url);
+  const topic = page.locator('.topic-map li').filter({
+    has: page.getByText('Тема math 1', { exact: true }),
+  });
+  await expect(topic).toContainText('Можно вызвать босса');
+  await topic.getByRole('button', { name: 'Вызвать босса' }).click();
+  await expect(page.getByRole('heading', { name: 'Пять подряд — и тема закрыта' })).toBeVisible();
+  await page.getByRole('button', { name: 'Начать бой' }).click();
+}
+
+async function answerBoss(page: import('@playwright/test').Page, answer: string): Promise<void> {
+  await page.getByLabel('Число').fill(answer);
+  await page.getByRole('button', { name: 'Проверить' }).click();
+}
+
 test('полный забег из двенадцати заданий приводит на финальный экран', async ({ page }) => {
   const harness = await startE2eHarness({ triagePassed: 'math' });
   try {
@@ -122,6 +138,111 @@ test('триаж проходит от старта до ранжировани�
     await expect(page.locator('.triage-ranking li')).toHaveCount(12);
     await expect(page.locator('.triage-ranking')).toContainText('Тема math 1');
     await expect(page.locator('.triage-ranking')).toContainText('Тема math 12');
+  } finally {
+    await harness.close();
+  }
+});
+
+test('готовый босс переживает reload, закрывает тему после 5 из 5 и убирает её из плана', async ({ page }) => {
+  const harness = await startE2eHarness({ triagePassed: 'math', controlledWorker: true });
+  try {
+    await harness.prepareBoss('math.1');
+    const mastery = harness.db.prepare<[string], { mastery: number }>(
+      'SELECT mastery FROM topic_state WHERE topic_id = ?',
+    ).get('math.1')?.mastery;
+    expect(mastery).toBeGreaterThan(0.75);
+
+    await startReadyBoss(page, harness.url);
+    await expect(page.locator('.task-meta')).toContainText('задание 1 из 5');
+    await answerBoss(page, '41');
+    await expect(page.locator('.verdict')).toContainText('Верно');
+    await page.getByRole('button', { name: 'Дальше' }).click();
+    await expect(page.locator('.task-meta')).toContainText('задание 2 из 5');
+
+    await page.reload();
+    await expect(page.getByRole('heading', { name: 'Пять подряд — и тема закрыта' })).toBeVisible();
+    await page.getByRole('button', { name: 'Начать бой' }).click();
+    await expect(page.locator('.task-meta')).toContainText('задание 2 из 5');
+
+    for (let position = 2; position <= 5; position += 1) {
+      await answerBoss(page, String(40 + position));
+      if (position < 5) {
+        await expect(page.locator('.verdict')).toContainText('Верно');
+        await page.getByRole('button', { name: 'Дальше' }).click();
+      }
+    }
+
+    await expect(page.getByRole('heading', { name: 'Босс побеждён' })).toBeVisible();
+    await page.getByRole('link', { name: 'На главный экран' }).click();
+    const closedTopic = page.locator('.topic-map li').filter({
+      has: page.getByText('Тема math 1', { exact: true }),
+    });
+    await expect(closedTopic).toContainText('Закрыта');
+    await expect(closedTopic).toHaveClass(/topic-closed/);
+    await expect(page.locator('.plan-cards article').filter({
+      has: page.getByText('Тема math 1', { exact: true }),
+    })).toHaveCount(0);
+    harness.assertCodexNotCalled();
+  } finally {
+    await harness.close();
+  }
+});
+
+test('upheld-спор оставляет бой на достигнутой позиции и позволяет победить', async ({ page }) => {
+  const harness = await startE2eHarness({
+    triagePassed: 'math',
+    controlledWorker: true,
+    controlledDispute: true,
+  });
+  try {
+    await harness.prepareBoss('math.1');
+    await startReadyBoss(page, harness.url);
+    await answerBoss(page, 'сорок один');
+    await expect(page.locator('.verdict')).toContainText('Ошибка');
+    await page.getByRole('button', { name: 'Я всё-таки прав' }).click();
+    await expect(page.getByRole('status')).toContainText('Разбираюсь');
+    await expect.poll(() => harness.db.prepare<[], { status: string }>(
+      'SELECT status FROM disputes ORDER BY id DESC LIMIT 1',
+    ).get()?.status).toBe('open');
+
+    harness.upholdDispute();
+    await expect(page.locator('.task-meta')).toContainText('задание 2 из 5');
+    await expect(page.locator('.boss-progress')).toHaveAttribute('aria-label', 'Прогресс босса: 1 из 5');
+
+    for (let position = 2; position <= 5; position += 1) {
+      await answerBoss(page, String(40 + position));
+      if (position < 5) await page.getByRole('button', { name: 'Дальше' }).click();
+    }
+    await expect(page.getByRole('heading', { name: 'Босс побеждён' })).toBeVisible();
+    harness.assertCodexNotCalled();
+  } finally {
+    await harness.close();
+  }
+});
+
+test('/parents напрямую и после reload показывает прогнозы, время, темы, ленту и флаги', async ({ page }) => {
+  const harness = await startE2eHarness();
+  try {
+    harness.seedParentsDashboard();
+    await page.goto(`${harness.url}/parents`);
+    await expect(page.getByRole('heading', { name: 'Картина подготовки без приукрашивания' })).toBeVisible();
+    await expect(page.locator('.parents-forecasts article')).toHaveCount(3);
+    await expect(page.locator('.parents-forecasts')).toContainText('Диапазон');
+    await expect(page.locator('.parents-forecasts')).toContainText('За 7 дней:');
+    await expect(page.locator('.parents-time-total')).toContainText('630 мин');
+    await expect(page.locator('.parents-time-total')).toContainText('6 мин');
+    await expect(page.locator('.parents-bars > div')).toHaveCount(7);
+    await expect(page.locator('.parents-gaps')).toContainText('Тема math 1');
+    await expect(page.locator('.parents-activity')).toContainText('Обычный забег');
+    await expect(page.locator('.parents-activity')).toContainText('Триаж');
+    await expect(page.locator('.parents-activity')).toContainText('Босс');
+    await expect(page.locator('.parents-flags')).toContainText('не растёт пять дней');
+
+    await page.reload();
+    await expect(page).toHaveURL(`${harness.url}/parents`);
+    await expect(page.getByRole('heading', { name: 'Картина подготовки без приукрашивания' })).toBeVisible();
+    await expect(page.locator('.parents-time-total')).toContainText('630 мин');
+    harness.assertCodexNotCalled();
   } finally {
     await harness.close();
   }
