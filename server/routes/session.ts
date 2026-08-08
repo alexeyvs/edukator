@@ -11,7 +11,7 @@ import type { Database } from 'better-sqlite3';
 import type { TopicGraph } from '../curriculum.js';
 import { disputeReviewer, type DisputeReviewer } from '../codex/dispute.js';
 import { MAX_ANSWER_LENGTH } from '../codex/prompt.js';
-import { MAX_CODEX_CONCURRENCY } from '../codex/worker.js';
+import { codexConcurrency, type CodexConcurrency } from '../codex/concurrency.js';
 import {
   nextTask,
   openDispute,
@@ -64,6 +64,8 @@ export interface SessionRoutesOptions {
   seedDir?: string;
   /** Соединение всё ещё привязано к текущему файлу базы. */
   available?: () => boolean;
+  /** Общий с воркером бюджет вызовов codex. */
+  codexBudget?: CodexConcurrency;
 }
 
 function defaultLog(message: string): void {
@@ -128,6 +130,7 @@ export function registerSessionRoutes(
   const log = options.log ?? defaultLog;
   const background: BackgroundRunner = options.background ?? ((task) => void task());
   const now = options.now ?? ((): Date => new Date());
+  const budget = options.codexBudget ?? codexConcurrency;
 
   /**
    * Споры, разбор которых уже идёт. Без этого набора каждое повторное нажатие
@@ -147,7 +150,7 @@ export function registerSessionRoutes(
    * занимает минуты. Ошибка разбора спор не закрывает — он остаётся открытым, и
    * следующее нажатие кнопки ставит его на разбор заново.
    *
-   * Одновременных разборов не больше `MAX_CODEX_CONCURRENCY`: набор `reviewing`
+   * Одновременных разборов вместе с воркером не больше общего бюджета: набор `reviewing`
    * держит только повтор по одному и тому же спору, а разных открытых споров
    * бывает сколько угодно, и каждый — это ещё один процесс codex на минуты.
    * Сверх предела спор остаётся открытым и попадёт на разбор со следующим
@@ -155,14 +158,14 @@ export function registerSessionRoutes(
    */
   function scheduleReview(id: number): void {
     if (reviewing.has(id)) return;
-    if (reviewing.size >= MAX_CODEX_CONCURRENCY) {
-      log(`разбор спора ${id} отложен: уже идёт ${reviewing.size} разбор(ов)`);
+    const pending = budget.tryRun(() => resolveDispute(db, graph, id, review));
+    if (pending === undefined) {
+      log(`разбор спора ${id} отложен: заняты все ${budget.limit} места codex`);
       return;
     }
     reviewing.add(id);
+    pendingReviews.add(pending);
     background(async () => {
-      const pending = resolveDispute(db, graph, id, review);
-      pendingReviews.add(pending);
       try {
         await pending;
       } catch (error) {

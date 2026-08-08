@@ -22,6 +22,8 @@ import {
   registerUnavailableTriage,
 } from './routes/triage.js';
 import { registerProfileRoutes, registerUnavailableProfile } from './routes/profile.js';
+import { codexConcurrency, type CodexConcurrency } from './codex/concurrency.js';
+import { startWorker, type StartWorkerOptions, type WorkerHandle } from './codex/worker.js';
 
 export { databasePath };
 
@@ -214,6 +216,10 @@ export type CurriculumStatus = 'ok' | 'error';
 export type ServerOptions = Omit<SessionRoutesOptions, 'db' | 'graph' | 'available'> & {
   /** Подменяется только в тестах ошибочной конфигурации. */
   personaPath?: string;
+  /** Подмена настроек воркера в тестах; false отключает его для служебного сервера. */
+  worker?: false | Omit<StartWorkerOptions, 'db' | 'graph' | 'budget'>;
+  /** Подменяемый общий бюджет; рабочий сервер использует процессный singleton. */
+  codexBudget?: CodexConcurrency;
 };
 
 export function buildServer(
@@ -306,12 +312,15 @@ export function buildServer(
   const session: DatabaseStatus = graph !== undefined && opened !== undefined ? 'ok' : 'error';
   if (graph !== undefined && opened !== undefined) {
     const sessionDb = opened.db;
+    const budget = options.codexBudget ?? codexConcurrency;
+    let worker: WorkerHandle | undefined;
     const sessionAvailable = (): boolean => fileIdentity(databasePath()) === opened.file;
     const waitForReviews = registerSessionRoutes(app, {
       ...options,
       db: sessionDb,
       graph,
       available: sessionAvailable,
+      codexBudget: budget,
     });
     registerRunRoutes(app, {
       db: sessionDb,
@@ -330,8 +339,22 @@ export function buildServer(
       available: sessionAvailable,
       ...(options.personaPath === undefined ? {} : { personaPath: options.personaPath }),
     });
+    app.addHook('onListen', async () => {
+      if (options.worker === false || worker !== undefined) return;
+      worker = startWorker({
+        db: sessionDb,
+        graph,
+        budget,
+        ...(options.log === undefined ? {} : { log: options.log }),
+        ...(options.worker ?? {}),
+      });
+    });
     app.addHook('onClose', async () => {
-      await waitForReviews();
+      worker?.stop();
+      await Promise.allSettled([
+        ...(worker === undefined ? [] : [worker.done]),
+        waitForReviews(),
+      ]);
       sessionDb.close();
     });
   } else {

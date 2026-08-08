@@ -22,6 +22,11 @@ import { CodexUnavailableError, type CodexRunner } from './client.js';
 import { generateTaskBatch } from './generate.js';
 import type { GeneratedTask } from './task-schema.js';
 import { validateTaskBatch } from './validate.js';
+import {
+  codexConcurrency,
+  MAX_CODEX_CONCURRENCY,
+  type CodexConcurrency,
+} from './concurrency.js';
 
 /** Запас заданий на активную тему, до которого доливает воркер. */
 export const QUEUE_TARGET = 8;
@@ -33,7 +38,7 @@ export const REFILL_BELOW = 4;
  * Предел одновременных вызовов codex. Пополнение одной темы — два вызова
  * подряд (генератор, затем проверяющий), поэтому предел считается по темам.
  */
-export const MAX_CODEX_CONCURRENCY = 2;
+export { MAX_CODEX_CONCURRENCY } from './concurrency.js';
 
 /** Сколько ближайших забегов планировщика греется про запас. */
 export const WARM_TOPICS = 3;
@@ -97,6 +102,8 @@ export interface WorkerOptions {
   model?: string;
   /** Подменяемый вызов codex: тесты передают заглушку. */
   run?: CodexRunner;
+  /** Общий с разборами споров бюджет процесса. */
+  budget?: CodexConcurrency;
 }
 
 export interface RefillReport {
@@ -207,6 +214,7 @@ interface RefillContext {
   maxBatches: number;
   log: WorkerLog;
   aborted: () => boolean;
+  budget: CodexConcurrency;
 }
 
 /**
@@ -225,14 +233,16 @@ async function refillTopic(topic: Topic, context: RefillContext): Promise<Refill
 
     let tasks: GeneratedTask[];
     try {
-      tasks = await context.produce({
-        topic,
-        // Целевая сложность — базовая сложность темы: очередь греется заранее,
-        // когда точность ученика по теме ещё неизвестна.
-        difficulty: topic.difficulty,
-        recent: recentQuestions(db, topic.id),
-        profile: context.profile,
-      });
+      tasks = await context.budget.run(() =>
+        context.produce({
+          topic,
+          // Целевая сложность — базовая сложность темы: очередь греется заранее,
+          // когда точность ученика по теме ещё неизвестна.
+          difficulty: topic.difficulty,
+          recent: recentQuestions(db, topic.id),
+          profile: context.profile,
+        }),
+      );
     } catch (error) {
       if (error instanceof CodexUnavailableError) throw error;
       const message = (error as Error).message;
@@ -336,6 +346,7 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
     maxBatches: options.maxBatches ?? MAX_BATCHES_PER_TOPIC,
     log,
     aborted: () => unavailable,
+    budget: options.budget ?? codexConcurrency,
   };
 
   await pool(hungry, concurrency, async (topic) => {
