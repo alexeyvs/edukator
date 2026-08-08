@@ -21,6 +21,7 @@ import {
   registerTriageRoutes,
   registerUnavailableTriage,
 } from './routes/triage.js';
+import { registerProfileRoutes, registerUnavailableProfile } from './routes/profile.js';
 
 export { databasePath };
 
@@ -210,7 +211,10 @@ export const DEFAULT_PORT = 3000;
 export type CurriculumStatus = 'ok' | 'error';
 
 /** Настройки занятия, которые тесты подменяют: разбирающий спор и запуск фона. */
-export type ServerOptions = Omit<SessionRoutesOptions, 'db' | 'graph' | 'available'>;
+export type ServerOptions = Omit<SessionRoutesOptions, 'db' | 'graph' | 'available'> & {
+  /** Подменяется только в тестах ошибочной конфигурации. */
+  personaPath?: string;
+};
 
 export function buildServer(
   curriculumDir: string = CURRICULUM_DIR,
@@ -321,6 +325,11 @@ export function buildServer(
       available: sessionAvailable,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
+    registerProfileRoutes(app, {
+      db: sessionDb,
+      available: sessionAvailable,
+      ...(options.personaPath === undefined ? {} : { personaPath: options.personaPath }),
+    });
     app.addHook('onClose', async () => {
       await waitForReviews();
       sessionDb.close();
@@ -335,6 +344,10 @@ export function buildServer(
       graph === undefined ? 'карта тем не загружена' : 'база недоступна',
     );
     registerUnavailableTriage(
+      app,
+      graph === undefined ? 'карта тем не загружена' : 'база недоступна',
+    );
+    registerUnavailableProfile(
       app,
       graph === undefined ? 'карта тем не загружена' : 'база недоступна',
     );

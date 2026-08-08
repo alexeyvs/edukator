@@ -172,6 +172,20 @@ export function readPersona(path: string = PERSONA_PATH): string {
   return trimmed;
 }
 
+/**
+ * Текст первого экрана живёт в той же персоне, что и промпт. Иначе
+ * после правки тона экран и генератор разъедутся молча.
+ */
+export function readPersonaIntroduction(path: string = PERSONA_PATH): string {
+  const persona = readPersona(path);
+  const match = /^## Знакомство\s*$\n([\s\S]*?)(?=^##\s|(?![\s\S]))/mu.exec(persona);
+  const introduction = match?.[1]?.trim();
+  if (introduction === undefined || introduction === '') {
+    throw new Error(`В персоне ${path} нет непустого раздела «## Знакомство»`);
+  }
+  return introduction;
+}
+
 function cleanItems(values: readonly string[]): string[] {
   return values.map((value) => value.trim().slice(0, MAX_ITEM_LENGTH)).filter((value) => value !== '');
 }
