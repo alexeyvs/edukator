@@ -29,6 +29,11 @@ export interface StoreTasksResult {
   duplicates: GeneratedTask[];
 }
 
+export interface ReserveBossTasksResult extends StoreTasksResult {
+  /** Полный набор связан с батчем и может быть активирован. */
+  ready: boolean;
+}
+
 export interface TakeTaskOptions {
   /**
    * Желаемая сложность 1-3. Точного совпадения не требуется: пустая очередь
@@ -54,6 +59,14 @@ interface TaskRow {
   explain: string | null;
   joke: string | null;
   difficulty: number;
+}
+
+interface PreparedTask {
+  task: GeneratedTask;
+  prompt: string;
+  fingerprint: string;
+  choices: string;
+  accept: string;
 }
 
 function ensureTopic(db: Database, topicId: string): void {
@@ -138,6 +151,86 @@ function toBankTaskOrReject(db: Database, row: TaskRow): BankTask {
 const TASK_COLUMNS = `id, topic_id, question, instruction, material, material_format, choices,
   answer, accept, hint, explain, joke, difficulty`;
 
+function prepareTasks(tasks: readonly GeneratedTask[]): PreparedTask[] {
+  return tasks.map((task) => {
+    const prompt = taskPromptText(task);
+    const fingerprint = questionFingerprint(prompt);
+    if (fingerprint === '') {
+      throw new Error(`Банк заданий: формулировка «${prompt}» пуста после нормализации`);
+    }
+    return {
+      task,
+      prompt,
+      fingerprint,
+      choices: JSON.stringify(task.choices),
+      accept: JSON.stringify(task.accept),
+    };
+  });
+}
+
+type InsertStatus = 'valid' | 'boss_reserved';
+
+function insertPreparedTasks(
+  db: Database,
+  topicId: string,
+  prepared: readonly PreparedTask[],
+  status: InsertStatus,
+): StoreTasksResult {
+  const insert = db.prepare<
+    {
+      topicId: string;
+      question: string;
+      instruction: string | null;
+      material: string | null;
+      materialFormat: MaterialFormat | null;
+      choices: string;
+      answer: string;
+      accept: string;
+      hint: string;
+      explain: string;
+      joke: string;
+      difficulty: number;
+      status: InsertStatus;
+      fingerprint: string;
+    },
+    { id: number }
+  >(
+    `INSERT INTO task_bank
+       (topic_id, question, instruction, material, material_format, choices,
+        answer, accept, hint, explain, joke, difficulty, status, fingerprint)
+     VALUES (@topicId, @question, @instruction, @material, @materialFormat, @choices,
+             @answer, @accept, @hint, @explain, @joke, @difficulty, @status, @fingerprint)
+     ON CONFLICT DO NOTHING
+     RETURNING id`,
+  );
+
+  const stored: BankTask[] = [];
+  const duplicates: GeneratedTask[] = [];
+  for (const item of prepared) {
+    const { task, fingerprint, prompt } = item;
+    const row = insert.get({
+      topicId,
+      question: prompt,
+      instruction: task.instruction,
+      material: task.material,
+      materialFormat: task.material_format,
+      choices: item.choices,
+      answer: task.answer,
+      accept: item.accept,
+      hint: task.hint,
+      explain: task.explain,
+      joke: task.joke,
+      difficulty: task.difficulty,
+      status,
+      fingerprint,
+    });
+
+    if (row === undefined) duplicates.push(task);
+    else stored.push({ ...task, question: prompt, accept: [...task.accept], id: row.id, topicId });
+  }
+  return { stored, duplicates };
+}
+
 /**
  * Кладёт провалидированные задания в банк и отдельно возвращает отсеянные
  * повторы. Батч пишется одной транзакцией: половина батча в базе и ошибка
@@ -148,74 +241,89 @@ export function storeTasks(
   topicId: string,
   tasks: readonly GeneratedTask[],
 ): StoreTasksResult {
-  const prepared = tasks.map((task) => {
-    const prompt = taskPromptText(task);
-    const fingerprint = questionFingerprint(prompt);
-    if (fingerprint === '') {
-      throw new Error(`Банк заданий: формулировка «${prompt}» пуста после нормализации`);
-    }
-    return { task, fingerprint, prompt };
-  });
-
-  // `ON CONFLICT DO NOTHING` вместо «прочитать отпечатки, потом вставить»:
-  // проверка и запись — один оператор, и параллельный воркер не может
-  // проскочить между ними с тем же заданием.
-  const insert = db.prepare<
-    {
-      topicId: string;
-      question: string;
-      instruction: string | null;
-      material: string | null;
-      materialFormat: MaterialFormat | null;
-      choices: string | null;
-      answer: string;
-      accept: string;
-      hint: string;
-      explain: string;
-      joke: string;
-      difficulty: number;
-      fingerprint: string;
-    },
-    { id: number }
-  >(
-    `INSERT INTO task_bank
-       (topic_id, question, instruction, material, material_format, choices,
-        answer, accept, hint, explain, joke, difficulty, status, fingerprint)
-     VALUES (@topicId, @question, @instruction, @material, @materialFormat, @choices,
-             @answer, @accept, @hint, @explain, @joke, @difficulty, 'valid', @fingerprint)
-     ON CONFLICT DO NOTHING
-     RETURNING id`,
-  );
+  const prepared = prepareTasks(tasks);
 
   return db.transaction((): StoreTasksResult => {
     ensureTopic(db, topicId);
 
-    const stored: BankTask[] = [];
-    const duplicates: GeneratedTask[] = [];
+    return insertPreparedTasks(db, topicId, prepared, 'valid');
+  }).immediate();
+}
 
-    for (const { task, fingerprint, prompt } of prepared) {
-      const row = insert.get({
-        topicId,
-        question: prompt,
-        instruction: task.instruction,
-        material: task.material,
-        materialFormat: task.material_format,
-        choices: JSON.stringify(task.choices),
-        answer: task.answer,
-        accept: JSON.stringify(task.accept),
-        hint: task.hint,
-        explain: task.explain,
-        joke: task.joke,
-        difficulty: task.difficulty,
-        fingerprint,
-      });
+/**
+ * Резервирует ровно пять свежих заданий для уже созданного `preparing`-батча.
+ * Связи, строки банка и переход в `ready` фиксируются одной транзакцией.
+ */
+export function reserveBossTasks(
+  db: Database,
+  batchId: number,
+  tasks: readonly GeneratedTask[],
+): ReserveBossTasksResult {
+  const prepared = prepareTasks(tasks);
 
-      if (row === undefined) duplicates.push(task);
-      else stored.push({ ...task, question: prompt, accept: [...task.accept], id: row.id, topicId });
+  return db.transaction((): ReserveBossTasksResult => {
+    const batch = db.prepare<[number], { topic_id: string; status: string }>(
+      'SELECT topic_id, status FROM boss_batches WHERE id = ?',
+    ).get(batchId);
+    if (batch === undefined) throw new Error(`Банк заданий: boss-батч ${batchId} не найден`);
+    if (batch.status !== 'preparing') {
+      throw new Error(`Банк заданий: boss-батч ${batchId} не готовится (${batch.status})`);
+    }
+    ensureTopic(db, batch.topic_id);
+
+    const result = insertPreparedTasks(db, batch.topic_id, prepared, 'boss_reserved');
+    if (tasks.length !== 5 || result.stored.length !== 5 || result.duplicates.length > 0) {
+      if (result.stored.length > 0) {
+        const ids = result.stored.map(({ id }) => id);
+        const placeholders = ids.map(() => '?').join(', ');
+        db.prepare(`UPDATE task_bank SET status = 'rejected' WHERE id IN (${placeholders})`).run(...ids);
+      }
+      db.prepare("UPDATE boss_batches SET status = 'failed' WHERE id = ? AND status = 'preparing'")
+        .run(batchId);
+      return { stored: [], duplicates: result.duplicates, ready: false };
     }
 
-    return { stored, duplicates };
+    const link = db.prepare(
+      'INSERT INTO boss_tasks (batch_id, task_id, position) VALUES (?, ?, ?)',
+    );
+    result.stored.forEach(({ id }, index) => link.run(batchId, id, index + 1));
+    db.prepare("UPDATE boss_batches SET status = 'ready' WHERE id = ? AND status = 'preparing'")
+      .run(batchId);
+    return { ...result, ready: true };
   }).immediate();
+}
+
+/** Читает только запрошенную позицию батча и не повторяет уже отвеченное задание. */
+export function bossTaskAtPosition(db: Database, batchId: number, position: number): BankTask | null {
+  if (!Number.isInteger(position) || position < 1 || position > 5) {
+    throw new Error(`Банк заданий: позиция босса должна быть от 1 до 5, получено ${position}`);
+  }
+  const result = db.transaction((): { task: BankTask | null; error?: Error } => {
+    const row = db.prepare<[number, number], TaskRow>(
+      `SELECT ${TASK_COLUMNS.replaceAll(/\bid\b/gu, 'task_bank.id')}
+         FROM boss_tasks
+         JOIN task_bank ON task_bank.id = boss_tasks.task_id
+        WHERE boss_tasks.batch_id = ? AND boss_tasks.position = ?
+          AND task_bank.status = 'boss_reserved'
+          AND NOT EXISTS (SELECT 1 FROM attempts WHERE attempts.task_id = task_bank.id)`,
+    ).get(batchId, position);
+    if (row === undefined) return { task: null };
+    try {
+      return { task: toBankTask(row) };
+    } catch (error) {
+      db.prepare(
+        `UPDATE task_bank SET status = 'rejected'
+          WHERE id IN (SELECT task_id FROM boss_tasks WHERE batch_id = ?)`,
+      ).run(batchId);
+      db.prepare(
+        `UPDATE boss_batches SET status = 'failed'
+          WHERE id = ? AND status IN ('preparing', 'ready', 'active')`,
+      ).run(batchId);
+      return { task: null, error: error instanceof Error ? error : new Error(String(error)) };
+    }
+  }).immediate();
+  if (result.error !== undefined) throw result.error;
+  return result.task;
 }
 
 /**

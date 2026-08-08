@@ -5,9 +5,11 @@ import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import { openDatabase } from '../server/db.js';
 import {
+  bossTaskAtPosition,
   countAvailable,
   issuedTask,
   recentQuestions,
+  reserveBossTasks,
   storeTasks,
   takeTask,
 } from '../server/codex/bank.js';
@@ -33,6 +35,12 @@ function batch(count: number, difficulty = 2): GeneratedTask[] {
   return Array.from({ length: count }, (_, index) =>
     task({ instruction: `Задание номер ${index + 1}: сколько будет ${index + 1} + 2?`, difficulty }),
   );
+}
+
+function preparingBatch(db: Database): number {
+  return db.prepare<[string], { id: number }>(
+    "INSERT INTO boss_batches (topic_id, status) VALUES (?, 'preparing') RETURNING id",
+  ).get(TOPIC)?.id ?? 0;
 }
 
 describe('банк заданий', () => {
@@ -228,6 +236,121 @@ describe('банк заданий', () => {
         /формулировка.*пуста/i,
       );
       expect(countAvailable(db, TOPIC)).toBe(0);
+    });
+  });
+
+  describe('резерв босса', () => {
+    it('сохраняет контракт обычной вставки и атомарной выдачи', () => {
+      const ordinary = task({ instruction: 'Обычный контракт: сколько будет 6 + 7?' });
+
+      expect(storeTasks(db, TOPIC, [ordinary])).toMatchObject({
+        duplicates: [],
+        stored: [{ question: 'Обычный контракт: сколько будет 6 + 7?', topicId: TOPIC }],
+      });
+      expect(takeTask(db, TOPIC)).toMatchObject({
+        question: 'Обычный контракт: сколько будет 6 + 7?',
+        answer: '4',
+        accept: ['4', 'четыре'],
+      });
+      expect(takeTask(db, TOPIC)).toBeNull();
+    });
+
+    it('атомарно связывает пять позиций и не смешивает их с обычной очередью', () => {
+      storeTasks(db, TOPIC, [task({ instruction: 'Обычная очередь: сколько будет 10 + 1?' })]);
+      const batchId = preparingBatch(db);
+
+      const result = reserveBossTasks(db, batchId, batch(5));
+
+      expect(result.ready).toBe(true);
+      expect(result.stored).toHaveLength(5);
+      expect(db.prepare('SELECT status FROM boss_batches WHERE id = ?').get(batchId))
+        .toEqual({ status: 'ready' });
+      expect(db.prepare(
+        `SELECT boss_tasks.position, task_bank.status
+           FROM boss_tasks JOIN task_bank ON task_bank.id = boss_tasks.task_id
+          WHERE boss_tasks.batch_id = ? ORDER BY boss_tasks.position`,
+      ).all(batchId)).toEqual([1, 2, 3, 4, 5].map((position) => ({
+        position, status: 'boss_reserved',
+      })));
+      expect(countAvailable(db, TOPIC)).toBe(1);
+      expect(takeTask(db, TOPIC)?.question).toBe('Обычная очередь: сколько будет 10 + 1?');
+      expect(takeTask(db, TOPIC)).toBeNull();
+    });
+
+    it('читает только указанную позицию и не повторяет уже отвеченную', () => {
+      const batchId = preparingBatch(db);
+      reserveBossTasks(db, batchId, batch(5));
+
+      expect(bossTaskAtPosition(db, batchId, 2)?.question).toBe(
+        'Задание номер 2: сколько будет 2 + 2?',
+      );
+      expect(bossTaskAtPosition(db, batchId, 3)?.question).toBe(
+        'Задание номер 3: сколько будет 3 + 2?',
+      );
+      const answered = bossTaskAtPosition(db, batchId, 2);
+      db.prepare(
+        `INSERT INTO attempts (task_id, topic_id, answer, is_correct)
+         VALUES (?, ?, '4', 1)`,
+      ).run(answered?.id, TOPIC);
+
+      expect(bossTaskAtPosition(db, batchId, 2)).toBeNull();
+      expect(() => bossTaskAtPosition(db, batchId, 6)).toThrow(/от 1 до 5/u);
+    });
+
+    it('при дубле внутри набора проваливает батч и выводит новые строки из резерва', () => {
+      const batchId = preparingBatch(db);
+      const tasks = batch(5);
+      tasks[1] = task({ instruction: tasks[0]?.instruction ?? '' });
+
+      expect(reserveBossTasks(db, batchId, tasks)).toMatchObject({ ready: false, stored: [] });
+      expect(db.prepare('SELECT status FROM boss_batches WHERE id = ?').get(batchId))
+        .toEqual({ status: 'failed' });
+      expect(db.prepare(
+        "SELECT COUNT(*) AS n FROM task_bank WHERE status = 'boss_reserved'",
+      ).get()).toEqual({ n: 0 });
+      expect(db.prepare('SELECT COUNT(*) AS n FROM boss_tasks WHERE batch_id = ?').get(batchId))
+        .toEqual({ n: 0 });
+    });
+
+    it('при дубле между попытками не оставляет частично готовый второй бой', () => {
+      const firstId = preparingBatch(db);
+      expect(reserveBossTasks(db, firstId, batch(4)).ready).toBe(false);
+      const secondId = preparingBatch(db);
+
+      expect(reserveBossTasks(db, secondId, batch(5)).ready).toBe(false);
+      expect(db.prepare('SELECT status FROM boss_batches WHERE id = ?').get(secondId))
+        .toEqual({ status: 'failed' });
+      expect(db.prepare('SELECT COUNT(*) AS n FROM boss_tasks WHERE batch_id = ?').get(secondId))
+        .toEqual({ n: 0 });
+      expect(db.prepare(
+        "SELECT COUNT(*) AS n FROM task_bank WHERE status = 'boss_reserved'",
+      ).get()).toEqual({ n: 0 });
+    });
+
+    it('повреждённый JSON проваливает весь готовый бой', () => {
+      const batchId = preparingBatch(db);
+      const { stored } = reserveBossTasks(db, batchId, batch(5));
+      db.prepare('UPDATE task_bank SET accept = ? WHERE id = ?').run('{', stored[1]?.id);
+
+      expect(() => bossTaskAtPosition(db, batchId, 2)).toThrow(/accept\[\].*не как JSON/u);
+      expect(db.prepare('SELECT status FROM boss_batches WHERE id = ?').get(batchId))
+        .toEqual({ status: 'failed' });
+      expect(db.prepare(
+        "SELECT COUNT(*) AS n FROM task_bank WHERE status = 'boss_reserved'",
+      ).get()).toEqual({ n: 0 });
+    });
+
+    it('ошибка посреди связывания откатывает все строки и не объявляет бой готовым', () => {
+      const batchId = preparingBatch(db);
+      db.exec(`CREATE TRIGGER stop_boss_link BEFORE INSERT ON boss_tasks
+        WHEN NEW.position = 3 BEGIN SELECT RAISE(ABORT, 'оборванная вставка'); END`);
+
+      expect(() => reserveBossTasks(db, batchId, batch(5))).toThrow(/оборванная вставка/u);
+      expect(db.prepare('SELECT status FROM boss_batches WHERE id = ?').get(batchId))
+        .toEqual({ status: 'preparing' });
+      expect(db.prepare('SELECT COUNT(*) AS n FROM boss_tasks WHERE batch_id = ?').get(batchId))
+        .toEqual({ n: 0 });
+      expect(db.prepare('SELECT COUNT(*) AS n FROM task_bank').get()).toEqual({ n: 0 });
     });
   });
 
