@@ -29,7 +29,22 @@ export default defineConfig({
           functions: 80,
           lines: 80,
         },
+        // Модули этапа забега и триажа держат калибровку, жизненный цикл и
+        // общий бюджет codex. Среднее с давно покрытым ядром скрыло бы
+        // непроверенную ветку именно в новом пользовательском потоке.
+        'server/{run,triage,xp,session-error}.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
         'server/routes/*.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        'server/codex/concurrency.ts': {
           statements: 80,
           branches: 80,
           functions: 80,
