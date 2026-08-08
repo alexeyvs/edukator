@@ -66,4 +66,12 @@ describe('знакомство и профиль', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Профиль временно недоступен'));
     expect(screen.getByRole('button', { name: 'Сохранить изменения' })).toBeEnabled();
   });
+
+  it('показывает отказ начальной загрузки как ошибку', async () => {
+    const api = profileApi();
+    vi.mocked(api.read).mockRejectedValue(new Error('Профиль временно недоступен'));
+    render(<ProfileScreen api={api} />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Профиль временно недоступен');
+  });
 });

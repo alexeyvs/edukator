@@ -35,6 +35,8 @@ export interface TakeTaskOptions {
    * ближайшее задание.
    */
   difficulty?: number;
+  /** Забег-владелец выдачи; отсутствие означает занятие без забега. */
+  runId?: number;
 }
 
 interface TaskRow {
@@ -201,8 +203,8 @@ export function takeTask(
     : 'ABS(difficulty - @difficulty), created_at, id';
 
   const row = db
-    .prepare<{ topicId: string; difficulty?: number }, TaskRow>(
-      `UPDATE task_bank SET status = 'used'
+    .prepare<{ topicId: string; difficulty?: number; runId: number | null }, TaskRow>(
+      `UPDATE task_bank SET status = 'used', issued_run_id = @runId
         WHERE id = (
           SELECT id FROM task_bank
            WHERE topic_id = @topicId AND status = 'valid'
@@ -210,7 +212,7 @@ export function takeTask(
            LIMIT 1)
        RETURNING ${TASK_COLUMNS}`,
     )
-    .get({ topicId, ...(difficulty === undefined ? {} : { difficulty }) });
+    .get({ topicId, runId: options.runId ?? null, ...(difficulty === undefined ? {} : { difficulty }) });
 
   return row === undefined ? null : toBankTaskOrReject(db, row);
 }
@@ -221,18 +223,19 @@ export function takeTask(
  * безвозвратно, и без повторной выдачи несколько обновлений подряд опустошали
  * бы тему, ни разу не спросив ученика.
  */
-export function issuedTask(db: Database, topicId: string): BankTask | null {
+export function issuedTask(db: Database, topicId: string, runId?: number): BankTask | null {
   ensureTopic(db, topicId);
 
   const row = db
-    .prepare<[string], TaskRow>(
+    .prepare<{ topicId: string; runId: number | null }, TaskRow>(
       `SELECT ${TASK_COLUMNS} FROM task_bank
-        WHERE topic_id = ? AND status = 'used'
+        WHERE topic_id = @topicId AND status = 'used'
+          AND issued_run_id IS @runId
           AND NOT EXISTS (SELECT 1 FROM attempts WHERE attempts.task_id = task_bank.id)
         ORDER BY created_at, id
         LIMIT 1`,
     )
-    .get(topicId);
+    .get({ topicId, runId: runId ?? null });
 
   return row === undefined ? null : toBankTaskOrReject(db, row);
 }

@@ -129,29 +129,44 @@ Vite — `localhost:5173`. Рабочий путь ученика:
 |---|---|
 | `GET /api/health` | состояние базы, карты тем и занятия |
 | `GET /api/run/plan` | план дня, прогнозы и состояние триажа по предметам |
-| `POST /api/run/start` | начать или продолжить сегодняшний забег |
+| `POST /api/run/start` | `{ subject }` → начать или продолжить сегодняшний забег |
 | `POST /api/run/:id/finish` | закрыть забег или триаж и получить итог |
-| `POST /api/triage/start` | начать или продолжить триаж |
+| `POST /api/triage/start` | `{ subject }` → начать или продолжить триаж |
 | `GET /api/triage/:id/next` | следующее диагностическое задание без подсказки |
-| `GET /api/session/next` | задание по выбору планировщика, **без** `answer`, `accept[]`, `explain` и `joke` |
-| `POST /api/session/answer` | `{ task_id, answer, hint_used?, duration_ms? }` → вердикт, разбор, шутка и новое состояние темы; `answer` длиннее 500 символов — 400 |
+| `GET /api/session/next` | задание по выбору планировщика; в забеге — `?runId=<id>`, **без** `answer`, `accept[]`, `explain` и `joke` |
+| `POST /api/session/answer` | `{ task_id, answer, runId?, hint_used?, duration_ms? }` → вердикт, XP, прогресс, разбор, шутка и новое состояние темы; `answer` длиннее 500 символов — 400 |
 | `POST /api/session/dispute` | `{ attempt_id }` → спор в очередь фоновой перепроверки: 202 при заведении, 200 с текущим `status` при повторном нажатии; нецелый или неположительный `attempt_id` — 400, неизвестный — 404 (`attempt-not-found`), уже засчитанная попытка — 400 (`attempt-correct`: спорить не о чем) |
 | `GET /api/profile`, `PUT /api/profile` | прочитать или изменить профиль и текст знакомства |
 
 Формы успешных ответов:
 
-- `GET /api/session/next` → `{ task: { id, topic_id, topic_title, subject,
-  question, hint, difficulty, answer_format } }`;
+- `POST /api/run/start` и `POST /api/triage/start` с `{ subject: "math" |
+  "russian" | "english" }` → `{ runId, resumed, progress }`;
+- `GET /api/session/next?runId=<id>` → `{ task: { id, topic_id, topic_title,
+  subject, question, hint, difficulty, answer_format }, progress: { total,
+  correct, target, done } }`; без `runId` поле `progress` отсутствует;
 - `POST /api/session/answer` → `{ attempt_id, correct, normalized, reason?,
-  answer, explain, joke, topic: { id, mastery, attempts, next_review } }`, где
+  answer, explain, joke, xp, progress, topic: { id, mastery, attempts,
+  next_review } }`, где `progress` равен `null` вне забега, а
   `reason` — `mismatch`, `empty`, `no-number` или `ambiguous-number`;
 - `POST /api/session/dispute` → `{ dispute_id, status }`, где `status` — `open`,
   `upheld` или `rejected`.
+- `GET /api/triage/:id/next` → `{ status: "ok", task, progress }` либо
+  `{ status: "done", total, target }`;
+- `POST /api/run/:id/finish` → `{ runId, total, correct, xp, touchedTopics,
+  closedTopics, declinedTopics, forecast, forecastDelta? }`;
+- `GET /api/profile` → `{ name, interests, examDate, partnerName,
+  introduction }`; `PUT /api/profile` принимает частичный patch этих полей
+  (кроме `introduction`) и отвергает неизвестные поля.
 
 `hint_used`, если передан, обязан быть логическим; `duration_ms` — безопасным
 целым числом миллисекунд не меньше нуля.
 
 Ответ на задание принимается ровно один раз и только по выданному заданию:
+выдача привязана к конкретному `runId`, поэтому другой забег того же предмета
+не может присвоить её себе. Триаж не принимается обычным `session/next` и не
+разрешает `hint_used: true`. Завершение до 12 ответов, до фактического исчерпания
+триажа или при открытом споре отвечает 409 (`run-not-ready`).
 повторный даёт 409, задание из очереди, которое ученику не выдавали, — тоже 409
 (`task-not-issued`), а `id`, которого в банке нет вовсе, — 404. Когда предлагать
 нечего, `next` перебирает весь план тем и только потом отвечает 503 — 404
@@ -433,8 +448,10 @@ npm run prefetch -- --export                  # выгрузить банк в �
 считается по темам, а не по вызовам: пополнение темы — это генератор и
 проверяющий подряд). Активные темы берутся у планировщика, плюс темы незакрытых
 сегодня забегов, начиная с самого свежего. Завершённые забеги исключаются: иначе
-законченная тема перехватывала бы выдачу и прогрев у текущей. В сервер воркер пока не включён —
-до появления экрана забега очередь греется руками через `npm run prefetch`.
+законченная тема перехватывала бы выдачу и прогрев у текущей. Сервер запускает
+воркер в `onListen`, останавливает в `onClose` и перед закрытием SQLite
+дожидается текущего цикла и фоновых разборов споров. `npm run prefetch` остаётся
+ручным/offline-путём прогрева и экспорта посева.
 
 ### Посевной банк
 
@@ -717,7 +734,7 @@ foreign_keys = ON` живёт в `openDatabase`, а не в схеме; откр
 ## Что делает человек
 
 Автоматические тесты проверяют структуру карты тем и инварианты заданий, но не
-их содержание. Ниже — то, что остаётся человеку перед этапом 3.
+их содержание. Ниже — ручные release-гейты реализованного этапа 3 перед этапом 4.
 
 **Карта тем.** Прочитать `content/curriculum/*.json` и убедиться, что темы
 соответствуют программе 6 класса, а `prompt_seed` даёт осмысленные задания.
@@ -738,3 +755,10 @@ foreign_keys = ON` живёт в `openDatabase`, а не в схеме; откр
 нейтральном умолчании (`видеоигры`, `ютуб и стримы`, `школьные будни`) и сюжеты
 будут пресными — а это единственное, что реально отличает «задачи из его мира»
 от обычного задачника.
+
+**Тон интерфейса.** Вычитать знакомство, главный экран, забег и финал живым
+человеком: подписи должны звучать как напарник из `content/persona.md`, без
+снисходительности и канцелярита.
+
+**Живой проход.** Дать ученику пройти полный забег из 12 заданий и записать,
+не утомляет ли темп, понятны ли переходы и читается ли финальный экран как итог.

@@ -45,13 +45,15 @@ export function ProfileGate({
 export function App() {
   const params = new URLSearchParams(window.location.search);
   const runId = Number(params.get('runId'));
+  let screen: ReactNode;
   if (Number.isSafeInteger(runId) && runId > 0) {
-    return params.get('kind') === 'triage'
+    screen = params.get('kind') === 'triage'
       ? <TriageScreen runId={runId} />
       : <RunScreen runId={runId} />;
+  } else if (params.get('screen') === 'profile') {
+    screen = <ProfileScreen />;
+  } else {
+    screen = <HomeScreen />;
   }
-
-  if (params.get('screen') === 'profile') return <ProfileScreen />;
-
-  return <ProfileGate><HomeScreen /></ProfileGate>;
+  return <ProfileGate>{screen}</ProfileGate>;
 }

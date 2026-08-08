@@ -92,11 +92,12 @@ describe('занятие', () => {
   });
 
   /** Кладёт задание в банк и сразу выдаёт его: дальше на него можно отвечать. */
-  function issue(topicId = 'math.a', patch: Partial<GeneratedTask> = {}): number {
+  function issue(topicId = 'math.a', patch: Partial<GeneratedTask> = {}, runId?: number): number {
     const { stored } = storeTasks(db, topicId, [task(patch)]);
     const id = stored[0]?.id;
     if (id === undefined) throw new Error('задание не легло в банк');
-    db.prepare("UPDATE task_bank SET status = 'used' WHERE id = ?").run(id);
+    db.prepare("UPDATE task_bank SET status = 'used', issued_run_id = ? WHERE id = ?")
+      .run(runId ?? null, id);
     return id;
   }
 
@@ -343,7 +344,7 @@ describe('занятие', () => {
         db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
           .run('math', 'math.a', new Date().toISOString()).lastInsertRowid,
       );
-      const taskId = issue('math.b', { difficulty: 3 });
+      const taskId = issue('math.b', { difficulty: 3 }, runId);
 
       const result = submitAnswer(db, runGraph, { taskId, runId, answer: '45' });
 
@@ -358,6 +359,42 @@ describe('занятие', () => {
           'SELECT total, correct FROM runs WHERE id = ?',
         ).get(runId),
       ).toEqual({ total: 1, correct: 1 });
+    });
+
+    it('не даёт забегу присвоить задание другого забега того же предмета', () => {
+      const insertRun = db.prepare(
+        'INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)',
+      );
+      const firstRun = Number(insertRun.run('math', 'math.a', new Date().toISOString()).lastInsertRowid);
+      const secondRun = Number(insertRun.run('math', 'math.a', new Date().toISOString()).lastInsertRowid);
+      storeTasks(db, 'math.a', [task()]);
+      const next = nextTask(db, graph, { runId: firstRun, seedDir });
+      expect(next.status).toBe('ok');
+      if (next.status !== 'ok') return;
+
+      expect(() => submitAnswer(db, graph, {
+        taskId: next.task.id,
+        runId: secondRun,
+        answer: '45',
+      })).toThrow(expect.objectContaining({ code: 'task-not-in-run' }));
+      expect(submitAnswer(db, graph, {
+        taskId: next.task.id,
+        runId: firstRun,
+        answer: '45',
+      }).correct).toBe(true);
+    });
+
+    it('не пускает триаж в обычную выдачу и запрещает подсказку в его ответе', () => {
+      const runId = Number(
+        db.prepare(
+          "INSERT INTO runs (subject, kind, topic_id, started_at) VALUES (?, 'triage', ?, ?)",
+        ).run('math', 'math.a', new Date().toISOString()).lastInsertRowid,
+      );
+      expect(() => nextTask(db, graph, { runId, seedDir }))
+        .toThrow(expect.objectContaining({ code: 'task-not-in-run' }));
+      const taskId = issue('math.a', {}, runId);
+      expect(() => submitAnswer(db, graph, { taskId, runId, answer: '45', hintUsed: true }))
+        .toThrow(expect.objectContaining({ code: 'task-not-in-run' }));
     });
 
     it('не связывает задание чужого предмета с забегом и не принимает ответ в закрытый', () => {
@@ -390,7 +427,7 @@ describe('занятие', () => {
         db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
           .run('math', 'math.a', new Date().toISOString()).lastInsertRowid,
       );
-      const taskId = issue('math.a');
+      const taskId = issue('math.a', {}, runId);
       db.exec(`
         CREATE TRIGGER тестовый_отказ_счётчика
         BEFORE UPDATE ON runs
@@ -550,7 +587,7 @@ describe('занятие', () => {
         db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
           .run('math', 'math.a', new Date().toISOString()).lastInsertRowid,
       );
-      const taskId = issue();
+      const taskId = issue('math.a', {}, runId);
       const attempt = submitAnswer(db, graph, {
         taskId,
         runId,

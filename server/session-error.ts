@@ -8,6 +8,7 @@ export type SessionErrorCode =
   | 'dispute-not-found'
   | 'run-not-found'
   | 'run-finished'
+  | 'run-not-ready'
   | 'task-not-in-run'
   /** Задание отбраковано при приёме ответа: сверить его не по чему. */
   | 'task-defective';

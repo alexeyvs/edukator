@@ -107,7 +107,7 @@ export function ProfileScreen({
   if (form === null || profile === null) {
     return (
       <main className="profile-shell">
-        <div className="profile-state" role="status">
+        <div className="profile-state" role={problem === null ? 'status' : 'alert'}>
           <span className="state-mark" aria-hidden="true">…</span>
           <p>{problem ?? 'Открываю профиль…'}</p>
         </div>

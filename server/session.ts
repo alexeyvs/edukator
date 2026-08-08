@@ -102,6 +102,9 @@ export function nextTask(
   const now = options.now ?? new Date();
   const log = options.log ?? ((message: string): void => void process.stderr.write(`${message}\n`));
   const run = options.runId === undefined ? undefined : readActiveRun(db, options.runId);
+  if (run?.kind === 'triage') {
+    throw new SessionError('task-not-in-run', `Забег ${run.id} является триажем`);
+  }
   if (run !== undefined && options.subject !== undefined && run.subject !== options.subject) {
     throw new SessionError(
       'task-not-in-run',
@@ -130,9 +133,10 @@ export function nextTask(
     // запросе значит остановить занятие целиком, хотя соседние темы полны.
     try {
       task =
-        issuedTask(db, topic.id) ??
+        issuedTask(db, topic.id, run?.id) ??
         takeTaskOrSeed(db, graph, topic.id, {
           difficulty: topic.difficulty,
+          ...(run === undefined ? {} : { runId: run.id }),
           seeded,
           ...(options.seedDir === undefined ? {} : { dir: options.seedDir }),
         });
@@ -197,12 +201,13 @@ export interface AnswerResult {
 interface SessionRun {
   id: number;
   subject: Subject;
+  kind: 'run' | 'triage';
   finished_at: string | null;
 }
 
 function readActiveRun(db: Database, runId: number): SessionRun {
   const run = db
-    .prepare<[number], SessionRun>('SELECT id, subject, finished_at FROM runs WHERE id = ?')
+    .prepare<[number], SessionRun>('SELECT id, subject, kind, finished_at FROM runs WHERE id = ?')
     .get(runId);
   if (run === undefined) {
     throw new SessionError('run-not-found', `Занятие: забег ${runId} не найден`);
@@ -222,6 +227,7 @@ interface TaskRow {
   joke: string | null;
   difficulty: number;
   status: string;
+  issued_run_id: number | null;
 }
 
 function parseAccept(raw: string, id: number): string[] {
@@ -240,7 +246,7 @@ function parseAccept(raw: string, id: number): string[] {
 function readTask(db: Database, taskId: number): TaskRow {
   const row = db
     .prepare<[number], TaskRow>(
-      `SELECT id, topic_id, answer, accept, explain, joke, difficulty, status
+      `SELECT id, topic_id, answer, accept, explain, joke, difficulty, status, issued_run_id
          FROM task_bank WHERE id = ?`,
     )
     .get(taskId);
@@ -299,6 +305,18 @@ export function submitAnswer(
       throw new SessionError(
         'task-not-in-run',
         `Занятие: задание ${request.taskId} не относится к забегу ${run.id}`,
+      );
+    }
+    if ((run?.id ?? null) !== row.issued_run_id) {
+      throw new SessionError(
+        'task-not-in-run',
+        `Занятие: задание ${request.taskId} выдано другому забегу`,
+      );
+    }
+    if (run?.kind === 'triage' && hintUsed) {
+      throw new SessionError(
+        'task-not-in-run',
+        `Занятие: в триаже ${run.id} нельзя использовать подсказку`,
       );
     }
     if (row.status !== 'used') {

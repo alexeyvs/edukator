@@ -8,6 +8,7 @@ import type {
   FinishRunResponse,
   NextTaskResponse,
   RunApi,
+  NextTriageResponse,
 } from './run-api';
 import './test-setup';
 
@@ -15,6 +16,12 @@ afterEach(cleanup);
 
 function deferred<T>(): Promise<T> {
   return new Promise(() => undefined);
+}
+
+function controlled<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 function finish(): FinishRunResponse {
@@ -102,5 +109,65 @@ describe('экран триажа', () => {
     expect(await screen.findByRole('heading', { name: 'Карта тем на старте' })).toBeInTheDocument();
     expect(screen.getByText('Дроби')).toBeInTheDocument();
     expect(api.finish).toHaveBeenCalledWith(12);
+  });
+
+  it('не показывает вопрос старого триажа после смены runId', async () => {
+    const old = controlled<NextTriageResponse>();
+    const firstApi = apiWith({ triageNext: vi.fn(() => old.promise) });
+    const secondApi = apiWith({ triageNext: vi.fn(() => Promise.resolve({
+      status: 'ok' as const,
+      progress: { total: 0, correct: 0, target: 12, done: false },
+      task: {
+        id: 5,
+        topic_id: 'math.b',
+        topic_title: 'Проценты',
+        subject: 'math' as const,
+        question: 'Новый вопрос',
+        difficulty: 2,
+        answer_format: 'number' as const,
+      },
+    })) });
+    const view = render(<TriageScreen runId={1} api={firstApi} />);
+
+    view.rerender(<TriageScreen runId={2} api={secondApi} />);
+    expect(await screen.findByRole('heading', { name: 'Новый вопрос' })).toBeInTheDocument();
+    old.resolve({
+      status: 'ok',
+      progress: { total: 0, correct: 0, target: 12, done: false },
+      task: {
+        id: 4,
+        topic_id: 'math.a',
+        topic_title: 'Дроби',
+        subject: 'math',
+        question: 'Старый вопрос',
+        difficulty: 2,
+        answer_format: 'number',
+      },
+    });
+
+    await screen.findByRole('heading', { name: 'Новый вопрос' });
+    expect(screen.queryByRole('heading', { name: 'Старый вопрос' })).not.toBeInTheDocument();
+  });
+
+  it('показывает ошибки загрузки, ответа и завершения', async () => {
+    const loadApi = apiWith({ triageNext: vi.fn(() => Promise.reject(new Error('load'))) });
+    const loadView = render(<TriageScreen runId={12} api={loadApi} />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Не получилось загрузить вопрос');
+    loadView.unmount();
+
+    const answerApi = apiWith({ answer: vi.fn(() => Promise.reject(new Error('answer'))) });
+    const answerView = render(<TriageScreen runId={12} api={answerApi} />);
+    await screen.findByRole('heading', { name: 'Чему равна половина от восьми?' });
+    fireEvent.change(screen.getByLabelText('Число'), { target: { value: '4' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Не получилось проверить ответ');
+    answerView.unmount();
+
+    const finishApi = apiWith({
+      triageNext: vi.fn(() => Promise.resolve({ status: 'done' as const, total: 1, target: 12 })),
+      finish: vi.fn(() => Promise.reject(new Error('finish'))),
+    });
+    render(<TriageScreen runId={12} api={finishApi} />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Не получилось собрать итог');
   });
 });

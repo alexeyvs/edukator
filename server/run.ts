@@ -15,6 +15,7 @@ import {
 import { selectTopic, topicsUsedToday } from './scheduler.js';
 import { SessionError } from './session-error.js';
 import { taskXp } from './xp.js';
+import { TRIAGE_TARGET } from './triage.js';
 
 /** Число ответов, после которого забег готов к финальному экрану. */
 export const RUN_TARGET = 12;
@@ -72,6 +73,7 @@ interface RunCounters {
 interface FinishableRun {
   id: number;
   subject: Subject;
+  kind: RunKind;
   finished_at: string | null;
 }
 
@@ -231,7 +233,9 @@ function topicChanges(
 
     let state = newTopicState(topicId);
     let before: number | undefined;
-    for (const row of byTopic.get(topicId) ?? []) {
+    const history = byTopic.get(topicId) ?? [];
+    const lastRunAttempt = history.findLast((row) => row.run_id === runId);
+    for (const row of history) {
       if (row.run_id === runId && before === undefined) before = state.mastery;
       state = applyAttempt(state, {
         correct: row.is_correct === 1,
@@ -239,6 +243,7 @@ function topicChanges(
         hintUsed: row.hint_used === 1,
         at: new Date(row.created_at),
       });
+      if (row.id === lastRunAttempt?.id) break;
     }
     if (before === undefined) continue;
 
@@ -267,7 +272,7 @@ export function finishRun(
   return db.transaction((): FinishRunResult => {
     const run = db
       .prepare<[number], FinishableRun>(
-        'SELECT id, subject, finished_at FROM runs WHERE id = ?',
+        'SELECT id, subject, kind, finished_at FROM runs WHERE id = ?',
       )
       .get(runId);
     if (run === undefined) {
@@ -288,6 +293,44 @@ export function finishRun(
       )
       .all(runId);
     const total = attempts.length;
+    if (run.kind === 'run' && total < RUN_TARGET) {
+      throw new SessionError(
+        'run-not-ready',
+        `Забег ${runId} нельзя завершить раньше ${RUN_TARGET} ответов`,
+      );
+    }
+    if (run.kind === 'triage' && total < TRIAGE_TARGET) {
+      const attempted = new Set(attempts.map((attempt) => attempt.topic_id));
+      const hasAvailableTopic = (graph.bySubject.get(run.subject) ?? []).some((topic) => {
+        if (attempted.has(topic.id)) return false;
+        return db.prepare<{ topicId: string; runId: number }, { ok: number }>(
+          `SELECT 1 AS ok FROM task_bank
+            WHERE topic_id = @topicId
+              AND (status = 'valid' OR (
+                status = 'used' AND issued_run_id = @runId
+                AND NOT EXISTS (
+                  SELECT 1 FROM attempts WHERE attempts.task_id = task_bank.id
+                )
+              ))
+            LIMIT 1`,
+        ).get({ topicId: topic.id, runId }) !== undefined;
+      });
+      if (hasAvailableTopic) {
+        throw new SessionError('run-not-ready', `Триаж ${runId} ещё не завершён`);
+      }
+    }
+    const openDispute = db.prepare<[number], { id: number }>(
+      `SELECT disputes.id FROM disputes
+        JOIN attempts ON attempts.id = disputes.attempt_id
+       WHERE attempts.run_id = ? AND disputes.status = 'open'
+       LIMIT 1`,
+    ).get(runId);
+    if (openDispute !== undefined) {
+      throw new SessionError(
+        'run-not-ready',
+        `Забег ${runId} нельзя завершить, пока разбирается спор`,
+      );
+    }
     const correct = attempts.reduce((sum, attempt) => sum + attempt.is_correct, 0);
     const xp = attempts.reduce(
       (sum, attempt) =>

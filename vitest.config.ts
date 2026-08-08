@@ -3,10 +3,10 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
-    include: ['tests/**/*.test.ts', 'web/**/*.test.tsx'],
+    include: ['tests/**/*.test.ts', 'web/**/*.test.ts', 'web/**/*.test.tsx'],
     coverage: {
       provider: 'v8',
-      include: ['server/**/*.ts', 'scripts/**/*.ts'],
+      include: ['server/**/*.ts', 'scripts/**/*.ts', 'web/src/{home,profile,run}-api.ts'],
       // Порог держится на ядре, занятии и генерации: все они детерминированы —
       // внешние процессы подменяются через `run`/`produce`/`review`, — и дефект
       // в них тихо портит учебный план, не роняя ничего. Скрипты извлечения и
@@ -60,6 +60,12 @@ export default defineConfig({
         // внешними процессами, `atomic-write.ts` пишет снимки, лежащие в
         // репозитории. Ни один из них не попадал ни под один порог.
         'server/{index,run-child,atomic-write}.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        'web/src/{home,profile,run}-api.ts': {
           statements: 80,
           branches: 80,
           functions: 80,

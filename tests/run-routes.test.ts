@@ -36,9 +36,9 @@ function writeCurriculum(dir: string): void {
   }
 }
 
-function task(subject: string): GeneratedTask {
+function task(subject: string, index = 0): GeneratedTask {
   return {
-    question: `Сколько будет 40 + 5 (${subject})?`,
+    question: `Сколько будет 40 + 5 (${subject}, ${index})?`,
     answer: '45',
     accept: ['45'],
     hint: 'Сложи десятки и единицы.',
@@ -67,7 +67,9 @@ describe('маршруты забега', () => {
     app = buildServer(curriculumDir, { seedDir, now: () => NOW });
     await app.ready();
     db = openDatabase(process.env.EDUKATOR_DB);
-    for (const subject of SUBJECTS) storeTasks(db, `${subject}.a`, [task(subject)]);
+    for (const subject of SUBJECTS) {
+      storeTasks(db, `${subject}.a`, Array.from({ length: 12 }, (_, index) => task(subject, index)));
+    }
   });
 
   afterEach(async () => {
@@ -104,32 +106,24 @@ describe('маршруты забега', () => {
     expect(plan.forecasts.every((item) => item.score === 2)).toBe(true);
 
     const runId = await start('math');
-    const next = await app.inject({ method: 'GET', url: `/api/session/next?runId=${runId}` });
-    expect(next.statusCode).toBe(200);
-    const issued = next.json() as {
-      task: { id: number; subject: string };
-      progress: { total: number; correct: number; target: number; done: boolean };
-    };
-    expect(issued.task.subject).toBe('math');
-    expect(issued.progress).toEqual({ total: 0, correct: 0, target: 12, done: false });
-
-    const answer = await app.inject({
-      method: 'POST',
-      url: '/api/session/answer',
-      payload: { task_id: issued.task.id, answer: '45', runId, hint_used: false },
-    });
-    expect(answer.statusCode).toBe(200);
-    expect(answer.json()).toMatchObject({
-      correct: true,
-      xp: 25,
-      progress: { total: 1, correct: 1, target: 12, done: false },
-    });
+    for (let index = 0; index < 12; index += 1) {
+      const next = await app.inject({ method: 'GET', url: `/api/session/next?runId=${runId}` });
+      expect(next.statusCode).toBe(200);
+      const issued = next.json() as { task: { id: number; subject: string } };
+      expect(issued.task.subject).toBe('math');
+      const answer = await app.inject({
+        method: 'POST',
+        url: '/api/session/answer',
+        payload: { task_id: issued.task.id, answer: '45', runId, hint_used: false },
+      });
+      expect(answer.statusCode).toBe(200);
+    }
 
     const finish = await app.inject({ method: 'POST', url: `/api/run/${runId}/finish` });
     expect(finish.statusCode).toBe(200);
-    expect(finish.json()).toMatchObject({ runId, total: 1, correct: 1, xp: 25 });
+    expect(finish.json()).toMatchObject({ runId, total: 12, correct: 12, xp: 300 });
     expect(db.prepare('SELECT finished_at, total, correct FROM runs WHERE id = ?').get(runId))
-      .toEqual({ finished_at: NOW.toISOString(), total: 1, correct: 1 });
+      .toEqual({ finished_at: NOW.toISOString(), total: 12, correct: 12 });
   });
 
   it('переводит доменные отказы в 404/409 и не пишет чужую попытку', async () => {
@@ -157,8 +151,10 @@ describe('маршруты забега', () => {
     expect(db.prepare('SELECT COUNT(*) AS count FROM attempts WHERE task_id = ?').get(taskId))
       .toEqual({ count: 0 });
 
-    const closed = await app.inject({ method: 'POST', url: `/api/run/${mathRun}/finish` });
-    expect(closed.statusCode).toBe(200);
+    const premature = await app.inject({ method: 'POST', url: `/api/run/${mathRun}/finish` });
+    expect(premature.statusCode).toBe(409);
+    expect(premature.json()).toMatchObject({ code: 'run-not-ready' });
+    db.prepare('UPDATE runs SET finished_at = ? WHERE id = ?').run(NOW.toISOString(), mathRun);
     const afterClose = await app.inject({
       method: 'GET',
       url: `/api/session/next?runId=${mathRun}`,

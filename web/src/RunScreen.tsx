@@ -78,13 +78,13 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
   const shownAt = useRef(Date.now());
   const prefetched = useRef<NextTaskResponse | null>(null);
   const prefetching = useRef<Promise<void> | null>(null);
-  const alive = useRef(true);
+  const generation = useRef(0);
 
-  const prefetchNext = useCallback((shownId: number): void => {
+  const prefetchNext = useCallback((shownId: number, token = generation.current): void => {
     prefetched.current = null;
     const pending = api.next(runId)
       .then((next) => {
-        if (alive.current && next.task.id !== shownId) prefetched.current = next;
+        if (generation.current === token && next.task.id !== shownId) prefetched.current = next;
       })
       .catch(() => {
         // Предзагрузка — ускорение, а не второй источник ошибок на экране.
@@ -105,34 +105,43 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
     setDisputeStatus(null);
     setProblem(null);
     shownAt.current = Date.now();
-    if (next.progress.total + 1 < next.progress.target) prefetchNext(next.task.id);
-  }, [prefetchNext]);
+  }, []);
 
-  const load = useCallback(async (): Promise<void> => {
+  const load = useCallback(async (token = generation.current): Promise<void> => {
     try {
-      showTask(await api.next(runId));
+      const next = await api.next(runId);
+      if (generation.current !== token) return;
+      showTask(next);
     } catch (error) {
-      if (!alive.current) return;
+      if (generation.current !== token) return;
       const nextProblem = problemOf(error);
       setProblem(nextProblem);
       if (nextProblem === 'no-task') {
         await wait(NO_TASK_RETRY_MS);
-        if (alive.current) void load();
+        if (generation.current === token) void load(token);
       }
     }
   }, [api, runId, showTask, wait]);
 
   useEffect(() => {
-    alive.current = true;
-    void load();
+    generation.current += 1;
+    const token = generation.current;
+    prefetched.current = null;
+    prefetching.current = null;
+    setCurrent(null);
+    setProgress(null);
+    setFinish(null);
+    setProblem(null);
+    void load(token);
     return () => {
-      alive.current = false;
+      if (generation.current === token) generation.current += 1;
     };
   }, [load]);
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (current === null || answer.trim() === '') return;
+    const token = generation.current;
     setSubmitting(true);
     try {
       const checked = await api.answer({
@@ -142,56 +151,61 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
         hintUsed,
         durationMs: Math.max(0, Date.now() - shownAt.current),
       });
-      if (!alive.current) return;
+      if (generation.current !== token) return;
       setResult(checked);
       setProgress(checked.progress);
+      if (!checked.progress.done) prefetchNext(current.task.id, token);
     } catch (error) {
-      if (alive.current) setProblem(problemOf(error));
+      if (generation.current === token) setProblem(problemOf(error));
     } finally {
-      if (alive.current) setSubmitting(false);
+      if (generation.current === token) setSubmitting(false);
     }
   }
 
   async function nextTask(): Promise<void> {
+    const token = generation.current;
     if (prefetching.current !== null) await prefetching.current;
+    if (generation.current !== token) return;
     const ready = prefetched.current;
     prefetched.current = null;
     if (ready !== null) {
       showTask(ready);
       return;
     }
-    await load();
+    await load(token);
   }
 
   async function finishRun(): Promise<void> {
+    const token = generation.current;
     setSubmitting(true);
     try {
       const summary = await api.finish(runId);
-      if (alive.current) setFinish(summary);
+      if (generation.current === token) setFinish(summary);
     } catch (error) {
-      if (alive.current) setProblem(problemOf(error));
+      if (generation.current === token) setProblem(problemOf(error));
     } finally {
-      if (alive.current) setSubmitting(false);
+      if (generation.current === token) setSubmitting(false);
     }
   }
 
   async function dispute(): Promise<void> {
     if (result === null || disputing) return;
+    const token = generation.current;
     setDisputing(true);
     let delay = DISPUTE_FIRST_DELAY_MS;
     try {
-      while (alive.current) {
+      while (generation.current === token) {
         const state = await api.dispute(result.attempt_id);
-        if (!alive.current) return;
+        if (generation.current !== token) return;
         setDisputeStatus(state.status);
         if (state.status !== 'open') return;
         await wait(delay);
         delay = Math.min(delay * 2, DISPUTE_MAX_DELAY_MS);
       }
     } catch (error) {
-      if (alive.current) setProblem(problemOf(error));
+      if (generation.current === token) setProblem(problemOf(error));
     } finally {
-      if (alive.current) setDisputing(false);
+      if (generation.current === token) setDisputing(false);
     }
   }
 
@@ -265,7 +279,7 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
               <button
                 className="primary"
                 type="button"
-                disabled={submitting}
+                disabled={submitting || disputing || disputeStatus === 'open'}
                 onClick={() => void (result.progress.done ? finishRun() : nextTask())}
               >
                 {result.progress.done ? 'Завершить забег' : 'Следующее задание'}

@@ -112,9 +112,9 @@ export function HomeScreen({
 
       {problem !== null && <p className="home-error" role="alert">{problem}</p>}
 
-      {plan === null ? (
+      {plan === null && problem === null ? (
         <section className="home-loading" aria-label="Загрузка плана">Собираю план дня…</section>
-      ) : !anyTriagePassed ? (
+      ) : plan === null ? null : !anyTriagePassed ? (
         <section className="triage-offer" aria-labelledby="triage-title">
           <span aria-hidden="true">01</span>
           <div>

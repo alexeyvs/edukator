@@ -419,7 +419,7 @@ describe('GET /api/health', () => {
     try {
       const [version] = db.pragma('user_version') as [{ user_version: number }];
       expect(version.user_version).toBe(SCHEMA_VERSION);
-      expect(readProfile(db)).toEqual(DEFAULT_PROFILE);
+      expect(readProfile(db)).toEqual({ ...DEFAULT_PROFILE, partnerName: '' });
     } finally {
       db.close();
     }

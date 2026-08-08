@@ -67,6 +67,12 @@ function deferred<T>(): Promise<T> {
   return new Promise(() => undefined);
 }
 
+function controlled<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 function apiWith(overrides: Partial<RunApi> = {}): RunApi {
   return {
     next: vi.fn(() => deferred<NextTaskResponse>()),
@@ -107,7 +113,7 @@ describe('экран забега', () => {
     }));
   });
 
-  it('предзагружает следующее задание сразу после показа текущего', async () => {
+  it('предзагружает следующее задание после ответа, пока открыт разбор', async () => {
     const next = vi.fn()
       .mockResolvedValueOnce(task(1, 'Первое задание'))
       .mockResolvedValueOnce(task(2, 'Следующее задание'))
@@ -116,12 +122,12 @@ describe('экран забега', () => {
     render(<RunScreen runId={9} api={api} />);
 
     expect(await screen.findByRole('heading', { name: 'Первое задание' })).toBeInTheDocument();
-    await waitFor(() => expect(next).toHaveBeenCalledTimes(2));
+    expect(next).toHaveBeenCalledTimes(1);
 
     fireEvent.change(screen.getByLabelText('Число'), { target: { value: '2' } });
     fireEvent.submit(screen.getByLabelText('Число').closest('form') as HTMLFormElement);
     expect(await screen.findByText('Верно')).toBeInTheDocument();
-    expect(next).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(next).toHaveBeenCalledTimes(2));
 
     fireEvent.click(screen.getByRole('button', { name: 'Следующее задание' }));
     expect(await screen.findByRole('heading', { name: 'Следующее задание' })).toBeInTheDocument();
@@ -216,5 +222,19 @@ describe('экран забега', () => {
     render(<RunScreen runId={9} api={api} />);
 
     expect(await screen.findByRole('heading', { name: heading })).toBeInTheDocument();
+  });
+
+  it('не показывает ответ старого запроса после смены забега', async () => {
+    const old = controlled<NextTaskResponse>();
+    const firstApi = apiWith({ next: vi.fn(() => old.promise) });
+    const secondApi = apiWith({ next: vi.fn(() => Promise.resolve(task(2, 'Новый забег'))) });
+    const view = render(<RunScreen runId={1} api={firstApi} />);
+
+    view.rerender(<RunScreen runId={2} api={secondApi} />);
+    expect(await screen.findByRole('heading', { name: 'Новый забег' })).toBeInTheDocument();
+    old.resolve(task(1, 'Старый забег'));
+
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Старый забег' }))
+      .not.toBeInTheDocument());
   });
 });

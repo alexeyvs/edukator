@@ -91,8 +91,9 @@ export function nextTriageTask(
 
       // До ответа повторно отдаётся то же задание: обновление страницы не
       // должно перескочить на новую тему и исказить ранжирование.
-      const task = issuedTask(db, topic.id) ?? takeTask(db, topic.id, {
+      const task = issuedTask(db, topic.id, runId) ?? takeTask(db, topic.id, {
         difficulty: targetDifficulty,
+        runId,
       });
       if (task !== null) return { status: 'ok', task: issued(task, topic) };
     }

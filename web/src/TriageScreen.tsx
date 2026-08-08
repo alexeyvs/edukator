@@ -27,27 +27,27 @@ export function TriageScreen({ runId, api = browserRunApi }: TriageScreenProps) 
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const shownAt = useRef(Date.now());
-  const alive = useRef(true);
+  const generation = useRef(0);
 
-  const finishTriage = useCallback(async (): Promise<void> => {
+  const finishTriage = useCallback(async (token = generation.current): Promise<void> => {
     setBusy(true);
     try {
       const summary = await api.finish(runId);
-      if (alive.current) setFinish(summary);
+      if (generation.current === token) setFinish(summary);
     } catch {
-      if (alive.current) setProblem('Не получилось собрать итог триажа. Попробуй ещё раз.');
+      if (generation.current === token) setProblem('Не получилось собрать итог триажа. Попробуй ещё раз.');
     } finally {
-      if (alive.current) setBusy(false);
+      if (generation.current === token) setBusy(false);
     }
   }, [api, runId]);
 
-  const load = useCallback(async (): Promise<void> => {
+  const load = useCallback(async (token = generation.current): Promise<void> => {
     setBusy(true);
     try {
       const response = await api.triageNext(runId);
-      if (!alive.current) return;
+      if (generation.current !== token) return;
       if (response.status === 'done') {
-        await finishTriage();
+        await finishTriage(token);
         return;
       }
       setNext(response);
@@ -55,23 +55,29 @@ export function TriageScreen({ runId, api = browserRunApi }: TriageScreenProps) 
       setResult(null);
       shownAt.current = Date.now();
     } catch {
-      if (alive.current) setProblem('Не получилось загрузить вопрос триажа. Попробуй ещё раз.');
+      if (generation.current === token) setProblem('Не получилось загрузить вопрос триажа. Попробуй ещё раз.');
     } finally {
-      if (alive.current) setBusy(false);
+      if (generation.current === token) setBusy(false);
     }
   }, [api, finishTriage, runId]);
 
   useEffect(() => {
-    alive.current = true;
-    void load();
+    generation.current += 1;
+    const token = generation.current;
+    setNext(null);
+    setResult(null);
+    setFinish(null);
+    setProblem(null);
+    void load(token);
     return () => {
-      alive.current = false;
+      if (generation.current === token) generation.current += 1;
     };
   }, [load]);
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (next === null || answer.trim() === '') return;
+    const token = generation.current;
     setBusy(true);
     try {
       const checked = await api.answer({
@@ -81,11 +87,11 @@ export function TriageScreen({ runId, api = browserRunApi }: TriageScreenProps) 
         hintUsed: false,
         durationMs: Math.max(0, Date.now() - shownAt.current),
       });
-      if (alive.current) setResult(checked);
+      if (generation.current === token) setResult(checked);
     } catch {
-      if (alive.current) setProblem('Не получилось проверить ответ. Попробуй ещё раз.');
+      if (generation.current === token) setProblem('Не получилось проверить ответ. Попробуй ещё раз.');
     } finally {
-      if (alive.current) setBusy(false);
+      if (generation.current === token) setBusy(false);
     }
   }
 

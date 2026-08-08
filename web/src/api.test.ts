@@ -1,0 +1,121 @@
+// @vitest-environment jsdom
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { browserHomeApi } from './home-api';
+import { browserProfileApi } from './profile-api';
+import { browserRunApi, RunApiError } from './run-api';
+
+function response(body: unknown, options: { ok?: boolean; status?: number } = {}) {
+  return {
+    ok: options.ok ?? true,
+    status: options.status ?? 200,
+    json: vi.fn().mockResolvedValue(body),
+  };
+}
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe('браузерные API-адаптеры', () => {
+  it('собирает URL и тела запросов главного экрана и профиля', async () => {
+    const fetch = vi.fn().mockResolvedValue(response({ ok: true }));
+    vi.stubGlobal('fetch', fetch);
+
+    await browserHomeApi.plan();
+    await browserHomeApi.profile();
+    await browserHomeApi.start('math');
+    await browserHomeApi.startTriage('english');
+    await browserHomeApi.finish(7);
+    await browserProfileApi.read();
+    await browserProfileApi.save({
+      name: 'Тимофей',
+      interests: ['скейт'],
+      examDate: null,
+      partnerName: 'Кекс',
+    });
+
+    expect(fetch.mock.calls).toEqual([
+      ['/api/run/plan', undefined],
+      ['/api/profile', undefined],
+      ['/api/run/start', expect.objectContaining({ method: 'POST', body: '{"subject":"math"}' })],
+      ['/api/triage/start', expect.objectContaining({ method: 'POST', body: '{"subject":"english"}' })],
+      ['/api/run/7/finish', { method: 'POST' }],
+      ['/api/profile', undefined],
+      ['/api/profile', expect.objectContaining({ method: 'PUT', body: expect.stringContaining('Тимофей') })],
+    ]);
+  });
+
+  it('переводит поля занятия в серверный snake_case-контракт', async () => {
+    const fetch = vi.fn().mockResolvedValue(response({ ok: true }));
+    vi.stubGlobal('fetch', fetch);
+
+    await browserRunApi.next(3);
+    await browserRunApi.answer({
+      runId: 3,
+      taskId: 9,
+      answer: '45',
+      hintUsed: true,
+      durationMs: 1200,
+    });
+    await browserRunApi.dispute(11);
+    await browserRunApi.finish(3);
+    await browserRunApi.triageNext(4);
+
+    expect(fetch.mock.calls).toEqual([
+      ['/api/session/next?runId=3', undefined],
+      ['/api/session/answer', expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          runId: 3,
+          task_id: 9,
+          answer: '45',
+          hint_used: true,
+          duration_ms: 1200,
+        }),
+      })],
+      ['/api/session/dispute', expect.objectContaining({
+        method: 'POST',
+        body: '{"attempt_id":11}',
+      })],
+      ['/api/run/3/finish', { method: 'POST' }],
+      ['/api/triage/4/next', undefined],
+    ]);
+  });
+
+  it('сохраняет статус и код ошибки занятия и использует безопасные fallback-сообщения', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      response({ error: 'Очередь пуста', code: 'no-task' }, { ok: false, status: 503 }),
+    ));
+    await expect(browserRunApi.next(1)).rejects.toMatchObject({
+      name: 'RunApiError',
+      message: 'Очередь пуста',
+      status: 503,
+      code: 'no-task',
+    } satisfies Partial<RunApiError>);
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      response(null, { ok: false, status: 500 }),
+    ));
+    await expect(browserHomeApi.plan()).rejects.toThrow('Сервер не смог обработать запрос');
+    await expect(browserProfileApi.read()).rejects.toThrow('Не получилось сохранить профиль');
+    await expect(browserRunApi.next(1)).rejects.toMatchObject({
+      message: 'Сервер не смог обработать запрос',
+      status: 500,
+      code: undefined,
+    });
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      response({ error: 'Профиль заблокирован' }, { ok: false, status: 409 }),
+    ));
+    await expect(browserProfileApi.read()).rejects.toThrow('Профиль заблокирован');
+  });
+
+  it('не маскирует не-JSON ответ как успешный контракт', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockRejectedValue(new SyntaxError('not json')),
+    }));
+
+    await expect(browserRunApi.next(1)).rejects.toThrow('not json');
+  });
+});

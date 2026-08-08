@@ -128,9 +128,26 @@ describe('маршруты триажа', () => {
     const second = (await app.inject({
       method: 'GET',
       url: `/api/triage/${runId}/next`,
-    })).json() as { task: { difficulty: number; topic_id: string } };
+    })).json() as { task: { id: number; difficulty: number; topic_id: string } };
     expect(second.task.difficulty).toBe(3);
     expect(second.task.topic_id).not.toBe(first.task.topic_id);
+
+    await app.inject({
+      method: 'POST',
+      url: '/api/session/answer',
+      payload: { task_id: second.task.id, answer: '4', runId },
+    });
+    const third = (await app.inject({
+      method: 'GET',
+      url: `/api/triage/${runId}/next`,
+    })).json() as { task: { id: number } };
+    await app.inject({
+      method: 'POST',
+      url: '/api/session/answer',
+      payload: { task_id: third.task.id, answer: '4', runId },
+    });
+    expect((await app.inject({ method: 'GET', url: `/api/triage/${runId}/next` })).json())
+      .toMatchObject({ status: 'done', total: 3 });
 
     const finish = await app.inject({ method: 'POST', url: `/api/run/${runId}/finish` });
     expect(finish.statusCode).toBe(200);
@@ -173,6 +190,10 @@ describe('маршруты триажа', () => {
     expect(wrongKind.json()).toMatchObject({ code: 'task-not-in-run' });
 
     const triageId = await startTriage();
+    const premature = await app.inject({ method: 'POST', url: `/api/run/${triageId}/finish` });
+    expect(premature.statusCode).toBe(409);
+    expect(premature.json()).toMatchObject({ code: 'run-not-ready' });
+    db.prepare("UPDATE task_bank SET status = 'rejected' WHERE topic_id LIKE 'math.%'").run();
     expect((await app.inject({ method: 'POST', url: `/api/run/${triageId}/finish` })).statusCode)
       .toBe(200);
     const closed = await app.inject({ method: 'GET', url: `/api/triage/${triageId}/next` });

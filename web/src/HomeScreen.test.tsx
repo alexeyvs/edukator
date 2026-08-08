@@ -111,4 +111,13 @@ describe('главный экран', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Забег временно недоступен'));
     expect(screen.getAllByRole('button', { name: 'Начать' })[0]).toBeEnabled();
   });
+
+  it('показывает ошибку начальной загрузки без вечного индикатора', async () => {
+    const api = apiWith(PLAN);
+    vi.mocked(api.plan).mockRejectedValue(new Error('План временно недоступен'));
+    render(<HomeScreen api={api} />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('План временно недоступен');
+    expect(screen.queryByLabelText('Загрузка плана')).not.toBeInTheDocument();
+  });
 });

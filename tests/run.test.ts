@@ -5,9 +5,9 @@ import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import { openDatabase } from '../server/db.js';
 import { buildTopicGraph, type Topic, type TopicGraph } from '../server/curriculum.js';
-import { recordAttempt } from '../server/mastery.js';
+import { readTopicState, recordAttempt } from '../server/mastery.js';
 import { readSnapshots } from '../server/forecast.js';
-import { SessionError } from '../server/session.js';
+import { openDispute, SessionError } from '../server/session.js';
 import { RUN_TARGET, finishRun, runProgress, startRun } from '../server/run.js';
 
 function at(day: number, hour = 12): Date {
@@ -184,7 +184,7 @@ describe('жизненный цикл забега', () => {
     addAttempt({ topicId: 'math.a', correct: true, difficulty: 3, now: at(-1, 9) });
     addAttempt({ topicId: 'math.b', correct: true, difficulty: 3, now: at(-1, 10) });
     addAttempt({ topicId: 'math.b', correct: true, difficulty: 3, now: at(-1, 11) });
-    const { runId } = startRun(db, graph, 'math', { now: at(0, 9) });
+    const { runId } = startRun(db, graph, 'math', { now: at(0, 9), kind: 'triage' });
     addAttempt({ runId, topicId: 'math.a', correct: true, difficulty: 3, now: at(0, 10) });
     addAttempt({ runId, topicId: 'math.b', correct: false, difficulty: 1, now: at(0, 11) });
     addAttempt({
@@ -233,11 +233,11 @@ describe('жизненный цикл забега', () => {
   });
 
   it('на первом забеге отдаёт прогноз без сдвига, на втором — разницу снимков', () => {
-    const first = startRun(db, graph, 'math', { now: at(0, 9) });
+    const first = startRun(db, graph, 'math', { now: at(0, 9), kind: 'triage' });
     addAttempt({ runId: first.runId, topicId: 'math.a', correct: true, now: at(0, 10) });
     const firstResult = finishRun(db, graph, first.runId, { now: at(0, 11) });
 
-    const second = startRun(db, graph, 'math', { now: at(0, 12) });
+    const second = startRun(db, graph, 'math', { now: at(0, 12), kind: 'triage' });
     addAttempt({ runId: second.runId, topicId: 'math.a', correct: true, now: at(0, 13) });
     const secondResult = finishRun(db, graph, second.runId, { now: at(0, 14) });
     const snapshots = readSnapshots(db, 'math');
@@ -255,7 +255,7 @@ describe('жизненный цикл забега', () => {
   });
 
   it('отвергает повторное закрытие и неизвестный забег кодами состояния', () => {
-    const { runId } = startRun(db, graph, 'math', { now: at(0, 9) });
+    const { runId } = startRun(db, graph, 'math', { now: at(0, 9), kind: 'triage' });
     finishRun(db, graph, runId, { now: at(0, 10) });
 
     for (const [id, code] of [
@@ -270,6 +270,36 @@ describe('жизненный цикл забега', () => {
         expect((error as SessionError).code).toBe(code);
       }
     }
+  });
+
+  it('не закрывает незавершённый забег и забег с открытым спором', () => {
+    const ordinary = startRun(db, graph, 'math', { now: at(0, 9) });
+    expect(() => finishRun(db, graph, ordinary.runId, { now: at(0, 10) }))
+      .toThrow(expect.objectContaining({ code: 'run-not-ready' }));
+
+    db.prepare('UPDATE runs SET finished_at = ? WHERE id = ?')
+      .run(at(0, 10).toISOString(), ordinary.runId);
+    const triage = startRun(db, graph, 'math', { now: at(0, 11), kind: 'triage' });
+    addAttempt({ runId: triage.runId, topicId: 'math.a', correct: false, now: at(0, 12) });
+    const attempt = db.prepare<[], { id: number }>('SELECT id FROM attempts ORDER BY id DESC').get();
+    if (attempt === undefined) throw new Error('фикстура: попытка не записана');
+    openDispute(db, attempt.id);
+
+    expect(() => finishRun(db, graph, triage.runId, { now: at(0, 13) }))
+      .toThrow(expect.objectContaining({ code: 'run-not-ready' }));
+  });
+
+  it('не приписывает итогу попытки, сделанные после последнего ответа забега', () => {
+    const run = startRun(db, graph, 'math', { now: at(0, 9), kind: 'triage' });
+    addAttempt({ runId: run.runId, topicId: 'math.a', correct: true, now: at(0, 10) });
+    const afterRun = readTopicState(db, 'math.a').mastery;
+    addAttempt({ topicId: 'math.a', correct: false, now: at(0, 11) });
+
+    const result = finishRun(db, graph, run.runId, { now: at(0, 12) });
+
+    expect(result.touchedTopics).toEqual([
+      expect.objectContaining({ topicId: 'math.a', after: expect.closeTo(afterRun, 10) }),
+    ]);
   });
 
   it('отвергает неизвестный забег и предмет вне карты тем', () => {

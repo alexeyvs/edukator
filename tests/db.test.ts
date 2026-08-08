@@ -170,6 +170,14 @@ function createVersionSixDatabase(path: string): Database {
   return legacy;
 }
 
+/** Версия 7 ещё не связывала выданное задание с конкретным забегом. */
+function createVersionSevenDatabase(path: string): Database {
+  const legacy = openDatabase(path);
+  legacy.exec('ALTER TABLE task_bank DROP COLUMN issued_run_id;');
+  legacy.pragma('user_version = 7');
+  return legacy;
+}
+
 describe('база данных', () => {
   let tempDir: string;
   let dbFile: string;
@@ -194,7 +202,7 @@ describe('база данных', () => {
     // рабочую базу, поэтому число прибито буквально и меняется только вместе с
     // новой ступенью и её тестом обновления.
     it('держит номер версии схемы', () => {
-      expect(SCHEMA_VERSION).toBe(7);
+      expect(SCHEMA_VERSION).toBe(8);
     });
 
     it('создаёт все семь таблиц на пустой базе', () => {
@@ -631,6 +639,27 @@ describe('база данных', () => {
       }
     });
 
+    it('добавляет владельца выдачи базе версии 7 и сохраняет задания', () => {
+      const path = join(tempDir, 'версия-7.db');
+      const legacy = createVersionSevenDatabase(path);
+      const topicId = seedTopic(legacy);
+      const taskId = seedTask(legacy, topicId);
+      legacy.prepare("UPDATE task_bank SET status = 'used' WHERE id = ?").run(taskId);
+      legacy.close();
+
+      const migrated = openDatabase(path);
+      try {
+        expect(migrated.prepare(
+          'SELECT issued_run_id, status FROM task_bank WHERE id = ?',
+        ).get(taskId)).toEqual({ issued_run_id: null, status: 'valid' });
+        expect(
+          (migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version,
+        ).toBe(SCHEMA_VERSION);
+      } finally {
+        migrated.close();
+      }
+    });
+
     it('не объявляет текущей непустую базу без номера версии', () => {
       const path = join(tempDir, 'неизвестная.db');
       const unknown = new BetterSqlite3(path);
@@ -729,7 +758,7 @@ describe('база данных', () => {
 
   describe('профиль', () => {
     it('на первом запуске отдаёт значения по умолчанию', () => {
-      expect(readProfile(db)).toEqual(DEFAULT_PROFILE);
+      expect(readProfile(db)).toEqual({ ...DEFAULT_PROFILE, partnerName: '' });
     });
 
     it('сохраняет и читает поля профиля', () => {

@@ -9,7 +9,7 @@ const projectRoot = resolve(here, '..');
  * Версия схемы. Хранится в `PRAGMA user_version`; миграция сравнивает её со
  * своей и пропускает работу, если база уже актуальна.
  */
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 /** Семь таблиц из спеки. Тесты сверяют состав базы именно с этим списком. */
 export const TABLES = [
@@ -99,6 +99,7 @@ const SCHEMA = `
     -- Отпечаток формулировки (questionFingerprint): по нему банк отсекает
     -- повторы внутри темы.
     fingerprint TEXT   NOT NULL DEFAULT '',
+    issued_run_id INTEGER REFERENCES runs (id) ON DELETE SET NULL,
     created_at TEXT    NOT NULL DEFAULT (${NOW_ISO})
   );
 
@@ -405,6 +406,24 @@ export function migrate(db: Database.Database): void {
       `);
     }
 
+    if (version <= 7) {
+      const columns = db
+        .prepare<[], { name: string }>('PRAGMA table_info(task_bank)')
+        .all()
+        .map((column) => column.name);
+      if (!columns.includes('issued_run_id')) {
+        db.exec(`
+          ALTER TABLE task_bank ADD COLUMN issued_run_id INTEGER
+            REFERENCES runs (id) ON DELETE SET NULL;
+          UPDATE task_bank SET status = 'valid'
+           WHERE status = 'used'
+             AND NOT EXISTS (
+               SELECT 1 FROM attempts WHERE attempts.task_id = task_bank.id
+             );
+        `);
+      }
+    }
+
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   }).immediate();
 }
@@ -412,7 +431,7 @@ export function migrate(db: Database.Database): void {
 const REQUIRED_COLUMNS: Readonly<Record<(typeof TABLES)[number], readonly string[]>> = {
   profile: ['id', 'name', 'interests', 'exam_date', 'partner_name'],
   topic_state: ['topic_id', 'mastery', 'confidence', 'attempts', 'last_seen', 'next_review'],
-  task_bank: ['id', 'topic_id', 'question', 'answer', 'accept', 'hint', 'explain', 'joke', 'difficulty', 'status', 'fingerprint', 'created_at'],
+  task_bank: ['id', 'topic_id', 'question', 'answer', 'accept', 'hint', 'explain', 'joke', 'difficulty', 'status', 'fingerprint', 'issued_run_id', 'created_at'],
   runs: ['id', 'subject', 'kind', 'topic_id', 'started_at', 'finished_at', 'total', 'correct'],
   attempts: ['id', 'task_id', 'topic_id', 'run_id', 'answer', 'is_correct', 'hint_used', 'duration_ms', 'created_at'],
   disputes: ['id', 'attempt_id', 'status', 'resolution', 'created_at', 'resolved_at'],
@@ -534,7 +553,9 @@ export function readProfile(db: Database.Database): Profile {
       'SELECT name, interests, exam_date, partner_name FROM profile WHERE id = 1',
     )
     .get();
-  if (row === undefined) return { ...DEFAULT_PROFILE, interests: [...DEFAULT_PROFILE.interests] };
+  if (row === undefined) {
+    return { ...DEFAULT_PROFILE, interests: [...DEFAULT_PROFILE.interests], partnerName: '' };
+  }
 
   return {
     name: row.name,
