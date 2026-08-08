@@ -395,3 +395,34 @@ export function planFromDatabase(
     used: topicsUsedToday(db, now),
   });
 }
+
+/**
+ * Темы, по которым занятие идёт прямо сейчас: сначала темы уже начатых сегодня
+ * забегов, потом план ближайших. Тема идущего забега для `planRuns` уже
+ * «использована сегодня» и в план не попадёт — а задания прямо сейчас берутся
+ * именно из неё, так что выдача и долив обязаны видеть её первой.
+ *
+ * Реализация одна на всех: и воркер, и выдача занятия спрашивают состав тем
+ * здесь. Своя копия у любого из них означала бы, что греется одно, а
+ * показывается другое.
+ */
+export function activeTopics(
+  db: Database,
+  graph: TopicGraph,
+  count: number,
+  now: Date = new Date(),
+): Topic[] {
+  const started = [...topicsUsedToday(db, now)]
+    .map((id) => graph.byId.get(id))
+    .filter((topic): topic is Topic => topic !== undefined);
+  const planned = planFromDatabase(db, graph, count, now).map((run) => run.topic);
+
+  const seen = new Set<string>();
+  const active: Topic[] = [];
+  for (const topic of [...started, ...planned]) {
+    if (seen.has(topic.id)) continue;
+    seen.add(topic.id);
+    active.push(topic);
+  }
+  return active;
+}

@@ -7,6 +7,7 @@ import { openDatabase, writeProfile, type Subject } from '../server/db.js';
 import { buildTopicGraph, type Topic, type TopicGraph } from '../server/curriculum.js';
 import { newTopicState, type TopicState } from '../server/mastery.js';
 import {
+  activeTopics,
   EXAM_HORIZON_DAYS,
   EXAM_URGENCY_GAIN,
   OVERDUE_CAP,
@@ -524,6 +525,33 @@ describe('планировщик', () => {
         at(0).toISOString(),
       );
       expect(planFromDatabase(db, graph, 1, at(0))[0]?.topic.id).not.toBe(first?.topic.id);
+    });
+
+    it('ставит тему идущего забега первой, хотя план её сегодня больше не предложит', () => {
+      // Ровно то, ради чего `activeTopics` и заведён: занятие выдаёт задания из
+      // темы начатого забега, а план её уже считает использованной. Без этого и
+      // выдача, и долив перескочили бы на чужую тему посреди забега.
+      const first = planFromDatabase(db, graph, 1, at(0))[0];
+      expect(first).toBeDefined();
+      db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)').run(
+        first?.subject,
+        first?.topic.id,
+        at(0).toISOString(),
+      );
+
+      const active = activeTopics(db, graph, 2, at(0));
+
+      expect(active[0]?.id).toBe(first?.topic.id);
+      // Второй раз та же тема в выборку не попадает: план её не предложит, а
+      // дубль означал бы двойной долив одной темы за цикл.
+      expect(new Set(active.map((item) => item.id)).size).toBe(active.length);
+      expect(active).toHaveLength(3);
+    });
+
+    it('без начатых забегов повторяет план', () => {
+      const plan = planFromDatabase(db, graph, 3, at(0)).map((run) => run.topic.id);
+
+      expect(activeTopics(db, graph, 3, at(0)).map((item) => item.id)).toEqual(plan);
     });
 
     it('не считает вчерашние забеги за назначенные сегодня', () => {

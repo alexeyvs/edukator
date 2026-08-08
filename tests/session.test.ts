@@ -232,6 +232,28 @@ describe('занятие', () => {
       expect(result).toEqual({ status: 'no-task', topicId: expect.any(String) });
     });
 
+    // Занятие идёт забегами по одной теме, а начатый забег планировщик считает
+    // темой, использованной сегодня, и в план больше не включает. По голому
+    // плану выдача перескочила бы с начатой темы на чужую прямо посреди забега,
+    // а выданное по ней задание осталось бы висеть неотвеченным навсегда.
+    it('продолжает тему начатого забега, хотя план её сегодня больше не предложит', () => {
+      const now = new Date('2026-08-07T18:00:00.000Z');
+      storeTasks(db, 'russian.a', [task(), task()]);
+      storeTasks(db, 'math.a', [task()]);
+      storeTasks(db, 'english.a', [task()]);
+      db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)').run(
+        'russian',
+        'russian.a',
+        now.toISOString(),
+      );
+
+      const result = nextTask(db, graph, { seedDir, now });
+
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') return;
+      expect(result.task.topicId).toBe('russian.a');
+    });
+
     it('сообщает «нет темы», когда планировщику нечего предложить', () => {
       const empty = buildTopicGraph([topic('math.a', { examWeight: 0 })]);
       syncTopicState(db, empty);

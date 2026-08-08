@@ -25,7 +25,7 @@ import {
   type TopicState,
 } from './mastery.js';
 import { checkAnswer, type CheckResult, type RejectReason } from './normalize.js';
-import { planFromDatabase } from './scheduler.js';
+import { activeTopics } from './scheduler.js';
 import { issuedTask, type BankTask } from './codex/bank.js';
 import { takeTaskOrSeed } from './codex/seed-bank.js';
 import { duplicateKey, fitsAccept } from './codex/task-schema.js';
@@ -100,6 +100,12 @@ export interface NextTaskOptions {
  *
  * Уже выданное, но неотвеченное задание темы возвращается повторно: перезагрузка
  * страницы не должна сжигать очередь.
+ *
+ * Состав тем берётся `activeTopics`, а не голым планом: тему идущего забега
+ * планировщик считает использованной сегодня и в план не включает, так что на
+ * голом плане занятие перескакивало бы с начатой темы на чужую прямо посреди
+ * забега — а уже выданное по ней задание осталось бы висеть навсегда, потому что
+ * `issuedTask` по выпавшей теме никто не спросит.
  */
 export function nextTask(
   db: Database,
@@ -108,7 +114,7 @@ export function nextTask(
 ): NextTaskResult {
   const now = options.now ?? new Date();
   const log = options.log ?? ((message: string): void => void process.stderr.write(`${message}\n`));
-  const planned = planFromDatabase(db, graph, graph.byId.size, now);
+  const planned = activeTopics(db, graph, graph.byId.size, now);
   const first = planned[0];
   if (first === undefined) return { status: 'no-topic' };
 
@@ -120,7 +126,7 @@ export function nextTask(
   // `topic_state`), и молчаливое «заданий нет» увело бы разбирательство не туда.
   let firstFailure: Error | undefined;
   let failed = 0;
-  for (const { topic } of planned) {
+  for (const topic of planned) {
     let task: BankTask | null;
     // Поломка одной темы не должна валить весь перебор: повреждённый `accept[]`
     // одного задания — дефект банка, и превращать его в пятисотку на каждом
@@ -159,7 +165,7 @@ export function nextTask(
   if (firstFailure !== undefined && failed === planned.length) throw firstFailure;
 
   // Тема первого забега: она же осталась бы выбранной и на следующем запросе.
-  return { status: 'no-task', topicId: first.topic.id };
+  return { status: 'no-task', topicId: first.id };
 }
 
 export interface AnswerRequest {

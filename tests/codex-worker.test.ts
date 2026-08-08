@@ -18,7 +18,6 @@ import {
 } from '../server/codex/client.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import {
-  activeTopics,
   backoffDelay,
   BACKOFF_BASE_MS,
   BACKOFF_MAX_MS,
@@ -300,7 +299,7 @@ describe('воркер тёплой очереди', () => {
       expect(countAvailable(db, 'math.dead')).toBe(0);
     });
 
-    it('греет тему идущего забега, хотя план её сегодня больше не предложит', () => {
+    it('греет тему идущего забега, хотя план её сегодня больше не предложит', async () => {
       const graph = graphOf(WIDE);
       const now = new Date('2026-08-07T18:00:00.000Z');
       db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)').run(
@@ -308,13 +307,15 @@ describe('воркер тёплой очереди', () => {
         'russian.b',
         now.toISOString(),
       );
+      const { requests, produce } = producer(QUEUE_TARGET);
 
-      const active = activeTopics(db, graph, { topics: 1, now });
+      const report = await runWarmupCycle({ db, graph, produce, log, topics: 1, now: () => now });
 
-      expect(active[0]?.id).toBe('russian.b');
+      expect(report.topics[0]).toBe('russian.b');
       // Планировщик её сегодня уже не предложит, так что второй раз она в
       // выборку не попадает — иначе воркер грел бы одну тему дважды.
-      expect(new Set(active.map((item) => item.id)).size).toBe(active.length);
+      expect(new Set(report.topics).size).toBe(report.topics.length);
+      expect(requests.filter((request) => request.topic.id === 'russian.b')).toHaveLength(1);
     });
   });
 

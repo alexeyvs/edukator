@@ -12,6 +12,7 @@ import {
   readPdfPages,
   scanWindow,
 } from '../scripts/extract-toc.js';
+import { MAX_CHILD_OUTPUT_BYTES } from '../server/run-child.js';
 
 /**
  * Собирает крошечный PDF с текстовым слоем: страница — массив строк.
@@ -405,6 +406,48 @@ describe('ocrPdfPages', () => {
     await expect(ocrPdfPages('/tmp/book.pdf', [3, 4], reordered)).rejects.toThrow(
       /не в запрошенном порядке/,
     );
+  });
+
+  // Общий предел `runChild` — мегабайт на процесс, а swift отдаёт все страницы
+  // одним массивом. Явный `--pages 1-200` по скану кириллицы перебирает его, и
+  // до правки пять минут работы Vision выбрасывались целиком.
+  it('пропускает ответ длиннее общего предела вывода, если страниц много', async () => {
+    const bin = fakeOcrBin(
+      'ocr-big.sh',
+      [
+        `text=$(awk 'BEGIN{s="";for(i=0;i<2000;i++)s=s "abcdefghij";print s}')`,
+        `printf '['`,
+        'i=1',
+        'while [ $i -le 64 ]; do',
+        `  if [ $i -gt 1 ]; then printf ','; fi`,
+        `  printf '{"num":%d,"text":"%s"}' "$i" "$text"`,
+        '  i=$((i+1))',
+        'done',
+        `printf ']'`,
+      ].join('\n'),
+    );
+
+    const pages = await ocrPdfPages(
+      '/tmp/book.pdf',
+      Array.from({ length: 64 }, (_, index) => index + 1),
+      bin,
+    );
+
+    expect(pages).toHaveLength(64);
+    // Ровно то, что не пролезло бы в мегабайт: без запаса на страницу вызов
+    // упал бы `ChildOutputLimitError` вместо разбора.
+    expect(Buffer.byteLength(pages[0]?.text ?? '') * 64).toBeGreaterThan(MAX_CHILD_OUTPUT_BYTES);
+  });
+
+  it('всё же обрывает распознавание, разболтавшееся сверх запаса на страницу', async () => {
+    // Запас считается по числу страниц, но не снимается: сорвавшийся инструмент,
+    // печатающий бесконечно, иначе съел бы память процесса.
+    const bin = fakeOcrBin(
+      'ocr-runaway.sh',
+      `awk 'BEGIN{s="";for(i=0;i<1000;i++)s=s "0123456789";for(j=0;j<210;j++)printf "%s", s}'`,
+    );
+
+    await expect(ocrPdfPages('/tmp/book.pdf', [1], bin)).rejects.toThrow(/вывод превысил/);
   });
 
   it('сообщает о неразбираемом ответе распознавания', async () => {

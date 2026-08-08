@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { PDFParse } from 'pdf-parse';
 import { SUBJECTS, type Subject } from '../server/db.js';
 import { findTocPages, formatToc, type PdfPage, type TocSelection } from './toc.js';
-import { runChild } from '../server/run-child.js';
+import { MAX_CHILD_OUTPUT_BYTES, runChild } from '../server/run-child.js';
 import { writeFileAtomic } from '../server/atomic-write.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -38,6 +38,16 @@ const DEFAULT_SCAN_EDGE = 15;
  */
 const MIN_TEXT_LAYER_CHARS_PER_PAGE = 200;
 export const OCR_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Запас вывода на распознанную страницу. Общий предел `runChild` — мегабайт на
+ * весь процесс, а swift отдаёт все запрошенные страницы одним массивом JSON:
+ * плотная страница кириллицы весит около пяти килобайт в UTF-8, и явный
+ * `--pages 1-200` упирался бы в предел после пяти минут работы Vision, теряя
+ * всё распознанное. Предел остаётся — иначе сорвавшийся инструмент съедает
+ * память, — но считается по числу страниц.
+ */
+export const OCR_BYTES_PER_PAGE = 32 * 1024;
 
 export type Extraction = 'text' | 'ocr';
 
@@ -186,6 +196,7 @@ export async function ocrPdfPages(
       args: [OCR_SCRIPT, pdfPath, pageNumbers.join(',')],
       label: 'OCR',
       timeoutMs,
+      maxOutputBytes: Math.max(MAX_CHILD_OUTPUT_BYTES, pageNumbers.length * OCR_BYTES_PER_PAGE),
     });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {

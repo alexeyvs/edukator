@@ -16,7 +16,7 @@
 import type { Database } from 'better-sqlite3';
 import type { Topic, TopicGraph } from '../curriculum.js';
 import { readProfile, type Profile } from '../db.js';
-import { planFromDatabase, topicsUsedToday } from '../scheduler.js';
+import { activeTopics } from '../scheduler.js';
 import { countAvailable, recentQuestions, storeTasks } from './bank.js';
 import { CodexUnavailableError, type CodexRunner } from './client.js';
 import { generateTaskBatch } from './generate.js';
@@ -167,34 +167,6 @@ export function createValidatingProducer(options: ProducerOptions = {}): TaskPro
   };
 }
 
-/**
- * Темы, которые воркер греет: сначала темы уже начатых сегодня забегов, потом
- * план ближайших. Свой список воркер не ведёт — оба источника принадлежат
- * планировщику, и расхождение означало бы генерацию не туда.
- */
-export function activeTopics(
-  db: Database,
-  graph: TopicGraph,
-  options: { topics?: number; now?: Date } = {},
-): Topic[] {
-  const now = options.now ?? new Date();
-  const started = [...topicsUsedToday(db, now)]
-    .map((id) => graph.byId.get(id))
-    .filter((topic): topic is Topic => topic !== undefined);
-  const planned = planFromDatabase(db, graph, options.topics ?? WARM_TOPICS, now).map(
-    (run) => run.topic,
-  );
-
-  const seen = new Set<string>();
-  const active: Topic[] = [];
-  for (const topic of [...started, ...planned]) {
-    if (seen.has(topic.id)) continue;
-    seen.add(topic.id);
-    active.push(topic);
-  }
-  return active;
-}
-
 /** Очередь с пределом одновременных исполнителей. Порядок выдачи — исходный. */
 async function pool<T>(
   items: readonly T[],
@@ -343,10 +315,7 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.run === undefined ? {} : { run: options.run }),
     });
-  const topics = activeTopics(db, graph, {
-    ...(options.topics === undefined ? {} : { topics: options.topics }),
-    ...(options.now === undefined ? {} : { now: options.now() }),
-  });
+  const topics = activeTopics(db, graph, options.topics ?? WARM_TOPICS, options.now?.());
 
   const profile = readProfile(db);
   // Счётчик под перехватом: тема, добавленная в карту и ещё не синхронизированная
