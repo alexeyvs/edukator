@@ -302,6 +302,22 @@ describe('воркер тёплой очереди', () => {
       expect(countAvailable(db, 'math.dead')).toBe(0);
     });
 
+    it('не прогревает закрытую тему', async () => {
+      const graph = graphOf([topic('math.closed'), topic('math.open')]);
+      syncTopicState(db, graph);
+      db.prepare('UPDATE topic_state SET closed_at = ? WHERE topic_id = ?').run(
+        '2026-08-07T12:00:00.000Z',
+        'math.closed',
+      );
+      const { requests, produce } = producer(QUEUE_TARGET);
+
+      const report = await runWarmupCycle({ db, graph, produce, log, topics: WARM_TOPICS });
+
+      expect(report.topics).toEqual(['math.open']);
+      expect(requests.map((request) => request.topic.id)).toEqual(['math.open']);
+      expect(countAvailable(db, 'math.closed')).toBe(0);
+    });
+
     it('греет тему идущего забега, хотя план её сегодня больше не предложит', async () => {
       const graph = graphOf(WIDE);
       const now = new Date('2026-08-07T18:00:00.000Z');

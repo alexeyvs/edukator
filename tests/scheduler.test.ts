@@ -5,8 +5,10 @@ import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import { openDatabase, writeProfile, type Subject } from '../server/db.js';
 import { buildTopicGraph, type Topic, type TopicGraph } from '../server/curriculum.js';
-import { newTopicState, type TopicState } from '../server/mastery.js';
+import { newTopicState, readTopicStates, type TopicState } from '../server/mastery.js';
+import { forecastFor } from '../server/forecast.js';
 import {
+  activeRunTopics,
   activeTopics,
   EXAM_HORIZON_DAYS,
   EXAM_URGENCY_GAIN,
@@ -667,6 +669,67 @@ describe('планировщик', () => {
       const withoutExam = planFromDatabase(db, graph, 1, at(0))[0]?.priority as number;
 
       expect(withExam).toBeGreaterThan(withoutExam);
+    });
+
+    it('навсегда исключает закрытую тему из плана и старого обычного забега', () => {
+      const closedAt = '2020-01-01T00:00:00.000Z';
+      db.prepare('UPDATE topic_state SET closed_at = ? WHERE topic_id = ?').run(
+        closedAt,
+        'math.t0',
+      );
+      db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)').run(
+        'math',
+        'math.t0',
+        at(0).toISOString(),
+      );
+
+      const farFuture = at(3650);
+      expect(planFromDatabase(db, graph, graph.byId.size, farFuture).map((run) => run.topic.id))
+        .not.toContain('math.t0');
+      expect(activeTopics(db, graph, graph.byId.size, at(0)).map((item) => item.id))
+        .not.toContain('math.t0');
+      expect(
+        db.prepare<[string], { closed_at: string | null }>(
+          'SELECT closed_at FROM topic_state WHERE topic_id = ?',
+        ).get('math.t0')?.closed_at,
+      ).toBe(closedAt);
+    });
+
+    it('не смешивает открытый boss-забег с обычными активными темами', () => {
+      db.prepare(
+        "INSERT INTO runs (subject, kind, topic_id, started_at) VALUES (?, 'boss', ?, ?)",
+      ).run('math', 'math.t0', at(0).toISOString());
+
+      expect(activeRunTopics(db, at(0))).not.toContain('math.t0');
+    });
+
+    it('ранжирует остальные темы предмета и возвращает пустой полностью закрытый план', () => {
+      db.prepare("UPDATE topic_state SET closed_at = '2026-08-07T12:00:00.000Z' WHERE topic_id = ?")
+        .run('math.t0');
+
+      const partlyOpen = planFromDatabase(db, graph, graph.byId.size, at(0));
+      expect(partlyOpen.some((run) => run.topic.id === 'math.t1')).toBe(true);
+      expect(partlyOpen.some((run) => run.topic.id === 'math.t2')).toBe(true);
+      expect(partlyOpen.some((run) => run.topic.id === 'math.t0')).toBe(false);
+
+      db.prepare("UPDATE topic_state SET closed_at = '2026-08-07T12:00:00.000Z'").run();
+      expect(planFromDatabase(db, graph, graph.byId.size, at(0))).toEqual([]);
+      expect(activeTopics(db, graph, graph.byId.size, at(0))).toEqual([]);
+    });
+
+    it('сохраняет закрытую тему и её экзаменационный вес в прогнозе', () => {
+      db.prepare(
+        `UPDATE topic_state
+            SET mastery = 0.8, confidence = 0.9, attempts = 5,
+                last_seen = ?, closed_at = ?
+          WHERE topic_id = ?`,
+      ).run(at(0).toISOString(), at(0).toISOString(), 'math.t0');
+
+      const forecast = forecastFor(graph, readTopicStates(db), 'math', at(0));
+
+      expect(forecast?.weight).toBe(6);
+      expect(forecast?.ratio).toBeCloseTo(0.8 / 3, 10);
+      expect(readTopicStates(db).get('math.t0')).toMatchObject({ mastery: 0.8, attempts: 5 });
     });
   });
 });

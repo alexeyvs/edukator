@@ -130,6 +130,20 @@ describe('занятие', () => {
       expect(JSON.stringify(result.task)).not.toContain('45');
     });
 
+    it('не выдаёт задание закрытой темы', () => {
+      storeTasks(db, 'math.a', [task()]);
+      db.prepare('UPDATE topic_state SET closed_at = ? WHERE topic_id = ?').run(
+        '2026-08-07T12:00:00.000Z',
+        'math.a',
+      );
+
+      const result = nextTask(db, graph, { seedDir });
+
+      expect(result).toEqual({ status: 'no-task', topicId: expect.not.stringMatching(/^math\.a$/u) });
+      expect(db.prepare("SELECT status FROM task_bank WHERE topic_id = 'math.a'").get())
+        .toEqual({ status: 'valid' });
+    });
+
     // Перезагрузка страницы не должна сжигать очередь: выданное задание помечено
     // `used` безвозвратно, и без повторной выдачи несколько обновлений подряд
     // опустошили бы тему, ни разу не спросив ученика.

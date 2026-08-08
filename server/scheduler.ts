@@ -387,7 +387,9 @@ export function topicsUsedToday(db: Database, now: Date = new Date()): Set<strin
 }
 
 /**
- * Темы незакрытых забегов сегодняшнего дня, самый свежий первым. Отдельный
+ * Темы незакрытых обычных забегов сегодняшнего дня, самый свежий первым.
+ * Триаж выбирает темы своей политикой, а boss-забег обслуживает только `boss.ts`.
+ * Отдельный
  * запрос, а не `topicsUsedToday`: та отвечает на вопрос «что сегодня уже
  * занято» и законно включает законченное, а здесь нужен ровно идущий забег.
  * Законченная тема, оказавшись впереди, перехватывала бы выдачу заданий —
@@ -403,11 +405,60 @@ export function activeRunTopics(db: Database, now: Date = new Date()): string[] 
   const rows = db
     .prepare<[string, string], { topic_id: string }>(
       `SELECT topic_id FROM runs
-       WHERE started_at >= ? AND started_at < ? AND finished_at IS NULL
+       WHERE started_at >= ? AND started_at < ? AND finished_at IS NULL AND kind = 'run'
        ORDER BY started_at DESC, id DESC`,
     )
     .all(start, next);
   return [...new Set(rows.map((row) => row.topic_id))];
+}
+
+interface DatabaseSelection {
+  plan: PlannedRun[];
+  active: Topic[];
+}
+
+/**
+ * Единая выборка тем обычного занятия: закрытие навсегда убирает тему и из
+ * будущего плана, и из старого незавершённого забега. Само состояние остаётся
+ * в базе — оно по-прежнему нужно прогнозу и истории.
+ */
+function selectionFromDatabase(
+  db: Database,
+  graph: TopicGraph,
+  count: number,
+  now: Date,
+): DatabaseSelection {
+  const closed = new Set(
+    db
+      .prepare<[], { topic_id: string }>(
+        'SELECT topic_id FROM topic_state WHERE closed_at IS NOT NULL ORDER BY topic_id',
+      )
+      .all()
+      .map((row) => row.topic_id),
+  );
+  const used = topicsUsedToday(db, now);
+  for (const topicId of closed) used.add(topicId);
+
+  const plan = planRuns(graph, readTopicStates(db), count, {
+    now,
+    examDate: readProfile(db).examDate,
+    lastSubject: lastRunSubject(db),
+    assigned: runsAssignedToday(db, now),
+    used,
+  });
+  const started = activeRunTopics(db, now)
+    .filter((id) => !closed.has(id))
+    .map((id) => graph.byId.get(id))
+    .filter((topic): topic is Topic => topic !== undefined);
+
+  const seen = new Set<string>();
+  const active: Topic[] = [];
+  for (const topic of [...started, ...plan.map((run) => run.topic)]) {
+    if (seen.has(topic.id)) continue;
+    seen.add(topic.id);
+    active.push(topic);
+  }
+  return { plan, active };
 }
 
 /**
@@ -421,13 +472,7 @@ export function planFromDatabase(
   count: number,
   now: Date = new Date(),
 ): PlannedRun[] {
-  return planRuns(graph, readTopicStates(db), count, {
-    now,
-    examDate: readProfile(db).examDate,
-    lastSubject: lastRunSubject(db),
-    assigned: runsAssignedToday(db, now),
-    used: topicsUsedToday(db, now),
-  });
+  return selectionFromDatabase(db, graph, count, now).plan;
 }
 
 /**
@@ -446,17 +491,5 @@ export function activeTopics(
   count: number,
   now: Date = new Date(),
 ): Topic[] {
-  const started = activeRunTopics(db, now)
-    .map((id) => graph.byId.get(id))
-    .filter((topic): topic is Topic => topic !== undefined);
-  const planned = planFromDatabase(db, graph, count, now).map((run) => run.topic);
-
-  const seen = new Set<string>();
-  const active: Topic[] = [];
-  for (const topic of [...started, ...planned]) {
-    if (seen.has(topic.id)) continue;
-    seen.add(topic.id);
-    active.push(topic);
-  }
-  return active;
+  return selectionFromDatabase(db, graph, count, now).active;
 }
