@@ -30,6 +30,272 @@ button:disabled {
   opacity: .55;
 }
 
+.home-shell {
+  width: min(100% - 2rem, 70rem);
+  margin: 0 auto;
+  padding: 2rem 0 5rem;
+}
+
+.home-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: clamp(2.5rem, 7vw, 5rem);
+}
+
+.home-header > div {
+  display: grid;
+  line-height: 1.2;
+}
+
+.home-header span {
+  color: #66756f;
+  font-size: .7rem;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.home-header strong {
+  font-size: 1.15rem;
+}
+
+.profile-link {
+  margin-left: auto;
+  color: #075b45;
+  font-weight: 750;
+  text-underline-offset: .25rem;
+}
+
+.home-intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(15rem, .4fr);
+  align-items: end;
+  gap: 2rem;
+  margin-bottom: 3.5rem;
+}
+
+.home-kicker,
+.section-heading p {
+  margin: 0 0 .5rem;
+  color: #0b7c5d;
+  font-size: .75rem;
+  font-weight: 850;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.home-intro h1 {
+  max-width: 16ch;
+  margin: 0;
+  font-size: clamp(2.4rem, 7vw, 5rem);
+  line-height: .98;
+  letter-spacing: -.055em;
+}
+
+.home-intro > div > p:last-child {
+  max-width: 42rem;
+  margin: 1.25rem 0 0;
+  color: #52625c;
+  font-size: 1.05rem;
+  line-height: 1.65;
+}
+
+.exam-countdown {
+  padding: 1.2rem 1.3rem;
+  border-top: 2px solid #e3a31b;
+  background: rgb(255 255 255 / 58%);
+}
+
+.exam-countdown span {
+  color: #72520c;
+  font-size: .7rem;
+  font-weight: 850;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.exam-countdown p {
+  margin: .45rem 0 0;
+  color: #52625c;
+}
+
+.exam-countdown strong {
+  color: #17231f;
+  font-size: 1.5rem;
+}
+
+.home-error {
+  margin: 0 0 1rem;
+  padding: .9rem 1rem;
+  border-radius: .8rem;
+  color: #87351f;
+  background: #fde8df;
+}
+
+.home-loading,
+.empty-day {
+  padding: 2rem;
+  border: 1px dashed #b8c8bf;
+  border-radius: 1.25rem;
+  color: #52625c;
+  text-align: center;
+}
+
+.triage-offer {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 1.5rem;
+  padding: clamp(1.5rem, 4vw, 2.5rem);
+  border-radius: 1.5rem;
+  color: white;
+  background: #075b45;
+  box-shadow: 0 24px 60px rgb(7 91 69 / 20%);
+}
+
+.triage-offer > span {
+  color: #f5cb61;
+  font-size: 2.4rem;
+  font-weight: 300;
+}
+
+.triage-offer p,
+.triage-offer h2,
+.triage-offer small {
+  margin: 0;
+}
+
+.triage-offer p,
+.triage-offer small {
+  color: #bcd9cf;
+}
+
+.triage-offer h2 {
+  margin: .2rem 0;
+  font-size: 1.55rem;
+}
+
+.triage-offer .primary {
+  min-height: 3rem;
+  padding: .75rem 1.2rem;
+  border-color: #f5cb61;
+  border-radius: .85rem;
+  color: #3d300f;
+  background: #f5cb61;
+  font-weight: 800;
+}
+
+.forecast-strip,
+.day-plan {
+  margin-top: 3rem;
+}
+
+.section-heading h2 {
+  margin: 0;
+  font-size: clamp(1.5rem, 4vw, 2.2rem);
+  letter-spacing: -.035em;
+}
+
+.day-plan-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.compact-triage {
+  padding: .65rem .9rem;
+  border-radius: .75rem;
+  font-size: .85rem;
+  font-weight: 750;
+}
+
+.forecast-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+
+.forecast-cards article {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: .5rem;
+  padding: 1.25rem;
+  border: 1px solid #dbe4de;
+  border-radius: 1.2rem;
+  background: rgb(255 255 255 / 65%);
+}
+
+.forecast-cards span {
+  color: #52625c;
+  font-size: .83rem;
+  font-weight: 750;
+}
+
+.forecast-cards strong {
+  color: #075b45;
+  font-size: 1.8rem;
+}
+
+.forecast-cards small {
+  grid-column: 1 / -1;
+  color: #7a8782;
+}
+
+.plan-cards {
+  display: grid;
+  gap: .75rem;
+  margin-top: 1.25rem;
+}
+
+.plan-cards article {
+  display: grid;
+  grid-template-columns: 3rem 1fr auto;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1.2rem;
+  border: 1px solid #dbe4de;
+  border-radius: 1.2rem;
+  background: rgb(255 255 255 / 78%);
+}
+
+.plan-number {
+  color: #c18a16;
+  font-size: 1.25rem;
+  font-weight: 800;
+}
+
+.plan-cards small {
+  color: #66756f;
+  font-weight: 750;
+}
+
+.plan-cards h3 {
+  margin: .2rem 0 0;
+  font-size: 1.1rem;
+}
+
+.plan-cards button {
+  min-width: 6.5rem;
+  min-height: 2.8rem;
+  border-radius: .8rem;
+  font-weight: 800;
+}
+
+.empty-day {
+  display: grid;
+  gap: .35rem;
+  margin-top: 1.25rem;
+}
+
+.empty-day strong {
+  color: #075b45;
+  font-size: 1.2rem;
+}
+
 .run-shell {
   width: min(100% - 2rem, 56rem);
   margin: 0 auto;
@@ -436,6 +702,46 @@ button:disabled {
 }
 
 @media (max-width: 540px) {
+  .home-shell {
+    width: min(100% - 1.25rem, 70rem);
+    padding-top: .75rem;
+  }
+
+  .home-header {
+    margin-bottom: 2.5rem;
+  }
+
+  .home-intro,
+  .forecast-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .home-intro {
+    gap: 1.25rem;
+    margin-bottom: 2rem;
+  }
+
+  .triage-offer {
+    grid-template-columns: auto 1fr;
+  }
+
+  .triage-offer button {
+    grid-column: 1 / -1;
+  }
+
+  .plan-cards article {
+    grid-template-columns: 2.25rem 1fr;
+  }
+
+  .day-plan-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .plan-cards button {
+    grid-column: 1 / -1;
+  }
+
   .run-shell {
     width: min(100% - 1rem, 56rem);
     padding-top: .75rem;
