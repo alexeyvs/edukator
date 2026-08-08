@@ -9,7 +9,7 @@
 Планы этапов: [`docs/plans/20260807-edukator-core.md`](docs/plans/20260807-edukator-core.md) (этап 1),
 [`docs/plans/20260807-edukator-generation.md`](docs/plans/20260807-edukator-generation.md) (этап 2),
 [`docs/plans/completed/20260808-edukator-run-triage.md`](docs/plans/completed/20260808-edukator-run-triage.md) (этап 3),
-[`docs/plans/20260808-edukator-game-parents.md`](docs/plans/20260808-edukator-game-parents.md) (этап 4; перенос в completed выполняется после финальной проверки).
+[`docs/plans/completed/20260808-edukator-game-parents.md`](docs/plans/completed/20260808-edukator-game-parents.md) (этап 4).
 
 ## Что уже есть
 
