@@ -156,6 +156,7 @@ describe('маршруты занятия', () => {
 
       expect(response.statusCode).toBe(503);
       expect((response.json() as { error: string }).error).toMatch(/нет готовых заданий/);
+      expect((response.json() as { code: string }).code).toBe('no-task');
     });
 
     // Порча посева на старте сервер не роняет; посреди занятия она приезжала бы
@@ -178,6 +179,7 @@ describe('маршруты занятия', () => {
 
       expect(response.statusCode).toBe(503);
       expect((response.json() as { error: string }).error).toMatch(/нечего предложить/);
+      expect((response.json() as { code: string }).code).toBe('no-topic');
     });
   });
 
@@ -707,6 +709,7 @@ describe('маршруты занятия', () => {
 
     expect(response.statusCode).toBe(503);
     expect((response.json() as { error: string }).error).toMatch(/карта тем не загружена/);
+    expect((response.json() as { code: string }).code).toBe('restart-required');
   });
 
   // Все три адреса, а не один: незарегистрированный маршрут отвечает 404 от

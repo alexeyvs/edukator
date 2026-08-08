@@ -198,12 +198,18 @@ export function registerSessionRoutes(
       if (result.status === 'no-topic') {
         return reply
           .code(503)
-          .send({ error: 'Планировщику нечего предложить: свободных тем нет' });
+          .send({
+            error: 'Планировщику нечего предложить: свободных тем нет',
+            code: 'no-topic',
+          });
       }
       if (result.status === 'no-task') {
         return reply
           .code(503)
-          .send({ error: `По теме «${result.topicId}» нет готовых заданий` });
+          .send({
+            error: `По теме «${result.topicId}» нет готовых заданий`,
+            code: 'no-task',
+          });
       }
 
       return reply.send({
@@ -322,7 +328,9 @@ export function registerSessionRoutes(
  */
 export function registerUnavailableSession(app: FastifyInstance, reason: string): void {
   const handler = (_request: unknown, reply: FastifyReply): FastifyReply =>
-    reply.code(503).send({ error: `Занятие недоступно: ${reason}` });
+    reply
+      .code(503)
+      .send({ error: `Занятие недоступно: ${reason}`, code: 'restart-required' });
 
   app.get('/api/session/next', handler);
   app.post('/api/session/answer', handler);

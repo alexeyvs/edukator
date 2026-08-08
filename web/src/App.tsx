@@ -1,4 +1,9 @@
+import { RunScreen } from './RunScreen';
+
 export function App() {
+  const runId = Number(new URLSearchParams(window.location.search).get('runId'));
+  if (Number.isSafeInteger(runId) && runId > 0) return <RunScreen runId={runId} />;
+
   return (
     <main className="mx-auto flex min-h-screen max-w-3xl items-center px-6 py-12">
       <section aria-labelledby="app-title">
