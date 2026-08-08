@@ -1,8 +1,20 @@
 import type { Database } from 'better-sqlite3';
 import { readProfile, type Subject } from './db.js';
 import type { TopicGraph } from './curriculum.js';
-import { readTopicStates } from './mastery.js';
+import {
+  applyAttempt,
+  GAP_MASTERY,
+  newTopicState,
+  readTopicStates,
+} from './mastery.js';
+import {
+  readSnapshots,
+  recordForecasts,
+  type ForecastSnapshot,
+} from './forecast.js';
 import { selectTopic, topicsUsedToday } from './scheduler.js';
+import { SessionError } from './session-error.js';
+import { taskXp } from './xp.js';
 
 /** Число ответов, после которого забег готов к финальному экрану. */
 export const RUN_TARGET = 12;
@@ -27,9 +39,48 @@ export interface StartRunResult {
   progress: RunProgress;
 }
 
+export interface FinishRunOptions {
+  now?: Date;
+}
+
+export interface RunTopicChange {
+  topicId: string;
+  title: string;
+  before: number;
+  after: number;
+}
+
+export interface FinishRunResult {
+  runId: number;
+  total: number;
+  correct: number;
+  xp: number;
+  closedTopics: RunTopicChange[];
+  declinedTopics: RunTopicChange[];
+  forecast: ForecastSnapshot;
+  /** Нет у первого снимка: отсутствие истории не равно нулевому сдвигу. */
+  forecastDelta?: number;
+}
+
 interface RunCounters {
   total: number;
   correct: number;
+}
+
+interface FinishableRun {
+  id: number;
+  subject: Subject;
+  finished_at: string | null;
+}
+
+interface RunAttemptRow {
+  id: number;
+  topic_id: string;
+  run_id: number | null;
+  is_correct: number;
+  hint_used: number;
+  difficulty: number;
+  created_at: string;
 }
 
 function dayBounds(now: Date): [string, string] {
@@ -126,5 +177,137 @@ export function startRun(
     );
 
     return { runId, resumed: false, progress: readRunProgress(db, runId) };
+  }).immediate();
+}
+
+function topicChanges(
+  db: Database,
+  graph: TopicGraph,
+  runId: number,
+): { closedTopics: RunTopicChange[]; declinedTopics: RunTopicChange[] } {
+  const touched = db
+    .prepare<[number], { topic_id: string }>(
+      'SELECT DISTINCT topic_id FROM attempts WHERE run_id = ? ORDER BY topic_id',
+    )
+    .all(runId)
+    .map((row) => row.topic_id);
+  if (touched.length === 0) return { closedTopics: [], declinedTopics: [] };
+
+  const placeholders = touched.map(() => '?').join(', ');
+  const rows = db
+    .prepare<unknown[], RunAttemptRow>(
+      `SELECT attempts.id, attempts.topic_id, attempts.run_id, attempts.is_correct,
+              attempts.hint_used, task_bank.difficulty, attempts.created_at
+         FROM attempts
+         JOIN task_bank ON task_bank.id = attempts.task_id
+        WHERE attempts.topic_id IN (${placeholders})
+        ORDER BY attempts.created_at, attempts.id`,
+    )
+    .all(...touched);
+
+  const byTopic = new Map<string, RunAttemptRow[]>();
+  for (const row of rows) {
+    const history = byTopic.get(row.topic_id) ?? [];
+    history.push(row);
+    byTopic.set(row.topic_id, history);
+  }
+
+  const closedTopics: RunTopicChange[] = [];
+  const declinedTopics: RunTopicChange[] = [];
+  for (const topicId of touched) {
+    const topic = graph.byId.get(topicId);
+    if (topic === undefined) {
+      throw new Error(`Забег: темы «${topicId}» нет в карте`);
+    }
+
+    let state = newTopicState(topicId);
+    let before: number | undefined;
+    for (const row of byTopic.get(topicId) ?? []) {
+      if (row.run_id === runId && before === undefined) before = state.mastery;
+      state = applyAttempt(state, {
+        correct: row.is_correct === 1,
+        difficulty: row.difficulty,
+        hintUsed: row.hint_used === 1,
+        at: new Date(row.created_at),
+      });
+    }
+    if (before === undefined) continue;
+
+    const change = { topicId, title: topic.title, before, after: state.mastery };
+    if (before < GAP_MASTERY && state.mastery >= GAP_MASTERY) closedTopics.push(change);
+    if (state.mastery < before) declinedTopics.push(change);
+  }
+
+  return { closedTopics, declinedTopics };
+}
+
+/**
+ * Закрывает забег и собирает итог по истории попыток. Строка забега, изменения
+ * тем и снимки прогноза читаются и пишутся одним снимком базы: частичный итог
+ * после сбоя не должен выглядеть завершённым забегом.
+ */
+export function finishRun(
+  db: Database,
+  graph: TopicGraph,
+  runId: number,
+  options: FinishRunOptions = {},
+): FinishRunResult {
+  const now = options.now ?? new Date();
+
+  return db.transaction((): FinishRunResult => {
+    const run = db
+      .prepare<[number], FinishableRun>(
+        'SELECT id, subject, finished_at FROM runs WHERE id = ?',
+      )
+      .get(runId);
+    if (run === undefined) {
+      throw new SessionError('run-not-found', `Забег ${runId} не найден`);
+    }
+    if (run.finished_at !== null) {
+      throw new SessionError('run-finished', `Забег ${runId} уже завершён`);
+    }
+
+    const attempts = db
+      .prepare<[number], RunAttemptRow>(
+        `SELECT attempts.id, attempts.topic_id, attempts.run_id, attempts.is_correct,
+                attempts.hint_used, task_bank.difficulty, attempts.created_at
+           FROM attempts
+           JOIN task_bank ON task_bank.id = attempts.task_id
+          WHERE attempts.run_id = ?
+          ORDER BY attempts.created_at, attempts.id`,
+      )
+      .all(runId);
+    const total = attempts.length;
+    const correct = attempts.reduce((sum, attempt) => sum + attempt.is_correct, 0);
+    const xp = attempts.reduce(
+      (sum, attempt) =>
+        sum +
+        taskXp({
+          difficulty: attempt.difficulty,
+          correct: attempt.is_correct === 1,
+          hintUsed: attempt.hint_used === 1,
+        }),
+      0,
+    );
+    const changes = topicChanges(db, graph, runId);
+    const previous = readSnapshots(db, run.subject).at(-1);
+
+    db.prepare('UPDATE runs SET finished_at = ? WHERE id = ?').run(now.toISOString(), runId);
+    const forecast = recordForecasts(db, graph, now).find(
+      (snapshot) => snapshot.subject === run.subject,
+    );
+    if (forecast === undefined) {
+      throw new Error(`Забег: для предмета «${run.subject}» прогноз не посчитан`);
+    }
+
+    return {
+      runId,
+      total,
+      correct,
+      xp,
+      ...changes,
+      forecast,
+      ...(previous === undefined ? {} : { forecastDelta: forecast.score - previous.score }),
+    };
   }).immediate();
 }
