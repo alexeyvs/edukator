@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { HomeScreen } from './HomeScreen';
+import { ParentsScreen } from './ParentsScreen';
 import { BossScreen } from './BossScreen';
 import { ProfileScreen } from './ProfileScreen';
 import { RunScreen } from './RunScreen';
@@ -44,6 +45,9 @@ export function ProfileGate({
 }
 
 export function App() {
+  if (window.location.pathname === '/parents') {
+    return <ParentsScreen />;
+  }
   const params = new URLSearchParams(window.location.search);
   const runId = Number(params.get('runId'));
   let screen: ReactNode;

@@ -58,4 +58,28 @@ describe('App', () => {
       .toBeInTheDocument();
     expect(screen.queryByText('Подбираю задание…')).not.toBeInTheDocument();
   });
+
+  it('открывает pathname /parents напрямую без query string и профайл-гейта', async () => {
+    window.history.replaceState({}, '', '/parents');
+    const fetchMock = vi.fn(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        generatedAt: '2026-08-08T12:00:00.000Z',
+        window: { since: '2026-08-01T12:00:00.000Z', until: '2026-08-08T12:00:00.000Z' },
+        forecasts: [],
+        time: { plannedMinutes: 630, actualMinutes: 0, daily: [] },
+        gaps: [], activity: [],
+        flags: { threeFullDaysWithoutRun: false, forecastNotGrowing: [], reduceLoad: [] },
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'Картина подготовки без приукрашивания' }))
+      .toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith('/api/parents');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('heading', { name: 'Сначала познакомимся' })).not.toBeInTheDocument();
+  });
 });

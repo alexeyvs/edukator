@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { browserHomeApi } from './home-api';
 import { browserBossApi } from './boss-api';
 import { browserProfileApi } from './profile-api';
+import { browserParentsApi } from './parents-api';
 import { browserRunApi, RunApiError } from './run-api';
 
 function response(body: unknown, options: { ok?: boolean; status?: number } = {}) {
@@ -28,6 +29,7 @@ describe('браузерные API-адаптеры', () => {
     await browserHomeApi.startTriage('english');
     await browserHomeApi.finish(7);
     await browserProfileApi.read();
+    await browserParentsApi.read();
     await browserProfileApi.save({
       name: 'Тимофей',
       interests: ['скейт'],
@@ -46,6 +48,7 @@ describe('браузерные API-адаптеры', () => {
       ['/api/triage/start', expect.objectContaining({ method: 'POST', body: '{"subject":"english"}' })],
       ['/api/run/7/finish', { method: 'POST' }],
       ['/api/profile', undefined],
+      ['/api/parents'],
       ['/api/profile', expect.objectContaining({ method: 'PUT', body: expect.stringContaining('Тимофей') })],
     ]);
   });
@@ -133,6 +136,7 @@ describe('браузерные API-адаптеры', () => {
     ));
     await expect(browserHomeApi.plan()).rejects.toThrow('Сервер не смог обработать запрос');
     await expect(browserProfileApi.read()).rejects.toThrow('Не получилось сохранить профиль');
+    await expect(browserParentsApi.read()).rejects.toThrow('Не получилось загрузить сводку');
     await expect(browserRunApi.next(1)).rejects.toMatchObject({
       message: 'Сервер не смог обработать запрос',
       status: 500,
@@ -143,6 +147,7 @@ describe('браузерные API-адаптеры', () => {
       response({ error: 'Профиль заблокирован' }, { ok: false, status: 409 }),
     ));
     await expect(browserProfileApi.read()).rejects.toThrow('Профиль заблокирован');
+    await expect(browserParentsApi.read()).rejects.toThrow('Профиль заблокирован');
   });
 
   it('не маскирует не-JSON ответ как успешный контракт', async () => {
