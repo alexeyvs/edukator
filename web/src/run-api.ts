@@ -13,6 +13,10 @@ export interface RunTask {
   topic_title: string;
   subject: 'math' | 'russian' | 'english';
   question: string;
+  instruction?: string;
+  material?: string;
+  material_format?: 'none' | 'text' | 'math';
+  choices?: string[];
   hint: string;
   difficulty: number;
   answer_format: AnswerFormat;

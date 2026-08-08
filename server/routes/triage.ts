@@ -106,6 +106,12 @@ export function registerTriageRoutes(app: FastifyInstance, options: TriageRoutes
           topic_title: result.task.topicTitle,
           subject: result.task.subject,
           question: result.task.question,
+          ...(result.task.instruction === undefined ? {} : {
+            instruction: result.task.instruction,
+            material: result.task.material,
+            material_format: result.task.materialFormat,
+            choices: result.task.choices,
+          }),
           difficulty: result.task.difficulty,
           answer_format: result.task.answerFormat,
         },

@@ -50,6 +50,10 @@ export interface IssuedTask {
   subject: Subject;
   topicTitle: string;
   question: string;
+  instruction?: string;
+  material?: string;
+  materialFormat?: 'none' | 'text' | 'math';
+  choices?: string[];
   hint: string;
   difficulty: number;
   answerFormat: AnswerFormat;
@@ -118,6 +122,12 @@ function issuedResult(topic: Topic, task: BankTask): NextTaskResult {
       subject: topic.subject,
       topicTitle: topic.title,
       question: taskPromptText(task),
+      ...(task.instruction === undefined ? {} : {
+        instruction: task.instruction,
+        material: task.material ?? '',
+        materialFormat: task.material_format ?? 'none',
+        choices: task.choices ?? [],
+      }),
       hint: task.hint,
       difficulty: task.difficulty,
       answerFormat: topic.answerFormat,

@@ -85,6 +85,30 @@ function apiWith(overrides: Partial<RunApi> = {}): RunApi {
 }
 
 describe('экран забега', () => {
+  it('для choice блокирует пустую отправку и отправляет текст radio-варианта', async () => {
+    const choice = task(1);
+    Object.assign(choice.task, {
+      instruction: 'Выбери результат',
+      material: '2 + 2',
+      material_format: 'math',
+      choices: ['3', '4', '5'],
+      answer_format: 'choice',
+    });
+    const api = apiWith({
+      next: vi.fn().mockResolvedValueOnce(choice).mockReturnValue(deferred<NextTaskResponse>()),
+    });
+    render(<RunScreen runId={9} api={api} />);
+
+    await screen.findByRole('heading', { name: 'Выбери результат' });
+    expect(screen.getByRole('button', { name: 'Проверить' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('radio', { name: /4/u }));
+    expect(screen.getByRole('button', { name: 'Проверить' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+
+    await screen.findByText('Верно');
+    expect(api.answer).toHaveBeenCalledWith(expect.objectContaining({ answer: '4' }));
+  });
+
   it('держит прогресс на виду, показывает подсказку и полный результат ответа', async () => {
     const api = apiWith({
       next: vi.fn()

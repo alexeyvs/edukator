@@ -115,6 +115,12 @@ function taskJson(task: IssuedTask): Record<string, unknown> {
     topic_title: task.topicTitle,
     subject: task.subject,
     question: task.question,
+    ...(task.instruction === undefined ? {} : {
+      instruction: task.instruction,
+      material: task.material,
+      material_format: task.materialFormat,
+      choices: task.choices,
+    }),
     hint: task.hint,
     difficulty: task.difficulty,
     answer_format: task.answerFormat,

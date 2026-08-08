@@ -78,6 +78,29 @@ function apiWith(overrides: Partial<RunApi> = {}): RunApi {
 }
 
 describe('экран триажа', () => {
+  it('использует общий структурированный prompt и radio-карточки', async () => {
+    const api = apiWith({
+      triageNext: vi.fn(() => Promise.resolve({
+        status: 'ok' as const,
+        progress: { total: 0, correct: 0, target: 12, done: false },
+        task: {
+          id: 4, topic_id: 'math.a', topic_title: 'Дроби', subject: 'math' as const,
+          question: 'fallback', instruction: 'Выбери дробь', material: String.raw`\frac12`,
+          material_format: 'math' as const, choices: ['1/2', '2/1'], difficulty: 2,
+          answer_format: 'choice' as const,
+        },
+      })),
+    });
+    render(<TriageScreen runId={12} api={api} />);
+
+    await screen.findByRole('heading', { name: 'Выбери дробь' });
+    expect(screen.getByRole('region', { name: 'Материал задания' }).querySelector('.katex')).not.toBeNull();
+    fireEvent.click(screen.getByRole('radio', { name: /1\/2/u }));
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+    await screen.findByText('Верно');
+    expect(api.answer).toHaveBeenCalledWith(expect.objectContaining({ answer: '1/2', hintUsed: false }));
+  });
+
   it('проводит вопрос без подсказки и передаёт ответ без её использования', async () => {
     const api = apiWith();
     render(<TriageScreen runId={12} api={api} />);

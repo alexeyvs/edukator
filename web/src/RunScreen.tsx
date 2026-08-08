@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import {
   browserRunApi,
   RunApiError,
-  type AnswerFormat,
   type AnswerResponse,
   type DisputeStatus,
   type FinishRunResponse,
@@ -11,6 +10,7 @@ import {
   type RunProgress,
 } from './run-api';
 import { FinishScreen } from './FinishScreen';
+import { TaskPrompt } from './TaskPrompt';
 
 const NO_TASK_RETRY_MS = 2_000;
 const DISPUTE_FIRST_DELAY_MS = 1_000;
@@ -36,16 +36,6 @@ function problemOf(error: unknown): ScreenProblem {
   if (error.code === 'no-task') return 'no-task';
   if (error.code === 'restart-required' || error.status === 503) return 'restart';
   return 'unknown';
-}
-
-function inputDetails(format: AnswerFormat): { label: string; inputMode?: 'decimal'; placeholder: string } {
-  if (format === 'number') {
-    return { label: 'Число', inputMode: 'decimal', placeholder: 'Введи число' };
-  }
-  if (format === 'choice') {
-    return { label: 'Вариант ответа', placeholder: 'Например, Б' };
-  }
-  return { label: 'Ответ', placeholder: 'Напиши ответ' };
 }
 
 function Problem({ problem }: { problem: ScreenProblem }) {
@@ -225,7 +215,6 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
     return <section className="run-card run-state" aria-label="Загрузка задания">Подбираю задание…</section>;
   }
 
-  const details = inputDetails(current.task.answer_format);
   return (
     <main className="run-shell">
       <header className="run-header">
@@ -246,20 +235,17 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
           <span>{current.task.topic_title}</span>
           <span>сложность {current.task.difficulty}</span>
         </div>
-        <h1 id="task-question">{current.task.question}</h1>
-
         {result === null ? (
           <form onSubmit={(event) => void submit(event)}>
-            <label htmlFor="run-answer">{details.label}</label>
-            <input
-              id="run-answer"
-              autoComplete="off"
-              inputMode={details.inputMode}
-              placeholder={details.placeholder}
-              value={answer}
-              onChange={(event) => setAnswer(event.target.value)}
+            <TaskPrompt
+              task={current.task}
+              answer={answer}
+              onAnswerChange={setAnswer}
+              answerId="run-answer"
+              headingId="task-question"
+              hint={current.task.hint}
+              hintVisible={hintUsed}
             />
-            {hintUsed && <aside className="hint"><span>Подсказка</span>{current.task.hint}</aside>}
             <div className="task-actions">
               <button className="secondary" type="button" onClick={() => setHintUsed(true)} disabled={hintUsed}>
                 {hintUsed ? 'Подсказка открыта' : 'Нужна подсказка'}

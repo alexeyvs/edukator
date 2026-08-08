@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { FinishScreen } from './FinishScreen';
+import { TaskPrompt } from './TaskPrompt';
 import {
   browserRunApi,
   type AnswerResponse,
@@ -20,12 +21,6 @@ const DISPUTE_MAX_DELAY_MS = 16_000;
 
 function defaultWait(delayMs: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, delayMs));
-}
-
-function answerLabel(format: 'number' | 'text' | 'choice'): string {
-  if (format === 'number') return 'Число';
-  if (format === 'choice') return 'Вариант ответа';
-  return 'Ответ';
 }
 
 export function TriageScreen({ runId, api = browserRunApi, wait = defaultWait }: TriageScreenProps) {
@@ -153,15 +148,14 @@ export function TriageScreen({ runId, api = browserRunApi, wait = defaultWait }:
           <span>{next.task.topic_title}</span>
           <span>сложность {next.task.difficulty}</span>
         </div>
-        <h1 id="triage-question">{next.task.question}</h1>
         {result === null ? (
           <form onSubmit={(event) => void submit(event)}>
-            <label htmlFor="triage-answer">{answerLabel(next.task.answer_format)}</label>
-            <input
-              id="triage-answer"
-              autoComplete="off"
-              value={answer}
-              onChange={(event) => setAnswer(event.target.value)}
+            <TaskPrompt
+              task={next.task}
+              answer={answer}
+              onAnswerChange={setAnswer}
+              answerId="triage-answer"
+              headingId="triage-question"
             />
             <div className="task-actions">
               <button className="primary" type="submit" disabled={busy || answer.trim() === ''}>

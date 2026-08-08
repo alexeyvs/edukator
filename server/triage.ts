@@ -24,6 +24,10 @@ export interface TriageIssuedTask {
   subject: Subject;
   topicTitle: string;
   question: string;
+  instruction?: string;
+  material?: string;
+  materialFormat?: 'none' | 'text' | 'math';
+  choices?: string[];
   hint: string;
   difficulty: number;
   answerFormat: AnswerFormat;
@@ -44,6 +48,12 @@ function issued(task: BankTask, topic: Topic): TriageIssuedTask {
     subject: topic.subject,
     topicTitle: topic.title,
     question: taskPromptText(task),
+    ...(task.instruction === undefined ? {} : {
+      instruction: task.instruction,
+      material: task.material ?? '',
+      materialFormat: task.material_format ?? 'none',
+      choices: task.choices ?? [],
+    }),
     hint: task.hint,
     difficulty: task.difficulty,
     answerFormat: topic.answerFormat,
