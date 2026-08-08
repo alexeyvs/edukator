@@ -39,6 +39,11 @@ export interface SeedTopic {
 export interface SeedBank {
   subject: Subject;
   topics: SeedTopic[];
+  /**
+   * Записи, которые разбор не пережил, — по одной причине на запись. Файл при
+   * этом отдаётся: испорчена запись, а не файл.
+   */
+  problems: string[];
 }
 
 /** Тема посевного файла как она лежит в JSON: snake_case, как и в картах тем. */
@@ -70,7 +75,17 @@ function isObject(value: unknown): value is Record<string, unknown> {
  * раньше, и пропускать его мимо инвариантов значило бы завести в базе задания,
  * которые генератор бы не пропустил.
  *
- * `source` попадает в текст ошибки: иначе непонятно, какой из трёх файлов чинить.
+ * Негодная запись выбрасывается поштучно, а не роняет разбор: причина уходит в
+ * `problems`, а здоровые темы файла доезжают до банка. Бросить на первой значило
+ * бы ровно то, от чего защищается перехват на каждую тему в `loadSeedBank`, —
+ * переименованная в карте тем одна тема оставляла бы без посева весь предмет, то
+ * есть все его темы отвечали бы 503, пока codex недоступен.
+ *
+ * Роняют разбор только поломки самого файла — не объект, чужой или неизвестный
+ * предмет, `topics` не массивом: годных записей в таком файле не бывает по
+ * определению.
+ *
+ * `source` попадает в текст причины: иначе непонятно, какой из трёх файлов чинить.
  */
 export function parseSeedBank(
   raw: unknown,
@@ -100,16 +115,24 @@ export function parseSeedBank(
   }
 
   const seen = new Set<string>();
-  const topics = rawTopics.map((entry, index): SeedTopic => {
+  const topics: SeedTopic[] = [];
+  const problems: string[] = [];
+
+  rawTopics.forEach((entry, index) => {
     const where = `${source}, запись ${index + 1}`;
-    if (!isObject(entry)) throw new Error(`Посевной банк ${where}: ожидался объект`);
+    if (!isObject(entry)) {
+      problems.push(`Посевной банк ${where}: ожидался объект`);
+      return;
+    }
 
     const topicId = entry['topic_id'];
     if (typeof topicId !== 'string') {
-      throw new Error(`Посевной банк ${where}: поле topic_id должно быть строкой`);
+      problems.push(`Посевной банк ${where}: поле topic_id должно быть строкой`);
+      return;
     }
     if (seen.has(topicId)) {
-      throw new Error(`Посевной банк ${where}: тема «${topicId}» встречается дважды`);
+      problems.push(`Посевной банк ${where}: тема «${topicId}» встречается дважды`);
+      return;
     }
     seen.add(topicId);
 
@@ -118,12 +141,14 @@ export function parseSeedBank(
     // нарушить внешний ключ `task_bank.topic_id`.
     const topic: Topic | undefined = graph.byId.get(topicId);
     if (topic === undefined) {
-      throw new Error(`Посевной банк ${where}: темы «${topicId}» нет в карте`);
+      problems.push(`Посевной банк ${where}: темы «${topicId}» нет в карте`);
+      return;
     }
     if (topic.subject !== subject) {
-      throw new Error(
+      problems.push(
         `Посевной банк ${where}: тема «${topicId}» принадлежит предмету «${topic.subject}», а файл объявлен как «${subject}»`,
       );
+      return;
     }
 
     const { tasks } = entry as unknown as SeedTopicJson;
@@ -131,13 +156,14 @@ export function parseSeedBank(
     try {
       parsed = parseTaskBatch({ items: tasks }, topic.answerFormat);
     } catch (error) {
-      throw new Error(`Посевной банк ${where}, тема «${topicId}»: ${(error as Error).message}`);
+      problems.push(`Посевной банк ${where}, тема «${topicId}»: ${(error as Error).message}`);
+      return;
     }
 
-    return { topicId, tasks: parsed };
+    topics.push({ topicId, tasks: parsed });
   });
 
-  return { subject: subject as Subject, topics };
+  return { subject: subject as Subject, topics, problems };
 }
 
 /**
@@ -211,6 +237,12 @@ export class SeedBankError extends Error {
  * бросаются одной ошибкой уже после. Иначе дефект в `math.json` оставлял бы без
  * заданий и русский с английским — то есть занятие целиком, — а вызывающие
  * ошибку и так только пишут в stderr.
+ *
+ * Ровно так же и внутри файла: негодную запись отбрасывает разбор
+ * (`parseSeedBank`), остальные темы предмета грузятся, а причина попадает в ту же
+ * ошибку. Предмет при этом всё равно считается испорченным — выгрузка
+ * `prefetch --export` не имеет права переписать снимок, часть которого не
+ * загрузилась.
  */
 export function loadSeedBank(
   db: Database,
@@ -238,6 +270,10 @@ export function loadSeedBank(
     if (bank === null) {
       result.missing.push(subject);
       continue;
+    }
+    if (bank.problems.length > 0) {
+      broken.push(...bank.problems);
+      brokenSubjects.add(subject);
     }
 
     // Запись каждой темы — под своим перехватом. Тема, которой нет в

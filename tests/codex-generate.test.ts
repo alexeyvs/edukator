@@ -205,7 +205,7 @@ describe('generateTaskBatch: повторные попытки', () => {
   });
 
   it('повторяет вызов, когда батч не прошёл инварианты разбора', async () => {
-    const { run } = recorder([batch(1, { accept: ['46'] }), batch()]);
+    const { run } = recorder([batch(1, { accept: ['сорок шесть'] }), batch()]);
 
     const result = await generateTaskBatch({ topic: topic(), difficulty: 2, persona: PERSONA, run });
 

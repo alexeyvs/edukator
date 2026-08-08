@@ -147,6 +147,21 @@ describe('нормализатор ответов', () => {
       expect(checkAnswer('45%', expected({ answer: '46' }), 'number').correct).toBe(false);
     });
 
+    it('читает знак процента и через пробел: «45 %» — та же запись, что «45%»', () => {
+      // Пробел перед знаком ставят ровно так же часто, и без него второе
+      // прочтение не разворачивалось — верный ответ на теме про доли считался
+      // неверным из-за одного нажатия.
+      expect(findNumbers('45 %')).toEqual([0.45]);
+      expect(checkAnswer('45 %', expected({ answer: '0.45' }), 'number')).toEqual({
+        correct: true,
+        normalized: '0.45',
+      });
+      expect(checkAnswer('45 %', expected({ answer: '45' }), 'number').correct).toBe(true);
+      // Пробел без знака процента в совпадение не уходит: «45 » — это 45.
+      expect(findNumbers('45 ')).toEqual([45]);
+      expect(findNumbers('45 и 46')).toEqual([45, 46]);
+    });
+
     it('отвергает другое число', () => {
       expect(checkAnswer('45', expected(), 'number')).toEqual({
         correct: false,

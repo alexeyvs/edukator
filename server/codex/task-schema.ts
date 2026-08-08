@@ -76,11 +76,20 @@ function hasPercentSign(value: string): boolean {
  * текст (`numberExpectations`), и запрещать его нельзя: разбор спора дописывает
  * в `accept[]` подтверждённый ответ ученика как есть, а этот же `parseTaskBatch`
  * потом читает выгруженный посевной файл. Запрет ломал бы задание навсегда
- * после первого же спора. Отсеивается ровно неоднозначное — два числа и больше
- * либо знак процента.
+ * после первого же спора. Отсеивается ровно неоднозначное — два числа и больше,
+ * знак процента и число, отличное от самого ответа.
+ *
+ * Последнее — не придирка к форме: `accept[]` перечисляет записи **того же**
+ * ответа, и «46» рядом с ответом «45» означает, что сверка засчитает неверный
+ * ответ верным и поднимет за него `mastery`. Ловится только здесь: проверяющий
+ * сверяет своё решение со всем `accept[]` целиком, и его «46» такую пару как раз
+ * подтвердит. Эталон, который сам не читается числом, до сравнения не доходит —
+ * про него уже сказано отдельной причиной.
  */
-function fitsNumberTopic(value: string): boolean {
-  return findNumbers(value).length <= 1 && !hasPercentSign(value);
+function fitsNumberTopic(value: string, answer: string): boolean {
+  if (findNumbers(value).length > 1 || hasPercentSign(value)) return false;
+  if (!readsAsOneNumber(value) || !readsAsOneNumber(answer) || hasPercentSign(answer)) return true;
+  return checkAnswer(value, { answer }, 'number').correct;
 }
 
 /**
@@ -90,11 +99,17 @@ function fitsNumberTopic(value: string): boolean {
  * обратно этим же разбором. Пустая строка (её отвергает `minLength` схемы) и
  * «45 и 46» на числовой теме сделали бы посев предмета неразбираемым навсегда,
  * а «40%» — засчитывало бы 0,4 за ответ 40 (см. `hasPercentSign`).
+ *
+ * `answer` нужен ровно затем же: подтверждённое спором «46» при эталоне «45» —
+ * другое число, и дописать его значило бы завести задание, которое `taskProblems`
+ * потом забракует, а до тех пор засчитывало бы обе взаимоисключающие записи.
+ * Сам спор при этом остаётся подтверждённым — не принимается только запись в
+ * `accept[]`.
  */
-export function fitsAccept(value: string, format: AnswerFormat): boolean {
+export function fitsAccept(value: string, format: AnswerFormat, answer: string): boolean {
   const trimmed = value.trim();
   if (trimmed === '') return false;
-  return format !== 'number' || fitsNumberTopic(trimmed);
+  return format !== 'number' || fitsNumberTopic(trimmed, answer);
 }
 
 function escapeRegExp(value: string): string {
@@ -176,6 +191,12 @@ function taskProblems(task: GeneratedTask, format: AnswerFormat): string[] {
         problems.push(
           `запись «${value}» содержит знак процента, а тема числовая: она приняла бы долю вместо числа`,
         );
+      } else if (!fitsNumberTopic(value, task.answer)) {
+        // Сюда доходит ровно одно: одно число, не равное эталону. Словесная
+        // запись («сорок пять») законна и в сравнение не идёт, а негодный
+        // эталон уже назван своей причиной выше.
+        numbersFit = false;
+        problems.push(`запись «${value}» — другое число, чем ответ «${task.answer}»`);
       }
     }
   }

@@ -10,13 +10,14 @@
  *   npx tsx scripts/extract-toc.ts --subject math --pdf ~/Downloads/book.pdf
  *   npx tsx scripts/extract-toc.ts --subject math --pdf book.pdf --pages 333-334
  */
-import { closeSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readSync, statSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PDFParse } from 'pdf-parse';
 import { SUBJECTS, type Subject } from '../server/db.js';
 import { findTocPages, formatToc, type PdfPage, type TocSelection } from './toc.js';
 import { runChild } from '../server/run-child.js';
+import { writeFileAtomic } from '../server/atomic-write.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -303,7 +304,11 @@ export async function extractToc(options: ExtractTocOptions): Promise<ExtractToc
   const outDir = options.outDir ?? RAW_TOC_DIR;
   mkdirSync(outDir, { recursive: true });
   const outPath = resolve(outDir, `${options.subject}.txt`);
-  writeFileSync(outPath, formatToc(selection, { source: basename(options.pdfPath), extraction }));
+  // Атомарно, как карта тем и посевной банк: `content/raw-toc/*.txt` лежит в
+  // репозитории и служит единственным входом сборки карты тем, а самих PDF в
+  // репозитории нет. Оборванная запись (Ctrl-C, кончившееся место) оставила бы
+  // обрезанное оглавление, которое уже нечем восстановить.
+  writeFileAtomic(outPath, formatToc(selection, { source: basename(options.pdfPath), extraction }));
 
   return { outPath, selection, extraction, total };
 }

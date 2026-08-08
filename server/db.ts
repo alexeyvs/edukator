@@ -189,9 +189,16 @@ const SCHEMA = `
 /**
  * Путь к базе: переопределяется через EDUKATOR_DB, чтобы тесты и dev-запуск
  * не дрались за один файл.
+ *
+ * Пустое значение — это незаданная переменная, а не путь: `??` ловит только
+ * отсутствие, а `EDUKATOR_DB=` уходило пустой строкой в SQLite, и та молча
+ * открывала временную базу, стираемую при закрытии соединения. Прогресс ученика
+ * пропадал бы на каждом перезапуске, а `/api/health` при этом оставался зелёным.
  */
 export function databasePath(): string {
-  return process.env.EDUKATOR_DB ?? resolve(projectRoot, 'edukator.db');
+  const value = process.env.EDUKATOR_DB;
+  if (value === undefined || value.trim() === '') return resolve(projectRoot, 'edukator.db');
+  return value;
 }
 
 /**

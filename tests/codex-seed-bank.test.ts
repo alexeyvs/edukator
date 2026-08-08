@@ -112,9 +112,11 @@ describe('посевной банк', () => {
         { topic_id: 'math.a', tasks: [task({ answer: '5', accept: ['4'] })] },
       ]);
 
-      expect(() => parseSeedBank(broken, GRAPH, 'посев.json')).toThrow(
-        /ответ «5» отсутствует в accept/u,
-      );
+      const bank = parseSeedBank(broken, GRAPH, 'посев.json');
+
+      expect(bank.topics).toEqual([]);
+      expect(bank.problems).toHaveLength(1);
+      expect(bank.problems[0]).toMatch(/другое число, чем ответ «5»/u);
     });
 
     it('проверяет accept[] по формату ответа темы, а не по формату файла', () => {
@@ -123,34 +125,68 @@ describe('посевной банк', () => {
         { topic_id: 'math.a', tasks: [task({ answer: 'четыре', accept: ['четыре'] })] },
       ]);
 
-      expect(() => parseSeedBank(wordy, GRAPH, 'посев.json')).toThrow(/не читается как одно число/u);
+      expect(parseSeedBank(wordy, GRAPH, 'посев.json').problems[0]).toMatch(
+        /не читается как одно число/u,
+      );
     });
 
-    it('падает на теме вне карты', () => {
-      expect(() =>
-        parseSeedBank(seedJson([{ topic_id: 'math.unknown', tasks: batch(1) }]), GRAPH, 'посев.json'),
-      ).toThrow(/темы «math.unknown» нет в карте/u);
+    // Негодная запись выбрасывается поштучно: иначе одна переименованная в карте
+    // тема оставляла бы без посева весь предмет — все его темы отвечали бы 503,
+    // хотя испорчена одна.
+    it('бракует запись, а не файл: здоровые темы разбираются', () => {
+      const bank = parseSeedBank(
+        seedJson([
+          { topic_id: 'math.unknown', tasks: batch(1) },
+          { topic_id: 'math.a', tasks: batch(2) },
+        ]),
+        GRAPH,
+        'посев.json',
+      );
+
+      expect(bank.topics.map((entry) => entry.topicId)).toEqual(['math.a']);
+      expect(bank.topics[0]?.tasks).toHaveLength(2);
+      expect(bank.problems[0]).toMatch(/темы «math.unknown» нет в карте/u);
     });
 
-    it('падает, когда тема принадлежит другому предмету', () => {
-      expect(() =>
-        parseSeedBank(seedJson([{ topic_id: 'russian.a', tasks: batch(1) }]), GRAPH, 'посев.json'),
-      ).toThrow(/принадлежит предмету «russian»/u);
+    it('бракует запись, когда тема принадлежит другому предмету', () => {
+      const bank = parseSeedBank(
+        seedJson([{ topic_id: 'russian.a', tasks: batch(1) }]),
+        GRAPH,
+        'посев.json',
+      );
+
+      expect(bank.topics).toEqual([]);
+      expect(bank.problems[0]).toMatch(/принадлежит предмету «russian»/u);
     });
 
-    it('падает на теме, встреченной дважды', () => {
-      expect(() =>
-        parseSeedBank(
-          seedJson([
-            { topic_id: 'math.a', tasks: batch(1) },
-            { topic_id: 'math.a', tasks: batch(1) },
-          ]),
-          GRAPH,
-          'посев.json',
-        ),
-      ).toThrow(/встречается дважды/u);
+    it('бракует тему, встреченную дважды', () => {
+      const bank = parseSeedBank(
+        seedJson([
+          { topic_id: 'math.a', tasks: batch(1) },
+          { topic_id: 'math.a', tasks: batch(1) },
+        ]),
+        GRAPH,
+        'посев.json',
+      );
+
+      expect(bank.topics).toHaveLength(1);
+      expect(bank.problems[0]).toMatch(/встречается дважды/u);
     });
 
+    it('бракует запись не той формы, оставляя соседние', () => {
+      const bank = parseSeedBank(
+        { subject: 'math', topics: ['math.a', { tasks: [] }, { topic_id: 'math.a', tasks: batch(1) }] },
+        GRAPH,
+        'посев.json',
+      );
+
+      expect(bank.topics.map((entry) => entry.topicId)).toEqual(['math.a']);
+      expect(bank.problems[0]).toMatch(/запись 1: ожидался объект/u);
+      expect(bank.problems[1]).toMatch(/запись 2.*topic_id должно быть строкой/su);
+    });
+
+    // Поломки самого файла разбор всё-таки роняют: годных записей в нём не
+    // бывает — предмет неизвестен, и формат ответа проверять нечем.
     it('падает на посеве не той формы', () => {
       expect(() => parseSeedBank([], GRAPH, 'посев.json')).toThrow(/ожидался объект/u);
       expect(() => parseSeedBank({ subject: 'физика', topics: [] }, GRAPH, 'посев.json')).toThrow(
@@ -159,12 +195,6 @@ describe('посевной банк', () => {
       expect(() => parseSeedBank({ subject: 'math' }, GRAPH, 'посев.json')).toThrow(
         /topics должно быть массивом/u,
       );
-      expect(() => parseSeedBank({ subject: 'math', topics: ['math.a'] }, GRAPH, 'посев.json')).toThrow(
-        /запись 1: ожидался объект/u,
-      );
-      expect(() =>
-        parseSeedBank({ subject: 'math', topics: [{ tasks: [] }] }, GRAPH, 'посев.json'),
-      ).toThrow(/topic_id должно быть строкой/u);
     });
 
     it('падает, когда предмет в файле не совпадает с его именем', () => {
@@ -273,6 +303,50 @@ describe('посевной банк', () => {
         /посев темы «math.a».*нет в карте/su,
       );
       expect(countAvailable(db, 'math.b')).toBe(3);
+    });
+
+    // Та же защита, но для отказа на разборе, а не на записи: тема, которую
+    // переименовали в карте, роняла разбор всего файла — и предмет оставался без
+    // посева целиком, то есть все его темы отвечали 503, пока codex недоступен.
+    it('заливает здоровые темы файла, даже когда соседней темы нет в карте', () => {
+      const wider = buildTopicGraph([topic('math.a'), topic('math.b')]);
+      syncTopicState(db, wider);
+      writeSeed(
+        'math',
+        seedJson([
+          { topic_id: 'math.переименована', tasks: batch(2) },
+          { topic_id: 'math.b', tasks: batch(3) },
+        ]),
+      );
+
+      expect(() => loadSeedBank(db, wider, { dir: seedDir, subjects: ['math'] })).toThrow(
+        /темы «math.переименована» нет в карте/u,
+      );
+      expect(countAvailable(db, 'math.b')).toBe(3);
+    });
+
+    // Предмет с испорченной записью обязан остаться в `subjects` ошибки: выгрузка
+    // `prefetch --export` иначе переписала бы снимок огрызком банка, и потерянные
+    // задания было бы уже не вернуть.
+    it('помечает предмет испорченным даже тогда, когда часть его тем загрузилась', () => {
+      const wider = buildTopicGraph([topic('math.a'), topic('math.b')]);
+      syncTopicState(db, wider);
+      writeSeed(
+        'math',
+        seedJson([
+          { topic_id: 'math.переименована', tasks: batch(2) },
+          { topic_id: 'math.b', tasks: batch(3) },
+        ]),
+      );
+
+      try {
+        loadSeedBank(db, wider, { dir: seedDir, subjects: ['math'] });
+        expect.unreachable('загрузка обязана бросить SeedBankError');
+      } catch (error) {
+        expect(error).toBeInstanceOf(SeedBankError);
+        expect((error as SeedBankError).subjects).toEqual(['math']);
+        expect((error as SeedBankError).result.loaded).toBe(3);
+      }
     });
 
     // Список виновных предметов — сигнал для выгрузки посева: предмет с
@@ -547,6 +621,10 @@ describe('посевной банк', () => {
         const bank = readSeedBank(graph, subject, SEED_BANK_DIR);
 
         expect(bank, `посев предмета ${subject} отсутствует`).not.toBeNull();
+        // Именно `problems`, а не отсутствие исключения: негодную запись разбор
+        // теперь выбрасывает молча, и без этой проверки тест зеленел бы на
+        // посеве, половина которого до банка не доезжает.
+        expect(bank?.problems, `посев предмета ${subject}`).toEqual([]);
       }
     });
 

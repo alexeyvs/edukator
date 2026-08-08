@@ -471,9 +471,9 @@ function readDispute(db: Database, disputeId: number): DisputeRow {
  * вердикт, не трогая ни модель, ни задание.
  *
  * Подтверждение спора всегда засчитывает попытку, но не всякий ответ попадает в
- * `accept[]`: пустая строка и «45 и 46» на числовой теме не проходят `fitsAccept`
- * и дописаны не будут — иначе выгруженный посевной файл предмета перестал бы
- * разбираться этим же `parseTaskBatch`.
+ * `accept[]`: пустая строка, «45 и 46» и число, отличное от эталона, не проходят
+ * `fitsAccept` и дописаны не будут — иначе выгруженный посевной файл предмета
+ * перестал бы разбираться этим же `parseTaskBatch`.
  */
 export async function resolveDispute(
   db: Database,
@@ -537,7 +537,7 @@ export async function resolveDispute(
       [fresh.answer, ...current].map((value) => duplicateKey(value, topic.answerFormat)),
     );
     const next =
-      !fitsAccept(given, topic.answerFormat) ||
+      !fitsAccept(given, topic.answerFormat, fresh.answer) ||
       keys.has(duplicateKey(given, topic.answerFormat))
         ? current
         : [...current, given];

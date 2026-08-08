@@ -879,6 +879,21 @@ describe('база данных', () => {
       }
     });
 
+    it('пустой EDUKATOR_DB — это не путь, а умолчание', () => {
+      // Пустая строка уходила в SQLite и открывала временную базу, стираемую при
+      // закрытии соединения: прогресс ученика пропадал на каждом перезапуске, а
+      // health при этом оставался зелёным.
+      const fallback = resolve(fileURLToPath(import.meta.url), '..', '..', 'edukator.db');
+      for (const value of ['', '   ']) {
+        process.env.EDUKATOR_DB = value;
+        try {
+          expect(databasePath()).toBe(fallback);
+        } finally {
+          delete process.env.EDUKATOR_DB;
+        }
+      }
+    });
+
     it('по умолчанию указывает на edukator.db в корне проекта', () => {
       const saved = process.env.EDUKATOR_DB;
       delete process.env.EDUKATOR_DB;

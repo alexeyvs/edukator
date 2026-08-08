@@ -142,9 +142,14 @@ describe('parseTaskBatch: нарушения схемы', () => {
 
 describe('parseTaskBatch: нарушения инвариантов', () => {
   it('отвергает задание, у которого answer не входит в accept', () => {
-    expect(() => parseTaskBatch(batch(task({ accept: ['46'] })), 'number')).toThrow(
-      /задание 1.*accept/s,
+    // Словесная запись: числовое расхождение ловится раньше и своей причиной,
+    // а здесь проверяется именно отсутствие эталона среди записей.
+    expect(() => parseTaskBatch(batch(task({ accept: ['сорок шесть'] })), 'number')).toThrow(
+      /задание 1.*отсутствует в accept/s,
     );
+    expect(() =>
+      parseTaskBatch(batch(task({ answer: 'кот', accept: ['пёс'] })), 'text'),
+    ).toThrow(/задание 1.*отсутствует в accept/s);
   });
 
   it('отвергает дубли в accept с точностью до нормализатора', () => {
@@ -342,10 +347,24 @@ describe('parseTaskBatch: нарушения инвариантов', () => {
   });
 
   it('не пускает «40%» в accept и через разбор спора', () => {
-    expect(fitsAccept('40%', 'number')).toBe(false);
-    expect(fitsAccept('40', 'number')).toBe(true);
+    expect(fitsAccept('40%', 'number', '40')).toBe(false);
+    expect(fitsAccept('40', 'number', '40')).toBe(true);
     // Текстовой темы запрет не касается: там процент — часть формулировки.
-    expect(fitsAccept('40%', 'text')).toBe(true);
+    expect(fitsAccept('40%', 'text', '40')).toBe(true);
+  });
+
+  it('не пускает в accept число, отличное от эталона: сверка засчитала бы неверный ответ', () => {
+    expect(() => parseTaskBatch(batch(task({ answer: '45', accept: ['45', '46'] })), 'number')).toThrow(
+      /задание 1.*«46» — другое число, чем ответ «45»/s,
+    );
+    // Та же запись не должна попадать в accept и через подтверждённый спор:
+    // иначе задание принимало бы обе взаимоисключающие записи до первой выгрузки.
+    expect(fitsAccept('46', 'number', '45')).toBe(false);
+    // Другая запись того же числа и запись с единицами измерения — законны.
+    expect(fitsAccept('45,0', 'number', '45')).toBe(true);
+    expect(fitsAccept('45 монет', 'number', '45')).toBe(true);
+    // Словесная форма в сравнение не идёт: чисел в ней нет.
+    expect(fitsAccept('сорок пять', 'number', '45')).toBe(true);
   });
 
   it('отвергает неоднозначный числовой accept: два числа в одной записи', () => {

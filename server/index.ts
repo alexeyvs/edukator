@@ -10,7 +10,7 @@ import {
   type SyncResult,
   type TopicGraph,
 } from './curriculum.js';
-import { loadSeedBank, type LoadSeedBankResult } from './codex/seed-bank.js';
+import { loadSeedBank, SeedBankError, type LoadSeedBankResult } from './codex/seed-bank.js';
 import {
   registerSessionRoutes,
   registerUnavailableSession,
@@ -189,7 +189,12 @@ export function buildServer(
         process.stderr.write(`посевной банк: добавлено ${seeded.loaded} задани(й)\n`);
       }
     } catch (error) {
-      process.stderr.write(`посевной банк не загружен: ${(error as Error).message}\n`);
+      // Частичный итог печатается вместе с причиной: порча одной записи не
+      // отменяет остальные, и «посевной банк не загружен» без числа заданий
+      // читалось бы как «не загружено ничего».
+      const loaded = error instanceof SeedBankError ? error.result.loaded : 0;
+      const partial = loaded > 0 ? ` (успело добавиться ${loaded} задани(й))` : '';
+      process.stderr.write(`посевной банк не загружен${partial}: ${(error as Error).message}\n`);
     }
   }
 
@@ -310,6 +315,16 @@ if (isDirectRun) {
   const app = buildServer();
   const port = readPort(process.env.PORT);
   closeOnSignals(app);
-  await app.listen({ host: HOST, port });
-  console.log(`edukator слушает http://${HOST}:${port}`);
+  // Отказ прослушивания перехватывается, как и в обеих точках входа CLI: занятое
+  // порт-число — обычная ошибка запуска, а необработанный отказ верхнеуровневого
+  // `await` печатал бы стек `node:net` и уносил процесс мимо `app.close()`, то
+  // есть оставлял бы соединение занятия незакрытым, а WAL — непереселённым.
+  try {
+    await app.listen({ host: HOST, port });
+    console.log(`edukator слушает http://${HOST}:${port}`);
+  } catch (error) {
+    process.stderr.write(`edukator не поднялся на порту ${port}: ${(error as Error).message}\n`);
+    await app.close();
+    process.exitCode = 1;
+  }
 }
