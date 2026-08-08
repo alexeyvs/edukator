@@ -155,6 +155,19 @@ describe('экран забега', () => {
     expect(api.next).toHaveBeenCalledTimes(1);
   });
 
+  it('завершает достигший цели забег после перезагрузки', async () => {
+    const api = apiWith({
+      next: vi.fn(() => Promise.reject(
+        new RunApiError('забег готов к завершению', 409, 'run-complete'),
+      )),
+      finish: vi.fn(() => Promise.resolve(finishSummary())),
+    });
+    render(<RunScreen runId={9} api={api} />);
+
+    expect(await screen.findByRole('heading', { name: 'Вот что получилось' })).toBeInTheDocument();
+    expect(api.finish).toHaveBeenCalledWith(9);
+  });
+
   it('опрашивает спор до первого закрытого статуса с нарастающей паузой', async () => {
     const delays: number[] = [];
     const dispute = vi.fn()

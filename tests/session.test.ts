@@ -384,6 +384,21 @@ describe('занятие', () => {
       }).correct).toBe(true);
     });
 
+    it('не выдаёт и не принимает тринадцатое задание забега', () => {
+      const runId = Number(
+        db.prepare('INSERT INTO runs (subject, topic_id, started_at, total) VALUES (?, ?, ?, 12)')
+          .run('math', 'math.a', new Date().toISOString()).lastInsertRowid,
+      );
+      const taskId = issue('math.a', {}, runId);
+
+      expect(() => nextTask(db, graph, { runId, seedDir }))
+        .toThrow(expect.objectContaining({ code: 'run-complete' }));
+      expect(() => submitAnswer(db, graph, { taskId, runId, answer: '45' }))
+        .toThrow(expect.objectContaining({ code: 'run-complete' }));
+      expect(db.prepare('SELECT COUNT(*) AS n FROM attempts').get()).toEqual({ n: 0 });
+      expect(db.prepare('SELECT total FROM runs WHERE id = ?').get(runId)).toEqual({ total: 12 });
+    });
+
     it('не пускает триаж в обычную выдачу и запрещает подсказку в его ответе', () => {
       const runId = Number(
         db.prepare(

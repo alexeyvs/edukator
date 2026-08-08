@@ -114,6 +114,15 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
       showTask(next);
     } catch (error) {
       if (generation.current !== token) return;
+      if (error instanceof RunApiError && error.code === 'run-complete') {
+        try {
+          const summary = await api.finish(runId);
+          if (generation.current === token) setFinish(summary);
+        } catch (finishError) {
+          if (generation.current === token) setProblem(problemOf(finishError));
+        }
+        return;
+      }
       const nextProblem = problemOf(error);
       setProblem(nextProblem);
       if (nextProblem === 'no-task') {

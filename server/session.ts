@@ -105,6 +105,9 @@ export function nextTask(
   if (run?.kind === 'triage') {
     throw new SessionError('task-not-in-run', `Забег ${run.id} является триажем`);
   }
+  if (run !== undefined && runProgress(db, run.id).done) {
+    throw new SessionError('run-complete', `Забег ${run.id} достиг цели и готов к завершению`);
+  }
   if (run !== undefined && options.subject !== undefined && run.subject !== options.subject) {
     throw new SessionError(
       'task-not-in-run',
@@ -301,6 +304,9 @@ export function submitAnswer(
     const row = readTask(db, request.taskId);
     const topic = topicOf(graph, row.topic_id);
     const run = request.runId === undefined ? undefined : readActiveRun(db, request.runId);
+    if (run?.kind === 'run' && runProgress(db, run.id).done) {
+      throw new SessionError('run-complete', `Забег ${run.id} достиг цели и готов к завершению`);
+    }
     if (run !== undefined && run.subject !== topic.subject) {
       throw new SessionError(
         'task-not-in-run',

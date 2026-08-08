@@ -35,6 +35,7 @@ const STATUS_BY_CODE: Record<SessionErrorCode, number> = {
   'dispute-not-found': 404,
   'run-not-found': 404,
   'run-finished': 409,
+  'run-complete': 409,
   'run-not-ready': 409,
   'task-not-in-run': 409,
   // 409, а не 500: задание оказалось негодным, но занятие цело — клиенту надо

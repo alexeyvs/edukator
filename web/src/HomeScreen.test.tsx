@@ -101,6 +101,40 @@ describe('главный экран', () => {
     expect(navigate).not.toHaveBeenCalled();
   });
 
+  it('показывает рейтинг на финале подхваченного триажа', async () => {
+    const api = apiWith({
+      ...PLAN,
+      triage: PLAN.triage.map((item) => ({ ...item, passed: false })),
+    });
+    vi.mocked(api.startTriage).mockResolvedValue({
+      runId: 8,
+      resumed: true,
+      progress: { total: 12, correct: 7, target: 12, done: true },
+    });
+    vi.mocked(api.finish).mockResolvedValue({
+      runId: 8,
+      total: 12,
+      correct: 7,
+      xp: 0,
+      touchedTopics: [{
+        topicId: 'russian.vowels',
+        title: 'Безударные гласные',
+        before: 0,
+        after: 0.35,
+      }],
+      closedTopics: [],
+      declinedTopics: [],
+      forecast: { id: 2, subject: 'russian', score: 3, band: .4, createdAt: '2026-08-08T12:00:00Z' },
+    });
+    render(<HomeScreen api={api} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Пройти триаж' }));
+
+    expect(await screen.findByText('Триаж завершён')).toBeInTheDocument();
+    expect(screen.getByText('Безударные гласные')).toBeInTheDocument();
+    expect(screen.queryByText('Забег завершён')).not.toBeInTheDocument();
+  });
+
   it('показывает ошибку старта и оставляет экран доступным', async () => {
     const api = apiWith(PLAN);
     vi.mocked(api.start).mockRejectedValue(new Error('Забег временно недоступен'));

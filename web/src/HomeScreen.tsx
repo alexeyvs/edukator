@@ -48,7 +48,10 @@ export function HomeScreen({
   const [profile, setProfile] = useState<ProfileSummary | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [starting, setStarting] = useState<Subject | null>(null);
-  const [finish, setFinish] = useState<FinishRunResponse | null>(null);
+  const [finish, setFinish] = useState<{
+    result: FinishRunResponse;
+    kind: 'run' | 'triage';
+  } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -72,7 +75,7 @@ export function HomeScreen({
         ? await api.startTriage(subject)
         : await api.start(subject);
       if (started.progress.done) {
-        setFinish(await api.finish(started.runId));
+        setFinish({ result: await api.finish(started.runId), kind });
         return;
       }
       navigate(`/?runId=${started.runId}${kind === 'triage' ? '&kind=triage' : ''}`);
@@ -83,7 +86,7 @@ export function HomeScreen({
     }
   }
 
-  if (finish !== null) return <FinishScreen result={finish} />;
+  if (finish !== null) return <FinishScreen result={finish.result} kind={finish.kind} />;
 
   const anyTriagePassed = plan?.triage.some((item) => item.passed) ?? false;
   const nextTriage = plan?.triage.find((item) => !item.passed)?.subject ?? 'math';

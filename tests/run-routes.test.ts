@@ -119,6 +119,13 @@ describe('маршруты забега', () => {
       expect(answer.statusCode).toBe(200);
     }
 
+    const beyondTarget = await app.inject({
+      method: 'GET',
+      url: `/api/session/next?runId=${runId}`,
+    });
+    expect(beyondTarget.statusCode).toBe(409);
+    expect(beyondTarget.json()).toMatchObject({ code: 'run-complete' });
+
     const finish = await app.inject({ method: 'POST', url: `/api/run/${runId}/finish` });
     expect(finish.statusCode).toBe(200);
     expect(finish.json()).toMatchObject({ runId, total: 12, correct: 12, xp: 300 });
