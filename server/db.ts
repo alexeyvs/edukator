@@ -9,9 +9,9 @@ const projectRoot = resolve(here, '..');
  * Версия схемы. Хранится в `PRAGMA user_version`; миграция сравнивает её со
  * своей и пропускает работу, если база уже актуальна.
  */
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
-/** Семь таблиц из спеки. Тесты сверяют состав базы именно с этим списком. */
+/** Таблицы приложения. Тесты сверяют состав базы именно с этим списком. */
 export const TABLES = [
   'profile',
   'topic_state',
@@ -20,6 +20,8 @@ export const TABLES = [
   'attempts',
   'disputes',
   'forecast_snapshots',
+  'boss_batches',
+  'boss_tasks',
 ] as const;
 
 /** Предметы подготовки. Ограничение уровня схемы, чтобы опечатка не дошла до отчётов. */
@@ -88,7 +90,8 @@ const SCHEMA = `
     confidence  REAL    NOT NULL DEFAULT 0 CHECK (confidence BETWEEN 0 AND 1),
     attempts    INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     last_seen   TEXT,
-    next_review TEXT
+    next_review TEXT,
+    closed_at   TEXT
   );
 
   CREATE TABLE IF NOT EXISTS task_bank (
@@ -106,7 +109,7 @@ const SCHEMA = `
     joke       TEXT,
     difficulty INTEGER NOT NULL CHECK (difficulty BETWEEN 1 AND 3),
     status     TEXT    NOT NULL DEFAULT 'pending'
-                       CHECK (status IN ('pending', 'valid', 'rejected', 'used')),
+                       CHECK (status IN ('pending', 'valid', 'rejected', 'used', 'boss_reserved')),
     -- Отпечаток формулировки (questionFingerprint): по нему банк отсекает
     -- повторы внутри темы.
     fingerprint TEXT   NOT NULL DEFAULT '',
@@ -125,7 +128,7 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY,
     subject     TEXT    NOT NULL CHECK (subject IN (${subjectCheck})),
-    kind        TEXT    NOT NULL DEFAULT 'run' CHECK (kind IN ('run', 'triage')),
+    kind        TEXT    NOT NULL DEFAULT 'run' CHECK (kind IN ('run', 'triage', 'boss')),
     -- Тема, ради которой забег начат. Внутри забега задания могут относиться к
     -- другим темам предмета; это поле читают планировочные эвристики
     -- activeRunTopics, topicsUsedToday и lastRunSubject.
@@ -199,6 +202,29 @@ const SCHEMA = `
 
   CREATE INDEX IF NOT EXISTS forecast_by_subject
     ON forecast_snapshots (subject, created_at);
+
+  CREATE TABLE IF NOT EXISTS boss_batches (
+    id           INTEGER PRIMARY KEY,
+    topic_id     TEXT    NOT NULL REFERENCES topic_state (topic_id) ON DELETE CASCADE,
+    run_id       INTEGER REFERENCES runs (id) ON DELETE SET NULL,
+    status       TEXT    NOT NULL DEFAULT 'preparing'
+                         CHECK (status IN ('preparing', 'ready', 'active', 'won', 'lost', 'failed')),
+    created_at   TEXT    NOT NULL DEFAULT (${NOW_ISO}),
+    activated_at TEXT,
+    finished_at  TEXT
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS boss_batches_live_topic
+    ON boss_batches (topic_id)
+    WHERE status IN ('preparing', 'ready', 'active');
+
+  CREATE TABLE IF NOT EXISTS boss_tasks (
+    batch_id INTEGER NOT NULL REFERENCES boss_batches (id) ON DELETE CASCADE,
+    task_id  INTEGER NOT NULL REFERENCES task_bank (id) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position BETWEEN 1 AND 5),
+    PRIMARY KEY (batch_id, position),
+    UNIQUE (task_id)
+  );
 `;
 
 /**
@@ -473,18 +499,84 @@ export function migrate(db: Database.Database): void {
       `);
     }
 
+    if (version <= 10) {
+      const topicColumns = db
+        .prepare<[], { name: string }>('PRAGMA table_info(topic_state)')
+        .all()
+        .map((column) => column.name);
+      if (!topicColumns.includes('closed_at')) {
+        db.exec('ALTER TABLE topic_state ADD COLUMN closed_at TEXT;');
+      }
+
+      // Оба новых значения входят в CHECK существующих таблиц, поэтому одного
+      // ALTER TABLE недостаточно. Цепочка перестраивается целиком: переименование
+      // родителя отдельно перенаправило бы внешние ключи детей на временную
+      // таблицу и сделало их висячими после DROP.
+      db.exec(`
+        DROP TABLE IF EXISTS boss_tasks;
+        DROP TABLE IF EXISTS boss_batches;
+        DROP TRIGGER IF EXISTS attempts_topic_consistency_insert;
+        DROP TRIGGER IF EXISTS attempts_topic_consistency_update;
+        DROP TRIGGER IF EXISTS runs_correct_not_above_total_insert;
+        DROP TRIGGER IF EXISTS runs_correct_not_above_total_update;
+        DROP INDEX IF EXISTS attempts_by_topic;
+        DROP INDEX IF EXISTS task_bank_queue;
+        DROP INDEX IF EXISTS task_bank_fingerprint;
+
+        ALTER TABLE disputes RENAME TO disputes_v10;
+        ALTER TABLE attempts RENAME TO attempts_v10;
+        ALTER TABLE task_bank RENAME TO task_bank_v10;
+        ALTER TABLE runs RENAME TO runs_v10;
+      `);
+      db.exec(SCHEMA);
+      db.exec(`
+        INSERT INTO runs
+          (id, subject, kind, topic_id, started_at, finished_at, summary, total, correct)
+          SELECT id, subject, kind, topic_id, started_at, finished_at, summary, total, correct
+          FROM runs_v10;
+        INSERT INTO task_bank
+          (id, topic_id, question, instruction, material, material_format, choices,
+           answer, accept, hint, explain, joke, difficulty, status, fingerprint,
+           issued_run_id, created_at)
+          SELECT id, topic_id, question, instruction, material, material_format, choices,
+                 answer, accept, hint, explain, joke, difficulty, status, fingerprint,
+                 issued_run_id, created_at
+          FROM task_bank_v10;
+        INSERT INTO attempts
+          (id, task_id, topic_id, run_id, answer, is_correct, hint_used, duration_ms, created_at)
+          SELECT id, task_id, topic_id, run_id, answer, is_correct, hint_used, duration_ms, created_at
+          FROM attempts_v10;
+        INSERT INTO disputes
+          (id, attempt_id, status, resolution, created_at, resolved_at)
+          SELECT id, attempt_id, status, resolution, created_at, resolved_at
+          FROM disputes_v10;
+
+        DROP TABLE disputes_v10;
+        DROP TABLE attempts_v10;
+        DROP TABLE task_bank_v10;
+        DROP TABLE runs_v10;
+      `);
+
+      const [foreignKeyProblem] = db.pragma('foreign_key_check') as unknown[];
+      if (foreignKeyProblem !== undefined) {
+        throw new Error('Миграция игрового слоя нарушила целостность внешних ключей');
+      }
+    }
+
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   }).immediate();
 }
 
 const REQUIRED_COLUMNS: Readonly<Record<(typeof TABLES)[number], readonly string[]>> = {
   profile: ['id', 'name', 'interests', 'exam_date', 'partner_name'],
-  topic_state: ['topic_id', 'mastery', 'confidence', 'attempts', 'last_seen', 'next_review'],
+  topic_state: ['topic_id', 'mastery', 'confidence', 'attempts', 'last_seen', 'next_review', 'closed_at'],
   task_bank: ['id', 'topic_id', 'question', 'instruction', 'material', 'material_format', 'choices', 'answer', 'accept', 'hint', 'explain', 'joke', 'difficulty', 'status', 'fingerprint', 'issued_run_id', 'created_at'],
   runs: ['id', 'subject', 'kind', 'topic_id', 'started_at', 'finished_at', 'summary', 'total', 'correct'],
   attempts: ['id', 'task_id', 'topic_id', 'run_id', 'answer', 'is_correct', 'hint_used', 'duration_ms', 'created_at'],
   disputes: ['id', 'attempt_id', 'status', 'resolution', 'created_at', 'resolved_at'],
   forecast_snapshots: ['id', 'subject', 'score', 'band', 'created_at'],
+  boss_batches: ['id', 'topic_id', 'run_id', 'status', 'created_at', 'activated_at', 'finished_at'],
+  boss_tasks: ['batch_id', 'task_id', 'position'],
 };
 
 const REQUIRED_AUXILIARY_OBJECTS = [
@@ -496,7 +588,15 @@ const REQUIRED_AUXILIARY_OBJECTS = [
   'runs_correct_not_above_total_update',
   'attempts_topic_consistency_insert',
   'attempts_topic_consistency_update',
+  'boss_batches_live_topic',
 ] as const;
+
+const REQUIRED_SCHEMA_FRAGMENTS = {
+  runs: ["'run', 'triage', 'boss'"],
+  task_bank: ["'pending', 'valid', 'rejected', 'used', 'boss_reserved'"],
+  boss_batches: ["'preparing', 'ready', 'active', 'won', 'lost', 'failed'"],
+  boss_tasks: ['position BETWEEN 1 AND 5', 'UNIQUE (task_id)'],
+} as const;
 
 /** Не даёт базе с актуальным номером версии скрыть удалённую или чужую схему. */
 export function validateSchema(db: Database.Database): void {
@@ -522,6 +622,19 @@ export function validateSchema(db: Database.Database): void {
   const missing = REQUIRED_AUXILIARY_OBJECTS.filter((name) => !objects.has(name));
   if (missing.length > 0) {
     throw new Error(`Схема базы повреждена: отсутствуют ${missing.join(', ')}`);
+  }
+
+  for (const [table, fragments] of Object.entries(REQUIRED_SCHEMA_FRAGMENTS)) {
+    const row = db
+      .prepare<[string], { sql: string | null }>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+      )
+      .get(table);
+    const sql = row?.sql ?? '';
+    const absent = fragments.filter((fragment) => !sql.includes(fragment));
+    if (absent.length > 0) {
+      throw new Error(`Схема базы повреждена: ${table} не содержит обязательные ограничения`);
+    }
   }
 
   const [integrity] = db.pragma('quick_check') as [{ quick_check: string }];

@@ -213,10 +213,10 @@ describe('база данных', () => {
     // рабочую базу, поэтому число прибито буквально и меняется только вместе с
     // новой ступенью и её тестом обновления.
     it('держит номер версии схемы', () => {
-      expect(SCHEMA_VERSION).toBe(10);
+      expect(SCHEMA_VERSION).toBe(11);
     });
 
-    it('создаёт все семь таблиц на пустой базе', () => {
+    it('создаёт все девять таблиц на пустой базе', () => {
       expect(tableNames(db)).toEqual([...TABLES].sort());
     });
 
@@ -686,7 +686,7 @@ describe('база данных', () => {
       }
     });
 
-    it('мигрирует очередь 9→10, сохраняя выданное задание и исторические связи', () => {
+    it('мигрирует базу версии 9 до игрового слоя, сохраняя забег, задание, попытку и спор', () => {
       const path = join(tempDir, 'версия-9.db');
       const legacy = openDatabase(path);
       const topicId = seedTopic(legacy);
@@ -715,10 +715,16 @@ describe('база данных', () => {
       try {
         expect(migrated.prepare('SELECT id, status, instruction FROM task_bank').all())
           .toEqual([{ id: used, status: 'used', instruction: null }]);
+        expect(migrated.prepare('SELECT id, kind, topic_id FROM runs').get())
+          .toEqual({ id: runId, kind: 'run', topic_id: topicId });
         expect(migrated.prepare('SELECT task_id, run_id FROM attempts').get())
           .toEqual({ task_id: used, run_id: runId });
         expect(migrated.prepare('SELECT attempt_id FROM disputes').get())
           .toEqual({ attempt_id: attemptId });
+        expect(migrated.prepare('SELECT closed_at FROM topic_state WHERE topic_id = ?')
+          .get(topicId)).toEqual({ closed_at: null });
+        expect(migrated.pragma('foreign_key_check')).toEqual([]);
+        expect(tableNames(migrated)).toEqual([...TABLES].sort());
       } finally {
         migrated.close();
       }
@@ -779,8 +785,72 @@ describe('база данных', () => {
       expect(() =>
         db
           .prepare('INSERT INTO runs (subject, kind, topic_id, started_at) VALUES (?, ?, ?, ?)')
+          .run('math', 'boss', topicId, '2026-08-07T10:00:00.000Z'),
+      ).not.toThrow();
+
+      expect(() =>
+        db
+          .prepare('INSERT INTO runs (subject, kind, topic_id, started_at) VALUES (?, ?, ?, ?)')
           .run('math', 'экзамен', topicId, '2026-08-07T10:00:00.000Z'),
       ).toThrow(/CHECK constraint failed/);
+    });
+
+    it('резервирует задания босса только в допустимых состояниях', () => {
+      const topicId = seedTopic(db);
+
+      expect(() =>
+        db.prepare(
+          `INSERT INTO task_bank (topic_id, question, answer, difficulty, status)
+           VALUES (?, ?, ?, ?, ?)`,
+        ).run(topicId, 'Босс', '4', 2, 'boss_reserved'),
+      ).not.toThrow();
+      expect(() =>
+        db.prepare(
+          `INSERT INTO task_bank (topic_id, question, answer, difficulty, status)
+           VALUES (?, ?, ?, ?, ?)`,
+        ).run(topicId, 'Неизвестно', '4', 2, 'boss_pending'),
+      ).toThrow(/CHECK constraint failed/);
+    });
+
+    it('ограничивает батч босса пятью уникальными позициями и заданиями', () => {
+      const topicId = seedTopic(db);
+      const firstTask = seedTask(db, topicId);
+      const secondTask = seedTask(db, topicId);
+      const batchId = Number(db.prepare(
+        'INSERT INTO boss_batches (topic_id, status) VALUES (?, ?)',
+      ).run(topicId, 'ready').lastInsertRowid);
+      db.prepare('INSERT INTO boss_tasks (batch_id, task_id, position) VALUES (?, ?, ?)')
+        .run(batchId, firstTask, 1);
+
+      expect(() =>
+        db.prepare('INSERT INTO boss_tasks (batch_id, task_id, position) VALUES (?, ?, ?)')
+          .run(batchId, secondTask, 6),
+      ).toThrow(/CHECK constraint failed/);
+      expect(() =>
+        db.prepare('INSERT INTO boss_tasks (batch_id, task_id, position) VALUES (?, ?, ?)')
+          .run(batchId, secondTask, 1),
+      ).toThrow(/UNIQUE constraint failed/);
+      expect(() =>
+        db.prepare('INSERT INTO boss_tasks (batch_id, task_id, position) VALUES (?, ?, ?)')
+          .run(batchId, firstTask, 2),
+      ).toThrow(/UNIQUE constraint failed/);
+    });
+
+    it('не допускает второй живой батч одной темы, но сохраняет историю завершённых', () => {
+      const topicId = seedTopic(db);
+      db.prepare('INSERT INTO boss_batches (topic_id, status) VALUES (?, ?)')
+        .run(topicId, 'preparing');
+
+      expect(() =>
+        db.prepare('INSERT INTO boss_batches (topic_id, status) VALUES (?, ?)')
+          .run(topicId, 'ready'),
+      ).toThrow(/UNIQUE constraint failed/);
+
+      db.prepare("UPDATE boss_batches SET status = 'failed' WHERE topic_id = ?").run(topicId);
+      expect(() =>
+        db.prepare('INSERT INTO boss_batches (topic_id, status) VALUES (?, ?)')
+          .run(topicId, 'active'),
+      ).not.toThrow();
     });
 
     it('не оставляет открытое соединение, если миграция упала', () => {
