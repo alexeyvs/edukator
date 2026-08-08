@@ -138,6 +138,40 @@ describe('writeFileAtomic', () => {
     }
   });
 
+  it('не сообщает об успехе, когда каталог не удалось сбросить на диск', async () => {
+    const path = join(dir, 'seed.json');
+    let syncs = 0;
+    vi.resetModules();
+    vi.doMock('node:fs', async () => {
+      const real = await vi.importActual<typeof import('node:fs')>('node:fs');
+      return {
+        ...real,
+        fsyncSync: (handle: number) => {
+          syncs += 1;
+          if (syncs === 2) {
+            const error = new Error('EIO: directory sync failed') as NodeJS.ErrnoException;
+            error.code = 'EIO';
+            throw error;
+          }
+          real.fsyncSync(handle);
+        },
+      };
+    });
+
+    try {
+      const { writeFileAtomic: patched } = await import('../server/atomic-write.js');
+
+      expect(() => patched(path, 'новый снимок')).toThrow(/directory sync failed/);
+      // Rename уже атомарно состоялся; ошибка означает именно неподтверждённую
+      // долговечность, а не возможность безопасно вернуть прежний снимок.
+      expect(readFileSync(path, 'utf8')).toBe('новый снимок');
+      expect(leftovers(path)).toEqual([]);
+    } finally {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    }
+  });
+
   it('не подменяет причину отказом уборки временного файла', async () => {
     // Второй отказ уборки: не убравшийся временный файл — беда куда меньшая,
     // чем потерянная причина, по которой снимок не записался.

@@ -205,7 +205,7 @@ export const DEFAULT_PORT = 3000;
 export type CurriculumStatus = 'ok' | 'error';
 
 /** Настройки занятия, которые тесты подменяют: разбирающий спор и запуск фона. */
-export type ServerOptions = Omit<SessionRoutesOptions, 'db' | 'graph'>;
+export type ServerOptions = Omit<SessionRoutesOptions, 'db' | 'graph' | 'available'>;
 
 export function buildServer(
   curriculumDir: string = CURRICULUM_DIR,
@@ -297,8 +297,15 @@ export function buildServer(
   const session: DatabaseStatus = graph !== undefined && opened !== undefined ? 'ok' : 'error';
   if (graph !== undefined && opened !== undefined) {
     const sessionDb = opened.db;
-    registerSessionRoutes(app, { ...options, db: sessionDb, graph });
-    app.addHook('onClose', () => {
+    const sessionAvailable = (): boolean => fileIdentity(databasePath()) === opened.file;
+    const waitForReviews = registerSessionRoutes(app, {
+      ...options,
+      db: sessionDb,
+      graph,
+      available: sessionAvailable,
+    });
+    app.addHook('onClose', async () => {
+      await waitForReviews();
       sessionDb.close();
     });
   } else {

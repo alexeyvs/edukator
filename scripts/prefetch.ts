@@ -221,6 +221,7 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
         // выгрузка создаёт его, ради чего её и зовут в первый раз.
         if (missingSeed.has(subject) && existsSync(path)) {
           log(`посев ${subject}: исходного файла не было, ${path} не переписан`);
+          exportFailed.push(subject);
           continue;
         }
         let topics: SeedTopic[];
@@ -241,6 +242,7 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
         // должен был обновить.
         if (topics.length === 0) {
           log(`посев ${subject}: в банке нет заданий, ${path} не переписан`);
+          exportFailed.push(subject);
           continue;
         }
         // Через временный файл: посев — снимок для первого запуска и отката, и
@@ -393,8 +395,8 @@ async function main(): Promise<void> {
   const stored = storedTotal(result);
   // Итог выгрузки печатается всегда, когда её просили, — в том числе нулевой:
   // пропуск предмета по осторожности («исходного файла не было, чужой снимок на
-  // месте») прогон не красит, и умолчав о нём, `--export` выглядел бы
-  // сработавшим, хотя не переписал ни одного файла.
+  // месте») красит прогон, но без итоговой строки `--export` всё равно выглядел
+  // бы сработавшим, пока диагностику конкретного предмета не заметили в логе.
   const exportSummary =
     options.exportSeed === true
       ? `, посев выгружен в ${result.exported.length} файл(ов)` +

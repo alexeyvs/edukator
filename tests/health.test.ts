@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } fr
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import type { FastifyInstance } from 'fastify';
 import {
   buildServer,
@@ -19,6 +20,8 @@ import { DEFAULT_PROFILE, SCHEMA_VERSION, openDatabase, readProfile } from '../s
 import { loadCurriculum } from '../server/curriculum.js';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const tsxCli = join(projectRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+const serverCli = join(projectRoot, 'server', 'index.ts');
 
 /** Версия из package.json напрямую: сверять ответ с `readVersion()` — сверять функцию с самой собой. */
 function packageVersion(): string {
@@ -252,7 +255,6 @@ describe('GET /api/health', () => {
         curriculum: 'ok',
         session: 'error',
       });
-
       const lesson = await recovering.inject({ method: 'GET', url: '/api/session/next' });
       expect(lesson.statusCode).toBe(503);
 
@@ -300,6 +302,11 @@ describe('GET /api/health', () => {
         curriculum: 'ok',
         session: 'error',
       });
+      // Красный health недостаточен: клиент может не опросить его перед
+      // ответом. Сам маршрут обязан не писать в отвязанный старый inode.
+      expect(
+        (await replacing.inject({ method: 'GET', url: '/api/session/next' })).statusCode,
+      ).toBe(503);
 
       const db = openDatabase(path);
       try {
@@ -513,5 +520,17 @@ describe('GET /api/health', () => {
         expect(() => readPort(value), value).toThrow(/PORT должен быть целым числом от 1 до 65535/u);
       }
     });
+  });
+
+  it('прямой CLI-запуск возвращает код 1 на битом PORT до открытия базы', () => {
+    const path = join(tempDir, 'cli-invalid-port.db');
+    const result = spawnSync(process.execPath, [tsxCli, serverCli], {
+      encoding: 'utf8',
+      env: { ...process.env, PORT: 'не-порт', EDUKATOR_DB: path },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/edukator не поднялся:.*PORT/u);
+    expect(existsSync(path)).toBe(false);
   });
 });

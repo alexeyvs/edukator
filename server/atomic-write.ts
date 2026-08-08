@@ -14,23 +14,28 @@ import { randomUUID } from 'node:crypto';
  * месте снимка оказался бы прежний файл либо ничего. Восстановить нечем — PDF,
  * по которым он собран, в репозитории нет.
  *
- * Отказ не выносится наружу: переименование к этому моменту уже состоялось,
- * файл на месте, и превращать «не подтвердилось на диске» в отказ записи —
- * значит заставить вызывающего откатывать удачную работу. На части файловых
- * систем каталог и открыть-то нельзя.
+ * После `rename` откатить запись уже нельзя, но и сообщать об успехе нельзя:
+ * EIO/ENOSPC на сбросе означает, что единственный снимок может исчезнуть после
+ * сбоя питания. Игнорируются только файловые системы, которые прямо сообщают,
+ * что `fsync` каталога ими не поддерживается.
  */
 function syncDirectory(path: string): void {
+  let handle: number;
   try {
-    const handle = openSync(dirname(path), 'r');
-    // Закрытие в `finally`, а не после `fsyncSync`: иначе отказ сброса уносил бы
-    // дескриптор с собой, и каждая запись снимка подтекала бы на один.
-    try {
-      fsyncSync(handle);
-    } finally {
-      closeSync(handle);
-    }
-  } catch {
-    /* см. выше */
+    handle = openSync(dirname(path), 'r');
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EINVAL' || code === 'ENOTSUP') return;
+    throw error;
+  }
+
+  try {
+    fsyncSync(handle);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EINVAL' && code !== 'ENOTSUP') throw error;
+  } finally {
+    closeSync(handle);
   }
 }
 

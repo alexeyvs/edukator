@@ -562,6 +562,39 @@ describe('маршруты занятия', () => {
         db.prepare<[], { status: string }>('SELECT status FROM disputes').get()?.status,
       ).toBe('upheld');
     });
+
+    it('перед закрытием сервера дожидается фонового разбора', async () => {
+      let release: (() => void) | undefined;
+      const slow = extraServer({
+        seedDir,
+        review: (): Promise<DisputeReview> =>
+          new Promise<DisputeReview>((resolve) => {
+            release = (): void => resolve(verdict);
+          }),
+      });
+      await slow.ready();
+      const { attemptId } = await wrongAnswer();
+      expect(
+        (await slow.inject({
+          method: 'POST',
+          url: '/api/session/dispute',
+          payload: { attempt_id: attemptId },
+        })).statusCode,
+      ).toBe(202);
+
+      let closed = false;
+      const closing = slow.close().then(() => {
+        closed = true;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(closed).toBe(false);
+
+      release?.();
+      await closing;
+      expect(
+        db.prepare<[], { status: string }>('SELECT status FROM disputes').get()?.status,
+      ).toBe('upheld');
+    });
   });
 
   // Негодное задание не должно вставать поперёк занятия навсегда: без пометки

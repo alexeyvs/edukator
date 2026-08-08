@@ -1,13 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { openDatabase, SUBJECTS, type Subject } from '../server/db.js';
 import { countAvailable } from '../server/codex/bank.js';
 import { CodexUnavailableError } from '../server/codex/client.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import type { ProduceRequest } from '../server/codex/worker.js';
 import { DEFAULT_CYCLES, parseArgs, prefetch, prefetchFailed } from '../scripts/prefetch.js';
+
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const tsxCli = join(projectRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+const prefetchCli = join(projectRoot, 'scripts', 'prefetch.ts');
 
 /** Карта из одной темы на предмет: без всех трёх файлов карта не грузится. */
 function writeCurriculum(dir: string): void {
@@ -194,6 +200,8 @@ describe('prefetch', () => {
       });
 
       expect(result.exported).toEqual([]);
+      expect(result.exportFailed).toEqual(SUBJECTS);
+      expect(prefetchFailed(result)).toBe(true);
       for (const subject of SUBJECTS) {
         expect(readFileSync(join(outDir, `${subject}.json`), 'utf8')).toBe(existing);
       }
@@ -254,6 +262,8 @@ describe('prefetch', () => {
       expect(result.exported).not.toContain(join(outDir, 'russian.json'));
       expect(readFileSync(join(outDir, 'russian.json'), 'utf8')).toBe(snapshot);
       expect(logged.join('\n')).toMatch(/посев russian: исходного файла не было/u);
+      expect(result.exportFailed).toContain('russian');
+      expect(prefetchFailed(result)).toBe(true);
     });
 
     // Строка банка без подсказки не пройдёт обратную загрузку, и `collectSeedTasks`
@@ -541,6 +551,35 @@ describe('prefetch', () => {
       expect(() => parseArgs(['--batches', '0'])).toThrow(/не меньше 1/u);
       expect(() => parseArgs(['--cycles', '0'])).toThrow(/не меньше 1/u);
       expect(() => parseArgs(['--topics', '99999999999999999999'])).toThrow(/не меньше 1/u);
+    });
+  });
+
+  describe('prefetch CLI', () => {
+    it('возвращает код 1, когда запрошенная выгрузка не состоялась', () => {
+      const outDir = join(tempDir, 'cli-out');
+      mkdirSync(outDir);
+      const result = spawnSync(
+        process.execPath,
+        [
+          tsxCli,
+          prefetchCli,
+          '--topics', '1',
+          '--cycles', '1',
+          '--export',
+          '--db', join(tempDir, 'cli.db'),
+          '--curriculum', curriculumDir,
+          '--seed-dir', seedDir,
+          '--out', outDir,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, PATH: '' },
+        },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stdout).toMatch(/посев выгружен в 0 файл/u);
+      expect(result.stderr).toMatch(/наполнение не удалось/u);
     });
   });
 });

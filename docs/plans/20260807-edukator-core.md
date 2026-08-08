@@ -41,7 +41,8 @@
   - математика — `1730195169__6_klass_bazovyj_uroven_merzljak.pdf`
   - русский — `1694611097_russkij-jaz_-6kl_-pour-plany-po-uch-baranova-i-razumovskoj_2013-318s.pdf`
   - английский — `1688304813_new-millennium-english_-uchebnik-dlja-6kl_derevjanko-n_n_-i-dr_2006-160s_compressed.pdf`
-- codex CLI 0.146.0; рабочая модель `gpt-5.6-terra`. Все вызовы обязаны
+- codex CLI 0.146.0; рабочая модель `gpt-5.6-sol`, запасная — `gpt-5.6-terra`.
+  Все вызовы обязаны
   закрывать stdin через `< /dev/null`, иначе процесс висит бесконечно. Для
   недоверенного OCR отключены `shell_tool` и `unified_exec`, чтобы инъекция из
   PDF не могла читать локальные файлы.
@@ -280,7 +281,7 @@ Vision (`ru-RU` + `en-US`). Vision выбран вместо tesseract/ocrmypdf 
       входе, `content/curriculum/<subject>.json` на выходе
 - [x] вызывать codex во временном каталоге как `codex exec --ephemeral
       --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox read-only
-      --cd <temp> -m gpt-5.6-terra --output-schema <schema> -o <out> "<промпт>"
+      --cd <temp> -m gpt-5.6-sol --output-schema <schema> -o <out> "<промпт>"
       < /dev/null` — **закрытие stdin и изоляция недоверенного OCR обязательны**
 - [x] в промпте требовать 20-25 тем на предмет с заполненными `exam_weight` по
       типовой программе и содержательным `prompt_seed` с примерами формулировок
@@ -655,11 +656,11 @@ ASCII-only `\b` в JS-регулярках, `PRAGMA foreign_keys` на кажд�
 **Формат темы** — `schemas/curriculum.json`; `answer_format` принимает только
 `number`, `text` или `choice` и определяет ветвь нормализатора.
 
-**Вызов codex** (используется только скриптом сборки карты тем на этом этапе):
-codex CLI 0.146.0, модель `gpt-5.6-terra`, вызов `codex exec --ephemeral
---ignore-user-config --ignore-rules --skip-git-repo-check --disable shell_tool
---disable unified_exec --sandbox read-only --cd <temp> -m gpt-5.6-terra
---output-schema <schema> -o <out> <prompt>`, stdin закрыт через `< /dev/null`.
+**Вызов codex на этапе 1** использовался для сборки карты тем. Общий клиент
+теперь обслуживает роли `curriculum`, `generate`, `validate` и `dispute`;
+текущая модель по умолчанию — `gpt-5.6-sol`, запасная — `gpt-5.6-terra`, с
+отдельной переменной окружения на роль. Полный актуальный контракт описан в
+README, «Модель по ролям».
 
 ## Post-Completion
 
@@ -696,9 +697,12 @@ codex CLI 0.146.0, модель `gpt-5.6-terra`, вызов `codex exec --epheme
   Решить до этапа 4: снизить `exam_weight` части тем вручную (сузить программу
   осознанно) либо принять, что прогноз оценки честно покажет незакрытый остаток.
 
+**Завершённые последующие этапы:**
+
+- Этап 2 — генерация заданий через codex: complete; детали и итоговый статус
+  см. в `docs/plans/20260807-edukator-generation.md`.
+
 **Следующие этапы:**
 
-- Этап 2 — генерация заданий через codex: клиент, генератор, валидатор, воркер
-  тёплой очереди, посевной банк.
 - Этап 3 — экран забега и триаж; после него можно начинать заниматься.
 - Этап 4 — отображение прогноза, родительский дашборд, боссы тем, диктант.

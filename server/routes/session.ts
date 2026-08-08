@@ -58,6 +58,8 @@ export interface SessionRoutesOptions {
   log?: (message: string) => void;
   /** Каталог посевного банка; по умолчанию репозиторный. */
   seedDir?: string;
+  /** Соединение всё ещё привязано к текущему файлу базы. */
+  available?: () => boolean;
 }
 
 function defaultLog(message: string): void {
@@ -100,7 +102,10 @@ function fail(reply: FastifyReply, error: unknown): FastifyReply {
   throw error;
 }
 
-export function registerSessionRoutes(app: FastifyInstance, options: SessionRoutesOptions): void {
+export function registerSessionRoutes(
+  app: FastifyInstance,
+  options: SessionRoutesOptions,
+): () => Promise<void> {
   const { db, graph } = options;
   const review = options.review ?? disputeReviewer();
   const log = options.log ?? defaultLog;
@@ -113,6 +118,12 @@ export function registerSessionRoutes(app: FastifyInstance, options: SessionRout
    * бы ещё один процесс codex на минуты.
    */
   const reviewing = new Set<number>();
+  const pendingReviews = new Set<Promise<unknown>>();
+
+  function unavailable(reply: FastifyReply): FastifyReply | undefined {
+    if (options.available?.() !== false) return undefined;
+    return reply.code(503).send({ error: 'Занятие недоступно: файл базы заменён, нужен перезапуск' });
+  }
 
   /**
    * Разбор идёт фоном: ученик нажал кнопку и решает дальше, а вызов модели
@@ -133,11 +144,14 @@ export function registerSessionRoutes(app: FastifyInstance, options: SessionRout
     }
     reviewing.add(id);
     background(async () => {
+      const pending = resolveDispute(db, graph, id, review);
+      pendingReviews.add(pending);
       try {
-        await resolveDispute(db, graph, id, review);
+        await pending;
       } catch (error) {
         log(`разбор спора ${id} не выполнен: ${(error as Error).message}`);
       } finally {
+        pendingReviews.delete(pending);
         // Именно в `finally`: снятая только при успехе пометка навсегда
         // запретила бы повторный разбор спора, который как раз и остался
         // открытым из-за недоступного codex.
@@ -147,6 +161,8 @@ export function registerSessionRoutes(app: FastifyInstance, options: SessionRout
   }
 
   app.get('/api/session/next', (_request, reply) => {
+    const stopped = unavailable(reply);
+    if (stopped !== undefined) return stopped;
     try {
       const result = nextTask(db, graph, {
         now: now(),
@@ -175,6 +191,8 @@ export function registerSessionRoutes(app: FastifyInstance, options: SessionRout
   });
 
   app.post('/api/session/answer', (request, reply) => {
+    const stopped = unavailable(reply);
+    if (stopped !== undefined) return stopped;
     try {
       const body = request.body;
       const taskId = readId(body, 'task_id');
@@ -236,6 +254,8 @@ export function registerSessionRoutes(app: FastifyInstance, options: SessionRout
   });
 
   app.post('/api/session/dispute', (request, reply) => {
+    const stopped = unavailable(reply);
+    if (stopped !== undefined) return stopped;
     try {
       const attemptId = readId(request.body, 'attempt_id');
       const dispute = openDispute(db, attemptId);
@@ -254,6 +274,16 @@ export function registerSessionRoutes(app: FastifyInstance, options: SessionRout
       return fail(reply, error);
     }
   });
+
+  // `app.close()` закрывает соединение занятия. Фоновый разбор уже держит
+  // ссылку на него и после удачного ответа модели пишет вердикт транзакцией,
+  // поэтому закрывать базу раньше — превращать штатное завершение в случайный
+  // `database connection is not open`. На сигнале `runChild` сначала снимает
+  // потомка, так что ожидание здесь быстро завершается и WAL закрывается после
+  // всей работы с базой.
+  return async () => {
+    await Promise.allSettled([...pendingReviews]);
+  };
 }
 
 /**
