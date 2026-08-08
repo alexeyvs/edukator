@@ -779,6 +779,32 @@ describe('занятие', () => {
       }
     });
 
+    it('не превращает choice-дистрактор в допустимый ответ после подтверждённого спора', async () => {
+      graph = buildTopicGraph([
+        topic('math.a', { answerFormat: 'choice' }),
+        topic('russian.a'),
+        topic('english.a'),
+      ]);
+      const taskId = issue('math.a', {
+        instruction: 'Выбери результат сложения.',
+        choices: ['четыре', 'пять'],
+        answer: 'четыре',
+        accept: ['четыре'],
+      });
+      const attempt = submitAnswer(db, graph, { taskId, answer: 'пять' });
+      expect(attempt.correct).toBe(false);
+      const { review } = reviewer({ studentCorrect: true, note: 'ошибочный вердикт проверки' });
+
+      const result = await resolveDispute(db, graph, openDispute(db, attempt.attemptId).id, review);
+
+      expect(result.status).toBe('upheld');
+      expect(result.accept).toEqual(['четыре']);
+      const stored = db.prepare<[number], { accept: string }>(
+        'SELECT accept FROM task_bank WHERE id = ?',
+      ).get(taskId);
+      expect(JSON.parse(stored?.accept ?? '[]')).toEqual(['четыре']);
+    });
+
     it('отклонённый спор не трогает ни модель, ни задание', async () => {
       const { attemptId, taskId, mastery } = disputed();
       const { review } = reviewer({ studentCorrect: false, note: 'это другое число' });

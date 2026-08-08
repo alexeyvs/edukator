@@ -156,7 +156,14 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
       setResult(checked);
       setProgress(checked.progress);
     } catch (error) {
-      if (generation.current === token) setProblem(problemOf(error));
+      if (generation.current !== token) return;
+      if (error instanceof RunApiError && error.code === 'task-defective') {
+        // Сервер уже исключил сломанное задание из дальнейшей выдачи. Не
+        // оставляем ученика на карточке, которую невозможно отправить снова.
+        await nextTask();
+      } else {
+        setProblem(problemOf(error));
+      }
     } finally {
       if (generation.current === token) setSubmitting(false);
     }

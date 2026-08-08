@@ -3,6 +3,7 @@ import { FinishScreen } from './FinishScreen';
 import { TaskPrompt } from './TaskPrompt';
 import {
   browserRunApi,
+  RunApiError,
   type AnswerResponse,
   type DisputeStatus,
   type FinishRunResponse,
@@ -96,8 +97,13 @@ export function TriageScreen({ runId, api = browserRunApi, wait = defaultWait }:
         durationMs: Math.max(0, Date.now() - shownAt.current),
       });
       if (generation.current === token) setResult(checked);
-    } catch {
-      if (generation.current === token) setProblem('Не получилось проверить ответ. Попробуй ещё раз.');
+    } catch (error) {
+      if (generation.current !== token) return;
+      if (error instanceof RunApiError && error.code === 'task-defective') {
+        await load(token);
+      } else {
+        setProblem('Не получилось проверить ответ. Попробуй ещё раз.');
+      }
     } finally {
       if (generation.current === token) setBusy(false);
     }

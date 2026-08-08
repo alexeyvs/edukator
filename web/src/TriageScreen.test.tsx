@@ -3,12 +3,13 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TriageScreen } from './TriageScreen';
-import type {
-  DisputeResponse,
-  FinishRunResponse,
-  NextTaskResponse,
-  RunApi,
-  NextTriageResponse,
+import {
+  RunApiError,
+  type DisputeResponse,
+  type FinishRunResponse,
+  type NextTaskResponse,
+  type RunApi,
+  type NextTriageResponse,
 } from './run-api';
 import './test-setup';
 
@@ -119,6 +120,40 @@ describe('экран триажа', () => {
       taskId: 4,
       hintUsed: false,
     }));
+  });
+
+  it('после task-defective автоматически загружает следующий вопрос', async () => {
+    const second: NextTriageResponse = {
+      status: 'ok',
+      progress: { total: 0, correct: 0, target: 12, done: false },
+      task: {
+        id: 5,
+        topic_id: 'math.b',
+        topic_title: 'Проценты',
+        subject: 'math',
+        question: 'Следующий исправный вопрос',
+        difficulty: 2,
+        answer_format: 'number',
+      },
+    };
+    const triageNext = vi.fn()
+      .mockResolvedValueOnce(await apiWith().triageNext(12))
+      .mockResolvedValueOnce(second);
+    const api = apiWith({
+      triageNext,
+      answer: vi.fn(() => Promise.reject(
+        new RunApiError('задание повреждено', 409, 'task-defective'),
+      )),
+    });
+    render(<TriageScreen runId={12} api={api} />);
+
+    await screen.findByRole('heading', { name: 'Чему равна половина от восьми?' });
+    fireEvent.change(screen.getByLabelText('Число'), { target: { value: '4' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+
+    expect(await screen.findByRole('heading', { name: 'Следующий исправный вопрос' }))
+      .toBeInTheDocument();
+    expect(triageNext).toHaveBeenCalledTimes(2);
   });
 
   it('разбирает спор до подтверждения и возвращает баллы', async () => {

@@ -656,6 +656,10 @@ describe('посевной банк', () => {
             hintsByTopic.set(entry.topicId, topicHints);
             expect(seededTask.instruction, `${entry.topicId}: естественная инструкция`)
               .not.toContain('фрагмент ниже');
+            expect(seededTask.hint, `${entry.topicId}: без артефактов шаблона`)
+              .not.toMatch(/(?:пропуск|placeholder|undefined|null)\d+/iu);
+            expect(seededTask.hint, `${entry.topicId}: без подменённой ссылки на условие`)
+              .not.toMatch(/Разбери именно это условие:[^.!?]*пропуск/iu);
           }
         }
       }

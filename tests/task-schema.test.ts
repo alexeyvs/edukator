@@ -432,6 +432,12 @@ describe('parseTaskBatch: нарушения инвариантов', () => {
     expect(fitsAccept('сорок пять', 'number', '45')).toBe(true);
   });
 
+  it('для choice разрешает спору сохранить только буквальный answer', () => {
+    expect(fitsAccept('четыре', 'choice', 'четыре')).toBe(true);
+    expect(fitsAccept('пять', 'choice', 'четыре')).toBe(false);
+    expect(fitsAccept(' четыре ', 'choice', 'четыре')).toBe(false);
+  });
+
   it('отвергает неоднозначный числовой accept: два числа в одной записи', () => {
     expect(() => parseTaskBatch(batch(task({ accept: ['45', '45 или 46'] })), 'number')).toThrow(
       /задание 1.*45 или 46/s,

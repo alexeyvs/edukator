@@ -123,12 +123,16 @@ function fitsNumberTopic(value: string, answer: string): boolean {
  * `answer` нужен ровно затем же: подтверждённое спором «46» при эталоне «45» —
  * другое число, и дописать его значило бы завести задание, которое `taskProblems`
  * потом забракует, а до тех пор засчитывало бы обе взаимоисключающие записи.
+ * Для choice контракт ещё строже: браузер отправляет текст radio-карточки, а
+ * `accept[]` может содержать только буквальный `answer`. Иначе подтверждённый
+ * спор о дистракторе незаметно сделал бы этот дистрактор вторым верным ответом.
  * Сам спор при этом остаётся подтверждённым — не принимается только запись в
  * `accept[]`.
  */
 export function fitsAccept(value: string, format: AnswerFormat, answer: string): boolean {
   const trimmed = value.trim();
   if (trimmed === '') return false;
+  if (format === 'choice') return value === answer;
   return format !== 'number' || fitsNumberTopic(trimmed, answer);
 }
 

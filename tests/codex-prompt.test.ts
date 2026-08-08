@@ -108,32 +108,17 @@ describe('buildGenerationPrompt: состав промпта', () => {
     expect(textual).not.toContain('ровно одно число');
   });
 
-  // Сверка выбора идёт посимвольно, а метку варианта ученик наберёт как придётся:
-  // без обеих записей в accept правильный ответ «Work in pairs» на задании с
-  // ответом «A) Work in pairs» считался бы ошибкой.
-  it('требует для выбора и голый вариант, и вариант с меткой', () => {
+  it('требует для выбора строгий контракт radio-карточек', () => {
     const prompt = buildGenerationPrompt({
       topic: topic({ answerFormat: 'choice' }),
       difficulty: 1,
       persona: PERSONA,
     });
 
-    expect(prompt).toContain('обе записи');
-    expect(prompt).toContain('сама метка отдельно');
-  });
-
-  // Метка «A» в русском задании набирается в русской раскладке как «А» (U+0410),
-  // а нормализатор двойников намеренно не сводит: без обеих букв в accept каждый
-  // ответ меткой — ложная ошибка, и снять её можно только спором.
-  it('требует для метки-двойника обе буквы, латинскую и кириллическую', () => {
-    const prompt = buildGenerationPrompt({
-      topic: topic({ answerFormat: 'choice' }),
-      difficulty: 1,
-      persona: PERSONA,
-    });
-
-    expect(prompt).toContain('латинице и кириллице');
-    expect(prompt).toContain('обе буквы');
+    expect(prompt).toContain('2–6 вариантов в choices');
+    expect(prompt).toContain('accept должен содержать только answer');
+    expect(prompt).toContain('без буквенных меток A/B/C');
+    expect(prompt).not.toContain('сама метка отдельно');
   });
 
   it('приводит целевую сложность к диапазону 1..3', () => {

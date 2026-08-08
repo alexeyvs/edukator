@@ -250,6 +250,27 @@ describe('экран забега', () => {
     expect(delays).toEqual([2_000]);
   });
 
+  it('после task-defective пропускает сломанную карточку и показывает следующую', async () => {
+    const next = vi.fn()
+      .mockResolvedValueOnce(task(1, 'Сломанное задание'))
+      .mockResolvedValueOnce(task(2, 'Исправное задание'))
+      .mockReturnValue(deferred<NextTaskResponse>());
+    const api = apiWith({
+      next,
+      answer: vi.fn(() => Promise.reject(
+        new RunApiError('задание повреждено', 409, 'task-defective'),
+      )),
+    });
+    render(<RunScreen runId={9} api={api} />);
+
+    await screen.findByRole('heading', { name: 'Сломанное задание' });
+    await waitFor(() => expect(next).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getByLabelText('Число'), { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+
+    expect(await screen.findByRole('heading', { name: 'Исправное задание' })).toBeInTheDocument();
+  });
+
   it.each([
     ['no-topic', 'На сегодня всё закрыто'],
     ['restart-required', 'Нужен перезапуск'],
