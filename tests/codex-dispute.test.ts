@@ -160,6 +160,13 @@ describe('reviewDispute: ошибочные сценарии', () => {
 });
 
 describe('parseDisputeReview', () => {
+  // Тест обрезки строит и вход, и ожидание из самой константы, так что её
+  // подмену не ловит: предел бережёт `disputes.resolution`, поэтому число
+  // прибито буквально.
+  it('держит предел обоснования', () => {
+    expect(MAX_RESOLUTION_LENGTH).toBe(300);
+  });
+
   it('обрезает слишком длинное обоснование: оно ложится в disputes.resolution', () => {
     const verdict = parseDisputeReview({
       student_correct: false,

@@ -462,7 +462,15 @@ describe('воркер тёплой очереди', () => {
       expect(filled).toHaveLength(1);
       const neighbour = filled[0] ?? '';
       expect(countAvailable(db, neighbour)).toBe(QUEUE_TARGET);
-      expect(report.refilled.find((item) => item.topicId === neighbour)?.error).toBeUndefined();
+      // Строка соседа сверяется целиком, а не через `find(...)?.error`: там
+      // `undefined` вышел бы и на потерянной строке — ровно на той потере,
+      // которую ловит тест.
+      expect(report.refilled.find((item) => item.topicId === neighbour)).toEqual({
+        topicId: neighbour,
+        batches: 1,
+        stored: QUEUE_TARGET,
+        available: QUEUE_TARGET,
+      });
     });
 
     // Отчёт обязан описывать то, что случилось: залитые первым батчем задания
