@@ -39,10 +39,13 @@ function writeCurriculum(dir: string): void {
 
 function task(subject: Subject, topic: number, difficulty: number): GeneratedTask {
   return {
-    question: `Задание ${subject} ${topic} сложности ${difficulty}: сколько будет ${difficulty} + 1?`,
+    instruction: `Задание ${subject} ${topic} сложности ${difficulty}: вычисли сумму.`,
+    material: `${difficulty} + 1`,
+    material_format: 'math',
+    choices: [],
     answer: String(difficulty + 1),
     accept: [String(difficulty + 1)],
-    hint: 'Эту подсказку API триажа отдавать не должен.',
+    hint: 'Определи первое слагаемое. Прибавь единицу и проверь результат обратным действием.',
     explain: `${difficulty} + 1 = ${difficulty + 1}.`,
     joke: 'Диагностическая лесенка держится.',
     difficulty,
@@ -114,7 +117,15 @@ describe('маршруты триажа', () => {
     };
     expect(first).toMatchObject({
       status: 'ok',
-      task: { difficulty: 2, subject: 'math', answer_format: 'number' },
+      task: {
+        difficulty: 2,
+        subject: 'math',
+        answer_format: 'number',
+        instruction: expect.stringContaining('вычисли сумму'),
+        material: '2 + 1',
+        material_format: 'math',
+        choices: [],
+      },
     });
     expect(first.task).not.toHaveProperty('hint');
 

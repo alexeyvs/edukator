@@ -22,6 +22,7 @@ export interface E2eHarness {
 
 function writeCurriculum(directory: string): void {
   for (const subject of SUBJECTS) {
+    const answerFormat = subject === 'math' ? 'number' : subject === 'russian' ? 'text' : 'choice';
     writeFileSync(
       join(directory, `${subject}.json`),
       JSON.stringify({
@@ -33,7 +34,7 @@ function writeCurriculum(directory: string): void {
           exam_weight: 3,
           difficulty: 2,
           prereqs: [],
-          answer_format: 'number',
+          answer_format: answerFormat,
           prompt_seed: `Проверить тему ${subject} ${index + 1}.`,
         })),
       }),
@@ -42,11 +43,42 @@ function writeCurriculum(directory: string): void {
 }
 
 function task(subject: Subject, topic: number, index: number): GeneratedTask {
+  if (subject === 'russian') {
+    return {
+      instruction: `Вставь слово в задании ${subject}.${topic} номер ${index}.`,
+      material: 'На полке лежит школьный ___ .',
+      material_format: 'text',
+      choices: [],
+      answer: 'учебник',
+      accept: ['учебник'],
+      hint: 'Определи, какой предмет обычно лежит на школьной полке. Подставь слово и проверь согласование с прилагательным.',
+      explain: 'На полке лежит школьный учебник.',
+      joke: 'Учебник нашёлся без помощи библиотечного детектива.',
+      difficulty: index % 3 + 1,
+    };
+  }
+  if (subject === 'english') {
+    return {
+      instruction: `Выбери правильный перевод в задании ${subject}.${topic} номер ${index}.`,
+      material: 'window',
+      material_format: 'text',
+      choices: ['дверь', 'окно', 'крыша'],
+      answer: 'окно',
+      accept: ['окно'],
+      hint: 'Вспомни предмет, через который в комнату попадает дневной свет. Сопоставь это значение с каждым вариантом и проверь, что остальные обозначают другие части здания.',
+      explain: 'Window переводится как «окно».',
+      joke: 'Английский открыл окно возможностей.',
+      difficulty: index % 3 + 1,
+    };
+  }
   return {
-    question: `Задание ${subject}.${topic} номер ${index}: чему равно 40 + 5?`,
+    instruction: `Задание ${subject}.${topic} номер ${index}: вычисли значение.`,
+    material: '40 + 5',
+    material_format: 'math',
+    choices: [],
     answer: '45',
     accept: ['45'],
-    hint: 'Сложи четыре десятка и пять единиц.',
+    hint: 'Раздели число на десятки и единицы. Прибавь единицы к десяткам и проверь результат обратным вычитанием.',
     explain: '40 + 5 = 45.',
     joke: 'Пять единиц добрались до ответа.',
     difficulty: index % 3 + 1,

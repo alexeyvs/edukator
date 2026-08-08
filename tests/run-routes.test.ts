@@ -38,10 +38,13 @@ function writeCurriculum(dir: string): void {
 
 function task(subject: string, index = 0): GeneratedTask {
   return {
-    question: `Сколько будет 40 + 5 (${subject}, ${index})?`,
+    instruction: `Вычисли сумму (${subject}, ${index}).`,
+    material: '40 + 5',
+    material_format: 'math',
+    choices: [],
     answer: '45',
     accept: ['45'],
-    hint: 'Сложи десятки и единицы.',
+    hint: 'Раздели число на десятки и единицы. Сложи части и проверь результат обратным действием.',
     explain: '40 + 5 = 45.',
     joke: 'Пять единиц не спрятались.',
     difficulty: 2,
@@ -109,8 +112,15 @@ describe('маршруты забега', () => {
     for (let index = 0; index < 12; index += 1) {
       const next = await app.inject({ method: 'GET', url: `/api/session/next?runId=${runId}` });
       expect(next.statusCode).toBe(200);
-      const issued = next.json() as { task: { id: number; subject: string } };
+      const issued = next.json() as { task: Record<string, unknown> & { id: number; subject: string } };
       expect(issued.task.subject).toBe('math');
+      expect(issued.task).toMatchObject({
+        instruction: expect.stringContaining('Вычисли сумму'),
+        material: '40 + 5',
+        material_format: 'math',
+        choices: [],
+        answer_format: 'number',
+      });
       const answer = await app.inject({
         method: 'POST',
         url: '/api/session/answer',

@@ -628,6 +628,19 @@ describe('посевной банк', () => {
         // теперь выбрасывает молча, и без этой проверки тест зеленел бы на
         // посеве, половина которого до банка не доезжает.
         expect(bank?.problems, `посев предмета ${subject}`).toEqual([]);
+        for (const entry of bank?.topics ?? []) {
+          for (const seededTask of entry.tasks) {
+            expect(seededTask.question, `${entry.topicId}: legacy question`).toBeUndefined();
+            expect(seededTask.instruction, `${entry.topicId}: instruction`).not.toBe('');
+            expect(seededTask.material_format, `${entry.topicId}: material_format`).toMatch(
+              /^(none|text|math)$/u,
+            );
+            expect(seededTask.choices, `${entry.topicId}: choices`).toBeInstanceOf(Array);
+            const sentences = seededTask.hint.trim().split(/(?<=[.!?])(?:\s+|$)/u).filter(Boolean);
+            expect(sentences.length, `${entry.topicId}: подробная подсказка`).toBeGreaterThanOrEqual(2);
+            expect(sentences.length, `${entry.topicId}: подробная подсказка`).toBeLessThanOrEqual(4);
+          }
+        }
       }
     });
 
