@@ -367,6 +367,33 @@ describe('buildCurriculum', () => {
     expect(calls).toBe(1);
   });
 
+  it('не теряет замечания попыток, отклонённых до пропажи codex', async () => {
+    // Иначе CLI сообщает одну лишь недоступность codex, а починить надо было
+    // ещё и вход: замечание первой попытки — единственный след этого.
+    let calls = 0;
+    const run = (): Promise<string> => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve('вот ваша карта тем');
+      return Promise.reject(new CodexUnavailableError('codex не отвечает'));
+    };
+
+    const failed = await buildCurriculum({
+      subject: 'math',
+      tocPath: writeToc('math-unavailable-later.txt'),
+      outDir: join(dir, 'out-unavailable-later'),
+      run,
+    }).then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+
+    // Тип сохранён: на нём у вызывающих отдельный сценарий, не только текст.
+    expect(failed).toBeInstanceOf(CodexUnavailableError);
+    expect(failed?.message).toMatch(/codex не отвечает/);
+    expect(failed?.message).toMatch(/попытка 1:.*не разбирается как JSON/s);
+    expect(calls).toBe(2);
+  });
+
   it('сообщает об отсутствующем оглавлении и не трогает codex', async () => {
     const run = fakeRunner([]);
 

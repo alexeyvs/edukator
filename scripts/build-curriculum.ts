@@ -248,8 +248,11 @@ export async function buildCurriculum(
         });
         graph = parseCurriculumAnswer(answer, subject);
       } catch (error) {
-        // codex, которого нет в PATH, не появится к третьей попытке.
-        if (error instanceof CodexUnavailableError) throw error;
+        // codex, которого нет в PATH, не появится к третьей попытке. Замечания
+        // уже отклонённых попыток при этом досылаются в текст: они про вход
+        // (кривое оглавление, мало тем), и без них CLI сообщал бы одну лишь
+        // недоступность codex, умолчав о том, что чинить надо не только его.
+        if (error instanceof CodexUnavailableError) throw withEarlierFailures(error, failures);
         failures.push((error as Error).message);
         if (!(error instanceof CodexRunError)) previousError = (error as Error).message;
         continue;
@@ -264,9 +267,28 @@ export async function buildCurriculum(
     rmSync(workDir, { recursive: true, force: true });
   }
 
-  const report = failures.map((message, index) => `  попытка ${index + 1}: ${message}`).join('\n');
   throw new Error(
-    `Карта тем по предмету «${subject}» не собрана за ${maxAttempts} попыт(ок):\n${report}`,
+    `Карта тем по предмету «${subject}» не собрана за ${maxAttempts} попыт(ок):\n${formatFailures(failures)}`,
+  );
+}
+
+function formatFailures(failures: readonly string[]): string {
+  return failures.map((message, index) => `  попытка ${index + 1}: ${message}`).join('\n');
+}
+
+/**
+ * Дополняет недоступность codex замечаниями попыток, которые до неё успели
+ * отклониться. Тип сохраняется: на `CodexUnavailableError` у вызывающих свой
+ * сценарий, и подменять его обычной ошибкой ради текста нельзя.
+ */
+function withEarlierFailures(
+  error: CodexUnavailableError,
+  failures: readonly string[],
+): CodexUnavailableError {
+  if (failures.length === 0) return error;
+  return new CodexUnavailableError(
+    `${error.message}\nДо этого попытки отклонены:\n${formatFailures(failures)}`,
+    { cause: error },
   );
 }
 

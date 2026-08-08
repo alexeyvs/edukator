@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
@@ -67,6 +67,81 @@ export function checkDatabase(path: string = databasePath()): DatabaseStatus {
   } finally {
     db?.close();
   }
+}
+
+/**
+ * Отпечаток файла базы: устройство и inode. Нужен, чтобы отличить тот файл, с
+ * которым занятие открыло соединение при старте, от положенного на его место
+ * другого. Иначе подмену не заметить вовсе: по отвязанному файлу отвечает не
+ * только `SELECT 1` — под WAL проходит и запись. `SQLITE_FCNTL_HAS_MOVED`, из-за
+ * которого в журнальном режиме была бы `SQLITE_READONLY_DBMOVED`, при WAL не
+ * спрашивают, так что транзакция завершается успехом, а её данные остаются в
+ * файле, которого по пути базы больше нет (проверено на нашем `openDatabase`).
+ * Молчаливая потеря и есть причина держать отпечаток руками.
+ *
+ * `undefined` — файла нет или он не читается; такой ответ значит «сверять не с
+ * чем», а не «тот же самый».
+ */
+function fileIdentity(path: string): string | undefined {
+  try {
+    const info = statSync(path);
+    return `${String(info.dev)}:${String(info.ino)}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Соединение занятия вместе с отпечатком файла, к которому оно привязано. */
+export interface SessionDatabase {
+  db: ReturnType<typeof openDatabase>;
+  file: string;
+}
+
+/**
+ * Открывает соединение занятия и снимает отпечаток файла **до и после**
+ * открытия. Одного замера после открытия мало: подмена файла ровно в это окно
+ * привязывает соединение к прежнему inode, а в отпечаток кладёт уже новый — тот
+ * самый, что health и увидит по пути базы. Сверка совпала бы навсегда, и health
+ * до перезапуска отвечал бы 200 занятию, чьи записи уходят в отвязанный файл.
+ * Пропавший перед открытием файл (`before === undefined`) — тот же случай, и
+ * открытие до него даже не доходит: `openDatabase` завёл бы пустую базу на
+ * месте потерянной, а она переживает отказ занятия. Health по ней отвечает
+ * «ok», следующий запуск поднимается зелёным — и потеря всего прогресса
+ * выглядит здоровьем. По той же причине открытие идёт с `fileMustExist`: файл
+ * может пропасть и между замером и открытием, а этот запрет проверяет сам
+ * SQLite, атомарно с открытием.
+ *
+ * Расхождение замеров значит «связь соединения с файлом не подтверждена»:
+ * соединение закрывается, занятие не поднимается — как и при недоступной базе.
+ * Отказ самого открытия пролетает наверх: его причину печатает вызывающий.
+ *
+ * Проверка остаётся вероятностной, и точнее её здесь не сделать. Замена вида
+ * A→B→A целиком внутри окна открытия (файл подменили и вернули прежний обратно)
+ * даёт совпадение замеров при соединении с B. Закрыть эту дыру можно было бы
+ * только отпечатком того файла, который открыл сам SQLite, а он наружу не
+ * выведен: `better-sqlite3` не отдаёт дескриптор, `PRAGMA database_list` знает
+ * лишь путь, и пробной записью подмену не поймать — под WAL она проходит без
+ * ошибки (см. `fileIdentity`). Договориться с тем, кто подменяет файл, тоже
+ * нельзя: это человек с `cp` мимо всякой блокировки.
+ */
+export function openSessionDatabase(
+  path: string,
+  open: (target: string) => ReturnType<typeof openDatabase> = (target) =>
+    openDatabase(target, { fileMustExist: true }),
+): SessionDatabase | undefined {
+  const before = fileIdentity(path);
+  if (before === undefined) return undefined;
+  const db = open(path);
+  const after = fileIdentity(path);
+  if (after === before) return { db, file: before };
+
+  // Уборка в своём `try`: отказ закрытия не имеет права заслонить причину.
+  try {
+    db.close();
+  } catch (error) {
+    process.stderr.write(`соединение занятия не закрыто: ${(error as Error).message}\n`);
+  }
+  return undefined;
 }
 
 /**
@@ -198,9 +273,13 @@ export function buildServer(
     }
   }
 
-  function tryOpenSession(): ReturnType<typeof openDatabase> | undefined {
+  function tryOpenSession(): SessionDatabase | undefined {
     try {
-      return openDatabase(databasePath());
+      const opened = openSessionDatabase(databasePath());
+      if (opened === undefined) {
+        process.stderr.write('занятие не поднято: файл базы сменился при открытии\n');
+      }
+      return opened;
     } catch (error) {
       process.stderr.write(`занятие не поднято: база недоступна: ${(error as Error).message}\n`);
       return undefined;
@@ -212,9 +291,12 @@ export function buildServer(
   // Занятию нужно живое соединение: выдача задания, приём ответа и разбор спора
   // идут транзакциями, а открывать базу на каждый запрос значит терять WAL и
   // получать чужой снимок посреди read-modify-write.
-  const sessionDb = graph !== undefined && curriculumSynchronized ? tryOpenSession() : undefined;
-  const session: DatabaseStatus = graph !== undefined && sessionDb !== undefined ? 'ok' : 'error';
-  if (graph !== undefined && sessionDb !== undefined) {
+  // Вместе с соединением снимается отпечаток файла, с которым оно открыто:
+  // health сверяет с ним то, что лежит по пути базы сейчас (см. `fileIdentity`).
+  const opened = graph !== undefined && curriculumSynchronized ? tryOpenSession() : undefined;
+  const session: DatabaseStatus = graph !== undefined && opened !== undefined ? 'ok' : 'error';
+  if (graph !== undefined && opened !== undefined) {
+    const sessionDb = opened.db;
     registerSessionRoutes(app, { ...options, db: sessionDb, graph });
     app.addHook('onClose', () => {
       sessionDb.close();
@@ -250,8 +332,25 @@ export function buildServer(
       if (!synchronized) database = 'error';
       else if (database !== 'ok') database = checkDatabase();
     }
+
+    // Исправная база — ещё не работающее занятие: его соединение открыто один
+    // раз при старте и держит тот файл, который лежал по пути тогда. Замена или
+    // восстановление базы под живым процессом оставляет соединение на старом,
+    // уже отвязанном файле, и под WAL это ничем не проявляется: пишется он без
+    // ошибки, а данные остаются в файле, которого по пути базы нет, — то есть
+    // ответы ученика уходят в никуда. Переоткрыть соединение здесь нельзя
+    // (у занятия могут идти транзакции, а маршруты уже выбраны), поэтому health
+    // краснеет до перезапуска — как и на не поднявшемся при старте занятии.
+    const detached = opened !== undefined && fileIdentity(databasePath()) !== opened.file;
+    const sessionNow: DatabaseStatus = session === 'ok' && !detached ? 'ok' : 'error';
+    if (detached) {
+      process.stderr.write(
+        `файл базы заменён после старта: занятие держит прежний, нужен перезапуск\n`,
+      );
+    }
+
     const status: DatabaseStatus =
-      database === 'ok' && curriculum === 'ok' && session === 'ok' ? 'ok' : 'error';
+      database === 'ok' && curriculum === 'ok' && sessionNow === 'ok' ? 'ok' : 'error';
 
     return reply
       .code(status === 'ok' ? 200 : 503)
@@ -260,7 +359,7 @@ export function buildServer(
         version: readVersion(),
         database,
         curriculum,
-        session,
+        session: sessionNow,
       });
   });
 
@@ -312,19 +411,32 @@ const isDirectRun = process.argv[1] !== undefined
   && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (isDirectRun) {
-  const app = buildServer();
-  const port = readPort(process.env.PORT);
-  closeOnSignals(app);
-  // Отказ прослушивания перехватывается, как и в обеих точках входа CLI: занятое
-  // порт-число — обычная ошибка запуска, а необработанный отказ верхнеуровневого
-  // `await` печатал бы стек `node:net` и уносил процесс мимо `app.close()`, то
-  // есть оставлял бы соединение занятия незакрытым, а WAL — непереселённым.
+  // Порт разбирается до `buildServer()`: `PORT=abc` — такая же обычная ошибка
+  // запуска, как занятый порт, но брошенная после сборки сервера она уносила бы
+  // процесс необработанным исключением мимо `app.close()`, то есть из-под уже
+  // открытого соединения занятия и с непереселённым WAL.
+  let port: number | undefined;
   try {
-    await app.listen({ host: HOST, port });
-    console.log(`edukator слушает http://${HOST}:${port}`);
+    port = readPort(process.env.PORT);
   } catch (error) {
-    process.stderr.write(`edukator не поднялся на порту ${port}: ${(error as Error).message}\n`);
-    await app.close();
+    process.stderr.write(`edukator не поднялся: ${(error as Error).message}\n`);
     process.exitCode = 1;
+  }
+
+  if (port !== undefined) {
+    const app = buildServer();
+    closeOnSignals(app);
+    // Отказ прослушивания перехватывается, как и в обеих точках входа CLI: занятое
+    // порт-число — обычная ошибка запуска, а необработанный отказ верхнеуровневого
+    // `await` печатал бы стек `node:net` и уносил процесс мимо `app.close()`, то
+    // есть оставлял бы соединение занятия незакрытым, а WAL — непереселённым.
+    try {
+      await app.listen({ host: HOST, port });
+      console.log(`edukator слушает http://${HOST}:${port}`);
+    } catch (error) {
+      process.stderr.write(`edukator не поднялся на порту ${port}: ${(error as Error).message}\n`);
+      await app.close();
+      process.exitCode = 1;
+    }
   }
 }

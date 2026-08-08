@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +10,7 @@ import {
   closeOnSignals,
   DEFAULT_PORT,
   HOST,
+  openSessionDatabase,
   readPort,
   readVersion,
   syncCurriculumState,
@@ -272,7 +273,7 @@ describe('GET /api/health', () => {
     expect(written.join('')).toContain('синхронизация карты тем');
   });
 
-  it('повторяет синхронизацию после замены уже исправной базы', async () => {
+  it('повторяет синхронизацию после замены уже исправной базы, но краснеет за занятие', async () => {
     const path = join(tempDir, 'заменённая.db');
     const previous = process.env.EDUKATOR_DB;
     process.env.EDUKATOR_DB = path;
@@ -286,8 +287,19 @@ describe('GET /api/health', () => {
       rmSync(`${path}-shm`, { force: true });
       openDatabase(path).close();
 
+      // Карта синхронизирована с новым файлом, но занятие держит соединение со
+      // старым, уже отвязанным. Само оно об этом не сообщит: под WAL по нему
+      // проходят и чтение, и запись, только записанное остаётся в файле,
+      // которого по пути базы больше нет. Зелёный health здесь означал бы
+      // «занимайся», а ответы ученика уходили бы в никуда.
       const restored = await replacing.inject({ method: 'GET', url: '/api/health' });
-      expect(restored.statusCode).toBe(200);
+      expect(restored.statusCode).toBe(503);
+      expect(restored.json()).toMatchObject({
+        status: 'error',
+        database: 'ok',
+        curriculum: 'ok',
+        session: 'error',
+      });
 
       const db = openDatabase(path);
       try {
@@ -317,13 +329,64 @@ describe('GET /api/health', () => {
 
       const missing = await watching.inject({ method: 'GET', url: '/api/health' });
       expect(missing.statusCode).toBe(503);
-      expect(missing.json()).toMatchObject({ status: 'error', database: 'error' });
+      // Занятие тоже красное: его соединение осталось на удалённом файле.
+      expect(missing.json()).toMatchObject({ status: 'error', database: 'error', session: 'error' });
       expect(existsSync(path)).toBe(false);
     } finally {
       await watching.close();
       if (previous === undefined) delete process.env.EDUKATOR_DB;
       else process.env.EDUKATOR_DB = previous;
     }
+  });
+
+  it('привязывает соединение занятия к отпечатку открытого файла', () => {
+    const path = join(tempDir, 'отпечаток.db');
+    openDatabase(path).close();
+    const info = statSync(path);
+
+    const opened = openSessionDatabase(path);
+    try {
+      expect(opened?.file).toBe(`${String(info.dev)}:${String(info.ino)}`);
+      expect(opened?.db.prepare<[], { one: number }>('SELECT 1 AS one').get()?.one).toBe(1);
+    } finally {
+      opened?.db.close();
+    }
+  });
+
+  it('не поднимает занятие, если файл базы подменили в окне открытия', () => {
+    // Отпечаток снимается и до открытия: сними его только после — соединение
+    // осталось бы на прежнем inode, а сверка в health навсегда совпадала бы с
+    // новым файлом, то есть 200 отвечал бы занятию, чьи записи уходят в никуда.
+    const path = join(tempDir, 'подменена-в-окне.db');
+    openDatabase(path).close();
+
+    let leaked: ReturnType<typeof openDatabase> | undefined;
+    const opened = openSessionDatabase(path, (target) => {
+      const db = openDatabase(target);
+      leaked = db;
+      rmSync(target, { force: true });
+      rmSync(`${target}-wal`, { force: true });
+      rmSync(`${target}-shm`, { force: true });
+      openDatabase(target).close();
+      return db;
+    });
+
+    expect(opened).toBeUndefined();
+    // Отвергнутое соединение закрыто, а не брошено открытым.
+    expect(() => leaked?.prepare('SELECT 1').get()).toThrow();
+  });
+
+  it('не поднимает занятие на месте пропавшего файла и не заводит его', () => {
+    // Пропавший до открытия файл `openDatabase` завёл бы заново: отпечаток
+    // совпал бы с новым, а прогресс остался бы в удалённом. Сверять не с чем —
+    // занятие не поднимается. Пустая база при этом не должна остаться на диске:
+    // health отвечал бы по ней «ok», и следующий запуск встал бы зелёным.
+    const path = join(tempDir, 'заведена-открытием.db');
+
+    const opened = openSessionDatabase(path);
+
+    expect(opened).toBeUndefined();
+    expect(existsSync(path)).toBe(false);
   });
 
   it('сообщает об ошибке базы, если путь недоступен', () => {
