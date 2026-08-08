@@ -89,11 +89,41 @@ describe('экран триажа', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
 
     expect(await screen.findByText('Верно')).toBeInTheDocument();
+    expect(screen.getByText('+25 XP')).toBeInTheDocument();
+    expect(screen.getByText('Точно пополам.')).toBeInTheDocument();
     expect(api.answer).toHaveBeenCalledWith(expect.objectContaining({
       runId: 12,
       taskId: 4,
       hintUsed: false,
     }));
+  });
+
+  it('разбирает спор до подтверждения и возвращает баллы', async () => {
+    const dispute = vi.fn()
+      .mockResolvedValueOnce({ dispute_id: 9, status: 'open' as const })
+      .mockResolvedValueOnce({ dispute_id: 9, status: 'upheld' as const });
+    const wrong = apiWith({
+      answer: vi.fn(() => Promise.resolve({
+        attempt_id: 9,
+        correct: false,
+        normalized: 'пять',
+        answer: '4',
+        explain: 'Половина восьми — четыре.',
+        joke: 'Давай перепроверим.',
+        xp: 0,
+        progress: { total: 1, correct: 0, target: 12, done: false },
+      })),
+      dispute,
+    });
+    render(<TriageScreen runId={12} api={wrong} wait={() => Promise.resolve()} />);
+
+    await screen.findByRole('heading', { name: 'Чему равна половина от восьми?' });
+    fireEvent.change(screen.getByLabelText('Число'), { target: { value: 'пять' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Я всё-таки прав' }));
+
+    expect(await screen.findByText('Ты был прав — баллы вернулись.')).toBeInTheDocument();
+    expect(dispute).toHaveBeenCalledTimes(2);
   });
 
   it('показывает ранжирование, когда темы закончились досрочно', async () => {

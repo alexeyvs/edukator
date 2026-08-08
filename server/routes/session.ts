@@ -15,6 +15,7 @@ import { codexConcurrency, type CodexConcurrency } from '../codex/concurrency.js
 import {
   nextTask,
   openDispute,
+  openDisputes,
   resolveDispute,
   submitAnswer,
   SessionError,
@@ -68,6 +69,8 @@ export interface SessionRoutesOptions {
   available?: () => boolean;
   /** Общий с воркером бюджет вызовов codex. */
   codexBudget?: CodexConcurrency;
+  /** Пауза перед автоматическим повтором незакрытого спора. */
+  disputeRetryMs?: number;
 }
 
 function defaultLog(message: string): void {
@@ -133,6 +136,7 @@ export function registerSessionRoutes(
   const background: BackgroundRunner = options.background ?? ((task) => void task());
   const now = options.now ?? ((): Date => new Date());
   const budget = options.codexBudget ?? codexConcurrency;
+  const disputeRetryMs = options.disputeRetryMs ?? 1_000;
 
   /**
    * Споры, разбор которых уже идёт. Без этого набора каждое повторное нажатие
@@ -141,6 +145,9 @@ export function registerSessionRoutes(
    */
   const reviewing = new Set<number>();
   const pendingReviews = new Set<Promise<unknown>>();
+  const retryTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  const retryDelays = new Map<number, number>();
+  let stopped = false;
 
   function unavailable(reply: FastifyReply): FastifyReply | undefined {
     if (options.available?.() !== false) return undefined;
@@ -159,10 +166,11 @@ export function registerSessionRoutes(
    * запросом — ровно тот же сценарий, что и при недоступном codex.
    */
   function scheduleReview(id: number): void {
-    if (reviewing.has(id)) return;
+    if (stopped || reviewing.has(id)) return;
     const pending = budget.tryRun(() => resolveDispute(db, graph, id, review));
     if (pending === undefined) {
       log(`разбор спора ${id} отложен: заняты все ${budget.limit} места codex`);
+      scheduleRetry(id);
       return;
     }
     reviewing.add(id);
@@ -170,8 +178,13 @@ export function registerSessionRoutes(
     background(async () => {
       try {
         await pending;
+        const timer = retryTimers.get(id);
+        if (timer !== undefined) clearTimeout(timer);
+        retryTimers.delete(id);
+        retryDelays.delete(id);
       } catch (error) {
         log(`разбор спора ${id} не выполнен: ${(error as Error).message}`);
+        scheduleRetry(id);
       } finally {
         pendingReviews.delete(pending);
         // Именно в `finally`: снятая только при успехе пометка навсегда
@@ -182,15 +195,29 @@ export function registerSessionRoutes(
     });
   }
 
+  function scheduleRetry(id: number): void {
+    if (stopped || retryTimers.has(id)) return;
+    const delay = retryDelays.get(id) ?? disputeRetryMs;
+    retryDelays.set(id, Math.min(delay * 2, disputeRetryMs * 16));
+    const timer = setTimeout(() => {
+      retryTimers.delete(id);
+      scheduleReview(id);
+    }, delay);
+    timer.unref();
+    retryTimers.set(id, timer);
+  }
+
   app.get('/api/session/next', (request, reply) => {
     const stopped = unavailable(reply);
     if (stopped !== undefined) return stopped;
     try {
       const runId = readQueryId(request.query, 'runId');
+      const excludeTaskId = readQueryId(request.query, 'excludeTaskId');
       const result = nextTask(db, graph, {
         now: now(),
         log,
         ...(runId === undefined ? {} : { runId }),
+        ...(excludeTaskId === undefined ? {} : { excludeTaskId }),
         ...(options.seedDir === undefined ? {} : { seedDir: options.seedDir }),
       });
 
@@ -312,6 +339,10 @@ export function registerSessionRoutes(
     }
   });
 
+  // Спор переживает процесс в SQLite. После перезапуска его нельзя оставлять
+  // без исполнителя только потому, что браузер уже потерял attempt_id.
+  for (const id of openDisputes(db)) scheduleReview(id);
+
   // `app.close()` закрывает соединение занятия. Фоновый разбор уже держит
   // ссылку на него и после удачного ответа модели пишет вердикт транзакцией,
   // поэтому закрывать базу раньше — превращать штатное завершение в случайный
@@ -319,6 +350,10 @@ export function registerSessionRoutes(
   // потомка, так что ожидание здесь быстро завершается и WAL закрывается после
   // всей работы с базой.
   return async () => {
+    stopped = true;
+    for (const timer of retryTimers.values()) clearTimeout(timer);
+    retryTimers.clear();
+    retryDelays.clear();
     await Promise.allSettled([...pendingReviews]);
   };
 }

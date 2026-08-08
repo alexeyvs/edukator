@@ -3,6 +3,7 @@ import { FinishScreen } from './FinishScreen';
 import {
   browserRunApi,
   type AnswerResponse,
+  type DisputeStatus,
   type FinishRunResponse,
   type NextTriageResponse,
   type RunApi,
@@ -11,6 +12,14 @@ import {
 export interface TriageScreenProps {
   runId: number;
   api?: RunApi;
+  wait?: (delayMs: number) => Promise<void>;
+}
+
+const DISPUTE_FIRST_DELAY_MS = 1_000;
+const DISPUTE_MAX_DELAY_MS = 16_000;
+
+function defaultWait(delayMs: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, delayMs));
 }
 
 function answerLabel(format: 'number' | 'text' | 'choice'): string {
@@ -19,13 +28,15 @@ function answerLabel(format: 'number' | 'text' | 'choice'): string {
   return 'Ответ';
 }
 
-export function TriageScreen({ runId, api = browserRunApi }: TriageScreenProps) {
+export function TriageScreen({ runId, api = browserRunApi, wait = defaultWait }: TriageScreenProps) {
   const [next, setNext] = useState<Extract<NextTriageResponse, { status: 'ok' }> | null>(null);
   const [answer, setAnswer] = useState('');
   const [result, setResult] = useState<AnswerResponse | null>(null);
   const [finish, setFinish] = useState<FinishRunResponse | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [disputeStatus, setDisputeStatus] = useState<DisputeStatus | null>(null);
+  const [disputing, setDisputing] = useState(false);
   const shownAt = useRef(Date.now());
   const generation = useRef(0);
 
@@ -53,6 +64,7 @@ export function TriageScreen({ runId, api = browserRunApi }: TriageScreenProps) 
       setNext(response);
       setAnswer('');
       setResult(null);
+      setDisputeStatus(null);
       shownAt.current = Date.now();
     } catch {
       if (generation.current === token) setProblem('Не получилось загрузить вопрос триажа. Попробуй ещё раз.');
@@ -68,6 +80,7 @@ export function TriageScreen({ runId, api = browserRunApi }: TriageScreenProps) 
     setResult(null);
     setFinish(null);
     setProblem(null);
+    setDisputeStatus(null);
     void load(token);
     return () => {
       if (generation.current === token) generation.current += 1;
@@ -92,6 +105,27 @@ export function TriageScreen({ runId, api = browserRunApi }: TriageScreenProps) 
       if (generation.current === token) setProblem('Не получилось проверить ответ. Попробуй ещё раз.');
     } finally {
       if (generation.current === token) setBusy(false);
+    }
+  }
+
+  async function dispute(): Promise<void> {
+    if (result === null || disputing) return;
+    const token = generation.current;
+    setDisputing(true);
+    let delay = DISPUTE_FIRST_DELAY_MS;
+    try {
+      while (generation.current === token) {
+        const state = await api.dispute(result.attempt_id);
+        if (generation.current !== token) return;
+        setDisputeStatus(state.status);
+        if (state.status !== 'open') return;
+        await wait(delay);
+        delay = Math.min(delay * 2, DISPUTE_MAX_DELAY_MS);
+      }
+    } catch {
+      if (generation.current === token) setProblem('Не получилось разобрать спор. Попробуй ещё раз.');
+    } finally {
+      if (generation.current === token) setDisputing(false);
     }
   }
 
@@ -137,16 +171,25 @@ export function TriageScreen({ runId, api = browserRunApi }: TriageScreenProps) 
           </form>
         ) : (
           <div className={`answer-result ${result.correct ? 'correct' : 'wrong'}`}>
-            <p className="verdict">{result.correct ? 'Верно' : 'Пока не сошлось'}</p>
+            <p className="verdict"><span>{result.correct ? 'Верно' : 'Пока не сошлось'}</span> <strong>+{result.xp} XP</strong></p>
             <dl>
               <div><dt>Эталон</dt><dd>{result.answer}</dd></div>
               <div><dt>Разбор</dt><dd>{result.explain}</dd></div>
+              <div><dt>Напарник</dt><dd>{result.joke}</dd></div>
             </dl>
+            {disputeStatus === 'open' && <p className="dispute-note">Разбираюсь. Это может занять пару минут…</p>}
+            {disputeStatus === 'upheld' && <p className="dispute-note success">Ты был прав — баллы вернулись.</p>}
+            {disputeStatus === 'rejected' && <p className="dispute-note">Проверил ещё раз: эталон остаётся в силе.</p>}
             <div className="task-actions">
+              {!result.correct && disputeStatus === null && (
+                <button className="secondary" type="button" onClick={() => void dispute()} disabled={disputing}>
+                  Я всё-таки прав
+                </button>
+              )}
               <button
                 className="primary"
                 type="button"
-                disabled={busy}
+                disabled={busy || disputing || disputeStatus === 'open'}
                 onClick={() => void (result.progress.done ? finishTriage() : load())}
               >
                 {result.progress.done ? 'Показать итог' : 'Следующий вопрос'}

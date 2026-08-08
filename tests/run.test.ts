@@ -162,6 +162,24 @@ describe('жизненный цикл забега', () => {
     ]);
   });
 
+  it('не закрывает вчерашний забег, пока по нему открыт спор', () => {
+    const runId = Number(db
+      .prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+      .run('math', 'math.a', at(-1, 9).toISOString()).lastInsertRowid);
+    addAttempt({ runId, topicId: 'math.a', correct: false, now: at(-1, 11) });
+    const attempt = db.prepare<[number], { id: number }>(
+      'SELECT id FROM attempts WHERE run_id = ? ORDER BY id DESC LIMIT 1',
+    ).get(runId);
+    if (attempt === undefined) throw new Error('попытка не записалась');
+    openDispute(db, attempt.id);
+
+    startRun(db, graph, 'russian', { now: at(0) });
+
+    expect(db.prepare('SELECT finished_at FROM runs WHERE id = ?').get(runId)).toEqual({
+      finished_at: null,
+    });
+  });
+
   it('считает прогресс и готовность к закрытию по счётчикам забега', () => {
     const { runId } = startRun(db, graph, 'math', { now: at(0) });
     db.prepare('UPDATE runs SET total = 12, correct = 9 WHERE id = ?').run(runId);

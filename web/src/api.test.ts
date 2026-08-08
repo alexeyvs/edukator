@@ -49,6 +49,7 @@ describe('браузерные API-адаптеры', () => {
     vi.stubGlobal('fetch', fetch);
 
     await browserRunApi.next(3);
+    await browserRunApi.next(3, 9);
     await browserRunApi.answer({
       runId: 3,
       taskId: 9,
@@ -62,6 +63,7 @@ describe('браузерные API-адаптеры', () => {
 
     expect(fetch.mock.calls).toEqual([
       ['/api/session/next?runId=3', undefined],
+      ['/api/session/next?runId=3&excludeTaskId=9', undefined],
       ['/api/session/answer', expect.objectContaining({
         method: 'POST',
         body: JSON.stringify({

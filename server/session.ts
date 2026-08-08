@@ -68,6 +68,8 @@ export interface NextTaskOptions {
   subject?: Subject;
   /** Активный забег: из него берётся предмет и проверяется его состояние. */
   runId?: number;
+  /** Уже показанное задание: предзагрузка должна зарезервировать следующее. */
+  excludeTaskId?: number;
   /** Каталог посевного банка; по умолчанию репозиторный. */
   seedDir?: string;
   /** Куда писать про пропущенную тему; по умолчанию stderr. */
@@ -136,7 +138,7 @@ export function nextTask(
     // запросе значит остановить занятие целиком, хотя соседние темы полны.
     try {
       task =
-        issuedTask(db, topic.id, run?.id) ??
+        issuedTask(db, topic.id, run?.id, options.excludeTaskId) ??
         takeTaskOrSeed(db, graph, topic.id, {
           difficulty: topic.difficulty,
           ...(run === undefined ? {} : { runId: run.id }),

@@ -113,7 +113,7 @@ describe('экран забега', () => {
     }));
   });
 
-  it('предзагружает следующее задание после ответа, пока открыт разбор', async () => {
+  it('предзагружает следующее задание сразу после показа текущего', async () => {
     const next = vi.fn()
       .mockResolvedValueOnce(task(1, 'Первое задание'))
       .mockResolvedValueOnce(task(2, 'Следующее задание'))
@@ -122,15 +122,16 @@ describe('экран забега', () => {
     render(<RunScreen runId={9} api={api} />);
 
     expect(await screen.findByRole('heading', { name: 'Первое задание' })).toBeInTheDocument();
-    expect(next).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(next).toHaveBeenCalledTimes(2));
+    expect(next).toHaveBeenNthCalledWith(2, 9, 1);
 
     fireEvent.change(screen.getByLabelText('Число'), { target: { value: '2' } });
     fireEvent.submit(screen.getByLabelText('Число').closest('form') as HTMLFormElement);
     expect(await screen.findByText('Верно')).toBeInTheDocument();
-    await waitFor(() => expect(next).toHaveBeenCalledTimes(2));
 
     fireEvent.click(screen.getByRole('button', { name: 'Следующее задание' }));
     expect(await screen.findByRole('heading', { name: 'Следующее задание' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Прогресс: 1 из 12')).toBeInTheDocument();
   });
 
   it('после целевого ответа закрывает забег и показывает финал', async () => {

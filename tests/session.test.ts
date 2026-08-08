@@ -144,6 +144,31 @@ describe('занятие', () => {
       expect(countAvailable(db, first.task.topicId)).toBe(1);
     });
 
+    it('резервирует другое задание при предзагрузке показанного', () => {
+      const runId = Number(
+        db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+          .run('math', 'math.a', new Date().toISOString()).lastInsertRowid,
+      );
+      storeTasks(db, 'math.a', [task(), task()]);
+
+      const shown = nextTask(db, graph, { runId, seedDir });
+      expect(shown.status).toBe('ok');
+      if (shown.status !== 'ok') return;
+      const prefetched = nextTask(db, graph, {
+        runId,
+        seedDir,
+        excludeTaskId: shown.task.id,
+      });
+
+      expect(prefetched.status).toBe('ok');
+      if (prefetched.status !== 'ok') return;
+      expect(prefetched.task.id).not.toBe(shown.task.id);
+      const reloaded = nextTask(db, graph, { runId, seedDir });
+      expect(reloaded.status).toBe('ok');
+      if (reloaded.status !== 'ok') return;
+      expect(reloaded.task).toMatchObject({ id: shown.task.id });
+    });
+
     it('не выдаёт одно задание дважды после ответа на него', () => {
       storeTasks(db, 'math.a', [task(), task()]);
       storeTasks(db, 'russian.a', [task(), task()]);

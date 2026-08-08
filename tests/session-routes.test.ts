@@ -475,6 +475,45 @@ describe('маршруты занятия', () => {
       ).toBe('open');
     });
 
+    it('после перезапуска сам подхватывает оставшийся открытым спор', async () => {
+      const failing = extraServer({
+        seedDir,
+        review: (): Promise<DisputeReview> => Promise.reject(new Error('codex не найден')),
+        background: (job): void => {
+          pending.push(job());
+        },
+      });
+      await failing.ready();
+      const { attemptId } = await wrongAnswer();
+      await failing.inject({
+        method: 'POST',
+        url: '/api/session/dispute',
+        payload: { attempt_id: attemptId },
+      });
+      await Promise.all(pending);
+      await failing.close();
+      extra.splice(extra.indexOf(failing), 1);
+      pending.length = 0;
+
+      const recovered = extraServer({
+        seedDir,
+        review: (context): Promise<DisputeReview> => {
+          reviewed.push(context);
+          return Promise.resolve(verdict);
+        },
+        background: (job): void => {
+          pending.push(job());
+        },
+      });
+      await recovered.ready();
+      await Promise.all(pending);
+
+      expect(reviewed).toHaveLength(1);
+      expect(
+        db.prepare<[], { status: string }>('SELECT status FROM disputes').get()?.status,
+      ).toBe('upheld');
+    });
+
     // Провалившийся разбор иначе не повторился бы никогда: второй раз спор уже
     // заведён, и по признаку «завели сейчас» на разбор он больше не попадал бы.
     it('ставит на разбор заново спор, оставшийся открытым после отказа', async () => {

@@ -74,7 +74,7 @@ export interface DisputeResponse {
 }
 
 export interface RunApi {
-  next(runId: number): Promise<NextTaskResponse>;
+  next(runId: number, excludeTaskId?: number): Promise<NextTaskResponse>;
   answer(input: {
     runId: number;
     taskId: number;
@@ -115,7 +115,9 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const browserRunApi: RunApi = {
-  next: (runId) => request<NextTaskResponse>(`/api/session/next?runId=${runId}`),
+  next: (runId, excludeTaskId) => request<NextTaskResponse>(
+    `/api/session/next?runId=${runId}${excludeTaskId === undefined ? '' : `&excludeTaskId=${excludeTaskId}`}`,
+  ),
   answer: (input) => request<AnswerResponse>('/api/session/answer', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

@@ -148,7 +148,12 @@ export function startRun(
             (SELECT MAX(attempts.created_at) FROM attempts WHERE attempts.run_id = runs.id),
             runs.started_at
           )
-        WHERE finished_at IS NULL AND started_at < ?`,
+        WHERE finished_at IS NULL AND started_at < ?
+          AND NOT EXISTS (
+            SELECT 1 FROM attempts
+            JOIN disputes ON disputes.attempt_id = attempts.id
+            WHERE attempts.run_id = runs.id AND disputes.status = 'open'
+          )`,
     ).run(start);
 
     const active = db

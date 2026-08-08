@@ -223,19 +223,25 @@ export function takeTask(
  * безвозвратно, и без повторной выдачи несколько обновлений подряд опустошали
  * бы тему, ни разу не спросив ученика.
  */
-export function issuedTask(db: Database, topicId: string, runId?: number): BankTask | null {
+export function issuedTask(
+  db: Database,
+  topicId: string,
+  runId?: number,
+  excludeTaskId?: number,
+): BankTask | null {
   ensureTopic(db, topicId);
 
   const row = db
-    .prepare<{ topicId: string; runId: number | null }, TaskRow>(
+    .prepare<{ topicId: string; runId: number | null; excludeTaskId: number | null }, TaskRow>(
       `SELECT ${TASK_COLUMNS} FROM task_bank
         WHERE topic_id = @topicId AND status = 'used'
           AND issued_run_id IS @runId
+          AND (@excludeTaskId IS NULL OR id != @excludeTaskId)
           AND NOT EXISTS (SELECT 1 FROM attempts WHERE attempts.task_id = task_bank.id)
         ORDER BY created_at, id
         LIMIT 1`,
     )
-    .get({ topicId, runId: runId ?? null });
+    .get({ topicId, runId: runId ?? null, excludeTaskId: excludeTaskId ?? null });
 
   return row === undefined ? null : toBankTaskOrReject(db, row);
 }

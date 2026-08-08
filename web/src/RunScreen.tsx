@@ -82,7 +82,7 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
 
   const prefetchNext = useCallback((shownId: number, token = generation.current): void => {
     prefetched.current = null;
-    const pending = api.next(runId)
+    const pending = api.next(runId, shownId)
       .then((next) => {
         if (generation.current === token && next.task.id !== shownId) prefetched.current = next;
       })
@@ -96,16 +96,18 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
     prefetching.current = pending;
   }, [api, runId]);
 
-  const showTask = useCallback((next: NextTaskResponse): void => {
-    setCurrent(next);
-    setProgress(next.progress);
+  const showTask = useCallback((next: NextTaskResponse, actualProgress = next.progress): void => {
+    const shown = { ...next, progress: actualProgress };
+    setCurrent(shown);
+    setProgress(actualProgress);
     setAnswer('');
     setHintUsed(false);
     setResult(null);
     setDisputeStatus(null);
     setProblem(null);
     shownAt.current = Date.now();
-  }, []);
+    if (actualProgress.total + 1 < actualProgress.target) prefetchNext(next.task.id);
+  }, [prefetchNext]);
 
   const load = useCallback(async (token = generation.current): Promise<void> => {
     try {
@@ -163,7 +165,6 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
       if (generation.current !== token) return;
       setResult(checked);
       setProgress(checked.progress);
-      if (!checked.progress.done) prefetchNext(current.task.id, token);
     } catch (error) {
       if (generation.current === token) setProblem(problemOf(error));
     } finally {
@@ -178,7 +179,7 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
     const ready = prefetched.current;
     prefetched.current = null;
     if (ready !== null) {
-      showTask(ready);
+      showTask(ready, progress ?? ready.progress);
       return;
     }
     await load(token);
