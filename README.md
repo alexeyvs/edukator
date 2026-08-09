@@ -10,7 +10,7 @@
 [`docs/plans/20260807-edukator-generation.md`](docs/plans/20260807-edukator-generation.md) (этап 2),
 [`docs/plans/completed/20260808-edukator-run-triage.md`](docs/plans/completed/20260808-edukator-run-triage.md) (этап 3),
 [`docs/plans/completed/20260808-edukator-game-parents.md`](docs/plans/completed/20260808-edukator-game-parents.md) (этап 4),
-[`docs/plans/20260809-background-learning-materials.md`](docs/plans/20260809-background-learning-materials.md) (персональные разборы).
+[`docs/plans/completed/20260809-background-learning-materials.md`](docs/plans/completed/20260809-background-learning-materials.md) (персональные разборы).
 
 ## Что уже есть
 
