@@ -74,6 +74,18 @@ describe('генерация и проверка учебного материа
     })).rejects.toThrow(/не прошёл структурную проверку/u);
   });
 
+  it('отвергает формулы с delimiters, которые безопасный KaTeX не ожидает', async () => {
+    const delimited = {
+      ...content,
+      sections: content.sections.map((section, index) => index === 1
+        ? { ...section, blocks: [{ type: 'formula' as const, content: '$a+b$' }] }
+        : section),
+    };
+    await expect(generateLearningMaterial({
+      ...options(() => Promise.resolve(JSON.stringify(delimited))), attempts: 1,
+    })).rejects.toThrow(/без разделителей \$/u);
+  });
+
   it('принимает только согласованный положительный вердикт независимой роли validate', async () => {
     const requests: CodexRequest[] = [];
     const accepted = await validateLearningMaterial({

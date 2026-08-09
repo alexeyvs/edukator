@@ -3,9 +3,11 @@ import type { Topic, TopicGraph } from './curriculum.js';
 import { readProfile, SUBJECTS, type Profile, type Subject } from './db.js';
 import {
   claimLearningMaterial,
+  expireStaleLearningClaims,
   rejectLearningMaterial,
   retireLearningMaterial,
 } from './learning.js';
+import { LEARNING_TASK_COUNT } from './learning-constants.js';
 import { isGap, readTopicStates, stateOf } from './mastery.js';
 import { questionFingerprint } from './normalize.js';
 import { rankTopics } from './scheduler.js';
@@ -197,13 +199,17 @@ export function createLearningProducer(options: {
 
     const gathered: GeneratedTask[] = [];
     const fingerprints = new Set(request.recent.map(questionFingerprint));
-    for (let batch = 0; batch < MAX_LEARNING_TASK_BATCHES && gathered.length < 5; batch += 1) {
+    for (
+      let batch = 0;
+      batch < MAX_LEARNING_TASK_BATCHES && gathered.length < LEARNING_TASK_COUNT;
+      batch += 1
+    ) {
       const generated = await generateTaskBatch({
         topic: request.topic,
         difficulty: request.topic.difficulty,
         profile: request.profile,
         recent: [...request.recent, ...gathered.map(taskPromptText)],
-        count: 5 - gathered.length,
+        count: LEARNING_TASK_COUNT - gathered.length,
         lessonContent: content,
         ...common,
       });
@@ -216,11 +222,13 @@ export function createLearningProducer(options: {
         if (fingerprint === '' || fingerprints.has(fingerprint)) continue;
         fingerprints.add(fingerprint);
         gathered.push(task);
-        if (gathered.length === 5) break;
+        if (gathered.length === LEARNING_TASK_COUNT) break;
       }
     }
-    if (gathered.length !== 5) {
-      throw new Error(`Тест материала собран не полностью: ${gathered.length} из 5 вопросов`);
+    if (gathered.length !== LEARNING_TASK_COUNT) {
+      throw new Error(
+        `Тест материала собран не полностью: ${gathered.length} из ${LEARNING_TASK_COUNT} вопросов`,
+      );
     }
     return { content, tasks: gathered };
   };
@@ -244,6 +252,7 @@ export async function prepareLearningMaterials(
   const now = options.now ?? new Date();
   const log = options.log ?? (() => undefined);
   const retired = retireResolvedMaterials(options.db, options.graph, now);
+  const recoveredTopics = expireStaleLearningClaims(options.db, { now });
   const candidates = selectLearningTopics(options.db, options.graph, now);
   const live = liveMaterials(options.db);
   const producer = options.produce ?? createLearningProducer({
@@ -297,12 +306,12 @@ export async function prepareLearningMaterials(
       if (!published.ready) {
         const error = 'полный тест столкнулся с уже сохранённым отпечатком';
         prepared.push({ topicId: candidate.topic.id, materialId: claim.materialId, ready: false,
-          recovered: claim.recovered, stored: 0, error });
+          recovered: claim.recovered || recoveredTopics.has(candidate.topic.id), stored: 0, error });
         log(`воркер: материал темы «${candidate.topic.id}» отклонён: ${error}`);
         continue;
       }
       prepared.push({ topicId: candidate.topic.id, materialId: claim.materialId, ready: true,
-        recovered: claim.recovered, stored: published.stored.length });
+        recovered: claim.recovered || recoveredTopics.has(candidate.topic.id), stored: published.stored.length });
       log(`воркер: материал темы «${candidate.topic.id}» готов`);
     } catch (error) {
       const unavailable = error instanceof CodexUnavailableError;
@@ -310,7 +319,7 @@ export async function prepareLearningMaterials(
       if (!unavailable) rejectLearningMaterial(options.db, claim.materialId, { now });
       const message = (error as Error).message;
       prepared.push({ topicId: candidate.topic.id, materialId: claim.materialId, ready: false,
-        recovered: claim.recovered, stored: 0, error: message });
+        recovered: claim.recovered || recoveredTopics.has(candidate.topic.id), stored: 0, error: message });
       log(`воркер: материал темы «${candidate.topic.id}» отложен: ${message}`);
     }
   }

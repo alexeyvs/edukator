@@ -125,6 +125,8 @@ function createVersionOneDatabase(path: string): Database {
 function createVersionTwoDatabase(path: string): Database {
   const legacy = openDatabase(path);
   legacy.exec(`
+    DROP TABLE learning_tasks;
+    DROP TABLE learning_materials;
     DROP INDEX forecast_by_subject;
     DROP TABLE forecast_snapshots;
     CREATE TABLE forecast_snapshots (
@@ -190,6 +192,94 @@ function createVersionEightDatabase(path: string): Database {
   const legacy = openDatabase(path);
   legacy.exec('ALTER TABLE runs DROP COLUMN summary;');
   legacy.pragma('user_version = 8');
+  return legacy;
+}
+
+/** Настоящая v11: без learning-таблиц и без новых значений обоих CHECK. */
+function createVersionElevenDatabase(path: string): Database {
+  const legacy = openDatabase(path);
+  legacy.exec(`
+    DROP TABLE learning_tasks;
+    DROP TABLE learning_materials;
+    DROP TABLE boss_tasks;
+    DROP TABLE boss_batches;
+    DROP TABLE disputes;
+    DROP TABLE attempts;
+    DROP TABLE task_bank;
+    DROP TABLE runs;
+
+    CREATE TABLE runs (
+      id INTEGER PRIMARY KEY,
+      subject TEXT NOT NULL CHECK (subject IN ('math', 'russian', 'english')),
+      kind TEXT NOT NULL DEFAULT 'run' CHECK (kind IN ('run', 'triage', 'boss')),
+      topic_id TEXT NOT NULL REFERENCES topic_state (topic_id) ON DELETE CASCADE,
+      started_at TEXT NOT NULL, finished_at TEXT, summary TEXT,
+      total INTEGER NOT NULL DEFAULT 0 CHECK (total >= 0),
+      correct INTEGER NOT NULL DEFAULT 0 CHECK (correct >= 0 AND correct <= total)
+    );
+    CREATE TRIGGER runs_correct_not_above_total_insert BEFORE INSERT ON runs
+      WHEN NEW.correct > NEW.total BEGIN SELECT RAISE(ABORT, 'runs.correct cannot exceed runs.total'); END;
+    CREATE TRIGGER runs_correct_not_above_total_update BEFORE UPDATE OF correct, total ON runs
+      WHEN NEW.correct > NEW.total BEGIN SELECT RAISE(ABORT, 'runs.correct cannot exceed runs.total'); END;
+
+    CREATE TABLE task_bank (
+      id INTEGER PRIMARY KEY,
+      topic_id TEXT NOT NULL REFERENCES topic_state (topic_id) ON DELETE CASCADE,
+      question TEXT NOT NULL, instruction TEXT, material TEXT,
+      material_format TEXT CHECK (material_format IN ('none', 'text', 'math')), choices TEXT,
+      answer TEXT NOT NULL, accept TEXT NOT NULL DEFAULT '[]', hint TEXT, explain TEXT, joke TEXT,
+      difficulty INTEGER NOT NULL CHECK (difficulty BETWEEN 1 AND 3),
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'valid', 'rejected', 'used', 'boss_reserved')),
+      fingerprint TEXT NOT NULL DEFAULT '',
+      issued_run_id INTEGER REFERENCES runs (id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );
+    CREATE INDEX task_bank_queue ON task_bank (topic_id, status, difficulty);
+    CREATE UNIQUE INDEX task_bank_fingerprint ON task_bank (topic_id, fingerprint)
+      WHERE fingerprint <> '';
+
+    CREATE TABLE attempts (
+      id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES task_bank (id) ON DELETE CASCADE,
+      topic_id TEXT NOT NULL REFERENCES topic_state (topic_id) ON DELETE CASCADE,
+      run_id INTEGER REFERENCES runs (id) ON DELETE SET NULL,
+      answer TEXT NOT NULL, is_correct INTEGER NOT NULL CHECK (is_correct IN (0, 1)),
+      hint_used INTEGER NOT NULL DEFAULT 0 CHECK (hint_used IN (0, 1)),
+      duration_ms INTEGER NOT NULL DEFAULT 0 CHECK (duration_ms >= 0),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );
+    CREATE INDEX attempts_by_topic ON attempts (topic_id, created_at);
+    CREATE TRIGGER attempts_topic_consistency_insert BEFORE INSERT ON attempts
+      WHEN (SELECT topic_id FROM task_bank WHERE id = NEW.task_id) <> NEW.topic_id
+      BEGIN SELECT RAISE(ABORT, 'attempt topic must match task topic'); END;
+    CREATE TRIGGER attempts_topic_consistency_update BEFORE UPDATE OF task_id, topic_id, run_id ON attempts
+      WHEN (SELECT topic_id FROM task_bank WHERE id = NEW.task_id) <> NEW.topic_id
+      BEGIN SELECT RAISE(ABORT, 'attempt topic must match task topic'); END;
+
+    CREATE TABLE disputes (
+      id INTEGER PRIMARY KEY, attempt_id INTEGER NOT NULL REFERENCES attempts (id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'upheld', 'rejected')),
+      resolution TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      resolved_at TEXT
+    );
+    CREATE TABLE boss_batches (
+      id INTEGER PRIMARY KEY, topic_id TEXT NOT NULL REFERENCES topic_state (topic_id) ON DELETE CASCADE,
+      run_id INTEGER REFERENCES runs (id) ON DELETE SET NULL,
+      status TEXT NOT NULL DEFAULT 'preparing'
+        CHECK (status IN ('preparing', 'ready', 'active', 'won', 'lost', 'failed')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      activated_at TEXT, finished_at TEXT
+    );
+    CREATE UNIQUE INDEX boss_batches_live_topic ON boss_batches (topic_id)
+      WHERE status IN ('preparing', 'ready', 'active');
+    CREATE TABLE boss_tasks (
+      batch_id INTEGER NOT NULL REFERENCES boss_batches (id) ON DELETE CASCADE,
+      task_id INTEGER NOT NULL REFERENCES task_bank (id) ON DELETE CASCADE,
+      position INTEGER NOT NULL CHECK (position BETWEEN 1 AND 5),
+      PRIMARY KEY (batch_id, position), UNIQUE (task_id)
+    );
+    PRAGMA user_version = 11;
+  `);
   return legacy;
 }
 
@@ -469,7 +559,12 @@ describe('база данных', () => {
     it('перестраивает базу версии 3, сохраняя цепочку задание-попытка-спор', () => {
       const path = join(tempDir, 'версия-3.db');
       const legacy = openDatabase(path);
-      legacy.exec('DROP INDEX task_bank_fingerprint; ALTER TABLE task_bank DROP COLUMN fingerprint;');
+      legacy.exec(`
+        DROP TABLE learning_tasks;
+        DROP TABLE learning_materials;
+        DROP INDEX task_bank_fingerprint;
+        ALTER TABLE task_bank DROP COLUMN fingerprint;
+      `);
       const topicId = seedTopic(legacy);
       const taskId = seedTask(legacy, topicId);
       // Отметки в формате `datetime('now')`: ради их перевода в ISO переход и
@@ -740,7 +835,7 @@ describe('база данных', () => {
 
     it('мигрирует базу версии 11, сохраняя обычную историю и готового босса', () => {
       const path = join(tempDir, 'версия-11.db');
-      const legacy = openDatabase(path);
+      const legacy = createVersionElevenDatabase(path);
       const topicId = seedTopic(legacy);
       writeProfile(legacy, { name: 'Тимофей', interests: ['шахматы'] });
       const usedTask = seedTask(legacy, topicId);
@@ -754,6 +849,9 @@ describe('база данных', () => {
          VALUES (?, ?, ?, '4', 1)`,
       ).run(usedTask, topicId, runId).lastInsertRowid);
       legacy.prepare("INSERT INTO disputes (attempt_id, status) VALUES (?, 'upheld')").run(attemptId);
+      legacy.prepare(
+        "INSERT INTO forecast_snapshots (subject, score, band, created_at) VALUES ('math', 3.7, 0.2, ?)",
+      ).run('2026-08-08T10:05:00.000Z');
 
       const bossTask = seedTask(legacy, topicId);
       legacy.prepare("UPDATE task_bank SET status = 'boss_reserved' WHERE id = ?").run(bossTask);
@@ -763,7 +861,13 @@ describe('база данных', () => {
       legacy.prepare(
         'INSERT INTO boss_tasks (batch_id, task_id, position) VALUES (?, ?, 1)',
       ).run(batchId, bossTask);
-      legacy.pragma('user_version = 11');
+      expect(() => legacy.prepare(
+        "INSERT INTO runs (subject, kind, topic_id, started_at) VALUES ('math', 'lesson', ?, ?)",
+      ).run(topicId, '2026-08-09T10:00:00.000Z')).toThrow();
+      expect(() => legacy.prepare(
+        "UPDATE task_bank SET status = 'lesson_reserved' WHERE id = ?",
+      ).run(usedTask)).toThrow();
+      expect(tableNames(legacy)).not.toContain('learning_materials');
       legacy.close();
 
       const migrated = openDatabase(path);
@@ -775,6 +879,8 @@ describe('база данных', () => {
           .toEqual({ attempt_id: attemptId, status: 'upheld' });
         expect(migrated.prepare('SELECT batch_id, task_id, position FROM boss_tasks').get())
           .toEqual({ batch_id: batchId, task_id: bossTask, position: 1 });
+        expect(migrated.prepare('SELECT subject, score, band FROM forecast_snapshots').get())
+          .toEqual({ subject: 'math', score: 3.7, band: 0.2 });
         expect(migrated.pragma('foreign_key_check')).toEqual([]);
         expect(tableNames(migrated)).toEqual([...TABLES].sort());
         expect(() => migrated.prepare(
@@ -918,6 +1024,21 @@ describe('база данных', () => {
         db.prepare('INSERT INTO boss_batches (topic_id, status) VALUES (?, ?)')
           .run(topicId, 'active'),
       ).not.toThrow();
+    });
+
+    it('не допускает два живых учебных материала одного предмета', () => {
+      const firstTopic = seedTopic(db, 'math.first');
+      const secondTopic = seedTopic(db, 'math.second');
+      db.prepare(
+        `INSERT INTO learning_materials
+           (subject, topic_id, recommendation_reason, mastery_before)
+         VALUES ('math', ?, 'Первый пробел', 0)`,
+      ).run(firstTopic);
+      expect(() => db.prepare(
+        `INSERT INTO learning_materials
+           (subject, topic_id, recommendation_reason, mastery_before)
+         VALUES ('math', ?, 'Второй пробел', 0)`,
+      ).run(secondTopic)).toThrow(/UNIQUE constraint failed/);
     });
 
     it('ограничивает учебный материал допустимыми состояниями и одним живым экземпляром темы', () => {

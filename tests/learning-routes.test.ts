@@ -12,6 +12,7 @@ import type { GeneratedTask } from '../server/codex/task-schema.js';
 import { readStreak } from '../server/streak.js';
 import { registerLearningRoutes, registerUnavailableLearning } from '../server/routes/learning.js';
 import { loadCurriculum } from '../server/curriculum.js';
+import { resolveDispute } from '../server/session.js';
 
 const NOW = new Date('2026-08-09T12:00:00.000Z');
 
@@ -337,6 +338,10 @@ describe('Learning API', () => {
     expect(db.prepare('SELECT status FROM learning_materials WHERE id = ?').get(materialId))
       .toEqual({ status: outcome });
 
+    const restart = await app.inject({ method: 'POST', url: `/api/learning/${materialId}/test` });
+    expect(restart.statusCode).toBe(409);
+    expect(restart.json()).toMatchObject({ code: 'learning-finished' });
+
     const repeated = await app.inject({
       method: 'POST', url: `/api/learning/run/${runId}/finish`,
     });
@@ -383,6 +388,43 @@ describe('Learning API', () => {
     expect(blocked.json()).toMatchObject({ code: 'learning-dispute-open' });
     expect(db.prepare('SELECT finished_at FROM runs WHERE id = ?').get(runId))
       .toEqual({ finished_at: null });
+  });
+
+  it.each([
+    { studentCorrect: false, outcome: 'failed', correct: 3 },
+    { studentCorrect: true, outcome: 'passed', correct: 4 },
+  ])('после $outcome-разрешения спора завершает lesson-run', async ({
+    studentCorrect, outcome, correct,
+  }) => {
+    const { materialId } = readyMaterial();
+    const runId = await openAndStart(materialId);
+    const attempts = await answerFive(runId, 3);
+    const disputedAttempt = attempts[3];
+    if (disputedAttempt === undefined) throw new Error('не найдена ошибочная попытка');
+    const disputeResponse = await app.inject({
+      method: 'POST', url: '/api/session/dispute', payload: { attempt_id: disputedAttempt },
+    });
+    const disputeId = (disputeResponse.json() as { dispute_id: number }).dispute_id;
+    const masteryBeforeResolution = db.prepare<[], { mastery: number }>(
+      "SELECT mastery FROM topic_state WHERE topic_id = 'math.a'",
+    ).get()?.mastery;
+
+    await resolveDispute(db, loadCurriculum(curriculumDir), disputeId, () => Promise.resolve({
+      studentCorrect,
+      note: studentCorrect ? 'Ответ ученика допустим' : 'Ответ не совпадает с правилом',
+    }));
+    expect(db.prepare('SELECT correct FROM runs WHERE id = ?').get(runId)).toEqual({ correct });
+    const masteryAfterResolution = db.prepare<[], { mastery: number }>(
+      "SELECT mastery FROM topic_state WHERE topic_id = 'math.a'",
+    ).get()?.mastery;
+    if (studentCorrect) expect(masteryAfterResolution).not.toBe(masteryBeforeResolution);
+    else expect(masteryAfterResolution).toBe(masteryBeforeResolution);
+
+    const finish = await app.inject({
+      method: 'POST', url: `/api/learning/run/${runId}/finish`,
+    });
+    expect(finish.statusCode).toBe(200);
+    expect(finish.json()).toMatchObject({ materialId, runId, correct, outcome });
   });
 
   it('валидирует идентификаторы, состояния и полное безопасное содержимое', async () => {

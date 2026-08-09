@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import Database from 'better-sqlite3';
+import { LEARNING_TASK_COUNT } from './learning-constants.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -77,7 +78,7 @@ const NOW_ISO = `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
 
 const subjectCheck = SUBJECTS.map((subject) => `'${subject}'`).join(', ');
 
-const SCHEMA = `
+const CORE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS profile (
     id           INTEGER PRIMARY KEY CHECK (id = 1),
     name         TEXT    NOT NULL DEFAULT '',
@@ -227,7 +228,10 @@ const SCHEMA = `
     PRIMARY KEY (batch_id, position),
     UNIQUE (task_id)
   );
+`;
 
+/** Учебный слой создаётся один раз после исторических перестроек runs/task_bank. */
+const LEARNING_SCHEMA = `
   CREATE TABLE IF NOT EXISTS learning_materials (
     id                    INTEGER PRIMARY KEY,
     subject               TEXT    NOT NULL CHECK (subject IN (${subjectCheck})),
@@ -249,10 +253,14 @@ const SCHEMA = `
     ON learning_materials (topic_id)
     WHERE status IN ('preparing', 'ready', 'active');
 
+  CREATE UNIQUE INDEX IF NOT EXISTS learning_materials_live_subject
+    ON learning_materials (subject)
+    WHERE status IN ('preparing', 'ready', 'active');
+
   CREATE TABLE IF NOT EXISTS learning_tasks (
     material_id INTEGER NOT NULL REFERENCES learning_materials (id) ON DELETE CASCADE,
     task_id     INTEGER NOT NULL REFERENCES task_bank (id) ON DELETE CASCADE,
-    position    INTEGER NOT NULL CHECK (position BETWEEN 1 AND 5),
+    position    INTEGER NOT NULL CHECK (position BETWEEN 1 AND ${LEARNING_TASK_COUNT}),
     PRIMARY KEY (material_id, position),
     UNIQUE (task_id)
   );
@@ -303,7 +311,7 @@ const SCHEMA = `
     WHERE learning_tasks.material_id = NEW.id
       AND task_bank.topic_id = NEW.topic_id
       AND task_bank.status = 'lesson_reserved'
-  ) <> 5
+  ) <> ${LEARNING_TASK_COUNT}
   BEGIN
     SELECT RAISE(ABORT, 'ready learning material must contain five reserved tasks');
   END;
@@ -317,21 +325,6 @@ const SCHEMA = `
   BEGIN
     SELECT RAISE(ABORT, 'live learning material must keep all tasks');
   END;
-`;
-
-// Старые ступени миграции несколько раз вызывают общий SCHEMA между
-// перестройками runs/task_bank. Учебный слой зависит от обеих таблиц и до
-// завершения этих ступеней существовать не должен: SQLite переписал бы его
-// внешние ключи и триггеры на временные имена.
-const DROP_LEARNING_SCHEMA = `
-  DROP TRIGGER IF EXISTS learning_tasks_complete_delete;
-  DROP TRIGGER IF EXISTS learning_material_ready_complete;
-  DROP TRIGGER IF EXISTS learning_material_run_consistency_update;
-  DROP TRIGGER IF EXISTS learning_material_run_consistency_insert;
-  DROP TRIGGER IF EXISTS learning_tasks_consistency_update;
-  DROP TRIGGER IF EXISTS learning_tasks_consistency_insert;
-  DROP TABLE IF EXISTS learning_tasks;
-  DROP TABLE IF EXISTS learning_materials;
 `;
 
 /**
@@ -396,14 +389,13 @@ export function migrate(db: Database.Database): void {
           `База без версии содержит объект «${existing.name}»; автоматическая миграция неизвестной схемы запрещена`,
         );
       }
-      db.exec(SCHEMA);
+      db.exec(CORE_SCHEMA);
+      db.exec(LEARNING_SCHEMA);
       db.pragma(`user_version = ${SCHEMA_VERSION}`);
       return;
     }
 
-    if (version <= 10) db.exec(DROP_LEARNING_SCHEMA);
-
-    // Колонка отпечатка добавляется раньше любых `db.exec(SCHEMA)` ниже: SCHEMA
+    // Колонка отпечатка добавляется раньше любых `db.exec(CORE_SCHEMA)` ниже: схема
     // строит по ней уникальный индекс, а существующую с версии 1 таблицу
     // `CREATE TABLE IF NOT EXISTS` не обновляет — индекс упал бы на нет колонки.
     // Отпечатки старых строк не восстанавливаются: считать их пришлось бы второй,
@@ -431,8 +423,7 @@ export function migrate(db: Database.Database): void {
       if (badRun !== undefined || badAttempt !== undefined) {
         throw new Error('База содержит противоречивые забеги или попытки; исправьте данные перед миграцией');
       }
-      db.exec(SCHEMA);
-      db.exec(DROP_LEARNING_SCHEMA);
+      db.exec(CORE_SCHEMA);
     }
 
     if (version <= 2) {
@@ -475,8 +466,7 @@ export function migrate(db: Database.Database): void {
         ALTER TABLE attempts RENAME TO attempts_v3;
         ALTER TABLE task_bank RENAME TO task_bank_v3;
       `);
-      db.exec(SCHEMA);
-      db.exec(DROP_LEARNING_SCHEMA);
+      db.exec(CORE_SCHEMA);
       db.exec(`
         INSERT INTO task_bank
           (id, topic_id, question, answer, accept, hint, explain, joke, difficulty, status, created_at)
@@ -639,7 +629,7 @@ export function migrate(db: Database.Database): void {
         ALTER TABLE task_bank RENAME TO task_bank_v10;
         ALTER TABLE runs RENAME TO runs_v10;
       `);
-      db.exec(SCHEMA);
+      db.exec(CORE_SCHEMA);
       db.exec(`
         INSERT INTO runs
           (id, subject, kind, topic_id, started_at, finished_at, summary, total, correct)
@@ -680,15 +670,6 @@ export function migrate(db: Database.Database): void {
       // вместе: так история боёв, попыток и споров переживает обновление без
       // временно висячих внешних ключей.
       db.exec(`
-        DROP TRIGGER IF EXISTS learning_tasks_complete_delete;
-        DROP TRIGGER IF EXISTS learning_material_ready_complete;
-        DROP TRIGGER IF EXISTS learning_material_run_consistency_update;
-        DROP TRIGGER IF EXISTS learning_material_run_consistency_insert;
-        DROP TRIGGER IF EXISTS learning_tasks_consistency_update;
-        DROP TRIGGER IF EXISTS learning_tasks_consistency_insert;
-        DROP TABLE IF EXISTS learning_tasks;
-        DROP TABLE IF EXISTS learning_materials;
-
         DROP TRIGGER IF EXISTS attempts_topic_consistency_insert;
         DROP TRIGGER IF EXISTS attempts_topic_consistency_update;
         DROP TRIGGER IF EXISTS runs_correct_not_above_total_insert;
@@ -705,7 +686,7 @@ export function migrate(db: Database.Database): void {
         ALTER TABLE task_bank RENAME TO task_bank_v11;
         ALTER TABLE runs RENAME TO runs_v11;
       `);
-      db.exec(SCHEMA);
+      db.exec(CORE_SCHEMA);
       db.exec(`
         INSERT INTO runs
           (id, subject, kind, topic_id, started_at, finished_at, summary, total, correct)
@@ -748,6 +729,7 @@ export function migrate(db: Database.Database): void {
       }
     }
 
+    db.exec(LEARNING_SCHEMA);
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   }).immediate();
 }
@@ -777,6 +759,7 @@ const REQUIRED_AUXILIARY_OBJECTS = [
   'attempts_topic_consistency_update',
   'boss_batches_live_topic',
   'learning_materials_live_topic',
+  'learning_materials_live_subject',
   'learning_tasks_consistency_insert',
   'learning_tasks_consistency_update',
   'learning_material_run_consistency_insert',
@@ -791,7 +774,7 @@ const REQUIRED_SCHEMA_FRAGMENTS = {
   boss_batches: ["'preparing', 'ready', 'active', 'won', 'lost', 'failed'"],
   boss_tasks: ['position BETWEEN 1 AND 5', 'UNIQUE (task_id)'],
   learning_materials: ["'preparing', 'ready', 'active', 'passed', 'failed', 'rejected', 'retired'", 'estimated_minutes BETWEEN 10 AND 15', 'UNIQUE'],
-  learning_tasks: ['position BETWEEN 1 AND 5', 'UNIQUE (task_id)'],
+  learning_tasks: [`position BETWEEN 1 AND ${LEARNING_TASK_COUNT}`, 'UNIQUE (task_id)'],
 } as const;
 
 /** Не даёт базе с актуальным номером версии скрыть удалённую или чужую схему. */

@@ -33,6 +33,7 @@ export interface LearningMaterialContent {
 }
 
 const HTML_TAG = /<\s*\/?\s*[a-z][^>]*>/iu;
+const LATEX_DELIMITER = /\$/u;
 const MAX_TEXT_LENGTH = 4_000;
 const MAX_BLOCKS_PER_SECTION = 8;
 
@@ -56,15 +57,6 @@ export function parseLearningMaterial(raw: unknown): LearningMaterialContent {
       `Учебный материал не соответствует схеме: ${describeSchemaErrors(validate.errors)}`,
     );
   }
-  if (raw.objectives.length < 1 || raw.objectives.length > 3) {
-    throw new Error('Учебный материал должен содержать от одной до трёх целей');
-  }
-  if (raw.sections.length < 3 || raw.sections.length > 5) {
-    throw new Error('Учебный материал должен содержать от трёх до пяти разделов');
-  }
-  if (raw.summary.length < 2 || raw.summary.length > 5) {
-    throw new Error('Итоговая памятка должна содержать от двух до пяти пунктов');
-  }
   for (const [index, section] of raw.sections.entries()) {
     if (section.blocks.length < 1 || section.blocks.length > MAX_BLOCKS_PER_SECTION) {
       throw new Error(
@@ -78,6 +70,10 @@ export function parseLearningMaterial(raw: unknown): LearningMaterialContent {
       throw new Error(`Текстовый блок учебного материала длиннее ${MAX_TEXT_LENGTH} знаков`);
     }
     if (HTML_TAG.test(text)) throw new Error('HTML в учебном материале запрещён');
+  }
+  if (raw.sections.some((section) =>
+    section.blocks.some((block) => block.type === 'formula' && LATEX_DELIMITER.test(block.content)))) {
+    throw new Error('Формула учебного материала должна быть display-LaTeX без разделителей $');
   }
   return {
     introduction: raw.introduction,

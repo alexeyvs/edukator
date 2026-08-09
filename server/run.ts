@@ -17,6 +17,7 @@ import { SessionError } from './session-error.js';
 import { taskXp } from './xp.js';
 import { TRIAGE_TARGET } from './triage.js';
 import { moscowDayBounds } from './moscow-time.js';
+import { LEARNING_TASK_COUNT } from './learning-constants.js';
 
 /** Число ответов, после которого забег готов к финальному экрану. */
 export const RUN_TARGET = 12;
@@ -95,7 +96,7 @@ interface RunAttemptRow {
 }
 
 function progressFrom(row: RunCounters): RunProgress {
-  const target = row.kind === 'lesson' ? 5 : RUN_TARGET;
+  const target = row.kind === 'lesson' ? LEARNING_TASK_COUNT : RUN_TARGET;
   return {
     total: row.total,
     correct: row.correct,

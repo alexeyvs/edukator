@@ -21,6 +21,7 @@ import type { LearningMaterialContent } from '../server/codex/learning-material-
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import { storeTasks } from '../server/codex/bank.js';
 import { everyRefillFailed, runWarmupCycle } from '../server/codex/worker.js';
+import { claimLearningMaterial } from '../server/learning.js';
 
 const NOW = new Date('2026-08-09T10:00:00.000Z');
 
@@ -150,6 +151,26 @@ describe('отбор и подготовка учебных материалов
     expect(repeat.prepared).toEqual([]);
   });
 
+  it('двум соединениям не позволяет захватить разные темы одного предмета', () => {
+    const second = openDatabase(join(tempDir, 'test.db'));
+    try {
+      const first = claimLearningMaterial(db, {
+        subject: 'math', topicId: 'math.best', recommendationReason: 'Первый пробел',
+        masteryBefore: 0, now: NOW,
+      });
+      expect(first).toBeDefined();
+      expect(claimLearningMaterial(second, {
+        subject: 'math', topicId: 'math.other', recommendationReason: 'Второй пробел',
+        masteryBefore: 0, now: NOW,
+      })).toBeUndefined();
+      expect(second.prepare(
+        "SELECT COUNT(*) AS n FROM learning_materials WHERE status IN ('preparing','ready','active')",
+      ).get()).toEqual({ n: 1 });
+    } finally {
+      second.close();
+    }
+  });
+
   it('передаёт предпосылки, профиль и пять последних ошибок', async () => {
     const prereq = topic('math.prereq', 2);
     const dependent = { ...topic('math.dependent'), prereqs: [prereq.id] };
@@ -198,6 +219,25 @@ describe('отбор и подготовка учебных материалов
     expect(restored.prepared[0]).toMatchObject({ ready: true, recovered: true, stored: 5 });
     expect(db.prepare('SELECT status FROM learning_materials ORDER BY id').all())
       .toEqual([{ status: 'rejected' }, { status: 'ready' }]);
+  });
+
+  it('освобождает зависший claim другой слабой темы до фильтрации предмета', async () => {
+    triage(db, 'math', 'math.best');
+    const stale = claimLearningMaterial(db, {
+      subject: 'math', topicId: 'math.other', recommendationReason: 'Старый приоритет',
+      masteryBefore: 0, now: NOW,
+    });
+    expect(stale).toBeDefined();
+
+    const report = await prepareLearningMaterials({
+      db, graph, now: new Date(NOW.getTime() + 30 * 60 * 1000 + 1),
+      produce: () => Promise.resolve(learningPackage('новый-приоритет')),
+    });
+    expect(report.prepared[0]).toMatchObject({ topicId: 'math.best', ready: true });
+    expect(db.prepare('SELECT topic_id, status FROM learning_materials ORDER BY id').all()).toEqual([
+      { topic_id: 'math.other', status: 'rejected' },
+      { topic_id: 'math.best', status: 'ready' },
+    ]);
   });
 
   it('retire возвращает задания в банк, когда тема перестала быть пробелом', async () => {
@@ -310,5 +350,72 @@ describe('производитель полного комплекта', () => {
     expect(calls).toHaveLength(4);
     expect(calls[1]?.model).toBe('gpt-5.6-sol');
     expect(calls[2]?.prompt).toContain('# Учебный материал для теста');
+  });
+
+  it('добирает пять разных вопросов после смысловой отбраковки и дубля между батчами', async () => {
+    const first = [task('принят-1'), task('принят-2'), task('отклонён')];
+    const second = [first[0] as GeneratedTask, task('принят-3'), task('принят-4')];
+    const third = [task('принят-5')];
+    const accepted = (items: readonly GeneratedTask[]) => items.map(() => ({
+      answer: '4', unambiguous: true, natural: true, on_topic: true,
+      age_appropriate: true, hint_safe: true, note: '',
+    }));
+    const firstVerdicts = accepted(first);
+    if (firstVerdicts[2] !== undefined) firstVerdicts[2].natural = false;
+    const answers = [
+      JSON.stringify(content),
+      JSON.stringify({ accepted: true, accurate: true, complete: true, age_appropriate: true, grounded: true, note: '' }),
+      JSON.stringify({ items: first }), JSON.stringify({ items: firstVerdicts }),
+      JSON.stringify({ items: second }), JSON.stringify({ items: accepted(second) }),
+      JSON.stringify({ items: third }), JSON.stringify({ items: accepted(third) }),
+    ];
+    const producer = createLearningProducer({
+      run: () => Promise.resolve(answers.shift() ?? '{}'),
+    });
+    const result = await producer({
+      topic: topic('math.best'), prerequisites: [],
+      profile: { name: 'Тимофей', interests: [], examDate: null, partnerName: 'Байт' },
+      recentErrors: [], previousApproaches: [], recent: [],
+    });
+    expect(result.tasks).toHaveLength(5);
+    expect(new Set(result.tasks.map(({ instruction }) => instruction)).size).toBe(5);
+    expect(answers).toEqual([]);
+  });
+
+  it('после четырёх батчей без новых вопросов оставляет claim чисто rejected', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'edukator-learning-exhausted-'));
+    const db = openDatabase(join(tempDir, 'test.db'));
+    try {
+      const graph = buildTopicGraph([topic('math.best')]);
+      syncTopicState(db, graph);
+      triage(db, 'math', 'math.best');
+      const duplicate = task('уже-видели');
+      storeTasks(db, 'math.best', [duplicate]);
+      const verdict = {
+        answer: '4', unambiguous: true, natural: true, on_topic: true,
+        age_appropriate: true, hint_safe: true, note: '',
+      };
+      const answers = [
+        JSON.stringify(content),
+        JSON.stringify({ accepted: true, accurate: true, complete: true, age_appropriate: true, grounded: true, note: '' }),
+        ...Array.from({ length: MAX_LEARNING_TASK_BATCHES }, () => [
+          JSON.stringify({ items: [duplicate] }), JSON.stringify({ items: [verdict] }),
+        ]).flat(),
+      ];
+      const report = await prepareLearningMaterials({
+        db, graph, now: NOW,
+        run: () => Promise.resolve(answers.shift() ?? '{}'),
+      });
+      expect(report.prepared[0]).toMatchObject({ ready: false, stored: 0 });
+      expect(report.prepared[0]?.error).toMatch(/0 из 5 вопросов/u);
+      expect(db.prepare('SELECT status, content FROM learning_materials').get())
+        .toEqual({ status: 'rejected', content: null });
+      expect(db.prepare("SELECT COUNT(*) AS n FROM task_bank WHERE status = 'lesson_reserved'").get())
+        .toEqual({ n: 0 });
+      expect(answers).toEqual([]);
+    } finally {
+      db.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });

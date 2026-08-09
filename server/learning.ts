@@ -3,9 +3,10 @@ import type { Database } from 'better-sqlite3';
 import type { TopicGraph } from './curriculum.js';
 import type { Subject } from './db.js';
 import { parseLearningMaterial, type LearningMaterialContent } from './codex/learning-material-schema.js';
+import { LEARNING_TASK_COUNT } from './learning-constants.js';
 import { finishRun, runProgress, type FinishRunResult, type RunProgress } from './run.js';
 
-export const LEARNING_TASK_COUNT = 5;
+export { LEARNING_TASK_COUNT } from './learning-constants.js';
 export const LEARNING_PASS_SCORE = 4;
 export const LEARNING_CLAIM_STALE_MS = 30 * 60 * 1000;
 
@@ -77,6 +78,40 @@ export interface ClaimLearningMaterialOptions {
 export interface LearningMaterialClaim {
   materialId: number;
   recovered: boolean;
+}
+
+function expireStaleLearningClaimsInTransaction(
+  db: Database,
+  now: Date,
+  staleAfterMs: number,
+): Set<string> {
+  const nowIso = timestamp(now, 'восстановления claim');
+  const cutoff = new Date(now.getTime() - staleAfterMs).toISOString();
+  const stale = db.prepare<[string], { id: number; topic_id: string }>(
+    `SELECT id, topic_id FROM learning_materials
+      WHERE status = 'preparing' AND updated_at <= ?
+      ORDER BY updated_at, id`,
+  ).all(cutoff);
+  const reject = db.prepare(
+    `UPDATE learning_materials
+        SET status = 'rejected', updated_at = ?, finished_at = ?
+      WHERE id = ? AND status = 'preparing'`,
+  );
+  for (const row of stale) reject.run(nowIso, nowIso, row.id);
+  return new Set(stale.map((row) => row.topic_id));
+}
+
+/** Освобождает все зависшие claim до выбора новых приоритетных тем. */
+export function expireStaleLearningClaims(
+  db: Database,
+  options: { now?: Date; staleAfterMs?: number } = {},
+): Set<string> {
+  const now = options.now ?? new Date();
+  const staleAfterMs = options.staleAfterMs ?? LEARNING_CLAIM_STALE_MS;
+  if (!Number.isFinite(staleAfterMs) || staleAfterMs <= 0) {
+    throw new Error(`Учебный материал: срок claim должен быть положительным, получено ${staleAfterMs}`);
+  }
+  return db.transaction(() => expireStaleLearningClaimsInTransaction(db, now, staleAfterMs)).immediate();
 }
 
 function timestamp(value: Date, operation: string): string {
@@ -199,24 +234,13 @@ export function claimLearningMaterial(
       throw new Error(`Учебный материал: темы «${options.topicId}» нет в topic_state`);
     }
 
-    const cutoff = new Date(now.getTime() - staleAfterMs).toISOString();
-    const stale = db.prepare<[string, string], { id: number }>(
-      `SELECT id FROM learning_materials
-        WHERE topic_id = ? AND status = 'preparing' AND updated_at <= ?
-        ORDER BY updated_at, id LIMIT 1`,
-    ).get(options.topicId, cutoff);
-    if (stale !== undefined) {
-      db.prepare(
-        `UPDATE learning_materials
-            SET status = 'rejected', updated_at = ?, finished_at = ?
-          WHERE id = ? AND status = 'preparing'`,
-      ).run(nowIso, nowIso, stale.id);
-    }
+    const expiredTopics = expireStaleLearningClaimsInTransaction(db, now, staleAfterMs);
 
-    const live = db.prepare<[string], { id: number }>(
+    const live = db.prepare<[string, string], { id: number }>(
       `SELECT id FROM learning_materials
-        WHERE topic_id = ? AND status IN ('preparing', 'ready', 'active') LIMIT 1`,
-    ).get(options.topicId);
+        WHERE (topic_id = ? OR subject = ?)
+          AND status IN ('preparing', 'ready', 'active') LIMIT 1`,
+    ).get(options.topicId, options.subject);
     if (live !== undefined) return undefined;
 
     const result = db.prepare(
@@ -233,75 +257,7 @@ export function claimLearningMaterial(
       nowIso,
       nowIso,
     );
-    return { materialId: Number(result.lastInsertRowid), recovered: stale !== undefined };
-  }).immediate();
-}
-
-export interface PublishLearningMaterialOptions {
-  content: unknown;
-  taskIds: readonly number[];
-  now?: Date;
-}
-
-/** Публикует содержимое и резервирует полный упорядоченный тест одной записью. */
-export function publishLearningMaterial(
-  db: Database,
-  materialId: number,
-  options: PublishLearningMaterialOptions,
-): void {
-  const nowIso = timestamp(options.now ?? new Date(), 'публикации');
-  if (options.taskIds.length !== LEARNING_TASK_COUNT || new Set(options.taskIds).size !== LEARNING_TASK_COUNT) {
-    throw new LearningError(
-      'learning-incomplete',
-      `Учебный материал должен содержать ровно ${LEARNING_TASK_COUNT} разных заданий`,
-    );
-  }
-  const content = JSON.stringify(options.content);
-  if (content === undefined) {
-    throw new Error('Учебный материал: содержимое должно сериализоваться в JSON');
-  }
-
-  db.transaction(() => {
-    const material = materialRow(db, materialId);
-    if (material.status !== 'preparing') {
-      throw new LearningError(
-        'learning-not-ready',
-        `Учебный материал ${materialId} не готовится (${material.status})`,
-      );
-    }
-
-    const placeholders = options.taskIds.map(() => '?').join(', ');
-    const tasks = db.prepare<unknown[], { id: number; topic_id: string; status: string }>(
-      `SELECT id, topic_id, status FROM task_bank WHERE id IN (${placeholders})`,
-    ).all(...options.taskIds);
-    if (
-      tasks.length !== LEARNING_TASK_COUNT ||
-      tasks.some((task) => task.topic_id !== material.topic_id || task.status !== 'valid')
-    ) {
-      throw new LearningError(
-        'learning-incomplete',
-        `Учебный материал ${materialId} получил неполный или несогласованный набор заданий`,
-      );
-    }
-
-    const reserved = db.prepare(
-      `UPDATE task_bank SET status = 'lesson_reserved'
-        WHERE id IN (${placeholders}) AND status = 'valid'`,
-    ).run(...options.taskIds);
-    if (reserved.changes !== LEARNING_TASK_COUNT) {
-      throw new LearningError('learning-inconsistent', `Задания материала ${materialId} уже заняты`);
-    }
-    const link = db.prepare(
-      'INSERT INTO learning_tasks (material_id, task_id, position) VALUES (?, ?, ?)',
-    );
-    options.taskIds.forEach((taskId, index) => link.run(materialId, taskId, index + 1));
-    const published = db.prepare(
-      `UPDATE learning_materials SET content = ?, status = 'ready', updated_at = ?
-        WHERE id = ? AND status = 'preparing'`,
-    ).run(content, nowIso, materialId);
-    if (published.changes !== 1) {
-      throw new LearningError('learning-inconsistent', `Claim материала ${materialId} изменился`);
-    }
+    return { materialId: Number(result.lastInsertRowid), recovered: expiredTopics.has(options.topicId) };
   }).immediate();
 }
 
@@ -384,6 +340,15 @@ export function startLearningRun(
       if (run?.kind !== 'lesson') {
         throw new LearningError('learning-inconsistent', `Материал ${materialId} связан не с lesson-run`);
       }
+      if (material.status === 'passed' || material.status === 'failed' || run.finished_at !== null) {
+        throw new LearningError('learning-finished', `Тест материала ${materialId} уже завершён`);
+      }
+      if (material.status !== 'active') {
+        throw new LearningError(
+          'learning-not-ready',
+          `Материал ${materialId} нельзя продолжить в состоянии ${material.status}`,
+        );
+      }
       return { materialId, runId: material.run_id, resumed: true };
     }
     if (material.status !== 'active') {
@@ -396,7 +361,10 @@ export function startLearningRun(
        VALUES (?, 'lesson', ?, ?)`,
     ).run(material.subject, material.topic_id, nowIso).lastInsertRowid);
     const linked = db.prepare(
-      `UPDATE learning_materials SET run_id = ?, updated_at = ?
+      `UPDATE learning_materials
+          SET run_id = ?, mastery_before = (
+                SELECT mastery FROM topic_state WHERE topic_id = learning_materials.topic_id
+              ), updated_at = ?
         WHERE id = ? AND status = 'active' AND run_id IS NULL`,
     ).run(runId, nowIso, materialId);
     if (linked.changes !== 1) {

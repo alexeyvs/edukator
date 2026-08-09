@@ -8,13 +8,13 @@ import { buildTopicGraph } from '../server/curriculum.js';
 import {
   claimLearningMaterial,
   finishLearningMaterial,
-  LearningError,
   openLearningMaterial,
-  publishLearningMaterial,
   rejectLearningMaterial,
   retireLearningMaterial,
   startLearningRun,
 } from '../server/learning.js';
+import { reserveLearningTasks } from '../server/codex/bank.js';
+import type { GeneratedTask } from '../server/codex/task-schema.js';
 
 const TOPIC = 'math.fractions';
 const START = new Date('2026-08-09T10:00:00.000Z');
@@ -27,13 +27,24 @@ function seedTopic(db: Database, mastery = 0.3): void {
   db.prepare('INSERT INTO topic_state (topic_id, mastery) VALUES (?, ?)').run(TOPIC, mastery);
 }
 
-function seedTasks(db: Database, count = 5): number[] {
-  return Array.from({ length: count }, (_, index) => Number(db.prepare(
-    `INSERT INTO task_bank
-       (topic_id, question, answer, accept, difficulty, status)
-     VALUES (?, ?, '4', '["4"]', 2, 'valid')`,
-  ).run(TOPIC, `Вопрос ${index + 1}`).lastInsertRowid));
+function task(label: string): GeneratedTask {
+  return {
+    instruction: `Вопрос ${label}`,
+    material: '', material_format: 'none', choices: [], answer: '4', accept: ['4'],
+    hint: 'Вспомни правило и проверь шаги.', explain: 'Получается четыре.',
+    joke: 'Ответ сошёлся.', difficulty: 2,
+  };
 }
+
+const CONTENT = {
+  introduction: 'Разберём дроби.', objectives: ['Находить общий знаменатель'],
+  sections: [
+    { title: 'Идея', blocks: [{ type: 'paragraph', content: 'Дробь — часть целого.' }] },
+    { title: 'Правило', blocks: [{ type: 'formula', content: '\\frac{a}{b}' }] },
+    { title: 'Пример', blocks: [{ type: 'example', content: 'Сложим одинаковые части.' }] },
+  ],
+  summary: ['Сначала проверь знаменатели.', 'Затем сложи числители.'],
+};
 
 function claim(db: Database, now = START): number {
   const result = claimLearningMaterial(db, {
@@ -49,13 +60,13 @@ function claim(db: Database, now = START): number {
 
 function readyMaterial(db: Database): { materialId: number; taskIds: number[] } {
   const materialId = claim(db);
-  const taskIds = seedTasks(db);
-  publishLearningMaterial(db, materialId, {
-    content: { introduction: 'Разберём дроби', objectives: ['Находить общий знаменатель'] },
-    taskIds,
-    now: new Date('2026-08-09T10:05:00.000Z'),
-  });
-  return { materialId, taskIds };
+  const result = reserveLearningTasks(
+    db, materialId, CONTENT,
+    Array.from({ length: 5 }, (_, index) => task(`материала-${materialId}-${index}`)),
+    new Date('2026-08-09T10:05:00.000Z'),
+  );
+  if (!result.ready) throw new Error('материал не опубликован');
+  return { materialId, taskIds: result.stored.map(({ id }) => id) };
 }
 
 function activeRun(db: Database): { materialId: number; taskIds: number[]; runId: number } {
@@ -106,19 +117,14 @@ describe('слой данных учебных материалов', () => {
   });
 
   it('публикует содержимое и ровно пять задач одной транзакцией', () => {
-    const materialId = claim(db);
-    const taskIds = seedTasks(db);
-
-    publishLearningMaterial(db, materialId, {
-      content: { introduction: 'Дроби без страха' }, taskIds, now: START,
-    });
+    const { materialId, taskIds } = readyMaterial(db);
 
     expect(db.prepare(
       'SELECT status, content, updated_at FROM learning_materials WHERE id = ?',
     ).get(materialId)).toEqual({
       status: 'ready',
-      content: JSON.stringify({ introduction: 'Дроби без страха' }),
-      updated_at: START.toISOString(),
+      content: JSON.stringify(CONTENT),
+      updated_at: '2026-08-09T10:05:00.000Z',
     });
     expect(db.prepare(
       `SELECT learning_tasks.task_id, learning_tasks.position, task_bank.status
@@ -129,17 +135,16 @@ describe('слой данных учебных материалов', () => {
     })));
   });
 
-  it('откатывает публикацию целиком при неполном или занятом наборе', () => {
+  it('отклоняет публикацию целиком при неполном наборе из-за дубля', () => {
     const materialId = claim(db);
-    const taskIds = seedTasks(db);
-    db.prepare("UPDATE task_bank SET status = 'used' WHERE id = ?").run(taskIds[4]);
-
-    expect(() => publishLearningMaterial(db, materialId, {
-      content: { introduction: 'Не сохранится' }, taskIds, now: START,
-    })).toThrowError(LearningError);
+    const duplicate = task('дубль');
+    const result = reserveLearningTasks(
+      db, materialId, CONTENT, Array.from({ length: 5 }, () => duplicate), START,
+    );
+    expect(result.ready).toBe(false);
 
     expect(db.prepare('SELECT status, content FROM learning_materials WHERE id = ?').get(materialId))
-      .toEqual({ status: 'preparing', content: null });
+      .toEqual({ status: 'rejected', content: null });
     expect(db.prepare(
       "SELECT COUNT(*) AS n FROM task_bank WHERE status = 'lesson_reserved'",
     ).get()).toEqual({ n: 0 });
@@ -154,12 +159,15 @@ describe('слой данных учебных материалов', () => {
     expect(openLearningMaterial(db, materialId, { now: new Date(START.getTime() + 1000) }))
       .toEqual({ materialId, resumed: true });
 
+    db.prepare('UPDATE topic_state SET mastery = 0.41 WHERE topic_id = ?').run(TOPIC);
     const first = startLearningRun(db, materialId, { now: START });
     const second = startLearningRun(db, materialId, { now: new Date(START.getTime() + 1000) });
     expect(first).toMatchObject({ materialId, resumed: false });
     expect(second).toEqual({ materialId, runId: first.runId, resumed: true });
     expect(db.prepare('SELECT kind, topic_id FROM runs WHERE id = ?').get(first.runId))
       .toEqual({ kind: 'lesson', topic_id: TOPIC });
+    expect(db.prepare('SELECT mastery_before FROM learning_materials WHERE id = ?').get(materialId))
+      .toEqual({ mastery_before: 0.41 });
     expect(db.prepare('SELECT id, issued_run_id FROM task_bank ORDER BY id').all())
       .toEqual(taskIds.map((id) => ({ id, issued_run_id: first.runId })));
   });

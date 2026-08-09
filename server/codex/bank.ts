@@ -15,6 +15,7 @@ import type { Database } from 'better-sqlite3';
 import { questionFingerprint } from '../normalize.js';
 import { RECENT_LIMIT } from './prompt.js';
 import { taskPromptText, type GeneratedTask, type MaterialFormat } from './task-schema.js';
+import { LEARNING_TASK_COUNT } from '../learning-constants.js';
 
 /** Задание, лежащее в банке: поля генератора плюс то, чем его различает база. */
 type StoredTaskBody = Omit<GeneratedTask, 'instruction' | 'material' | 'material_format' | 'choices'>;
@@ -326,7 +327,10 @@ export function reserveLearningTasks(
     ensureTopic(db, material.topic_id);
 
     const result = insertPreparedTasks(db, material.topic_id, prepared, 'lesson_reserved');
-    if (tasks.length !== 5 || result.stored.length !== 5 || result.duplicates.length > 0) {
+    if (
+      tasks.length !== LEARNING_TASK_COUNT || result.stored.length !== LEARNING_TASK_COUNT ||
+      result.duplicates.length > 0
+    ) {
       if (result.stored.length > 0) {
         const ids = result.stored.map(({ id }) => id);
         const placeholders = ids.map(() => '?').join(', ');
@@ -393,8 +397,10 @@ export function learningTaskAtPosition(
   materialId: number,
   position: number,
 ): BankTask | null {
-  if (!Number.isInteger(position) || position < 1 || position > 5) {
-    throw new Error(`Банк заданий: позиция материала должна быть от 1 до 5, получено ${position}`);
+  if (!Number.isInteger(position) || position < 1 || position > LEARNING_TASK_COUNT) {
+    throw new Error(
+      `Банк заданий: позиция материала должна быть от 1 до ${LEARNING_TASK_COUNT}, получено ${position}`,
+    );
   }
   const row = db.prepare<[number, number], TaskRow>(
     `SELECT ${TASK_COLUMNS.replaceAll(/\bid\b/gu, 'task_bank.id')}
