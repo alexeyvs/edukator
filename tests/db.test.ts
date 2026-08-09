@@ -143,7 +143,11 @@ function createVersionTwoDatabase(path: string): Database {
 /** Схема версии 5 отличается от текущей только отсутствием вида забега. */
 function createVersionFiveDatabase(path: string): Database {
   const legacy = openDatabase(path);
-  legacy.exec('ALTER TABLE runs DROP COLUMN kind;');
+  legacy.exec(`
+    DROP TABLE learning_tasks;
+    DROP TABLE learning_materials;
+    ALTER TABLE runs DROP COLUMN kind;
+  `);
   legacy.pragma('user_version = 5');
   return legacy;
 }
@@ -213,10 +217,10 @@ describe('база данных', () => {
     // рабочую базу, поэтому число прибито буквально и меняется только вместе с
     // новой ступенью и её тестом обновления.
     it('держит номер версии схемы', () => {
-      expect(SCHEMA_VERSION).toBe(11);
+      expect(SCHEMA_VERSION).toBe(12);
     });
 
-    it('создаёт все девять таблиц на пустой базе', () => {
+    it('создаёт все одиннадцать таблиц на пустой базе', () => {
       expect(tableNames(db)).toEqual([...TABLES].sort());
     });
 
@@ -292,6 +296,8 @@ describe('база данных', () => {
 
     it('обновляет схему версии 1 до текущей и ставит ограничения целостности', () => {
       db.exec(`
+        DROP TABLE learning_tasks;
+        DROP TABLE learning_materials;
         DROP TRIGGER runs_correct_not_above_total_insert;
         DROP TRIGGER runs_correct_not_above_total_update;
         DROP TRIGGER attempts_topic_consistency_insert;
@@ -307,7 +313,7 @@ describe('база данных', () => {
         "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger'",
       ).get();
       expect(version.user_version).toBe(SCHEMA_VERSION);
-      expect(triggers?.n).toBe(4);
+      expect(triggers?.n).toBe(10);
     });
 
     it('обновляет ISO-умолчания реальной схемы версии 1 и сохраняет данные', () => {
@@ -361,6 +367,8 @@ describe('база данных', () => {
     it('откатывает миграцию версии 1 с противоречивым забегом', () => {
       const topicId = seedTopic(db);
       db.exec(`
+        DROP TABLE learning_tasks;
+        DROP TABLE learning_materials;
         DROP TRIGGER runs_correct_not_above_total_insert;
         DROP TRIGGER runs_correct_not_above_total_update;
         DROP TRIGGER attempts_topic_consistency_insert;
@@ -527,7 +535,7 @@ describe('база данных', () => {
         const triggers = migrated.prepare<[], { n: number }>(
           "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger'",
         ).get();
-        expect(triggers?.n).toBe(4);
+        expect(triggers?.n).toBe(10);
         migrated
           .prepare(
             `INSERT INTO task_bank (topic_id, question, answer, difficulty, fingerprint)
@@ -730,6 +738,53 @@ describe('база данных', () => {
       }
     });
 
+    it('мигрирует базу версии 11, сохраняя обычную историю и готового босса', () => {
+      const path = join(tempDir, 'версия-11.db');
+      const legacy = openDatabase(path);
+      const topicId = seedTopic(legacy);
+      writeProfile(legacy, { name: 'Тимофей', interests: ['шахматы'] });
+      const usedTask = seedTask(legacy, topicId);
+      legacy.prepare("UPDATE task_bank SET status = 'used' WHERE id = ?").run(usedTask);
+      const runId = Number(legacy.prepare(
+        `INSERT INTO runs (subject, kind, topic_id, started_at, total, correct)
+         VALUES ('math', 'run', ?, ?, 1, 1)`,
+      ).run(topicId, '2026-08-08T10:00:00.000Z').lastInsertRowid);
+      const attemptId = Number(legacy.prepare(
+        `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct)
+         VALUES (?, ?, ?, '4', 1)`,
+      ).run(usedTask, topicId, runId).lastInsertRowid);
+      legacy.prepare("INSERT INTO disputes (attempt_id, status) VALUES (?, 'upheld')").run(attemptId);
+
+      const bossTask = seedTask(legacy, topicId);
+      legacy.prepare("UPDATE task_bank SET status = 'boss_reserved' WHERE id = ?").run(bossTask);
+      const batchId = Number(legacy.prepare(
+        "INSERT INTO boss_batches (topic_id, status) VALUES (?, 'ready')",
+      ).run(topicId).lastInsertRowid);
+      legacy.prepare(
+        'INSERT INTO boss_tasks (batch_id, task_id, position) VALUES (?, ?, 1)',
+      ).run(batchId, bossTask);
+      legacy.pragma('user_version = 11');
+      legacy.close();
+
+      const migrated = openDatabase(path);
+      try {
+        expect(readProfile(migrated)).toMatchObject({ name: 'Тимофей', interests: ['шахматы'] });
+        expect(migrated.prepare('SELECT task_id, run_id FROM attempts').get())
+          .toEqual({ task_id: usedTask, run_id: runId });
+        expect(migrated.prepare('SELECT attempt_id, status FROM disputes').get())
+          .toEqual({ attempt_id: attemptId, status: 'upheld' });
+        expect(migrated.prepare('SELECT batch_id, task_id, position FROM boss_tasks').get())
+          .toEqual({ batch_id: batchId, task_id: bossTask, position: 1 });
+        expect(migrated.pragma('foreign_key_check')).toEqual([]);
+        expect(tableNames(migrated)).toEqual([...TABLES].sort());
+        expect(() => migrated.prepare(
+          "INSERT INTO runs (subject, kind, topic_id, started_at) VALUES ('math', 'lesson', ?, ?)",
+        ).run(topicId, '2026-08-09T10:00:00.000Z')).not.toThrow();
+      } finally {
+        migrated.close();
+      }
+    });
+
     it('атомарно откатывает DDL миграции 9→10 при отказе очистки очереди', () => {
       const path = join(tempDir, 'версия-9-откат.db');
       const legacy = openDatabase(path);
@@ -785,6 +840,12 @@ describe('база данных', () => {
       expect(() =>
         db
           .prepare('INSERT INTO runs (subject, kind, topic_id, started_at) VALUES (?, ?, ?, ?)')
+          .run('math', 'lesson', topicId, '2026-08-07T10:00:00.000Z'),
+      ).not.toThrow();
+
+      expect(() =>
+        db
+          .prepare('INSERT INTO runs (subject, kind, topic_id, started_at) VALUES (?, ?, ?, ?)')
           .run('math', 'boss', topicId, '2026-08-07T10:00:00.000Z'),
       ).not.toThrow();
 
@@ -798,6 +859,12 @@ describe('база данных', () => {
     it('резервирует задания босса только в допустимых состояниях', () => {
       const topicId = seedTopic(db);
 
+      expect(() =>
+        db.prepare(
+          `INSERT INTO task_bank (topic_id, question, answer, difficulty, status)
+           VALUES (?, ?, ?, ?, ?)`,
+        ).run(topicId, 'Урок', '4', 2, 'lesson_reserved'),
+      ).not.toThrow();
       expect(() =>
         db.prepare(
           `INSERT INTO task_bank (topic_id, question, answer, difficulty, status)
@@ -851,6 +918,84 @@ describe('база данных', () => {
         db.prepare('INSERT INTO boss_batches (topic_id, status) VALUES (?, ?)')
           .run(topicId, 'active'),
       ).not.toThrow();
+    });
+
+    it('ограничивает учебный материал допустимыми состояниями и одним живым экземпляром темы', () => {
+      const topicId = seedTopic(db);
+      const insert = db.prepare(
+        `INSERT INTO learning_materials
+           (subject, topic_id, status, recommendation_reason, mastery_before)
+         VALUES ('math', ?, ?, 'Нужно закрепить дроби', 0.35)`,
+      );
+      insert.run(topicId, 'preparing');
+
+      expect(() => insert.run(topicId, 'ready')).toThrow(/UNIQUE constraint failed/);
+      expect(() => insert.run(topicId, 'unknown')).toThrow(/CHECK constraint failed/);
+
+      db.prepare("UPDATE learning_materials SET status = 'rejected' WHERE topic_id = ?")
+        .run(topicId);
+      expect(() => insert.run(topicId, 'preparing')).not.toThrow();
+    });
+
+    it('требует пять упорядоченных заданий темы до публикации материала', () => {
+      const topicId = seedTopic(db);
+      const otherTopic = seedTopic(db, 'math.geometry');
+      const materialId = Number(db.prepare(
+        `INSERT INTO learning_materials
+           (subject, topic_id, recommendation_reason, mastery_before)
+         VALUES ('math', ?, 'Ошибки в дробях', 0.3)`,
+      ).run(topicId).lastInsertRowid);
+      const taskIds = Array.from({ length: 5 }, () => seedTask(db, topicId));
+      const foreignTask = seedTask(db, otherTopic);
+      db.prepare(
+        `UPDATE task_bank SET status = 'lesson_reserved'
+          WHERE id IN (${taskIds.map(() => '?').join(', ')}, ?)`,
+      ).run(...taskIds, foreignTask);
+
+      expect(() => db.prepare(
+        'INSERT INTO learning_tasks (material_id, task_id, position) VALUES (?, ?, 1)',
+      ).run(materialId, foreignTask)).toThrow(/learning task must match material topic/);
+      expect(() => db.prepare(
+        'INSERT INTO learning_tasks (material_id, task_id, position) VALUES (?, ?, 6)',
+      ).run(materialId, taskIds[0])).toThrow(/CHECK constraint failed/);
+
+      const link = db.prepare(
+        'INSERT INTO learning_tasks (material_id, task_id, position) VALUES (?, ?, ?)',
+      );
+      taskIds.slice(0, 4).forEach((taskId, index) => link.run(materialId, taskId, index + 1));
+      expect(() => db.prepare(
+        "UPDATE learning_materials SET status = 'ready' WHERE id = ?",
+      ).run(materialId)).toThrow(/five reserved tasks/);
+
+      link.run(materialId, taskIds[4], 5);
+      expect(() => db.prepare(
+        "UPDATE learning_materials SET status = 'ready' WHERE id = ?",
+      ).run(materialId)).not.toThrow();
+      expect(() => db.prepare(
+        'DELETE FROM learning_tasks WHERE material_id = ? AND position = 5',
+      ).run(materialId)).toThrow(/keep all tasks/);
+    });
+
+    it('связывает материал только с lesson-run той же темы и предмета', () => {
+      const topicId = seedTopic(db);
+      const run = db.prepare(
+        'INSERT INTO runs (subject, kind, topic_id, started_at) VALUES (?, ?, ?, ?)',
+      );
+      const ordinaryRunId = Number(run.run(
+        'math', 'run', topicId, '2026-08-09T10:00:00.000Z',
+      ).lastInsertRowid);
+      const lessonRunId = Number(run.run(
+        'math', 'lesson', topicId, '2026-08-09T10:01:00.000Z',
+      ).lastInsertRowid);
+      const insert = db.prepare(
+        `INSERT INTO learning_materials
+           (subject, topic_id, recommendation_reason, mastery_before, run_id)
+         VALUES ('math', ?, 'Закрепить тему', 0.4, ?)`,
+      );
+
+      expect(() => insert.run(topicId, ordinaryRunId)).toThrow(/matching lesson run/);
+      expect(() => insert.run(topicId, lessonRunId)).not.toThrow();
+      expect(() => insert.run(topicId, 9999)).toThrow(/matching lesson run|FOREIGN KEY/);
     });
 
     it('не оставляет открытое соединение, если миграция упала', () => {

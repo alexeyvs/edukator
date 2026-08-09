@@ -62,6 +62,9 @@ npm run prefetch                  # ручной прогрев/экспорт �
   `server/boss-prep.ts` — claim, генерация вне транзакции и атомарный резерв
   полного набора. Порог доступности строгий (`mastery > BOSS_MASTERY`), победа
   требует ровно `BOSS_TARGET` верных ответов.
+- `server/learning.ts` — атомарный жизненный цикл персонального материала:
+  claim/recovery, публикация полного теста, открытие, единственный lesson-run,
+  завершение и retirement с возвратом неоткрытых заданий в обычный банк.
 - `server/parents.ts` одним чтением строит read-only семидневную сводку:
   прогнозы, активное время из `attempts.duration_ms`, пробелы, ленту и флаги.
   Округлять миллисекунды можно только в read model; дневные значения и итог
@@ -123,9 +126,10 @@ npm run prefetch                  # ручной прогрев/экспорт �
   файл, `fsync`, `rename`. Такой файл пишется только через `writeFileAtomic` —
   оборванная запись оставила бы вместо снимка битый JSON. Уборка в `catch`
   обёрнута своими `try`: отказ закрытия не имеет права заслонить причину.
-- Схема версии 11 содержит девять таблиц: `profile`, `topic_state`, `task_bank`,
+- Схема версии 12 содержит одиннадцать таблиц: `profile`, `topic_state`, `task_bank`,
   `runs`, `attempts`, `disputes`, `forecast_snapshots`, `boss_batches` и
-  `boss_tasks`. `topic_state.closed_at` закрывает тему постоянно;
+  `boss_tasks`, `learning_materials`, `learning_tasks`. `topic_state.closed_at`
+  закрывает тему постоянно;
   `task_bank.status = 'boss_reserved'` не виден обычной выдаче, а порядок боя
   задаётся только `boss_tasks.position`, не `task_bank.id` и не временем.
 

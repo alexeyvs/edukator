@@ -21,7 +21,7 @@ import { moscowDayBounds } from './moscow-time.js';
 /** Число ответов, после которого забег готов к финальному экрану. */
 export const RUN_TARGET = 12;
 
-export type RunKind = 'run' | 'triage' | 'boss';
+export type RunKind = 'run' | 'triage' | 'boss' | 'lesson';
 
 export interface RunProgress {
   total: number;
@@ -32,7 +32,7 @@ export interface RunProgress {
 
 export interface StartRunOptions {
   now?: Date;
-  kind?: Exclude<RunKind, 'boss'>;
+  kind?: Exclude<RunKind, 'boss' | 'lesson'>;
   /** Тема конкретной карточки плана; для триажа тему выбирает его собственная политика. */
   topicId?: string;
 }
@@ -152,7 +152,7 @@ export function startRun(
     ).run(start);
 
     const active = db
-      .prepare<[Subject, Exclude<RunKind, 'boss'>, string, string], { id: number }>(
+      .prepare<[Subject, Exclude<RunKind, 'boss' | 'lesson'>, string, string], { id: number }>(
         `SELECT id FROM runs
           WHERE subject = ? AND kind = ? AND finished_at IS NULL
             AND EXISTS (

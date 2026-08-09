@@ -9,7 +9,7 @@ const projectRoot = resolve(here, '..');
  * Версия схемы. Хранится в `PRAGMA user_version`; миграция сравнивает её со
  * своей и пропускает работу, если база уже актуальна.
  */
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 
 /** Таблицы приложения. Тесты сверяют состав базы именно с этим списком. */
 export const TABLES = [
@@ -22,6 +22,8 @@ export const TABLES = [
   'forecast_snapshots',
   'boss_batches',
   'boss_tasks',
+  'learning_materials',
+  'learning_tasks',
 ] as const;
 
 /** Предметы подготовки. Ограничение уровня схемы, чтобы опечатка не дошла до отчётов. */
@@ -109,7 +111,7 @@ const SCHEMA = `
     joke       TEXT,
     difficulty INTEGER NOT NULL CHECK (difficulty BETWEEN 1 AND 3),
     status     TEXT    NOT NULL DEFAULT 'pending'
-                       CHECK (status IN ('pending', 'valid', 'rejected', 'used', 'boss_reserved')),
+                       CHECK (status IN ('pending', 'valid', 'rejected', 'used', 'boss_reserved', 'lesson_reserved')),
     -- Отпечаток формулировки (questionFingerprint): по нему банк отсекает
     -- повторы внутри темы.
     fingerprint TEXT   NOT NULL DEFAULT '',
@@ -128,7 +130,7 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY,
     subject     TEXT    NOT NULL CHECK (subject IN (${subjectCheck})),
-    kind        TEXT    NOT NULL DEFAULT 'run' CHECK (kind IN ('run', 'triage', 'boss')),
+    kind        TEXT    NOT NULL DEFAULT 'run' CHECK (kind IN ('run', 'triage', 'boss', 'lesson')),
     -- Тема, ради которой забег начат. Внутри забега задания могут относиться к
     -- другим темам предмета; это поле читают планировочные эвристики
     -- activeRunTopics, topicsUsedToday и lastRunSubject.
@@ -225,6 +227,111 @@ const SCHEMA = `
     PRIMARY KEY (batch_id, position),
     UNIQUE (task_id)
   );
+
+  CREATE TABLE IF NOT EXISTS learning_materials (
+    id                    INTEGER PRIMARY KEY,
+    subject               TEXT    NOT NULL CHECK (subject IN (${subjectCheck})),
+    topic_id              TEXT    NOT NULL REFERENCES topic_state (topic_id) ON DELETE CASCADE,
+    status                TEXT    NOT NULL DEFAULT 'preparing'
+                                CHECK (status IN ('preparing', 'ready', 'active', 'passed', 'failed', 'rejected', 'retired')),
+    content               TEXT,
+    recommendation_reason TEXT    NOT NULL,
+    estimated_minutes     INTEGER NOT NULL DEFAULT 12 CHECK (estimated_minutes BETWEEN 10 AND 15),
+    run_id                INTEGER UNIQUE REFERENCES runs (id) ON DELETE SET NULL,
+    mastery_before        REAL    NOT NULL CHECK (mastery_before BETWEEN 0 AND 1),
+    created_at            TEXT    NOT NULL DEFAULT (${NOW_ISO}),
+    updated_at            TEXT    NOT NULL DEFAULT (${NOW_ISO}),
+    opened_at             TEXT,
+    finished_at           TEXT
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS learning_materials_live_topic
+    ON learning_materials (topic_id)
+    WHERE status IN ('preparing', 'ready', 'active');
+
+  CREATE TABLE IF NOT EXISTS learning_tasks (
+    material_id INTEGER NOT NULL REFERENCES learning_materials (id) ON DELETE CASCADE,
+    task_id     INTEGER NOT NULL REFERENCES task_bank (id) ON DELETE CASCADE,
+    position    INTEGER NOT NULL CHECK (position BETWEEN 1 AND 5),
+    PRIMARY KEY (material_id, position),
+    UNIQUE (task_id)
+  );
+
+  CREATE TRIGGER IF NOT EXISTS learning_tasks_consistency_insert
+  BEFORE INSERT ON learning_tasks
+  WHEN (SELECT topic_id FROM task_bank WHERE id = NEW.task_id) <>
+       (SELECT topic_id FROM learning_materials WHERE id = NEW.material_id)
+  BEGIN
+    SELECT RAISE(ABORT, 'learning task must match material topic');
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS learning_tasks_consistency_update
+  BEFORE UPDATE OF material_id, task_id ON learning_tasks
+  WHEN (SELECT topic_id FROM task_bank WHERE id = NEW.task_id) <>
+       (SELECT topic_id FROM learning_materials WHERE id = NEW.material_id)
+  BEGIN
+    SELECT RAISE(ABORT, 'learning task must match material topic');
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS learning_material_run_consistency_insert
+  BEFORE INSERT ON learning_materials
+  WHEN NEW.run_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM runs
+     WHERE id = NEW.run_id AND kind = 'lesson'
+       AND topic_id = NEW.topic_id AND subject = NEW.subject
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'learning material must reference matching lesson run');
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS learning_material_run_consistency_update
+  BEFORE UPDATE OF run_id, topic_id, subject ON learning_materials
+  WHEN NEW.run_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM runs
+     WHERE id = NEW.run_id AND kind = 'lesson'
+       AND topic_id = NEW.topic_id AND subject = NEW.subject
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'learning material must reference matching lesson run');
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS learning_material_ready_complete
+  BEFORE UPDATE OF status ON learning_materials
+  WHEN NEW.status = 'ready' AND (
+    SELECT COUNT(*) FROM learning_tasks
+     JOIN task_bank ON task_bank.id = learning_tasks.task_id
+    WHERE learning_tasks.material_id = NEW.id
+      AND task_bank.topic_id = NEW.topic_id
+      AND task_bank.status = 'lesson_reserved'
+  ) <> 5
+  BEGIN
+    SELECT RAISE(ABORT, 'ready learning material must contain five reserved tasks');
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS learning_tasks_complete_delete
+  BEFORE DELETE ON learning_tasks
+  WHEN EXISTS (
+    SELECT 1 FROM learning_materials
+     WHERE id = OLD.material_id AND status IN ('ready', 'active')
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'live learning material must keep all tasks');
+  END;
+`;
+
+// Старые ступени миграции несколько раз вызывают общий SCHEMA между
+// перестройками runs/task_bank. Учебный слой зависит от обеих таблиц и до
+// завершения этих ступеней существовать не должен: SQLite переписал бы его
+// внешние ключи и триггеры на временные имена.
+const DROP_LEARNING_SCHEMA = `
+  DROP TRIGGER IF EXISTS learning_tasks_complete_delete;
+  DROP TRIGGER IF EXISTS learning_material_ready_complete;
+  DROP TRIGGER IF EXISTS learning_material_run_consistency_update;
+  DROP TRIGGER IF EXISTS learning_material_run_consistency_insert;
+  DROP TRIGGER IF EXISTS learning_tasks_consistency_update;
+  DROP TRIGGER IF EXISTS learning_tasks_consistency_insert;
+  DROP TABLE IF EXISTS learning_tasks;
+  DROP TABLE IF EXISTS learning_materials;
 `;
 
 /**
@@ -294,6 +401,8 @@ export function migrate(db: Database.Database): void {
       return;
     }
 
+    if (version <= 10) db.exec(DROP_LEARNING_SCHEMA);
+
     // Колонка отпечатка добавляется раньше любых `db.exec(SCHEMA)` ниже: SCHEMA
     // строит по ней уникальный индекс, а существующую с версии 1 таблицу
     // `CREATE TABLE IF NOT EXISTS` не обновляет — индекс упал бы на нет колонки.
@@ -323,6 +432,7 @@ export function migrate(db: Database.Database): void {
         throw new Error('База содержит противоречивые забеги или попытки; исправьте данные перед миграцией');
       }
       db.exec(SCHEMA);
+      db.exec(DROP_LEARNING_SCHEMA);
     }
 
     if (version <= 2) {
@@ -366,6 +476,7 @@ export function migrate(db: Database.Database): void {
         ALTER TABLE task_bank RENAME TO task_bank_v3;
       `);
       db.exec(SCHEMA);
+      db.exec(DROP_LEARNING_SCHEMA);
       db.exec(`
         INSERT INTO task_bank
           (id, topic_id, question, answer, accept, hint, explain, joke, difficulty, status, created_at)
@@ -563,6 +674,80 @@ export function migrate(db: Database.Database): void {
       }
     }
 
+    if (version === 11) {
+      // Оба расширенных CHECK нельзя изменить через ALTER TABLE. Все таблицы,
+      // которые прямо или косвенно ссылаются на runs/task_bank, переносятся
+      // вместе: так история боёв, попыток и споров переживает обновление без
+      // временно висячих внешних ключей.
+      db.exec(`
+        DROP TRIGGER IF EXISTS learning_tasks_complete_delete;
+        DROP TRIGGER IF EXISTS learning_material_ready_complete;
+        DROP TRIGGER IF EXISTS learning_material_run_consistency_update;
+        DROP TRIGGER IF EXISTS learning_material_run_consistency_insert;
+        DROP TRIGGER IF EXISTS learning_tasks_consistency_update;
+        DROP TRIGGER IF EXISTS learning_tasks_consistency_insert;
+        DROP TABLE IF EXISTS learning_tasks;
+        DROP TABLE IF EXISTS learning_materials;
+
+        DROP TRIGGER IF EXISTS attempts_topic_consistency_insert;
+        DROP TRIGGER IF EXISTS attempts_topic_consistency_update;
+        DROP TRIGGER IF EXISTS runs_correct_not_above_total_insert;
+        DROP TRIGGER IF EXISTS runs_correct_not_above_total_update;
+        DROP INDEX IF EXISTS attempts_by_topic;
+        DROP INDEX IF EXISTS task_bank_queue;
+        DROP INDEX IF EXISTS task_bank_fingerprint;
+        DROP INDEX IF EXISTS boss_batches_live_topic;
+
+        ALTER TABLE boss_tasks RENAME TO boss_tasks_v11;
+        ALTER TABLE boss_batches RENAME TO boss_batches_v11;
+        ALTER TABLE disputes RENAME TO disputes_v11;
+        ALTER TABLE attempts RENAME TO attempts_v11;
+        ALTER TABLE task_bank RENAME TO task_bank_v11;
+        ALTER TABLE runs RENAME TO runs_v11;
+      `);
+      db.exec(SCHEMA);
+      db.exec(`
+        INSERT INTO runs
+          (id, subject, kind, topic_id, started_at, finished_at, summary, total, correct)
+          SELECT id, subject, kind, topic_id, started_at, finished_at, summary, total, correct
+          FROM runs_v11;
+        INSERT INTO task_bank
+          (id, topic_id, question, instruction, material, material_format, choices,
+           answer, accept, hint, explain, joke, difficulty, status, fingerprint,
+           issued_run_id, created_at)
+          SELECT id, topic_id, question, instruction, material, material_format, choices,
+                 answer, accept, hint, explain, joke, difficulty, status, fingerprint,
+                 issued_run_id, created_at
+          FROM task_bank_v11;
+        INSERT INTO attempts
+          (id, task_id, topic_id, run_id, answer, is_correct, hint_used, duration_ms, created_at)
+          SELECT id, task_id, topic_id, run_id, answer, is_correct, hint_used, duration_ms, created_at
+          FROM attempts_v11;
+        INSERT INTO disputes
+          (id, attempt_id, status, resolution, created_at, resolved_at)
+          SELECT id, attempt_id, status, resolution, created_at, resolved_at
+          FROM disputes_v11;
+        INSERT INTO boss_batches
+          (id, topic_id, run_id, status, created_at, activated_at, finished_at)
+          SELECT id, topic_id, run_id, status, created_at, activated_at, finished_at
+          FROM boss_batches_v11;
+        INSERT INTO boss_tasks (batch_id, task_id, position)
+          SELECT batch_id, task_id, position FROM boss_tasks_v11;
+
+        DROP TABLE boss_tasks_v11;
+        DROP TABLE disputes_v11;
+        DROP TABLE attempts_v11;
+        DROP TABLE boss_batches_v11;
+        DROP TABLE task_bank_v11;
+        DROP TABLE runs_v11;
+      `);
+
+      const [foreignKeyProblem] = db.pragma('foreign_key_check') as unknown[];
+      if (foreignKeyProblem !== undefined) {
+        throw new Error('Миграция учебных материалов нарушила целостность внешних ключей');
+      }
+    }
+
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   }).immediate();
 }
@@ -577,6 +762,8 @@ const REQUIRED_COLUMNS: Readonly<Record<(typeof TABLES)[number], readonly string
   forecast_snapshots: ['id', 'subject', 'score', 'band', 'created_at'],
   boss_batches: ['id', 'topic_id', 'run_id', 'status', 'created_at', 'activated_at', 'finished_at'],
   boss_tasks: ['batch_id', 'task_id', 'position'],
+  learning_materials: ['id', 'subject', 'topic_id', 'status', 'content', 'recommendation_reason', 'estimated_minutes', 'run_id', 'mastery_before', 'created_at', 'updated_at', 'opened_at', 'finished_at'],
+  learning_tasks: ['material_id', 'task_id', 'position'],
 };
 
 const REQUIRED_AUXILIARY_OBJECTS = [
@@ -589,13 +776,22 @@ const REQUIRED_AUXILIARY_OBJECTS = [
   'attempts_topic_consistency_insert',
   'attempts_topic_consistency_update',
   'boss_batches_live_topic',
+  'learning_materials_live_topic',
+  'learning_tasks_consistency_insert',
+  'learning_tasks_consistency_update',
+  'learning_material_run_consistency_insert',
+  'learning_material_run_consistency_update',
+  'learning_material_ready_complete',
+  'learning_tasks_complete_delete',
 ] as const;
 
 const REQUIRED_SCHEMA_FRAGMENTS = {
-  runs: ["'run', 'triage', 'boss'"],
-  task_bank: ["'pending', 'valid', 'rejected', 'used', 'boss_reserved'"],
+  runs: ["'run', 'triage', 'boss', 'lesson'"],
+  task_bank: ["'pending', 'valid', 'rejected', 'used', 'boss_reserved', 'lesson_reserved'"],
   boss_batches: ["'preparing', 'ready', 'active', 'won', 'lost', 'failed'"],
   boss_tasks: ['position BETWEEN 1 AND 5', 'UNIQUE (task_id)'],
+  learning_materials: ["'preparing', 'ready', 'active', 'passed', 'failed', 'rejected', 'retired'", 'estimated_minutes BETWEEN 10 AND 15', 'UNIQUE'],
+  learning_tasks: ['position BETWEEN 1 AND 5', 'UNIQUE (task_id)'],
 } as const;
 
 /** Не даёт базе с актуальным номером версии скрыть удалённую или чужую схему. */
