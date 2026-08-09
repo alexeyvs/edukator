@@ -256,8 +256,11 @@ export function registerSessionRoutes(
           });
       }
 
+      const includeHint = runId === undefined || db.prepare<[number], { kind: string }>(
+        'SELECT kind FROM runs WHERE id = ?',
+      ).get(runId)?.kind !== 'lesson';
       return reply.send({
-        task: issuedTaskJson(result.task),
+        task: issuedTaskJson(result.task, includeHint),
         ...(runId === undefined ? {} : { progress: runProgress(db, runId) }),
       });
     } catch (error) {

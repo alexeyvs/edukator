@@ -387,6 +387,26 @@ export function bossTaskAtPosition(db: Database, batchId: number, position: numb
   return result.task;
 }
 
+/** Читает ровно одну позицию опубликованного теста, не раскрывая соседние задания. */
+export function learningTaskAtPosition(
+  db: Database,
+  materialId: number,
+  position: number,
+): BankTask | null {
+  if (!Number.isInteger(position) || position < 1 || position > 5) {
+    throw new Error(`Банк заданий: позиция материала должна быть от 1 до 5, получено ${position}`);
+  }
+  const row = db.prepare<[number, number], TaskRow>(
+    `SELECT ${TASK_COLUMNS.replaceAll(/\bid\b/gu, 'task_bank.id')}
+       FROM learning_tasks
+       JOIN task_bank ON task_bank.id = learning_tasks.task_id
+      WHERE learning_tasks.material_id = ? AND learning_tasks.position = ?
+        AND task_bank.status = 'lesson_reserved'
+        AND NOT EXISTS (SELECT 1 FROM attempts WHERE attempts.task_id = task_bank.id)`,
+  ).get(materialId, position);
+  return row === undefined ? null : toBankTask(row);
+}
+
 /**
  * Выдаёт непросмотренное задание темы и тем же оператором помечает его
  * выданным: выбор и пометка врозь дали бы двум забегам одно задание. Пустая

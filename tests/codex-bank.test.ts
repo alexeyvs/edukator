@@ -8,8 +8,10 @@ import {
   bossTaskAtPosition,
   countAvailable,
   issuedTask,
+  learningTaskAtPosition,
   recentQuestions,
   reserveBossTasks,
+  reserveLearningTasks,
   storeTasks,
   takeTask,
 } from '../server/codex/bank.js';
@@ -41,6 +43,14 @@ function preparingBatch(db: Database): number {
   return db.prepare<[string], { id: number }>(
     "INSERT INTO boss_batches (topic_id, status) VALUES (?, 'preparing') RETURNING id",
   ).get(TOPIC)?.id ?? 0;
+}
+
+function preparingMaterial(db: Database): number {
+  return Number(db.prepare(
+    `INSERT INTO learning_materials
+       (subject, topic_id, recommendation_reason, mastery_before)
+     VALUES ('math', ?, 'Слабая тема', 0.2)`,
+  ).run(TOPIC).lastInsertRowid);
 }
 
 describe('банк заданий', () => {
@@ -351,6 +361,28 @@ describe('банк заданий', () => {
       expect(db.prepare('SELECT COUNT(*) AS n FROM boss_tasks WHERE batch_id = ?').get(batchId))
         .toEqual({ n: 0 });
       expect(db.prepare('SELECT COUNT(*) AS n FROM task_bank').get()).toEqual({ n: 0 });
+    });
+  });
+
+  describe('резерв материала', () => {
+    it('читает тест строго по позиции и не повторяет отвеченное', () => {
+      const materialId = preparingMaterial(db);
+      const { stored, ready } = reserveLearningTasks(
+        db,
+        materialId,
+        { introduction: 'Теория' },
+        batch(5),
+      );
+      expect(ready).toBe(true);
+      expect(learningTaskAtPosition(db, materialId, 2)?.id).toBe(stored[1]?.id);
+
+      db.prepare(
+        `INSERT INTO attempts (task_id, topic_id, answer, is_correct)
+         VALUES (?, ?, '4', 1)`,
+      ).run(stored[1]?.id, TOPIC);
+      expect(learningTaskAtPosition(db, materialId, 2)).toBeNull();
+      expect(() => learningTaskAtPosition(db, materialId, 0)).toThrow(/от 1 до 5/u);
+      expect(() => learningTaskAtPosition(db, materialId, 6)).toThrow(/от 1 до 5/u);
     });
   });
 

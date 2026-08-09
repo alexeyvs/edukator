@@ -1,6 +1,9 @@
 /** Атомарный жизненный цикл персонального учебного материала и его теста. */
 import type { Database } from 'better-sqlite3';
+import type { TopicGraph } from './curriculum.js';
 import type { Subject } from './db.js';
+import { parseLearningMaterial, type LearningMaterialContent } from './codex/learning-material-schema.js';
+import { finishRun, runProgress, type FinishRunResult, type RunProgress } from './run.js';
 
 export const LEARNING_TASK_COUNT = 5;
 export const LEARNING_PASS_SCORE = 4;
@@ -41,6 +44,26 @@ interface MaterialRow {
   updated_at: string;
 }
 
+interface PublicMaterialRow extends MaterialRow {
+  content: string | null;
+  recommendation_reason: string;
+  estimated_minutes: number;
+}
+
+export interface LearningMaterialCard {
+  id: number;
+  subject: Subject;
+  topicId: string;
+  recommendationReason: string;
+  estimatedMinutes: number;
+  status: 'ready' | 'active';
+}
+
+export interface LearningMaterialView extends LearningMaterialCard {
+  content: LearningMaterialContent;
+  progress: RunProgress;
+}
+
 export interface ClaimLearningMaterialOptions {
   subject: Subject;
   topicId: string;
@@ -72,6 +95,74 @@ function materialRow(db: Database, materialId: number): MaterialRow {
     throw new LearningError('learning-not-found', `Учебный материал ${materialId} не найден`);
   }
   return row;
+}
+
+/** Карточки главного экрана: claim и закрытая история наружу не попадают. */
+export function learningMaterialCards(db: Database): LearningMaterialCard[] {
+  return db.prepare<[], PublicMaterialRow>(
+    `SELECT id, subject, topic_id, status, run_id, mastery_before,
+            content, recommendation_reason, estimated_minutes, created_at, updated_at
+       FROM learning_materials
+      WHERE status IN ('ready', 'active')
+      ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, created_at, id`,
+  ).all().map((row) => ({
+    id: row.id,
+    subject: row.subject,
+    topicId: row.topic_id,
+    recommendationReason: row.recommendation_reason,
+    estimatedMinutes: row.estimated_minutes,
+    status: row.status as 'ready' | 'active',
+  }));
+}
+
+/** Безопасно разбирает только опубликованное содержимое и текущий прогресс. */
+export function readLearningMaterial(db: Database, materialId: number): LearningMaterialView {
+  const row = db.prepare<[number], PublicMaterialRow>(
+    `SELECT id, subject, topic_id, status, run_id, mastery_before,
+            content, recommendation_reason, estimated_minutes, created_at, updated_at
+       FROM learning_materials WHERE id = ?`,
+  ).get(materialId);
+  if (row === undefined) {
+    throw new LearningError('learning-not-found', `Учебный материал ${materialId} не найден`);
+  }
+  if (row.status !== 'ready' && row.status !== 'active') {
+    throw new LearningError(
+      row.status === 'passed' || row.status === 'failed'
+        ? 'learning-finished'
+        : 'learning-not-ready',
+      `Учебный материал ${materialId} нельзя читать в состоянии ${row.status}`,
+    );
+  }
+  if (row.content === null) {
+    throw new LearningError('learning-inconsistent', `Учебный материал ${materialId} не содержит теорию`);
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(row.content);
+  } catch {
+    throw new LearningError('learning-inconsistent', `Учебный материал ${materialId} хранит повреждённый JSON`);
+  }
+  let content: LearningMaterialContent;
+  try {
+    content = parseLearningMaterial(raw);
+  } catch (error) {
+    throw new LearningError(
+      'learning-inconsistent',
+      `Учебный материал ${materialId} небезопасен: ${(error as Error).message}`,
+    );
+  }
+  return {
+    id: row.id,
+    subject: row.subject,
+    topicId: row.topic_id,
+    recommendationReason: row.recommendation_reason,
+    estimatedMinutes: row.estimated_minutes,
+    status: row.status,
+    content,
+    progress: row.run_id === null
+      ? { total: 0, correct: 0, target: LEARNING_TASK_COUNT, done: false }
+      : runProgress(db, row.run_id),
+  };
 }
 
 /**
@@ -319,11 +410,8 @@ export function startLearningRun(
   }).immediate();
 }
 
-export interface FinishLearningMaterialResult {
+export interface FinishLearningMaterialResult extends FinishRunResult {
   materialId: number;
-  runId: number;
-  total: number;
-  correct: number;
   outcome: 'passed' | 'failed';
   masteryBefore: number;
   masteryAfter: number;
@@ -332,13 +420,16 @@ export interface FinishLearningMaterialResult {
 /** Закрывает единственный тест по сохранённым попыткам; повтор возвращает тот же итог. */
 export function finishLearningMaterial(
   db: Database,
+  graph: TopicGraph,
   runId: number,
   options: { now?: Date } = {},
 ): FinishLearningMaterialResult {
-  const nowIso = timestamp(options.now ?? new Date(), 'завершения');
+  const now = options.now ?? new Date();
+  const nowIso = timestamp(now, 'завершения');
   return db.transaction((): FinishLearningMaterialResult => {
     const joined = db.prepare<[number], MaterialRow & {
       finished_at: string | null;
+      summary: string | null;
       total: number;
       correct: number;
       run_kind: string;
@@ -347,7 +438,7 @@ export function finishLearningMaterial(
               learning_materials.topic_id, learning_materials.status,
               learning_materials.run_id, learning_materials.mastery_before,
               learning_materials.created_at, learning_materials.updated_at,
-              runs.finished_at, runs.total, runs.correct, runs.kind AS run_kind
+              runs.finished_at, runs.summary, runs.total, runs.correct, runs.kind AS run_kind
          FROM learning_materials JOIN runs ON runs.id = learning_materials.run_id
         WHERE runs.id = ?`,
     ).get(runId);
@@ -364,15 +455,10 @@ export function finishLearningMaterial(
       throw new LearningError('learning-inconsistent', `Тема материала ${joined.id} исчезла`);
     }
     if (joined.status === 'passed' || joined.status === 'failed') {
-      return {
-        materialId: joined.id,
-        runId,
-        total: joined.total,
-        correct: joined.correct,
-        outcome: joined.status,
-        masteryBefore: joined.mastery_before,
-        masteryAfter,
-      };
+      if (joined.summary === null) {
+        throw new LearningError('learning-inconsistent', `Lesson-run ${runId} не хранит итог`);
+      }
+      return JSON.parse(joined.summary) as FinishLearningMaterialResult;
     }
     if (joined.status !== 'active') {
       throw new LearningError('learning-not-ready', `Материал ${joined.id} не проходит тест`);
@@ -393,36 +479,32 @@ export function finishLearningMaterial(
     }
 
     const outcome = joined.correct >= LEARNING_PASS_SCORE ? 'passed' : 'failed';
-    const summary = JSON.stringify({
-      kind: 'lesson', total: joined.total, correct: joined.correct, outcome,
-      masteryBefore: joined.mastery_before, masteryAfter,
-    });
-    const runChanged = db.prepare(
-      `UPDATE runs SET finished_at = ?, summary = ?
-        WHERE id = ? AND kind = 'lesson' AND finished_at IS NULL`,
-    ).run(nowIso, summary, runId);
+    const runResult = finishRun(db, graph, runId, { now, allowLesson: true });
+    if (runResult.total !== LEARNING_TASK_COUNT || runResult.correct !== joined.correct) {
+      throw new LearningError('learning-inconsistent', `Счётчики lesson-run ${runId} расходятся с попытками`);
+    }
+    const result: FinishLearningMaterialResult = {
+      ...runResult,
+      materialId: joined.id,
+      outcome,
+      masteryBefore: joined.mastery_before,
+      masteryAfter,
+    };
     const materialChanged = db.prepare(
       `UPDATE learning_materials
           SET status = ?, finished_at = ?, updated_at = ?
         WHERE id = ? AND status = 'active'`,
     ).run(outcome, nowIso, nowIso, joined.id);
-    if (runChanged.changes !== 1 || materialChanged.changes !== 1) {
+    if (materialChanged.changes !== 1) {
       throw new LearningError('learning-inconsistent', `Lesson-run ${runId} изменился во время завершения`);
     }
+    db.prepare('UPDATE runs SET summary = ? WHERE id = ?').run(JSON.stringify(result), runId);
     db.prepare(
       `UPDATE task_bank SET status = 'used'
         WHERE status = 'lesson_reserved'
           AND id IN (SELECT task_id FROM learning_tasks WHERE material_id = ?)`,
     ).run(joined.id);
-    return {
-      materialId: joined.id,
-      runId,
-      total: joined.total,
-      correct: joined.correct,
-      outcome,
-      masteryBefore: joined.mastery_before,
-      masteryAfter,
-    };
+    return result;
   }).immediate();
 }
 

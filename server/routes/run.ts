@@ -13,6 +13,7 @@ import { planFromDatabase } from '../scheduler.js';
 import { SessionError } from '../session-error.js';
 import { readStreak } from '../streak.js';
 import { bossTopicState } from '../boss.js';
+import { learningMaterialCards } from '../learning.js';
 
 /** День состоит из 2–3 забегов; главный экран показывает верхние три. */
 export const DAILY_RUNS = 3;
@@ -107,7 +108,22 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
       readiness: bossTopicState(db, topic.id),
     }));
 
-    return reply.send({ plan, forecasts, triage, streak: readStreak(db, at), topics });
+    const learning = learningMaterialCards(db).map((material) => {
+      const topic = graph.byId.get(material.topicId);
+      if (topic === undefined || topic.subject !== material.subject) {
+        throw new Error(`План: тема материала «${material.topicId}» не согласована с предметом`);
+      }
+      return {
+        id: material.id,
+        subject: material.subject,
+        topic: { id: topic.id, title: topic.title },
+        recommendationReason: material.recommendationReason,
+        estimatedMinutes: material.estimatedMinutes,
+        status: material.status,
+      };
+    });
+
+    return reply.send({ plan, learning, forecasts, triage, streak: readStreak(db, at), topics });
   });
 
   app.post('/api/run/start', (request, reply) => {

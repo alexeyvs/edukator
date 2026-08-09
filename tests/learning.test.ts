@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import { openDatabase } from '../server/db.js';
+import { buildTopicGraph } from '../server/curriculum.js';
 import {
   claimLearningMaterial,
   finishLearningMaterial,
@@ -17,6 +18,10 @@ import {
 
 const TOPIC = 'math.fractions';
 const START = new Date('2026-08-09T10:00:00.000Z');
+const GRAPH = buildTopicGraph([{
+  id: TOPIC, subject: 'math', title: 'Дроби', examWeight: 3, difficulty: 2,
+  prereqs: [], answerFormat: 'number', promptSeed: 'Действия с дробями',
+}]);
 
 function seedTopic(db: Database, mastery = 0.3): void {
   db.prepare('INSERT INTO topic_state (topic_id, mastery) VALUES (?, ?)').run(TOPIC, mastery);
@@ -171,11 +176,12 @@ describe('слой данных учебных материалов', () => {
     db.prepare('UPDATE runs SET total = 5, correct = ? WHERE id = ?').run(correct, runId);
     db.prepare('UPDATE topic_state SET mastery = 0.46 WHERE topic_id = ?').run(TOPIC);
 
-    const result = finishLearningMaterial(db, runId, { now: START });
-    expect(result).toEqual({
+    const result = finishLearningMaterial(db, GRAPH, runId, { now: START });
+    expect(result).toMatchObject({
       materialId, runId, total: 5, correct, outcome, masteryBefore: 0.3, masteryAfter: 0.46,
     });
-    expect(finishLearningMaterial(db, runId, { now: new Date(START.getTime() + 5000) }))
+    expect(result).toMatchObject({ xp: correct * 25, forecast: { subject: 'math' } });
+    expect(finishLearningMaterial(db, GRAPH, runId, { now: new Date(START.getTime() + 5000) }))
       .toEqual(result);
     expect(db.prepare('SELECT status, finished_at FROM learning_materials WHERE id = ?').get(materialId))
       .toEqual({ status: outcome, finished_at: START.toISOString() });
@@ -186,7 +192,7 @@ describe('слой данных учебных материалов', () => {
   it('не завершает неполный тест или тест с открытым спором', () => {
     const { taskIds, runId } = activeRun(db);
     db.prepare('UPDATE runs SET total = 4, correct = 4 WHERE id = ?').run(runId);
-    expect(() => finishLearningMaterial(db, runId, { now: START }))
+    expect(() => finishLearningMaterial(db, GRAPH, runId, { now: START }))
       .toThrow(/4 из 5 ответов/);
 
     db.prepare('UPDATE runs SET total = 5, correct = 4 WHERE id = ?').run(runId);
@@ -195,7 +201,7 @@ describe('слой данных учебных материалов', () => {
        VALUES (?, ?, ?, '4', 1)`,
     ).run(taskIds[0], TOPIC, runId).lastInsertRowid);
     db.prepare("INSERT INTO disputes (attempt_id, status) VALUES (?, 'open')").run(attemptId);
-    expect(() => finishLearningMaterial(db, runId, { now: START }))
+    expect(() => finishLearningMaterial(db, GRAPH, runId, { now: START }))
       .toThrow(/открытым спором/);
     expect(db.prepare('SELECT finished_at FROM runs WHERE id = ?').get(runId))
       .toEqual({ finished_at: null });

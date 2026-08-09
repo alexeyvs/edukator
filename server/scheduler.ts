@@ -338,7 +338,8 @@ export function planRuns(
 export function lastRunSubject(db: Database): Subject | null {
   const row = db
     .prepare<[], { subject: Subject }>(
-      'SELECT subject FROM runs ORDER BY started_at DESC, id DESC LIMIT 1',
+      `SELECT subject FROM runs WHERE kind <> 'lesson'
+       ORDER BY started_at DESC, id DESC LIMIT 1`,
     )
     .get();
   return row?.subject ?? null;
@@ -356,7 +357,7 @@ export function runsAssignedToday(db: Database, now: Date = new Date()): Map<Sub
   const rows = db
     .prepare<[string, string], { subject: Subject; runs: number }>(
       `SELECT subject, COUNT(*) AS runs FROM runs
-       WHERE started_at >= ? AND started_at < ? GROUP BY subject`,
+       WHERE kind <> 'lesson' AND started_at >= ? AND started_at < ? GROUP BY subject`,
     )
     .all(start, next);
 
@@ -368,7 +369,8 @@ export function topicsUsedToday(db: Database, now: Date = new Date()): Set<strin
   const [start, next] = moscowDayBounds(now);
   const rows = db
     .prepare<[string, string], { topic_id: string }>(
-      'SELECT DISTINCT topic_id FROM runs WHERE started_at >= ? AND started_at < ?',
+      `SELECT DISTINCT topic_id FROM runs
+       WHERE kind <> 'lesson' AND started_at >= ? AND started_at < ?`,
     )
     .all(start, next);
   return new Set(rows.map((row) => row.topic_id));

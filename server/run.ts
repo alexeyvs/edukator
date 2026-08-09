@@ -45,6 +45,8 @@ export interface StartRunResult {
 
 export interface FinishRunOptions {
   now?: Date;
+  /** Lesson закрывает только learning-домен после проверки полного комплекта. */
+  allowLesson?: boolean;
 }
 
 export interface RunTopicChange {
@@ -71,6 +73,7 @@ export interface FinishRunResult {
 interface RunCounters {
   total: number;
   correct: number;
+  kind: RunKind;
 }
 
 interface FinishableRun {
@@ -92,17 +95,18 @@ interface RunAttemptRow {
 }
 
 function progressFrom(row: RunCounters): RunProgress {
+  const target = row.kind === 'lesson' ? 5 : RUN_TARGET;
   return {
     total: row.total,
     correct: row.correct,
-    target: RUN_TARGET,
-    done: row.total >= RUN_TARGET,
+    target,
+    done: row.total >= target,
   };
 }
 
 function readRunProgress(db: Database, runId: number): RunProgress {
   const row = db
-    .prepare<[number], RunCounters>('SELECT total, correct FROM runs WHERE id = ?')
+    .prepare<[number], RunCounters>('SELECT total, correct, kind FROM runs WHERE id = ?')
     .get(runId);
   if (row === undefined) throw new Error(`Забег ${runId} не найден`);
   return progressFrom(row);
@@ -303,6 +307,12 @@ export function finishRun(
       throw new SessionError(
         'run-not-ready',
         `Бой с боссом ${runId} завершается только победой или поражением`,
+      );
+    }
+    if (run.kind === 'lesson' && options.allowLesson !== true) {
+      throw new SessionError(
+        'run-not-ready',
+        `Lesson-run ${runId} завершается только через учебный материал`,
       );
     }
 

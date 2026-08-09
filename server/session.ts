@@ -26,7 +26,7 @@ import {
 } from './mastery.js';
 import { checkAnswer, type CheckResult, type RejectReason } from './normalize.js';
 import { activeTopics } from './scheduler.js';
-import { issuedTask, type BankTask } from './codex/bank.js';
+import { issuedTask, learningTaskAtPosition, type BankTask } from './codex/bank.js';
 import { takeTaskOrSeed } from './codex/seed-bank.js';
 import { duplicateKey, fitsAccept } from './codex/task-schema.js';
 import type { DisputeContext, DisputeReviewer } from './codex/dispute.js';
@@ -130,6 +130,27 @@ export function nextTask(
   const now = options.now ?? new Date();
   const log = options.log ?? ((message: string): void => void process.stderr.write(`${message}\n`));
   const run = options.runId === undefined ? undefined : readActiveRun(db, options.runId);
+  if (run?.kind === 'lesson') {
+    if (run.total >= 5) {
+      throw new SessionError('run-complete', `Lesson-run ${run.id} достиг цели и готов к завершению`);
+    }
+    const material = db.prepare<[number], { id: number; status: string }>(
+      `SELECT id, status FROM learning_materials WHERE run_id = ?`,
+    ).get(run.id);
+    if (material === undefined || material.status !== 'active') {
+      throw new SessionError('task-not-in-run', `Lesson-run ${run.id} не связан с активным материалом`);
+    }
+    const task = learningTaskAtPosition(db, material.id, run.total + 1);
+    if (task === null || task.topicId !== run.topic_id) {
+      throw new Error(`Lesson-run ${run.id} не содержит задание позиции ${run.total + 1}`);
+    }
+    if (db.prepare<[number, number], { ok: number }>(
+      'SELECT 1 AS ok FROM task_bank WHERE id = ? AND issued_run_id = ?',
+    ).get(task.id, run.id) === undefined) {
+      throw new SessionError('task-not-in-run', `Задание ${task.id} не принадлежит lesson-run ${run.id}`);
+    }
+    return issuedResult(topicOf(graph, task.topicId), task);
+  }
   if (run?.kind !== undefined && run.kind !== 'run') {
     throw new SessionError(
       'task-not-in-run',
@@ -251,7 +272,7 @@ interface SessionRun {
   id: number;
   subject: Subject;
   topic_id: string;
-  kind: 'run' | 'triage' | 'boss';
+  kind: 'run' | 'triage' | 'boss' | 'lesson';
   finished_at: string | null;
   total: number;
   correct: number;
@@ -409,7 +430,12 @@ export function submitAnswer(
     if (closed === undefined) {
       throw new Error(`Занятие: тема «${row.topic_id}» не заведена в topic_state`);
     }
-    if (closed.closed_at !== null) {
+    // Открытый материал переживает закрытие темы боссом: ученик должен иметь
+    // возможность продолжить единственный уже начатый тест. Сам lesson-run
+    // ниже всё равно проверяется на активный материал, принадлежность и порядок
+    // заданий. Для обычных забегов, триажа, босса и ответа без run закрытая тема
+    // остаётся недоступной.
+    if (closed.closed_at !== null && run?.kind !== 'lesson') {
       throw new SessionError('task-not-in-run', `Занятие: тема «${row.topic_id}» уже закрыта`);
     }
     const boss = run?.kind === 'boss' ? bossAnswerContext(db, run, row.id) : undefined;
@@ -419,7 +445,7 @@ export function submitAnswer(
     ) {
       throw new SessionError('task-not-in-run', `Босс: batch, run и task ${request.taskId} несогласованы`);
     }
-    if (run?.kind === 'run' && runProgress(db, run.id).done) {
+    if ((run?.kind === 'run' || run?.kind === 'lesson') && runProgress(db, run.id).done) {
       throw new SessionError('run-complete', `Забег ${run.id} достиг цели и готов к завершению`);
     }
     if (run !== undefined && run.subject !== topic.subject) {
@@ -436,20 +462,40 @@ export function submitAnswer(
           : `Занятие: задание ${request.taskId} выдано другому забегу`,
       );
     }
-    if ((run?.kind === 'triage' || run?.kind === 'boss') && hintUsed) {
+    if ((run?.kind === 'triage' || run?.kind === 'boss' || run?.kind === 'lesson') && hintUsed) {
       throw new SessionError(
         'task-not-in-run',
         run.kind === 'boss'
           ? `Босс: в бою ${run.id} нельзя использовать подсказку`
-          : `Занятие: в триаже ${run.id} нельзя использовать подсказку`,
+          : run.kind === 'lesson'
+            ? `Учебный тест ${run.id} запрещает подсказки`
+            : `Занятие: в триаже ${run.id} нельзя использовать подсказку`,
       );
     }
-    const expectedStatus = run?.kind === 'boss' ? 'boss_reserved' : 'used';
+    const expectedStatus = run?.kind === 'boss'
+      ? 'boss_reserved'
+      : run?.kind === 'lesson' ? 'lesson_reserved' : 'used';
     if (row.status !== expectedStatus) {
       throw new SessionError(
         'task-not-issued',
         `Занятие: задание ${request.taskId} ученику не выдавалось`,
       );
+    }
+
+    if (run?.kind === 'lesson') {
+      const position = db.prepare<[number, number], { position: number }>(
+        `SELECT learning_tasks.position
+           FROM learning_materials
+           JOIN learning_tasks ON learning_tasks.material_id = learning_materials.id
+          WHERE learning_materials.run_id = ? AND learning_tasks.task_id = ?
+            AND learning_materials.status = 'active'`,
+      ).get(run.id, row.id)?.position;
+      if (position !== run.total + 1) {
+        throw new SessionError(
+          'task-not-in-run',
+          `Учебный тест ${run.id} ожидает задание позиции ${run.total + 1}`,
+        );
+      }
     }
 
     const answered = db
@@ -491,7 +537,7 @@ export function submitAnswer(
         topic.answerFormat,
       );
     } catch (error) {
-      if (run?.kind === 'boss') throw error;
+      if (run?.kind === 'boss' || run?.kind === 'lesson') throw error;
       db.prepare("UPDATE task_bank SET status = 'rejected' WHERE id = ?").run(row.id);
       return { defect: (error as Error).message };
     }
