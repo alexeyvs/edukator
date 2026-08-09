@@ -61,7 +61,8 @@ export interface LearningMaterialCard {
 }
 
 export interface LearningMaterialView extends LearningMaterialCard {
-  content: LearningMaterialContent;
+  /** Теория скрывается после первого ответа: lesson-run не допускает подсказок. */
+  content: LearningMaterialContent | null;
   progress: RunProgress;
   passScore: number;
 }
@@ -169,6 +170,22 @@ export function readLearningMaterial(db: Database, materialId: number): Learning
       `Учебный материал ${materialId} нельзя читать в состоянии ${row.status}`,
     );
   }
+  const progress = row.run_id === null
+    ? { total: 0, correct: 0, target: LEARNING_TASK_COUNT, done: false }
+    : runProgress(db, row.run_id);
+  if (progress.total > 0) {
+    return {
+      id: row.id,
+      subject: row.subject,
+      topicId: row.topic_id,
+      recommendationReason: row.recommendation_reason,
+      estimatedMinutes: row.estimated_minutes,
+      status: row.status,
+      content: null,
+      passScore: LEARNING_PASS_SCORE,
+      progress,
+    };
+  }
   if (row.content === null) {
     throw new LearningError('learning-inconsistent', `Учебный материал ${materialId} не содержит теорию`);
   }
@@ -196,9 +213,7 @@ export function readLearningMaterial(db: Database, materialId: number): Learning
     status: row.status,
     content,
     passScore: LEARNING_PASS_SCORE,
-    progress: row.run_id === null
-      ? { total: 0, correct: 0, target: LEARNING_TASK_COUNT, done: false }
-      : runProgress(db, row.run_id),
+    progress,
   };
 }
 

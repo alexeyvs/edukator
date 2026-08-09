@@ -45,7 +45,7 @@ export function LearningScreen({
     api.open(materialId)
       .then(async ({ material: opened }) => {
         if (!active) return;
-        if (opened.progress.total > 0) {
+        if (opened.progress.total > 0 || opened.content === null) {
           const started = await api.startTest(materialId);
           if (active) navigate(`/?runId=${started.runId}&kind=lesson`);
           return;
@@ -75,6 +75,9 @@ export function LearningScreen({
   }
   if (material === null) {
     return <main className="run-state" role="status"><p>Открываю разбор темы…</p></main>;
+  }
+  if (material.content === null) {
+    return <main className="run-state" role="status"><p>Возвращаю в тест…</p></main>;
   }
 
   return (

@@ -23,7 +23,8 @@ export interface LearningMaterialView {
   recommendationReason: string;
   estimatedMinutes: number;
   status: 'ready' | 'active';
-  content: LearningMaterialContent;
+  /** Null после первого ответа: теория больше не доступна во время теста. */
+  content: LearningMaterialContent | null;
   progress: RunProgress;
   passScore: number;
 }

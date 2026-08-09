@@ -221,6 +221,34 @@ describe('Learning API', () => {
       .toMatchObject({ code: 'run-not-ready' });
   });
 
+  it('после первого ответа не отдаёт теорию и возобновляет существующий тест', async () => {
+    const { materialId } = readyMaterial();
+    const runId = await openAndStart(materialId);
+    const next = (await app.inject({
+      method: 'GET', url: `/api/session/next?runId=${runId}`,
+    })).json() as { task: { id: number } };
+    expect((await app.inject({
+      method: 'POST', url: '/api/session/answer',
+      payload: { task_id: next.task.id, runId, answer: '4', hint_used: false },
+    })).statusCode).toBe(200);
+
+    for (const request of [
+      { method: 'GET' as const, url: `/api/learning/${materialId}` },
+      { method: 'POST' as const, url: `/api/learning/${materialId}/open` },
+    ]) {
+      const response = await app.inject(request);
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject(request.method === 'GET'
+        ? { content: null, progress: { total: 1 } }
+        : { resumed: true, material: { content: null, progress: { total: 1 } } });
+      expect(response.body).not.toContain(CONTENT.introduction);
+    }
+
+    const resumed = await app.inject({ method: 'POST', url: `/api/learning/${materialId}/test` });
+    expect(resumed.statusCode).toBe(200);
+    expect(resumed.json()).toMatchObject({ runId, resumed: true, progress: { total: 1 } });
+  });
+
   it('продолжает lesson-run после победы над боссом, сохраняя запрет обычному забегу', async () => {
     const { materialId } = readyMaterial();
     const lessonRunId = await openAndStart(materialId);

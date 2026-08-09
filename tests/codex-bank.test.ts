@@ -19,6 +19,17 @@ import type { GeneratedTask } from '../server/codex/task-schema.js';
 
 const TOPIC = 'math.fractions';
 
+const LEARNING_CONTENT = {
+  introduction: 'Разберём сложение по шагам.',
+  objectives: ['Складывать небольшие числа'],
+  sections: [
+    { title: 'Идея', blocks: [{ type: 'paragraph', content: 'Слагаемые объединяются в сумму.' }] },
+    { title: 'Правило', blocks: [{ type: 'formula', content: 'a+b=c' }] },
+    { title: 'Пример', blocks: [{ type: 'example', content: 'Два плюс два равно четырём.' }] },
+  ],
+  summary: ['Сложи слагаемые.', 'Проверь сумму обратным действием.'],
+};
+
 function task(patch: Partial<GeneratedTask> = {}): GeneratedTask {
   return {
     instruction: 'Сколько будет 2 + 2?', material: '', material_format: 'none', choices: [],
@@ -370,7 +381,7 @@ describe('банк заданий', () => {
       const { stored, ready } = reserveLearningTasks(
         db,
         materialId,
-        { introduction: 'Теория' },
+        LEARNING_CONTENT,
         batch(5),
       );
       expect(ready).toBe(true);
@@ -383,6 +394,26 @@ describe('банк заданий', () => {
       expect(learningTaskAtPosition(db, materialId, 2)).toBeNull();
       expect(() => learningTaskAtPosition(db, materialId, 0)).toThrow(/от 1 до 5/u);
       expect(() => learningTaskAtPosition(db, materialId, 6)).toThrow(/от 1 до 5/u);
+    });
+
+    it('отклоняет claim до публикации, если содержимое не прошло схему', () => {
+      const materialId = preparingMaterial(db);
+
+      expect(() => reserveLearningTasks(
+        db,
+        materialId,
+        { introduction: '<script>не теория</script>' },
+        batch(5),
+      )).toThrow(/содержимое материала не прошло проверку/u);
+
+      expect(db.prepare(
+        'SELECT status, content, finished_at FROM learning_materials WHERE id = ?',
+      ).get(materialId)).toMatchObject({
+        status: 'rejected', content: null, finished_at: expect.any(String),
+      });
+      expect(db.prepare('SELECT COUNT(*) AS n FROM learning_tasks WHERE material_id = ?').get(materialId))
+        .toEqual({ n: 0 });
+      expect(db.prepare('SELECT COUNT(*) AS n FROM task_bank').get()).toEqual({ n: 0 });
     });
   });
 

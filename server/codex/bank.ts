@@ -13,6 +13,7 @@
  */
 import type { Database } from 'better-sqlite3';
 import { questionFingerprint } from '../normalize.js';
+import { parseLearningMaterial } from './learning-material-schema.js';
 import { RECENT_LIMIT } from './prompt.js';
 import { taskPromptText, type GeneratedTask, type MaterialFormat } from './task-schema.js';
 import { LEARNING_TASK_COUNT } from '../learning-constants.js';
@@ -310,13 +311,10 @@ export function reserveLearningTasks(
   tasks: readonly GeneratedTask[],
   now: Date = new Date(),
 ): ReserveLearningTasksResult {
-  const prepared = prepareTasks(tasks);
   if (!Number.isFinite(now.getTime())) throw new Error('Банк заданий: некорректное время публикации материала');
   const nowIso = now.toISOString();
-  const serialized = JSON.stringify(content);
-  if (serialized === undefined) throw new Error('Банк заданий: содержимое материала не сериализуется в JSON');
 
-  return db.transaction((): ReserveLearningTasksResult => {
+  const publication = db.transaction((): ReserveLearningTasksResult | Error => {
     const material = db.prepare<[number], { topic_id: string; status: string }>(
       'SELECT topic_id, status FROM learning_materials WHERE id = ?',
     ).get(materialId);
@@ -326,6 +324,21 @@ export function reserveLearningTasks(
     }
     ensureTopic(db, material.topic_id);
 
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(parseLearningMaterial(content));
+    } catch (error) {
+      db.prepare(
+        `UPDATE learning_materials
+            SET status = 'rejected', updated_at = ?, finished_at = ?
+          WHERE id = ? AND status = 'preparing'`,
+      ).run(nowIso, nowIso, materialId);
+      return new Error(
+        `Банк заданий: содержимое материала не прошло проверку: ${(error as Error).message}`,
+      );
+    }
+
+    const prepared = prepareTasks(tasks);
     const result = insertPreparedTasks(db, material.topic_id, prepared, 'lesson_reserved');
     if (
       tasks.length !== LEARNING_TASK_COUNT || result.stored.length !== LEARNING_TASK_COUNT ||
@@ -356,6 +369,8 @@ export function reserveLearningTasks(
     if (changed.changes !== 1) throw new Error(`Банк заданий: claim материала ${materialId} изменился`);
     return { ...result, ready: true };
   }).immediate();
+  if (publication instanceof Error) throw publication;
+  return publication;
 }
 
 /** Читает только запрошенную позицию батча и не повторяет уже отвеченное задание. */
