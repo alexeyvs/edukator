@@ -37,6 +37,9 @@ test('полный забег из двенадцати заданий прив�
     await expect(page.getByRole('heading', { name: 'Вот что получилось' })).toBeVisible();
     await expect(page.locator('.finish-stats')).toContainText('12сделано');
     await expect(page.locator('.finish-stats')).toContainText('12верно');
+    expect(harness.db.prepare<[], { kind: string; total: number; correct: number }>(
+      'SELECT kind, total, correct FROM runs ORDER BY id DESC LIMIT 1',
+    ).get()).toEqual({ kind: 'run', total: 12, correct: 12 });
   } finally {
     await harness.close();
   }
@@ -138,6 +141,91 @@ test('триаж проходит от старта до ранжировани�
     await expect(page.locator('.triage-ranking li')).toHaveCount(12);
     await expect(page.locator('.triage-ranking')).toContainText('Тема math 1');
     await expect(page.locator('.triage-ranking')).toContainText('Тема math 12');
+    expect(harness.db.prepare<[], { kind: string; total: number; correct: number }>(
+      'SELECT kind, total, correct FROM runs ORDER BY id DESC LIMIT 1',
+    ).get()).toEqual({ kind: 'triage', total: 12, correct: 12 });
+  } finally {
+    await harness.close();
+  }
+});
+
+test('карточка ведёт через материал и пять ответов к зачёту и обновлённому прогнозу', async ({ page }) => {
+  const harness = await startE2eHarness({
+    triagePassed: 'math',
+    controlledWorker: true,
+    learningForecastFixture: 'math',
+  });
+  try {
+    const materialId = await harness.waitForLearningMaterial('math.1');
+    const initialPlan = await page.request.get(`${harness.url}/api/run/plan`);
+    expect(initialPlan.ok()).toBe(true);
+    const initial = await initialPlan.json() as {
+      forecasts: Array<{ subject: string; score: number }>;
+      learning: Array<{ id: number; status: string }>;
+      plan: unknown[];
+      streak: { current: number; best: number; completedToday: boolean };
+    };
+    const forecastBefore = initial.forecasts.find(({ subject }) => subject === 'math')?.score;
+    expect(forecastBefore).toBeDefined();
+    expect(initial.learning).toContainEqual(expect.objectContaining({ id: materialId, status: 'ready' }));
+
+    await page.goto(harness.url);
+    await expect(page.getByRole('heading', { name: 'Разобрать слабое место' })).toBeVisible();
+    const card = page.locator('.learning-card').filter({
+      has: page.getByText('Тема math 1', { exact: true }),
+    });
+    await expect(card).toContainText('Математика · 12 минут');
+    await card.getByRole('button', { name: 'Разобрать тему' }).click();
+
+    await expect(page.getByRole('heading', { name: 'Тема math 1', exact: true })).toBeVisible();
+    await expect(page.getByText('Тестовый материал 1 по теме Тема math 1.')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Возьми с собой в тест' })).toBeVisible();
+    await page.getByRole('button', { name: 'Перейти к тесту' }).click();
+
+    for (let answered = 1; answered <= 5; answered += 1) {
+      await expect(page.getByRole('heading', { name: /вычисли значение/ })).toBeVisible();
+      await expect(page.getByRole('button', { name: /подсказ/i })).toHaveCount(0);
+      await page.getByLabel('Число').fill('45');
+      await page.getByRole('button', { name: 'Проверить' }).click();
+      await expect(page.locator('.verdict')).toContainText('Верно');
+      await page.getByRole('button', {
+        name: answered === 5 ? 'Завершить тест' : 'Следующее задание',
+      }).click();
+    }
+
+    await expect(page.getByRole('heading', { name: 'Зачёт' })).toBeVisible();
+    await expect(page.locator('.lesson-finish-stats')).toContainText('5/5');
+    await expect(page.locator('.lesson-score-note')).toContainText('Порог зачёта — 4 из 5');
+
+    const lesson = harness.db.prepare<[], {
+      kind: string;
+      total: number;
+      correct: number;
+      status: string;
+    }>(
+      `SELECT runs.kind, runs.total, runs.correct, learning_materials.status
+         FROM runs JOIN learning_materials ON learning_materials.run_id = runs.id
+        ORDER BY runs.id DESC LIMIT 1`,
+    ).get();
+    expect(lesson).toEqual({ kind: 'lesson', total: 5, correct: 5, status: 'passed' });
+    expect(harness.db.prepare("SELECT COUNT(*) AS count FROM runs WHERE kind = 'run'").get())
+      .toEqual({ count: 0 });
+
+    const latestForecast = harness.db.prepare<[], { score: number }>(
+      "SELECT score FROM forecast_snapshots WHERE subject = 'math' ORDER BY id DESC LIMIT 1",
+    ).get();
+    expect(latestForecast?.score).toBeGreaterThan(forecastBefore as number);
+
+    await page.getByRole('link', { name: 'Вернуться к плану' }).click();
+    const mathForecast = page.locator('.forecast-cards article').filter({ hasText: 'Математика' });
+    await expect(mathForecast).toContainText((latestForecast?.score ?? 0).toFixed(1));
+    await expect(page.locator('.learning-card').filter({
+      has: page.getByText('Тема math 1', { exact: true }),
+    })).toHaveCount(0);
+    await expect(page.locator('.plan-cards article')).toHaveCount(initial.plan.length);
+    await expect(page.getByLabel('Серия занятий')).toContainText('Первый день серии впереди');
+    expect(initial.streak).toEqual({ current: 0, best: 0, completedToday: false });
+    harness.assertCodexNotCalled();
   } finally {
     await harness.close();
   }
@@ -173,6 +261,9 @@ test('готовый босс переживает reload, закрывает т
     }
 
     await expect(page.getByRole('heading', { name: 'Босс побеждён' })).toBeVisible();
+    expect(harness.db.prepare<[], { kind: string; total: number; correct: number }>(
+      'SELECT kind, total, correct FROM runs ORDER BY id DESC LIMIT 1',
+    ).get()).toEqual({ kind: 'boss', total: 5, correct: 5 });
     await page.getByRole('link', { name: 'На главный экран' }).click();
     const closedTopic = page.locator('.topic-map li').filter({
       has: page.getByText('Тема math 1', { exact: true }),

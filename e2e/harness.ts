@@ -23,6 +23,7 @@ export interface E2eHarness {
   db: Database;
   url: string;
   assertCodexNotCalled(): void;
+  waitForLearningMaterial(topicId: string): Promise<number>;
   prepareBoss(topicId: string): Promise<void>;
   seedParentsDashboard(): void;
   upholdDispute(): void;
@@ -33,6 +34,7 @@ interface HarnessOptions {
   triagePassed?: Subject;
   controlledWorker?: boolean;
   controlledDispute?: boolean;
+  learningForecastFixture?: Subject;
 }
 
 function writeCurriculum(directory: string): void {
@@ -120,6 +122,23 @@ function markTriagePassed(db: Database, subject: Subject): void {
     `INSERT INTO runs (subject, kind, topic_id, started_at, finished_at, summary)
      VALUES (?, 'triage', ?, ?, ?, ?)`,
   ).run(subject, `${subject}.1`, NOW.toISOString(), NOW.toISOString(), '{}');
+}
+
+function seedLearningForecastFixture(db: Database, subject: Subject): void {
+  db.prepare(
+    `UPDATE topic_state
+        SET mastery = CASE WHEN topic_id = ? THEN 0.3 ELSE 0.5 END,
+            confidence = 0.8,
+            attempts = 5,
+            last_seen = ?,
+            next_review = ?
+      WHERE topic_id LIKE ?`,
+  ).run(
+    `${subject}.1`,
+    NOW.toISOString(),
+    '2026-08-07T12:00:00.000Z',
+    `${subject}.%`,
+  );
 }
 
 function bossTask(topicId: string, serial: number, position: number): GeneratedTask {
@@ -232,6 +251,9 @@ export async function startE2eHarness(
     });
     seedTasks(db);
     if (options.triagePassed !== undefined) markTriagePassed(db, options.triagePassed);
+    if (options.learningForecastFixture !== undefined) {
+      seedLearningForecastFixture(db, options.learningForecastFixture);
+    }
     const url = await app.listen({ host: '127.0.0.1', port: 0 });
 
     function assertCodexNotCalled(): void {
@@ -245,6 +267,19 @@ export async function startE2eHarness(
       db,
       url,
       assertCodexNotCalled,
+      async waitForLearningMaterial(topicId: string): Promise<number> {
+        await waitUntil(
+          () => db.prepare<[string], { status: string }>(
+            "SELECT status FROM learning_materials WHERE topic_id = ? AND status = 'ready'",
+          ).get(topicId)?.status === 'ready',
+          `готовый учебный материал ${topicId}`,
+        );
+        const material = db.prepare<[string], { id: number }>(
+          "SELECT id FROM learning_materials WHERE topic_id = ? AND status = 'ready'",
+        ).get(topicId);
+        if (material === undefined) throw new Error(`E2E: материал ${topicId} исчез после подготовки`);
+        return material.id;
+      },
       async prepareBoss(topicId: string): Promise<void> {
         const topic = graph.byId.get(topicId);
         if (topic === undefined) throw new Error(`E2E: неизвестная тема ${topicId}`);
