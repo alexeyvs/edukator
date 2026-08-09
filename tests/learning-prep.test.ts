@@ -1,0 +1,314 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Database } from 'better-sqlite3';
+import { buildTopicGraph, syncTopicState, type Topic, type TopicGraph } from '../server/curriculum.js';
+import { openDatabase, writeProfile } from '../server/db.js';
+import {
+  createLearningProducer,
+  MAX_LEARNING_TASK_BATCHES,
+  MAX_READY_LEARNING_MATERIALS,
+  prepareLearningMaterials,
+  RECENT_LEARNING_ERRORS,
+  selectLearningTopics,
+  type LearningPackage,
+  type LearningProduceRequest,
+} from '../server/learning-prep.js';
+import { CodexUnavailableError, type CodexRequest } from '../server/codex/client.js';
+import { CodexConcurrency } from '../server/codex/concurrency.js';
+import type { LearningMaterialContent } from '../server/codex/learning-material-schema.js';
+import type { GeneratedTask } from '../server/codex/task-schema.js';
+import { storeTasks } from '../server/codex/bank.js';
+import { everyRefillFailed, runWarmupCycle } from '../server/codex/worker.js';
+
+const NOW = new Date('2026-08-09T10:00:00.000Z');
+
+function topic(id: string, examWeight = 3): Topic {
+  return {
+    id,
+    subject: id.startsWith('math') ? 'math' : id.startsWith('russian') ? 'russian' : 'english',
+    title: `Тема ${id}`,
+    examWeight,
+    difficulty: 2,
+    prereqs: [],
+    answerFormat: 'number',
+    promptSeed: `Карта ${id}`,
+  };
+}
+
+const topics = [
+  topic('math.best', 3), topic('math.other', 2),
+  topic('russian.best', 3), topic('english.best', 3),
+];
+
+const content: LearningMaterialContent = {
+  introduction: 'Новая понятная подача.',
+  objectives: ['Применить правило'],
+  sections: [
+    { title: 'Идея', blocks: [{ type: 'paragraph', content: 'Объяснение.' }] },
+    { title: 'Правило', blocks: [{ type: 'formula', content: 'a+b' }] },
+    { title: 'Пример', blocks: [{ type: 'example', content: 'Пример решения.' }] },
+  ],
+  summary: ['Вспомни правило.', 'Проверь результат.'],
+};
+
+let sequence = 0;
+function task(label: string): GeneratedTask {
+  sequence += 1;
+  return {
+    instruction: `Самостоятельный вопрос ${label}-${sequence}`,
+    material: '', material_format: 'none', choices: [], answer: '4', accept: ['4'],
+    hint: 'Вспомни правило. Затем проверь шаги.', explain: 'Получается четыре.',
+    joke: 'Сошлось.', difficulty: 2,
+  };
+}
+
+function learningPackage(label: string): LearningPackage {
+  return { content, tasks: Array.from({ length: 5 }, (_, index) => task(`${label}-${index}`)) };
+}
+
+function triage(db: Database, subject: Topic['subject'], topicId: string): void {
+  db.prepare(
+    `INSERT INTO runs (subject, kind, topic_id, started_at, finished_at, summary)
+     VALUES (?, 'triage', ?, ?, ?, '{}')`,
+  ).run(subject, topicId, NOW.toISOString(), NOW.toISOString());
+}
+
+describe('отбор и подготовка учебных материалов', () => {
+  let tempDir: string;
+  let db: Database;
+  let graph: TopicGraph;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'edukator-learning-prep-'));
+    db = openDatabase(join(tempDir, 'test.db'));
+    graph = buildTopicGraph(topics);
+    syncTopicState(db, graph);
+    writeProfile(db, { name: 'Тимофей', interests: ['Minecraft'] });
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('держит буквальные пределы материалов и истории ошибок', () => {
+    expect(MAX_READY_LEARNING_MATERIALS).toBe(3);
+    expect(MAX_LEARNING_TASK_BATCHES).toBe(4);
+    expect(RECENT_LEARNING_ERRORS).toBe(5);
+  });
+
+  it('ничего не выбирает до триажа, затем берёт лучший пробел каждого предмета', () => {
+    expect(selectLearningTopics(db, graph, NOW)).toEqual([]);
+    triage(db, 'math', 'math.best');
+    expect(selectLearningTopics(db, graph, NOW).map(({ topic: item }) => item.id))
+      .toEqual(['math.best']);
+    triage(db, 'russian', 'russian.best');
+    triage(db, 'english', 'english.best');
+    expect(selectLearningTopics(db, graph, NOW).map(({ topic: item }) => item.id).sort())
+      .toEqual(['english.best', 'math.best', 'russian.best']);
+  });
+
+  it('исключает закрытые и переставшие быть пробелами темы', () => {
+    triage(db, 'math', 'math.best');
+    db.prepare('UPDATE topic_state SET closed_at = ? WHERE topic_id = ?')
+      .run(NOW.toISOString(), 'math.best');
+    expect(selectLearningTopics(db, graph, NOW)[0]?.topic.id).toBe('math.other');
+    db.prepare(
+      `UPDATE topic_state SET mastery = 0.9, attempts = 2, confidence = 0.9,
+       last_seen = ?, next_review = ? WHERE topic_id = ?`,
+    ).run(NOW.toISOString(), NOW.toISOString(), 'math.other');
+    expect(selectLearningTopics(db, graph, NOW)).toEqual([]);
+  });
+
+  it('публикует по одному полному материалу на предмет через общий бюджет', async () => {
+    triage(db, 'math', 'math.best');
+    triage(db, 'russian', 'russian.best');
+    const budget = new CodexConcurrency(1);
+    const requests: LearningProduceRequest[] = [];
+    const report = await prepareLearningMaterials({
+      db, graph, now: NOW, budget,
+      produce: (request) => {
+        expect(budget.active).toBe(1);
+        requests.push(request);
+        return Promise.resolve(learningPackage(request.topic.id));
+      },
+    });
+    expect(report.prepared).toHaveLength(2);
+    expect(report.prepared.every((item) => item.ready && item.stored === 5)).toBe(true);
+    expect(requests.map(({ topic: item }) => item.subject).sort()).toEqual(['math', 'russian']);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM learning_materials WHERE status = 'ready'").get())
+      .toEqual({ n: 2 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM task_bank WHERE status = 'lesson_reserved'").get())
+      .toEqual({ n: 10 });
+
+    const repeat = await prepareLearningMaterials({
+      db, graph, now: new Date(NOW.getTime() + 1),
+      produce: () => Promise.reject(new Error('не должен вызываться')),
+    });
+    expect(repeat.prepared).toEqual([]);
+  });
+
+  it('передаёт предпосылки, профиль и пять последних ошибок', async () => {
+    const prereq = topic('math.prereq', 2);
+    const dependent = { ...topic('math.dependent'), prereqs: [prereq.id] };
+    graph = buildTopicGraph([prereq, dependent]);
+    syncTopicState(db, graph);
+    triage(db, 'math', dependent.id);
+    db.prepare('UPDATE topic_state SET closed_at = ? WHERE topic_id = ?').run(NOW.toISOString(), prereq.id);
+    for (let index = 0; index < 7; index += 1) {
+      const stored = storeTasks(db, dependent.id, [task(`ошибка-${index}`)]).stored[0];
+      if (stored === undefined) throw new Error('задача не сохранена');
+      db.prepare(
+        `INSERT INTO attempts (task_id, topic_id, answer, is_correct, created_at)
+         VALUES (?, ?, ?, 0, ?)`,
+      ).run(stored.id, dependent.id, `ответ-${index}`, new Date(NOW.getTime() + index).toISOString());
+    }
+    let captured: LearningProduceRequest | undefined;
+    await prepareLearningMaterials({
+      db, graph, now: NOW,
+      produce: (request) => {
+        captured = request;
+        return Promise.resolve(learningPackage('context'));
+      },
+    });
+    expect(captured?.prerequisites.map(({ id }) => id)).toEqual([prereq.id]);
+    expect(captured?.profile).toMatchObject({ name: 'Тимофей', interests: ['Minecraft'] });
+    expect(captured?.recentErrors).toHaveLength(5);
+    expect(captured?.recentErrors.map(({ answer }) => answer)).toEqual([
+      'ответ-2', 'ответ-3', 'ответ-4', 'ответ-5', 'ответ-6',
+    ]);
+  });
+
+  it('восстанавливает зависший claim, а недоступность codex включает backoff воркера', async () => {
+    triage(db, 'math', 'math.best');
+    const failed = await prepareLearningMaterials({
+      db, graph, now: NOW,
+      produce: () => Promise.reject(new CodexUnavailableError('codex не найден')),
+    });
+    expect(failed.codexUnavailable).toBe(true);
+    expect(failed.prepared[0]).toMatchObject({ ready: false, recovered: false });
+    expect(db.prepare('SELECT status FROM learning_materials').get()).toEqual({ status: 'preparing' });
+
+    const restored = await prepareLearningMaterials({
+      db, graph, now: new Date(NOW.getTime() + 30 * 60 * 1000 + 1),
+      produce: () => Promise.resolve(learningPackage('restored')),
+    });
+    expect(restored.prepared[0]).toMatchObject({ ready: true, recovered: true, stored: 5 });
+    expect(db.prepare('SELECT status FROM learning_materials ORDER BY id').all())
+      .toEqual([{ status: 'rejected' }, { status: 'ready' }]);
+  });
+
+  it('retire возвращает задания в банк, когда тема перестала быть пробелом', async () => {
+    triage(db, 'math', 'math.best');
+    await prepareLearningMaterials({
+      db, graph, now: NOW, produce: () => Promise.resolve(learningPackage('old')),
+    });
+    db.prepare("UPDATE topic_state SET mastery = 0.9, attempts = 2 WHERE topic_id LIKE 'math.%'").run();
+    const report = await prepareLearningMaterials({ db, graph, now: new Date(NOW.getTime() + 1) });
+    expect(report.retired).toHaveLength(1);
+    expect(db.prepare('SELECT status FROM learning_materials').get()).toEqual({ status: 'retired' });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM task_bank WHERE status = 'valid'").get())
+      .toEqual({ n: 5 });
+  });
+
+  it('после failed создаёт другую подачу, если тема осталась приоритетной', async () => {
+    triage(db, 'math', 'math.best');
+    db.prepare(
+      `INSERT INTO learning_materials
+       (subject, topic_id, status, content, recommendation_reason, mastery_before, finished_at)
+       VALUES ('math', 'math.best', 'failed', ?, 'Слабая тема', 0, ?)`,
+    ).run(JSON.stringify({ ...content, introduction: 'Старая аналогия с пиццей.' }), NOW.toISOString());
+    let previous: string[] = [];
+    const report = await prepareLearningMaterials({
+      db, graph, now: new Date(NOW.getTime() + 1),
+      produce: (request) => {
+        previous = request.previousApproaches;
+        return Promise.resolve(learningPackage('new-approach'));
+      },
+    });
+    expect(previous).toEqual(['Старая аналогия с пиццей.']);
+    expect(report.prepared[0]).toMatchObject({ ready: true });
+  });
+
+  it('атомарно отбраковывает комплект при дедупликации', async () => {
+    triage(db, 'math', 'math.best');
+    const duplicate = task('повтор');
+    storeTasks(db, 'math.best', [duplicate]);
+    const report = await prepareLearningMaterials({
+      db, graph, now: NOW,
+      produce: () => Promise.resolve({ content, tasks: [duplicate, ...learningPackage('fresh').tasks.slice(0, 4)] }),
+    });
+    expect(report.prepared[0]).toMatchObject({ ready: false, stored: 0, error: expect.stringContaining('отпечатком') });
+    expect(db.prepare('SELECT status, content FROM learning_materials').get())
+      .toEqual({ status: 'rejected', content: null });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM task_bank WHERE status = 'lesson_reserved'").get())
+      .toEqual({ n: 0 });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM learning_tasks').get()).toEqual({ n: 0 });
+  });
+
+  it('встраивается после обычного прогрева и учитывается общим backoff', async () => {
+    triage(db, 'math', 'math.best');
+    storeTasks(db, 'math.best', Array.from({ length: 8 }, () => task('warm')));
+    const report = await runWarmupCycle({
+      db, graph: buildTopicGraph([topic('math.best')]),
+      learningProduce: () => Promise.reject(new Error('методист отклонил')),
+    });
+    expect(report.learningPreparation?.prepared[0]).toMatchObject({ stored: 0, error: 'методист отклонил' });
+    expect(everyRefillFailed(report)).toBe(true);
+  });
+
+  it('запускает подготовку материала только после пополнения обычного банка', async () => {
+    triage(db, 'math', 'math.best');
+    const order: string[] = [];
+    const report = await runWarmupCycle({
+      db,
+      graph: buildTopicGraph([topic('math.best')]),
+      now: () => new Date(NOW.getTime() + 24 * 60 * 60 * 1000),
+      produce: () => {
+        order.push('bank');
+        return Promise.resolve(Array.from({ length: 8 }, () => task('ordinary')));
+      },
+      learningProduce: () => {
+        order.push('learning');
+        return Promise.resolve(learningPackage('after-bank'));
+      },
+    });
+    expect(order).toEqual(['bank', 'learning']);
+    expect(report.refilled[0]).toMatchObject({ stored: 8 });
+    expect(report.learningPreparation?.prepared[0]).toMatchObject({ ready: true, stored: 5 });
+  });
+});
+
+describe('производитель полного комплекта', () => {
+  it('проверяет материал независимо и строит пять вопросов по его содержимому', async () => {
+    const generatedTasks = Array.from({ length: 5 }, (_, index) => task(`codex-${index}`));
+    const verdicts = generatedTasks.map(() => ({
+      answer: '4', unambiguous: true, natural: true, on_topic: true,
+      age_appropriate: true, hint_safe: true, note: '',
+    }));
+    const answers = [
+      JSON.stringify(content),
+      JSON.stringify({ accepted: true, accurate: true, complete: true, age_appropriate: true, grounded: true, note: '' }),
+      JSON.stringify({ items: generatedTasks }),
+      JSON.stringify({ items: verdicts }),
+    ];
+    const calls: CodexRequest[] = [];
+    const producer = createLearningProducer({
+      run: (request) => {
+        calls.push(request);
+        const answer = answers.shift();
+        return answer === undefined ? Promise.reject(new Error('лишний вызов')) : Promise.resolve(answer);
+      },
+    });
+    const result = await producer({
+      topic: topic('math.best'), prerequisites: [], profile: { name: 'Тимофей', interests: [], examDate: null, partnerName: 'Байт' },
+      recentErrors: [], previousApproaches: [], recent: [],
+    });
+    expect(result.tasks).toHaveLength(5);
+    expect(calls).toHaveLength(4);
+    expect(calls[1]?.model).toBe('gpt-5.6-sol');
+    expect(calls[2]?.prompt).toContain('# Учебный материал для теста');
+  });
+});

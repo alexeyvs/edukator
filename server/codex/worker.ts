@@ -15,6 +15,11 @@
  */
 import type { Database } from 'better-sqlite3';
 import { prepareNextBoss, type BossPreparationReport } from '../boss-prep.js';
+import {
+  prepareLearningMaterials,
+  type LearningPreparationReport,
+  type LearningProducer,
+} from '../learning-prep.js';
 import type { Topic, TopicGraph } from '../curriculum.js';
 import { readProfile, type Profile } from '../db.js';
 import { activeTopics } from '../scheduler.js';
@@ -105,6 +110,8 @@ export interface WorkerOptions {
   run?: CodexRunner;
   /** Общий с разборами споров бюджет процесса. */
   budget?: CodexConcurrency;
+  /** Подменяемая подготовка полного материала и теста. */
+  learningProduce?: LearningProducer;
 }
 
 export interface RefillReport {
@@ -127,6 +134,8 @@ export interface CycleReport {
   codexUnavailable: boolean;
   /** Подготовка босса входит в тот же проход и тот же расчёт отступа. */
   bossPreparation?: BossPreparationReport;
+  /** Подготовка персональных материалов выполняется после обычного банка. */
+  learningPreparation?: LearningPreparationReport;
 }
 
 function defaultLog(message: string): void {
@@ -394,6 +403,21 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
     }
   });
 
+  let learning: LearningPreparationReport | undefined;
+  if (!unavailable) {
+    learning = await prepareLearningMaterials({
+      db,
+      graph,
+      budget,
+      log,
+      ...(options.now === undefined ? {} : { now: options.now() }),
+      ...(options.learningProduce === undefined ? {} : { produce: options.learningProduce }),
+      ...(options.model === undefined ? {} : { model: options.model }),
+      ...(options.run === undefined ? {} : { run: options.run }),
+    });
+    unavailable = learning.codexUnavailable;
+  }
+
   return {
     topics: topics.map((topic) => topic.id),
     refilled,
@@ -402,6 +426,13 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
       boss.topicId === undefined
         ? {}
         : { bossPreparation: boss }
+    ),
+    ...(
+      learning === undefined || (
+        learning.candidates.length === 0 && learning.retired.length === 0 && learning.prepared.length === 0
+      )
+        ? {}
+        : { learningPreparation: learning }
     ),
   };
 }
@@ -423,13 +454,12 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
  * тогда, когда очередь пополняется.
  */
 export function everyRefillFailed(report: CycleReport): boolean {
-  const bossFailed = report.bossPreparation?.error !== undefined
-    && report.bossPreparation.stored === 0;
-  const attempts = report.refilled.length + (bossFailed ? 1 : 0);
-  const ordinaryFailed = report.refilled.every(
-    (refill) => refill.error !== undefined && refill.stored === 0,
+  const attempts: { stored: number; error?: string }[] = [...report.refilled];
+  if (report.bossPreparation?.topicId !== undefined) attempts.push(report.bossPreparation);
+  attempts.push(...(report.learningPreparation?.prepared ?? []));
+  return attempts.length > 0 && attempts.every(
+    (attempt) => attempt.error !== undefined && attempt.stored === 0,
   );
-  return attempts > 0 && ordinaryFailed && (report.bossPreparation === undefined || bossFailed);
 }
 
 /**
@@ -477,8 +507,14 @@ export function startWorker(options: StartWorkerOptions): WorkerHandle {
         unavailable = report.codexUnavailable;
         if (!unavailable && everyRefillFailed(report)) {
           unavailable = true;
+          const backgroundAttempts = report.refilled.length
+            + (report.bossPreparation?.topicId === undefined ? 0 : 1)
+            + (report.learningPreparation?.prepared.length ?? 0);
+          const failedLabel = backgroundAttempts === report.refilled.length
+            ? `ни одна из ${report.refilled.length} голодных тем не пополнена`
+            : `все ${backgroundAttempts} фоновые подготовки провалились`;
           log(
-            `воркер: ни одна из ${report.refilled.length} голодных тем не пополнена, ` +
+            `воркер: ${failedLabel}, ` +
               'пауза увеличена',
           );
         }

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edukator.local/schemas/learning-verdict.json",
+  "title": "Вердикт по учебному материалу",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["accepted", "accurate", "complete", "age_appropriate", "grounded", "note"],
+  "properties": {
+    "accepted": { "type": "boolean" },
+    "accurate": { "type": "boolean" },
+    "complete": { "type": "boolean" },
+    "age_appropriate": { "type": "boolean" },
+    "grounded": { "type": "boolean" },
+    "note": { "type": "string" }
+  }
+}

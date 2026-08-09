@@ -46,6 +46,8 @@ export interface GenerateTasksOptions {
   timeoutMs?: number;
   /** Текст персоны; по умолчанию читается из `content/persona.md`. */
   persona?: string;
+  /** Структурированная теория для самостоятельного теста lesson-run. */
+  lessonContent?: unknown;
 }
 
 export interface GenerateTasksResult {
@@ -96,6 +98,7 @@ export async function generateTaskBatch(
         persona,
         ...(options.profile === undefined ? {} : { profile: options.profile }),
         ...(options.recent === undefined ? {} : { recent: options.recent }),
+        ...(options.lessonContent === undefined ? {} : { lessonContent: options.lessonContent }),
         ...(previousError === undefined ? {} : { previousError }),
       });
 

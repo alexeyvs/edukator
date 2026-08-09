@@ -34,6 +34,11 @@ export interface ReserveBossTasksResult extends StoreTasksResult {
   ready: boolean;
 }
 
+export interface ReserveLearningTasksResult extends StoreTasksResult {
+  /** Содержимое и полный тест опубликованы одной транзакцией. */
+  ready: boolean;
+}
+
 export interface TakeTaskOptions {
   /**
    * Желаемая сложность 1-3. Точного совпадения не требуется: пустая очередь
@@ -168,7 +173,7 @@ function prepareTasks(tasks: readonly GeneratedTask[]): PreparedTask[] {
   });
 }
 
-type InsertStatus = 'valid' | 'boss_reserved';
+type InsertStatus = 'valid' | 'boss_reserved' | 'lesson_reserved';
 
 function insertPreparedTasks(
   db: Database,
@@ -289,6 +294,62 @@ export function reserveBossTasks(
     result.stored.forEach(({ id }, index) => link.run(batchId, id, index + 1));
     db.prepare("UPDATE boss_batches SET status = 'ready' WHERE id = ? AND status = 'preparing'")
       .run(batchId);
+    return { ...result, ready: true };
+  }).immediate();
+}
+
+/**
+ * Вставляет пять свежих заданий, связывает их с материалом и публикует теорию
+ * одной транзакцией. Частичный комплект никогда не становится видимым.
+ */
+export function reserveLearningTasks(
+  db: Database,
+  materialId: number,
+  content: unknown,
+  tasks: readonly GeneratedTask[],
+  now: Date = new Date(),
+): ReserveLearningTasksResult {
+  const prepared = prepareTasks(tasks);
+  if (!Number.isFinite(now.getTime())) throw new Error('Банк заданий: некорректное время публикации материала');
+  const nowIso = now.toISOString();
+  const serialized = JSON.stringify(content);
+  if (serialized === undefined) throw new Error('Банк заданий: содержимое материала не сериализуется в JSON');
+
+  return db.transaction((): ReserveLearningTasksResult => {
+    const material = db.prepare<[number], { topic_id: string; status: string }>(
+      'SELECT topic_id, status FROM learning_materials WHERE id = ?',
+    ).get(materialId);
+    if (material === undefined) throw new Error(`Банк заданий: материал ${materialId} не найден`);
+    if (material.status !== 'preparing') {
+      throw new Error(`Банк заданий: материал ${materialId} не готовится (${material.status})`);
+    }
+    ensureTopic(db, material.topic_id);
+
+    const result = insertPreparedTasks(db, material.topic_id, prepared, 'lesson_reserved');
+    if (tasks.length !== 5 || result.stored.length !== 5 || result.duplicates.length > 0) {
+      if (result.stored.length > 0) {
+        const ids = result.stored.map(({ id }) => id);
+        const placeholders = ids.map(() => '?').join(', ');
+        db.prepare(`UPDATE task_bank SET status = 'rejected' WHERE id IN (${placeholders})`).run(...ids);
+      }
+      db.prepare(
+        `UPDATE learning_materials
+            SET status = 'rejected', updated_at = ?, finished_at = ?
+          WHERE id = ? AND status = 'preparing'`,
+      ).run(nowIso, nowIso, materialId);
+      return { stored: [], duplicates: result.duplicates, ready: false };
+    }
+
+    const link = db.prepare(
+      'INSERT INTO learning_tasks (material_id, task_id, position) VALUES (?, ?, ?)',
+    );
+    result.stored.forEach(({ id }, index) => link.run(materialId, id, index + 1));
+    const changed = db.prepare(
+      `UPDATE learning_materials
+          SET content = ?, status = 'ready', updated_at = ?
+        WHERE id = ? AND status = 'preparing'`,
+    ).run(serialized, nowIso, materialId);
+    if (changed.changes !== 1) throw new Error(`Банк заданий: claim материала ${materialId} изменился`);
     return { ...result, ready: true };
   }).immediate();
 }

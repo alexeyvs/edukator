@@ -7,6 +7,7 @@ import { storeTasks } from '../server/codex/bank.js';
 import type { DisputeReviewer } from '../server/codex/dispute.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import type { TaskProducer } from '../server/codex/worker.js';
+import type { LearningProducer } from '../server/learning-prep.js';
 import { openDatabase, SUBJECTS, writeProfile, type Subject } from '../server/db.js';
 import { buildServer } from '../server/index.js';
 import { loadCurriculum } from '../server/curriculum.js';
@@ -144,6 +145,30 @@ function controlledProducer(): TaskProducer {
   };
 }
 
+function controlledLearningProducer(): LearningProducer {
+  let serial = 0;
+  return async ({ topic: selected }) => {
+    serial += 1;
+    const topicNumber = Number(selected.id.split('.').at(-1)) || 1;
+    return {
+      content: {
+        introduction: `Тестовый материал ${serial} по теме ${selected.title}.`,
+        objectives: ['Разобраться в правиле', 'Применить его самостоятельно'],
+        sections: [
+          { title: 'Идея', blocks: [{ type: 'paragraph', content: 'Короткое объяснение идеи.' }] },
+          { title: 'Правило', blocks: [{ type: 'example', content: 'Разбираем правило на примере.' }] },
+          { title: 'Проверка', blocks: [{ type: 'warning', content: 'Проверяем ответ перед завершением.' }] },
+        ],
+        summary: ['Вспомни правило.', 'Проверь ответ.'],
+      },
+      tasks: Array.from(
+        { length: 5 },
+        (_, index) => task(selected.subject, topicNumber, TASKS_PER_TOPIC + serial * 10 + index),
+      ),
+    };
+  };
+}
+
 async function waitUntil(check: () => boolean, label: string): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (!check()) {
@@ -187,6 +212,7 @@ export async function startE2eHarness(
     worker: options.controlledWorker === true
       ? {
           produce: controlledProducer(),
+          learningProduce: controlledLearningProducer(),
           wait: async () => new Promise((resolve) => setTimeout(resolve, 10)),
         }
       : false,
