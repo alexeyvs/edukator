@@ -136,7 +136,6 @@ function retireResolvedMaterials(
 }
 
 interface LiveMaterial {
-  subject: Subject;
   topicId: string;
   status: 'preparing' | 'ready' | 'active';
 }
@@ -146,7 +145,6 @@ function liveMaterials(db: Database): Map<Subject, LiveMaterial> {
     `SELECT subject, topic_id, status FROM learning_materials
       WHERE status IN ('preparing', 'ready', 'active') ORDER BY id`,
   ).all().map((row) => [row.subject, {
-    subject: row.subject,
     topicId: row.topic_id,
     status: row.status,
   }]));
@@ -280,7 +278,6 @@ export async function prepareLearningMaterials(
     });
     if (claim === undefined) continue;
     live.set(candidate.topic.subject, {
-      subject: candidate.topic.subject,
       topicId: candidate.topic.id,
       status: 'preparing',
     });

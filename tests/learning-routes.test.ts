@@ -157,6 +157,7 @@ describe('Learning API', () => {
     expect(detail.statusCode).toBe(200);
     expect(detail.json()).toMatchObject({
       id: materialId, status: 'ready', content: CONTENT,
+      passScore: 4,
       progress: { total: 0, correct: 0, target: 5, done: false },
     });
     expect(JSON.stringify(detail.json())).not.toMatch(/answer|accept|hint/iu);
@@ -328,6 +329,7 @@ describe('Learning API', () => {
     expect(finish.statusCode).toBe(200);
     expect(finish.json()).toMatchObject({
       materialId, runId, total: 5, correct, xp, outcome,
+      passScore: 4,
       masteryBefore: beforeMastery, masteryAfter: afterAnswers,
       forecast: { subject: 'math' },
     });

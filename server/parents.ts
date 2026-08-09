@@ -3,6 +3,7 @@ import type { Subject } from './db.js';
 import type { TopicGraph } from './curriculum.js';
 import { computeForecast, MIN_SCORE, MAX_SCORE } from './forecast.js';
 import { confidenceAt, readTopicStates } from './mastery.js';
+import { isRunKind, type RunKind } from './run.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WINDOW_DAYS = 7;
@@ -10,7 +11,6 @@ const STALE_RUN_DAYS = 3;
 const STALLED_FORECAST_DAYS = 5;
 export const PARENTS_PLANNED_MINUTES = 630;
 
-type RunKind = 'run' | 'triage' | 'boss' | 'lesson';
 type BossOutcome = 'won' | 'lost';
 
 interface ParentsForecast {
@@ -107,7 +107,7 @@ function subjectOf(value: string, label: string): Subject {
 }
 
 function kindOf(value: string): RunKind {
-  if (value !== 'run' && value !== 'triage' && value !== 'boss' && value !== 'lesson') {
+  if (!isRunKind(value)) {
     throw new Error(`Дашборд родителей: неизвестный kind (${value})`);
   }
   return value;

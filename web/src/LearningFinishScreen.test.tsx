@@ -18,6 +18,7 @@ function result(outcome: 'passed' | 'failed'): FinishLearningResponse {
     xp: outcome === 'passed' ? 100 : 75,
     masteryBefore: .32,
     masteryAfter: outcome === 'passed' ? .61 : .42,
+    passScore: 4,
     touchedTopics: [],
     closedTopics: [],
     declinedTopics: [],

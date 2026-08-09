@@ -63,6 +63,7 @@ export interface LearningMaterialCard {
 export interface LearningMaterialView extends LearningMaterialCard {
   content: LearningMaterialContent;
   progress: RunProgress;
+  passScore: number;
 }
 
 export interface ClaimLearningMaterialOptions {
@@ -194,6 +195,7 @@ export function readLearningMaterial(db: Database, materialId: number): Learning
     estimatedMinutes: row.estimated_minutes,
     status: row.status,
     content,
+    passScore: LEARNING_PASS_SCORE,
     progress: row.run_id === null
       ? { total: 0, correct: 0, target: LEARNING_TASK_COUNT, done: false }
       : runProgress(db, row.run_id),
@@ -383,6 +385,7 @@ export interface FinishLearningMaterialResult extends FinishRunResult {
   outcome: 'passed' | 'failed';
   masteryBefore: number;
   masteryAfter: number;
+  passScore: number;
 }
 
 /** Закрывает единственный тест по сохранённым попыткам; повтор возвращает тот же итог. */
@@ -457,6 +460,7 @@ export function finishLearningMaterial(
       outcome,
       masteryBefore: joined.mastery_before,
       masteryAfter,
+      passScore: LEARNING_PASS_SCORE,
     };
     const materialChanged = db.prepare(
       `UPDATE learning_materials

@@ -8,7 +8,7 @@ import { buildTopicGraph, type Topic, type TopicGraph } from '../server/curricul
 import { readTopicState, recordAttempt } from '../server/mastery.js';
 import { readSnapshots } from '../server/forecast.js';
 import { openDispute, SessionError } from '../server/session.js';
-import { RUN_TARGET, finishRun, runProgress, startRun } from '../server/run.js';
+import { RUN_TARGET, finishRun, isRunKind, runProgress, startRun } from '../server/run.js';
 
 function at(day: number, hour = 12): Date {
   return new Date(Date.UTC(2026, 7, 8 + day, hour));
@@ -93,6 +93,11 @@ describe('жизненный цикл забега', () => {
 
   it('держит калибровочные константы спеки', () => {
     expect(RUN_TARGET).toBe(12);
+  });
+
+  it('распознаёт все допустимые виды забега одним runtime guard', () => {
+    expect(['run', 'triage', 'boss', 'lesson'].every(isRunKind)).toBe(true);
+    expect(isRunKind('exam')).toBe(false);
   });
 
   it('подхватывает незакрытый забег того же предмета в те же сутки', () => {

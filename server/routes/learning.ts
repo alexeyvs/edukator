@@ -63,6 +63,7 @@ function materialJson(db: Database, graph: TopicGraph, materialId: number): Reco
     status: material.status,
     content: material.content,
     progress: material.progress,
+    passScore: material.passScore,
   };
 }
 

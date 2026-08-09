@@ -6,9 +6,7 @@ import {
   type LearningMaterialView,
 } from './learning-api';
 import { SafeFormula } from './TaskPrompt';
-import { SUBJECT_NAMES } from './subject-meta';
-
-const SUBJECT_MARKS = { math: '∑', russian: 'Ъ', english: 'Aa' } as const;
+import { SUBJECT_MARKS, SUBJECT_NAMES } from './subject-meta';
 
 export interface LearningScreenProps {
   materialId: number;
@@ -129,7 +127,10 @@ export function LearningScreen({
 
         {problem !== null && <p className="home-error" role="alert">{problem}</p>}
         <footer className="lesson-cta">
-          <div><strong>Готов проверить тему?</strong><span>Пять вопросов, зачёт — от четырёх верных.</span></div>
+          <div>
+            <strong>Готов проверить тему?</strong>
+            <span>{material.progress.target} вопросов, зачёт — от {material.passScore} верных.</span>
+          </div>
           <button className="primary" type="button" disabled={starting} onClick={() => void startTest()}>
             {starting ? 'Открываю тест…' : 'Перейти к тесту'}
           </button>

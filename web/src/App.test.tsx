@@ -74,6 +74,7 @@ describe('App', () => {
           topic: { id: 'math.fractions', title: 'Обыкновенные дроби' },
           recommendationReason: 'Путаются знаменатели',
           estimatedMinutes: 12,
+          passScore: 4,
           status: 'active',
           progress: { total: 0, correct: 0, target: 5, done: false },
           content: {

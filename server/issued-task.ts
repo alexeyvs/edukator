@@ -18,13 +18,17 @@ export interface IssuedTask {
   material?: string;
   materialFormat?: 'none' | 'text' | 'math';
   choices?: string[];
-  hint: string;
+  hint?: string;
   difficulty: number;
   answerFormat: AnswerFormat;
 }
 
 /** Общее представление банковского задания для занятия и триажа. */
-export function projectIssuedTask(topic: Topic, task: BankTask): IssuedTask {
+export function projectIssuedTask(
+  topic: Topic,
+  task: BankTask,
+  options: { exposeHint?: boolean } = {},
+): IssuedTask {
   return {
     id: task.id,
     topicId: topic.id,
@@ -37,7 +41,7 @@ export function projectIssuedTask(topic: Topic, task: BankTask): IssuedTask {
       materialFormat: task.material_format ?? 'none',
       choices: task.choices ?? [],
     }),
-    hint: task.hint,
+    ...(options.exposeHint === false ? {} : { hint: task.hint }),
     difficulty: task.difficulty,
     answerFormat: topic.answerFormat,
   };

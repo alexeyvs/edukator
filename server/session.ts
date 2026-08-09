@@ -30,13 +30,14 @@ import { issuedTask, learningTaskAtPosition, type BankTask } from './codex/bank.
 import { takeTaskOrSeed } from './codex/seed-bank.js';
 import { duplicateKey, fitsAccept } from './codex/task-schema.js';
 import type { DisputeContext, DisputeReviewer } from './codex/dispute.js';
-import { runProgress, type RunProgress } from './run.js';
+import { isRunKind, runProgress, type RunKind, type RunProgress } from './run.js';
 import { SessionError, type SessionErrorCode } from './session-error.js';
 import { taskXp } from './xp.js';
 import { projectIssuedTask, type IssuedTask } from './issued-task.js';
 import { BOSS_TARGET } from './boss-rules.js';
 import { finishBossLoss } from './boss-loss.js';
 import { bossFightConsistent, finishBossWin, readBossFight } from './boss-fight.js';
+import { LEARNING_TASK_COUNT } from './learning-constants.js';
 
 export type { IssuedTask } from './issued-task.js';
 
@@ -96,8 +97,8 @@ function balanceRunTopics(db: Database, runId: number, topics: Topic[]): Topic[]
     .map(({ topic }) => topic);
 }
 
-function issuedResult(topic: Topic, task: BankTask): NextTaskResult {
-  return { status: 'ok', task: projectIssuedTask(topic, task) };
+function issuedResult(topic: Topic, task: BankTask, exposeHint = true): NextTaskResult {
+  return { status: 'ok', task: projectIssuedTask(topic, task, { exposeHint }) };
 }
 
 /**
@@ -131,7 +132,7 @@ export function nextTask(
   const log = options.log ?? ((message: string): void => void process.stderr.write(`${message}\n`));
   const run = options.runId === undefined ? undefined : readActiveRun(db, options.runId);
   if (run?.kind === 'lesson') {
-    if (run.total >= 5) {
+    if (run.total >= LEARNING_TASK_COUNT) {
       throw new SessionError('run-complete', `Lesson-run ${run.id} достиг цели и готов к завершению`);
     }
     const material = db.prepare<[number], { id: number; status: string }>(
@@ -149,7 +150,7 @@ export function nextTask(
     ).get(task.id, run.id) === undefined) {
       throw new SessionError('task-not-in-run', `Задание ${task.id} не принадлежит lesson-run ${run.id}`);
     }
-    return issuedResult(topicOf(graph, task.topicId), task);
+    return issuedResult(topicOf(graph, task.topicId), task, false);
   }
   if (run?.kind !== undefined && run.kind !== 'run') {
     throw new SessionError(
@@ -272,21 +273,27 @@ interface SessionRun {
   id: number;
   subject: Subject;
   topic_id: string;
-  kind: 'run' | 'triage' | 'boss' | 'lesson';
+  kind: RunKind;
   finished_at: string | null;
   total: number;
   correct: number;
 }
 
+type SessionRunRow = Omit<SessionRun, 'kind'> & { kind: string };
+
 function readActiveRun(db: Database, runId: number): SessionRun {
-  const run = db
-    .prepare<[number], SessionRun>(
+  const row = db
+    .prepare<[number], SessionRunRow>(
       'SELECT id, subject, topic_id, kind, finished_at, total, correct FROM runs WHERE id = ?',
     )
     .get(runId);
-  if (run === undefined) {
+  if (row === undefined) {
     throw new SessionError('run-not-found', `Занятие: забег ${runId} не найден`);
   }
+  if (!isRunKind(row.kind)) {
+    throw new Error(`Занятие: забег ${runId} хранит неизвестный kind (${row.kind})`);
+  }
+  const run: SessionRun = { ...row, kind: row.kind };
   if (run.finished_at !== null) {
     throw new SessionError('run-finished', `Занятие: забег ${runId} уже завершён`);
   }

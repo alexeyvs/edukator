@@ -10,9 +10,7 @@ import {
 } from './home-api';
 import type { FinishRunResponse } from './run-api';
 import { isPreliminaryForecast } from './forecast-presentation';
-import { SUBJECT_NAMES, SUBJECTS } from './subject-meta';
-
-const LEARNING_MARKS: Record<Subject, string> = { math: '∑', russian: 'Ъ', english: 'Aa' };
+import { SUBJECT_MARKS, SUBJECT_NAMES, SUBJECTS } from './subject-meta';
 
 export interface HomeScreenProps {
   api?: HomeApi;
@@ -210,7 +208,7 @@ export function HomeScreen({
               <div className="learning-cards">
                 {plan.learning.map((material) => (
                   <article className={`learning-card learning-card-${material.subject}`} key={material.id}>
-                    <span className="learning-card-mark" aria-hidden="true">{LEARNING_MARKS[material.subject]}</span>
+                    <span className="learning-card-mark" aria-hidden="true">{SUBJECT_MARKS[material.subject]}</span>
                     <div className="learning-card-copy">
                       <small>{SUBJECT_NAMES[material.subject]} · {material.estimatedMinutes} минут</small>
                       <h3>{material.topic.title}</h3>

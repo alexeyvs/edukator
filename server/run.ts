@@ -24,6 +24,11 @@ export const RUN_TARGET = 12;
 
 export type RunKind = 'run' | 'triage' | 'boss' | 'lesson';
 
+/** Проверяет строковое значение из SQLite до передачи в доменную логику. */
+export function isRunKind(value: string): value is RunKind {
+  return value === 'run' || value === 'triage' || value === 'boss' || value === 'lesson';
+}
+
 export interface RunProgress {
   total: number;
   correct: number;

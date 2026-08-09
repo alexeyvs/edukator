@@ -25,6 +25,7 @@ export interface LearningMaterialView {
   status: 'ready' | 'active';
   content: LearningMaterialContent;
   progress: RunProgress;
+  passScore: number;
 }
 
 export interface OpenLearningResponse {
@@ -45,6 +46,7 @@ export interface FinishLearningResponse extends FinishRunResponse {
   outcome: 'passed' | 'failed';
   masteryBefore: number;
   masteryAfter: number;
+  passScore: number;
 }
 
 export interface LearningApi {

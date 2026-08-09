@@ -16,6 +16,7 @@ const MATERIAL: LearningMaterialView = {
   estimatedMinutes: 12,
   status: 'active',
   progress: { total: 0, correct: 0, target: 5, done: false },
+  passScore: 4,
   content: {
     introduction: 'Дробь показывает, сколько равных частей взяли.',
     objectives: ['Находить числитель и знаменатель'],
@@ -61,6 +62,7 @@ describe('экран персонального разбора', () => {
     expect(screen.getByText('Пример')).toBeInTheDocument();
     expect(screen.getByText('Обрати внимание')).toBeInTheDocument();
     expect(screen.queryByText(/таймер|осталось/iu)).not.toBeInTheDocument();
+    expect(screen.getByText('5 вопросов, зачёт — от 4 верных.')).toBeInTheDocument();
   });
 
   it('переходит к единственному тесту по явной кнопке', async () => {

@@ -8,10 +8,10 @@
   --paper: #f6f3e9;
   --glass: rgb(255 255 255 / 88%);
   font-family: "Avenir Next", Inter, ui-sans-serif, system-ui, sans-serif;
-  color: #17231f;
+  color: var(--ink);
   background:
     radial-gradient(circle at 12% 8%, rgb(251 191 36 / 14%), transparent 24rem),
-    #f6f3e9;
+    var(--paper);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -75,7 +75,7 @@ button:focus-visible {
 
 .profile-link {
   margin-left: auto;
-  color: #075b45;
+  color: var(--evergreen);
   font-weight: 750;
   text-underline-offset: .25rem;
 }
@@ -95,7 +95,7 @@ button:focus-visible {
   gap: .25rem 1rem;
   margin-bottom: 1.5rem;
   padding: 1rem 1.25rem;
-  border-left: .3rem solid #e3a31b;
+  border-left: .3rem solid var(--amber);
   border-radius: 0 1rem 1rem 0;
   background: rgb(255 255 255 / 65%);
 }
@@ -120,7 +120,7 @@ button:focus-visible {
 .home-kicker,
 .section-heading p {
   margin: 0 0 .5rem;
-  color: #0b7c5d;
+  color: var(--leaf);
   font-size: .75rem;
   font-weight: 850;
   letter-spacing: .1em;
@@ -145,7 +145,7 @@ button:focus-visible {
 
 .exam-countdown {
   padding: 1.2rem 1.3rem;
-  border-top: 2px solid #e3a31b;
+  border-top: 2px solid var(--amber);
   background: rgb(255 255 255 / 58%);
 }
 
@@ -163,7 +163,7 @@ button:focus-visible {
 }
 
 .exam-countdown strong {
-  color: #17231f;
+  color: var(--ink);
   font-size: 1.5rem;
 }
 
@@ -192,7 +192,7 @@ button:focus-visible {
   padding: clamp(1.5rem, 4vw, 2.5rem);
   border-radius: 1.5rem;
   color: white;
-  background: #075b45;
+  background: var(--evergreen);
   box-shadow: 0 24px 60px rgb(7 91 69 / 20%);
 }
 
@@ -242,7 +242,7 @@ button:focus-visible {
 }
 
 .learning-card {
-  --subject-accent: #e3a31b;
+  --subject-accent: var(--amber);
   display: grid;
   grid-template-columns: 4rem minmax(0, 1fr) auto;
   align-items: center;
@@ -354,7 +354,7 @@ button:focus-visible {
 
 .topic-map-subjects li small {
   margin-top: .18rem;
-  color: #0b7c5d;
+  color: var(--leaf);
   font-size: .7rem;
   font-weight: 750;
 }
@@ -420,7 +420,7 @@ button:focus-visible {
 }
 
 .forecast-cards strong {
-  color: #075b45;
+  color: var(--evergreen);
   font-size: 1.8rem;
 }
 
@@ -486,7 +486,7 @@ button:focus-visible {
 }
 
 .empty-day strong {
-  color: #075b45;
+  color: var(--evergreen);
   font-size: 1.2rem;
 }
 
@@ -510,7 +510,7 @@ button:focus-visible {
   place-items: center;
   border-radius: 1rem;
   color: white;
-  background: #075b45;
+  background: var(--evergreen);
   box-shadow: 0 8px 20px rgb(7 91 69 / 22%);
   font-size: 1.35rem;
   font-weight: 800;
@@ -533,7 +533,7 @@ button:focus-visible {
 }
 
 .progress-copy strong {
-  color: #075b45;
+  color: var(--evergreen);
 }
 
 .progress-track {
@@ -547,7 +547,7 @@ button:focus-visible {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #0b7c5d, #e3a31b);
+  background: linear-gradient(90deg, var(--leaf), var(--amber));
   transition: width .25s ease;
 }
 
@@ -564,7 +564,7 @@ button:focus-visible {
 }
 
 .boss-progress span.complete {
-  background: linear-gradient(90deg, #0b7c5d, #e3a31b);
+  background: linear-gradient(90deg, var(--leaf), var(--amber));
 }
 
 .boss-kicker {
@@ -619,7 +619,7 @@ button:focus-visible {
 .task-meta span {
   padding: .35rem .65rem;
   border-radius: 999px;
-  color: #075b45;
+  color: var(--evergreen);
   background: #e3f1eb;
   font-size: .78rem;
   font-weight: 700;
@@ -653,20 +653,20 @@ button:focus-visible {
   border: 2px solid #cad6cf;
   border-radius: 1rem;
   outline: none;
-  color: #17231f;
+  color: var(--ink);
   background: white;
   font-size: 1.1rem;
 }
 
 .answer-field input:focus {
-  border-color: #0b7c5d;
+  border-color: var(--leaf);
   box-shadow: 0 0 0 4px rgb(11 124 93 / 12%);
 }
 
 .hint {
   margin-top: 1rem;
   padding: 1rem 1.1rem;
-  border-left: 4px solid #e3a31b;
+  border-left: 4px solid var(--amber);
   border-radius: .4rem 1rem 1rem .4rem;
   background: #fff8e7;
   line-height: 1.55;
@@ -746,7 +746,7 @@ button:focus-visible {
   padding: .9rem 1rem;
   border: 2px solid #d4ddd7;
   border-radius: 1rem;
-  color: #17231f !important;
+  color: var(--ink) !important;
   background: white;
   cursor: pointer;
   transition: border-color .15s ease, background-color .15s ease, box-shadow .15s ease;
@@ -757,7 +757,7 @@ button:focus-visible {
 }
 
 .choice-card:has(input:checked) {
-  border-color: #0b7c5d;
+  border-color: var(--leaf);
   background: #edf7f2;
   box-shadow: 0 0 0 3px rgb(11 124 93 / 10%);
 }
@@ -771,7 +771,7 @@ button:focus-visible {
   width: 1.15rem;
   height: 1.15rem;
   margin: 0;
-  accent-color: #075b45;
+  accent-color: var(--evergreen);
 }
 
 .choice-letter {
@@ -780,7 +780,7 @@ button:focus-visible {
   height: 1.8rem;
   place-items: center;
   border-radius: .55rem;
-  color: #075b45;
+  color: var(--evergreen);
   background: #e3f1eb;
   font-size: .8rem;
   font-weight: 850;
@@ -811,9 +811,9 @@ button:focus-visible {
 }
 
 .primary {
-  border: 1px solid #075b45;
+  border: 1px solid var(--evergreen);
   color: white;
-  background: #075b45;
+  background: var(--evergreen);
 }
 
 .secondary {
@@ -832,7 +832,7 @@ button:focus-visible {
 }
 
 .correct .verdict {
-  color: #075b45;
+  color: var(--evergreen);
 }
 
 .verdict strong {
@@ -870,7 +870,7 @@ button:focus-visible {
 }
 
 .dispute-note.success {
-  color: #075b45;
+  color: var(--evergreen);
   background: #e3f1eb;
 }
 
@@ -903,7 +903,7 @@ button:focus-visible {
 
 .finish-kicker {
   margin: 0 0 .45rem;
-  color: #0b7c5d;
+  color: var(--leaf);
   font-size: .82rem;
   font-weight: 800;
   letter-spacing: .08em;
@@ -935,7 +935,7 @@ button:focus-visible {
 }
 
 .finish-stats strong {
-  color: #075b45;
+  color: var(--evergreen);
   font-size: 1.8rem;
 }
 
@@ -1002,7 +1002,7 @@ button:focus-visible {
 
 .finish-encouragement {
   margin: -.25rem 0 1.25rem;
-  color: #075b45;
+  color: var(--evergreen);
   font-weight: 750;
 }
 
@@ -1034,7 +1034,7 @@ button:focus-visible {
   place-items: center;
   border-radius: 50%;
   color: white;
-  background: #075b45;
+  background: var(--evergreen);
   font-weight: 800;
 }
 
@@ -1083,7 +1083,7 @@ button:focus-visible {
 }
 
 .profile-home {
-  color: #075b45;
+  color: var(--evergreen);
   font-weight: 750;
   text-underline-offset: .25rem;
 }
@@ -1097,7 +1097,7 @@ button:focus-visible {
 
 .profile-kicker {
   margin: 0 0 .6rem;
-  color: #0b7c5d;
+  color: var(--leaf);
   font-size: .75rem;
   font-weight: 850;
   letter-spacing: .1em;
@@ -1181,12 +1181,12 @@ button:focus-visible {
   border: 2px solid #cad6cf;
   border-radius: .9rem;
   outline: none;
-  color: #17231f;
+  color: var(--ink);
   background: white;
 }
 
 .profile-field input:focus-visible {
-  border-color: #0b7c5d;
+  border-color: var(--leaf);
   box-shadow: 0 0 0 4px rgb(11 124 93 / 12%);
 }
 
@@ -1209,7 +1209,7 @@ button:focus-visible {
 }
 
 .profile-message.success {
-  color: #075b45;
+  color: var(--evergreen);
   background: #e3f1eb;
 }
 
@@ -1253,7 +1253,7 @@ button:focus-visible {
 
 .parents-home {
   margin-left: auto;
-  color: #075b45;
+  color: var(--evergreen);
   font-weight: 750;
   text-underline-offset: .25rem;
 }
@@ -1295,7 +1295,7 @@ button:focus-visible {
 .parents-forecasts article {
   display: grid;
   padding: 1.15rem;
-  border-left: .3rem solid #0b7c5d;
+  border-left: .3rem solid var(--leaf);
   border-radius: 0 1rem 1rem 0;
   background: #edf7f2;
 }
@@ -1310,7 +1310,7 @@ button:focus-visible {
 
 .parents-forecasts strong {
   margin: .35rem 0;
-  color: #075b45;
+  color: var(--evergreen);
   font-size: 2rem;
 }
 
@@ -1343,7 +1343,7 @@ button:focus-visible {
 }
 
 .parents-time-total strong {
-  color: #075b45;
+  color: var(--evergreen);
   font-size: 1.7rem;
 }
 
@@ -1380,7 +1380,7 @@ button:focus-visible {
 .parents-bar-track > span {
   width: 100%;
   min-height: .2rem;
-  background: linear-gradient(#e3a31b, #0b7c5d);
+  background: linear-gradient(var(--amber), var(--leaf));
 }
 
 .parents-bars time {
@@ -1432,7 +1432,7 @@ button:focus-visible {
   grid-template-columns: 1fr auto;
   gap: .2rem 1rem;
   padding: .8rem 1rem;
-  border-left: .3rem solid #0b7c5d;
+  border-left: .3rem solid var(--leaf);
   border-radius: 0 .8rem .8rem 0;
   background: #f1f4f1;
 }
@@ -1442,7 +1442,7 @@ button:focus-visible {
 }
 
 .parents-activity .activity-boss {
-  border-left-color: #e3a31b;
+  border-left-color: var(--amber);
 }
 
 .parents-activity .activity-lesson {
@@ -1450,7 +1450,7 @@ button:focus-visible {
 }
 
 .lesson-shell {
-  --subject-accent: #e3a31b;
+  --subject-accent: var(--amber);
   width: min(100% - 2rem, 62rem);
   margin: 0 auto;
   padding: 2rem 0 5rem;
@@ -1706,13 +1706,13 @@ button:focus-visible {
   place-items: center;
   border-radius: 1.2rem;
   color: white;
-  background: #075b45;
+  background: var(--evergreen);
   font-size: 2rem;
   font-weight: 850;
 }
 
 .lesson-finish.failed .lesson-outcome-mark {
-  background: #e3a31b;
+  background: var(--amber);
 }
 
 .lesson-finish-stats {

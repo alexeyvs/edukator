@@ -15,6 +15,7 @@ import {
 } from '../server/learning.js';
 import { reserveLearningTasks } from '../server/codex/bank.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
+import { nextTask } from '../server/session.js';
 
 const TOPIC = 'math.fractions';
 const START = new Date('2026-08-09T10:00:00.000Z');
@@ -170,6 +171,10 @@ describe('слой данных учебных материалов', () => {
       .toEqual({ mastery_before: 0.41 });
     expect(db.prepare('SELECT id, issued_run_id FROM task_bank ORDER BY id').all())
       .toEqual(taskIds.map((id) => ({ id, issued_run_id: first.runId })));
+
+    const issued = nextTask(db, GRAPH, { runId: first.runId });
+    expect(issued.status).toBe('ok');
+    if (issued.status === 'ok') expect(issued.task).not.toHaveProperty('hint');
   });
 
   it.each([
@@ -187,6 +192,7 @@ describe('слой данных учебных материалов', () => {
     const result = finishLearningMaterial(db, GRAPH, runId, { now: START });
     expect(result).toMatchObject({
       materialId, runId, total: 5, correct, outcome, masteryBefore: 0.3, masteryAfter: 0.46,
+      passScore: 4,
     });
     expect(result).toMatchObject({ xp: correct * 25, forecast: { subject: 'math' } });
     expect(finishLearningMaterial(db, GRAPH, runId, { now: new Date(START.getTime() + 5000) }))

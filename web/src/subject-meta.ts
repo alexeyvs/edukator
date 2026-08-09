@@ -7,3 +7,9 @@ export const SUBJECT_NAMES: Record<Subject, string> = {
 };
 
 export const SUBJECTS = Object.keys(SUBJECT_NAMES) as Subject[];
+
+export const SUBJECT_MARKS: Record<Subject, string> = {
+  math: '∑',
+  russian: 'Ъ',
+  english: 'Aa',
+};
