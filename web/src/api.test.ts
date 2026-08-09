@@ -6,6 +6,7 @@ import { browserBossApi } from './boss-api';
 import { browserProfileApi } from './profile-api';
 import { browserParentsApi } from './parents-api';
 import { browserRunApi, RunApiError } from './run-api';
+import { browserLearningApi } from './learning-api';
 
 function response(body: unknown, options: { ok?: boolean; status?: number } = {}) {
   return {
@@ -119,6 +120,23 @@ describe('браузерные API-адаптеры', () => {
         body: '{"attempt_id":23}',
       })],
       ['/api/boss/5/concede', { method: 'POST' }],
+    ]);
+  });
+
+  it('собирает запросы чтения, открытия, теста и learning-финиша', async () => {
+    const fetch = vi.fn().mockResolvedValue(response({ ok: true }));
+    vi.stubGlobal('fetch', fetch);
+
+    await browserLearningApi.read(21);
+    await browserLearningApi.open(21);
+    await browserLearningApi.startTest(21);
+    await browserLearningApi.finish(31);
+
+    expect(fetch.mock.calls).toEqual([
+      ['/api/learning/21'],
+      ['/api/learning/21/open', { method: 'POST' }],
+      ['/api/learning/21/test', { method: 'POST' }],
+      ['/api/learning/run/31/finish', { method: 'POST' }],
     ]);
   });
 

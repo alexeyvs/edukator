@@ -12,6 +12,8 @@ import type { FinishRunResponse } from './run-api';
 import { isPreliminaryForecast } from './forecast-presentation';
 import { SUBJECT_NAMES, SUBJECTS } from './subject-meta';
 
+const LEARNING_MARKS: Record<Subject, string> = { math: '∑', russian: 'Ъ', english: 'Aa' };
+
 export interface HomeScreenProps {
   api?: HomeApi;
   now?: () => Date;
@@ -199,6 +201,34 @@ export function HomeScreen({
         </section>
       ) : (
         <>
+          {plan.learning.length > 0 && (
+            <section className="learning-offer" aria-labelledby="learning-offer-title">
+              <div className="section-heading">
+                <p>Персональный разбор</p>
+                <h2 id="learning-offer-title">Разобрать слабое место</h2>
+              </div>
+              <div className="learning-cards">
+                {plan.learning.map((material) => (
+                  <article className={`learning-card learning-card-${material.subject}`} key={material.id}>
+                    <span className="learning-card-mark" aria-hidden="true">{LEARNING_MARKS[material.subject]}</span>
+                    <div className="learning-card-copy">
+                      <small>{SUBJECT_NAMES[material.subject]} · {material.estimatedMinutes} минут</small>
+                      <h3>{material.topic.title}</h3>
+                      <p>{material.recommendationReason}</p>
+                    </div>
+                    <button
+                      className="primary"
+                      type="button"
+                      onClick={() => navigate(`/?learningId=${material.id}`)}
+                    >
+                      {material.status === 'active' ? 'Продолжить разбор' : 'Разобрать тему'}
+                    </button>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
+
           <section className="forecast-strip" aria-labelledby="forecast-title">
             <div className="section-heading">
               <p>Текущая форма</p>

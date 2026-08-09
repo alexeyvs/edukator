@@ -30,6 +30,7 @@ const DASHBOARD: ParentsDashboard = {
     { title: 'Обыкновенные дроби', subject: 'math' },
   ],
   activity: [
+    { kind: 'lesson', subject: 'math', startedAt: '2026-08-08T10:00:00.000Z', finishedAt: '2026-08-08T10:08:00.000Z', total: 5, correct: 4, activeMinutes: 6 },
     { kind: 'run', subject: 'math', startedAt: '2026-08-08T09:00:00.000Z', finishedAt: '2026-08-08T09:15:00.000Z', total: 5, correct: 4, activeMinutes: 12 },
     { kind: 'triage', subject: 'english', startedAt: '2026-08-07T09:00:00.000Z', finishedAt: '2026-08-07T09:10:00.000Z', total: 4, correct: 2, activeMinutes: 8 },
     { kind: 'boss', subject: 'russian', startedAt: '2026-08-06T09:00:00.000Z', finishedAt: '2026-08-06T09:10:00.000Z', total: 5, correct: 5, activeMinutes: 9, bossOutcome: 'won' },
@@ -69,6 +70,7 @@ describe('родительский дашборд', () => {
     expect(activity).toHaveTextContent('Обычный забег');
     expect(activity).toHaveTextContent('Триаж');
     expect(activity).toHaveTextContent('Босс');
+    expect(activity).toHaveTextContent('Тест по разбору');
     expect(activity).toHaveTextContent('победа');
     expect(screen.getByRole('region', { name: 'На что обратить внимание' }))
       .toHaveTextContent('Три полных дня без обычных забегов');

@@ -10,6 +10,12 @@ import {
   type RunProgress,
 } from './run-api';
 import { FinishScreen } from './FinishScreen';
+import { LearningFinishScreen } from './LearningFinishScreen';
+import {
+  browserLearningApi,
+  type FinishLearningResponse,
+  type LearningApi,
+} from './learning-api';
 import { TaskPrompt } from './TaskPrompt';
 
 const NO_TASK_RETRY_MS = 2_000;
@@ -21,6 +27,8 @@ type Wait = (delayMs: number) => Promise<void>;
 export interface RunScreenProps {
   runId: number;
   api?: RunApi;
+  learningApi?: Pick<LearningApi, 'finish'>;
+  kind?: 'run' | 'lesson';
   wait?: Wait;
 }
 
@@ -54,7 +62,13 @@ function Problem({ problem }: { problem: ScreenProblem }) {
   );
 }
 
-export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: RunScreenProps) {
+export function RunScreen({
+  runId,
+  api = browserRunApi,
+  learningApi = browserLearningApi,
+  kind = 'run',
+  wait = defaultWait,
+}: RunScreenProps) {
   const [current, setCurrent] = useState<NextTaskResponse | null>(null);
   const [progress, setProgress] = useState<RunProgress | null>(null);
   const [answer, setAnswer] = useState('');
@@ -65,6 +79,7 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
   const [disputeStatus, setDisputeStatus] = useState<DisputeStatus | null>(null);
   const [disputing, setDisputing] = useState(false);
   const [finish, setFinish] = useState<FinishRunResponse | null>(null);
+  const [learningFinish, setLearningFinish] = useState<FinishLearningResponse | null>(null);
   const shownAt = useRef(Date.now());
   const prefetched = useRef<NextTaskResponse | null>(null);
   const prefetching = useRef<Promise<void> | null>(null);
@@ -108,8 +123,13 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
       if (generation.current !== token) return;
       if (error instanceof RunApiError && error.code === 'run-complete') {
         try {
-          const summary = await api.finish(runId);
-          if (generation.current === token) setFinish(summary);
+          if (kind === 'lesson') {
+            const summary = await learningApi.finish(runId);
+            if (generation.current === token) setLearningFinish(summary);
+          } else {
+            const summary = await api.finish(runId);
+            if (generation.current === token) setFinish(summary);
+          }
         } catch (finishError) {
           if (generation.current === token) setProblem(problemOf(finishError));
         }
@@ -122,7 +142,7 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
         if (generation.current === token) void load(token);
       }
     }
-  }, [api, runId, showTask, wait]);
+  }, [api, kind, learningApi, runId, showTask, wait]);
 
   useEffect(() => {
     generation.current += 1;
@@ -132,6 +152,7 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
     setCurrent(null);
     setProgress(null);
     setFinish(null);
+    setLearningFinish(null);
     setProblem(null);
     void load(token);
     return () => {
@@ -186,8 +207,13 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
     const token = generation.current;
     setSubmitting(true);
     try {
-      const summary = await api.finish(runId);
-      if (generation.current === token) setFinish(summary);
+      if (kind === 'lesson') {
+        const summary = await learningApi.finish(runId);
+        if (generation.current === token) setLearningFinish(summary);
+      } else {
+        const summary = await api.finish(runId);
+        if (generation.current === token) setFinish(summary);
+      }
     } catch (error) {
       if (generation.current === token) setProblem(problemOf(error));
     } finally {
@@ -216,6 +242,7 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
     }
   }
 
+  if (learningFinish !== null) return <LearningFinishScreen result={learningFinish} />;
   if (finish !== null) return <FinishScreen result={finish} />;
   if (problem !== null) return <Problem problem={problem} />;
   if (current === null || progress === null) {
@@ -225,10 +252,14 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
   return (
     <main className="run-shell">
       <header className="run-header">
-        <a className="brand" href="/" aria-label="На главный экран">Э</a>
+        <a
+          className="brand"
+          href={kind === 'lesson' && progress.total > 0 ? `/?runId=${runId}&kind=lesson` : '/'}
+          aria-label={kind === 'lesson' && progress.total > 0 ? 'Вернуться к тесту' : 'На главный экран'}
+        >Э</a>
         <div className="progress-block" aria-label={`Прогресс: ${progress.total} из ${progress.target}`}>
           <div className="progress-copy">
-            <span>Забег</span>
+            <span>{kind === 'lesson' ? 'Проверка темы' : 'Забег'}</span>
             <strong>{progress.total} из {progress.target}</strong>
           </div>
           <div className="progress-track" aria-hidden="true">
@@ -250,13 +281,14 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
               onAnswerChange={setAnswer}
               answerId="run-answer"
               headingId="task-question"
-              hint={current.task.hint}
-              hintVisible={hintUsed}
+              {...(kind === 'lesson' ? {} : { hint: current.task.hint, hintVisible: hintUsed })}
             />
             <div className="task-actions">
-              <button className="secondary" type="button" onClick={() => setHintUsed(true)} disabled={hintUsed}>
-                {hintUsed ? 'Подсказка открыта' : 'Нужна подсказка'}
-              </button>
+              {kind !== 'lesson' && (
+                <button className="secondary" type="button" onClick={() => setHintUsed(true)} disabled={hintUsed}>
+                  {hintUsed ? 'Подсказка открыта' : 'Нужна подсказка'}
+                </button>
+              )}
               <button className="primary" type="submit" disabled={submitting || answer.trim() === ''}>
                 {submitting ? 'Проверяю…' : 'Проверить'}
               </button>
@@ -271,8 +303,7 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
             answerId="run-answer-result"
             headingId="task-question"
             readOnly
-            hint={current.task.hint}
-            hintVisible={hintUsed}
+            {...(kind === 'lesson' ? {} : { hint: current.task.hint, hintVisible: hintUsed })}
           />
           <div className={`answer-result ${result.correct ? 'correct' : 'wrong'}`}>
             <p className="verdict">{result.correct ? 'Верно' : 'Пока не сошлось'} <strong>+{result.xp} XP</strong></p>
@@ -296,7 +327,9 @@ export function RunScreen({ runId, api = browserRunApi, wait = defaultWait }: Ru
                 disabled={submitting || disputing || disputeStatus === 'open'}
                 onClick={() => void (result.progress.done ? finishRun() : nextTask())}
               >
-                {result.progress.done ? 'Завершить забег' : 'Следующее задание'}
+                {result.progress.done
+                  ? kind === 'lesson' ? 'Завершить тест' : 'Завершить забег'
+                  : 'Следующее задание'}
               </button>
             </div>
           </div>

@@ -61,6 +61,44 @@ describe('App', () => {
     expect(screen.queryByText('Подбираю задание…')).not.toBeInTheDocument();
   });
 
+  it('открывает персональный разбор по learningId через профайл-гейт', async () => {
+    window.history.replaceState({}, '', '/?learningId=21');
+    vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(String(input).includes('/api/learning/21/open') ? {
+        materialId: 21,
+        resumed: true,
+        material: {
+          id: 21,
+          subject: 'math',
+          topic: { id: 'math.fractions', title: 'Обыкновенные дроби' },
+          recommendationReason: 'Путаются знаменатели',
+          estimatedMinutes: 12,
+          status: 'active',
+          progress: { total: 0, correct: 0, target: 5, done: false },
+          content: {
+            introduction: 'Разберём дроби.',
+            objectives: ['Складывать дроби'],
+            sections: [
+              { title: 'Части', blocks: [{ type: 'paragraph', content: 'У дроби две части.' }] },
+              { title: 'Запись', blocks: [{ type: 'formula', content: '\\frac{a}{b}' }] },
+              { title: 'Проверка', blocks: [{ type: 'example', content: 'Одна вторая.' }] },
+            ],
+            summary: ['Следи за знаменателем.', 'Проверяй ответ.'],
+          },
+        },
+      } : {
+        name: 'Ученик', interests: [], examDate: null, partnerName: 'Кекс', introduction: 'Готовы.',
+      }),
+    })));
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'Обыкновенные дроби', level: 1 }))
+      .toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Перейти к тесту' })).toBeInTheDocument();
+  });
+
   it('открывает pathname /parents напрямую без query string и профайл-гейта', async () => {
     window.history.replaceState({}, '', '/parents');
     const fetchMock = vi.fn(() => Promise.resolve({

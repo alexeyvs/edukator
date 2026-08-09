@@ -5,6 +5,7 @@ import { BossScreen } from './BossScreen';
 import { ProfileScreen } from './ProfileScreen';
 import { RunScreen } from './RunScreen';
 import { TriageScreen } from './TriageScreen';
+import { LearningScreen } from './LearningScreen';
 import { browserProfileApi, type Profile, type ProfileApi } from './profile-api';
 
 export function ProfileGate({
@@ -50,12 +51,17 @@ export function App() {
   }
   const params = new URLSearchParams(window.location.search);
   const runId = Number(params.get('runId'));
+  const learningId = Number(params.get('learningId'));
   let screen: ReactNode;
   if (Number.isSafeInteger(runId) && runId > 0) {
     const kind = params.get('kind');
     screen = kind === 'triage'
       ? <TriageScreen runId={runId} />
-      : kind === 'boss' ? <BossScreen runId={runId} /> : <RunScreen runId={runId} />;
+      : kind === 'boss' ? <BossScreen runId={runId} />
+        : kind === 'lesson' ? <RunScreen runId={runId} kind="lesson" />
+          : <RunScreen runId={runId} />;
+  } else if (Number.isSafeInteger(learningId) && learningId > 0) {
+    screen = <LearningScreen materialId={learningId} />;
   } else if (params.get('screen') === 'profile') {
     screen = <ProfileScreen />;
   } else {

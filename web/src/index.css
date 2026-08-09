@@ -1,6 +1,12 @@
 @import "tailwindcss";
 
 :root {
+  --ink: #17231f;
+  --evergreen: #075b45;
+  --leaf: #0b7c5d;
+  --amber: #e3a31b;
+  --paper: #f6f3e9;
+  --glass: rgb(255 255 255 / 88%);
   font-family: "Avenir Next", Inter, ui-sans-serif, system-ui, sans-serif;
   color: #17231f;
   background:
@@ -29,6 +35,12 @@ button {
 button:disabled {
   cursor: default;
   opacity: .55;
+}
+
+a:focus-visible,
+button:focus-visible {
+  outline: 3px solid rgb(11 124 93 / 32%);
+  outline-offset: 3px;
 }
 
 .home-shell {
@@ -218,8 +230,75 @@ button:disabled {
 
 .forecast-strip,
 .day-plan,
-.topic-map {
+.topic-map,
+.learning-offer {
   margin-top: 3rem;
+}
+
+.learning-cards {
+  display: grid;
+  gap: .8rem;
+  margin-top: 1.25rem;
+}
+
+.learning-card {
+  --subject-accent: #e3a31b;
+  display: grid;
+  grid-template-columns: 4rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 1.1rem;
+  padding: 1.2rem;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--subject-accent) 34%, #dbe4de);
+  border-radius: 1.35rem;
+  background: rgb(255 255 255 / 78%);
+}
+
+.learning-card-russian {
+  --subject-accent: #28729b;
+}
+
+.learning-card-english {
+  --subject-accent: #8b5cad;
+}
+
+.learning-card-mark {
+  display: grid;
+  width: 4rem;
+  height: 4rem;
+  place-items: center;
+  border-radius: 1rem;
+  color: var(--subject-accent);
+  background: color-mix(in srgb, var(--subject-accent) 12%, white);
+  font-size: 1.55rem;
+  font-weight: 850;
+}
+
+.learning-card-copy {
+  min-width: 0;
+}
+
+.learning-card small {
+  color: var(--subject-accent);
+  font-weight: 800;
+}
+
+.learning-card h3 {
+  margin: .2rem 0;
+  font-size: 1.18rem;
+}
+
+.learning-card p {
+  margin: 0;
+  color: #52625c;
+  line-height: 1.45;
+}
+
+.learning-card button {
+  min-height: 2.9rem;
+  padding: .7rem 1rem;
+  border-radius: .85rem;
+  font-weight: 800;
 }
 
 .topic-map-subjects {
@@ -1366,6 +1445,285 @@ button:disabled {
   border-left-color: #e3a31b;
 }
 
+.parents-activity .activity-lesson {
+  border-left-color: #8b5cad;
+}
+
+.lesson-shell {
+  --subject-accent: #e3a31b;
+  width: min(100% - 2rem, 62rem);
+  margin: 0 auto;
+  padding: 2rem 0 5rem;
+}
+
+.lesson-russian {
+  --subject-accent: #28729b;
+}
+
+.lesson-english {
+  --subject-accent: #8b5cad;
+}
+
+.lesson-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.lesson-header > div {
+  display: grid;
+  min-width: 0;
+}
+
+.lesson-header span,
+.lesson-header small {
+  color: #66756f;
+  font-size: .75rem;
+  font-weight: 800;
+}
+
+.lesson-header strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lesson-header small {
+  margin-left: auto;
+  padding: .45rem .7rem;
+  border-radius: 999px;
+  background: white;
+  white-space: nowrap;
+}
+
+.lesson-paper {
+  padding: clamp(1.5rem, 5vw, 4rem);
+  border: 1px solid rgb(7 91 69 / 10%);
+  border-radius: 2rem;
+  background: var(--glass);
+  box-shadow: 0 22px 70px rgb(42 57 50 / 10%);
+}
+
+.lesson-lead {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: clamp(1rem, 4vw, 2rem);
+  padding-bottom: 2rem;
+  border-bottom: 1px solid #dbe4de;
+}
+
+.lesson-subject-mark {
+  display: grid;
+  width: clamp(4.5rem, 10vw, 6.5rem);
+  height: clamp(4.5rem, 10vw, 6.5rem);
+  place-items: center;
+  border-radius: 1.4rem;
+  color: var(--subject-accent);
+  background: color-mix(in srgb, var(--subject-accent) 12%, white);
+  font-size: clamp(1.8rem, 5vw, 3rem);
+  font-weight: 850;
+}
+
+.lesson-lead h1 {
+  max-width: 18ch;
+  margin: 0;
+  font-size: clamp(2.2rem, 6vw, 4.2rem);
+  line-height: 1;
+  letter-spacing: -.055em;
+}
+
+.lesson-lead > div > p:not(.home-kicker) {
+  max-width: 42rem;
+  margin: 1rem 0 0;
+  color: #52625c;
+  font-size: 1.04rem;
+  line-height: 1.65;
+}
+
+.lesson-lead .lesson-reason {
+  padding-left: .85rem;
+  border-left: .25rem solid var(--subject-accent);
+  font-size: .9rem !important;
+}
+
+.lesson-objectives {
+  margin: 2rem 0 2.5rem;
+  padding: 1.2rem 1.4rem;
+  border-radius: 1.2rem;
+  background: #edf7f2;
+}
+
+.lesson-objectives h2,
+.lesson-summary h2 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.lesson-objectives ul,
+.lesson-summary ul {
+  display: grid;
+  gap: .55rem;
+  margin: .9rem 0 0;
+  padding-left: 1.2rem;
+  line-height: 1.55;
+}
+
+.lesson-thread {
+  display: grid;
+}
+
+.lesson-thread > section {
+  position: relative;
+  display: grid;
+  grid-template-columns: 3.1rem minmax(0, 1fr);
+  gap: 1rem;
+  padding-bottom: 2.5rem;
+}
+
+.lesson-thread > section:not(:last-child)::before {
+  position: absolute;
+  top: 2.35rem;
+  bottom: 0;
+  left: 1.15rem;
+  width: 2px;
+  background: color-mix(in srgb, var(--subject-accent) 30%, #dbe4de);
+  content: '';
+}
+
+.lesson-section-number {
+  z-index: 1;
+  display: grid;
+  width: 2.35rem;
+  height: 2.35rem;
+  place-items: center;
+  border-radius: .8rem;
+  color: white;
+  background: var(--subject-accent);
+  font-size: .75rem;
+  font-weight: 850;
+}
+
+.lesson-thread h2 {
+  margin: .3rem 0 1rem;
+  font-size: clamp(1.35rem, 3vw, 1.85rem);
+  letter-spacing: -.025em;
+}
+
+.lesson-block {
+  margin: .8rem 0 0;
+}
+
+.lesson-paragraph,
+.lesson-example p,
+.lesson-warning p {
+  color: #34453e;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.lesson-example,
+.lesson-warning {
+  padding: 1rem 1.15rem;
+  border-left: .28rem solid var(--subject-accent);
+  border-radius: 0 1rem 1rem 0;
+  background: color-mix(in srgb, var(--subject-accent) 8%, white);
+}
+
+.lesson-warning {
+  border-left-color: #9a3f27;
+  background: #fff3ee;
+}
+
+.lesson-example strong,
+.lesson-warning strong {
+  color: #52625c;
+  font-size: .75rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.lesson-example p,
+.lesson-warning p {
+  margin: .35rem 0 0;
+}
+
+.lesson-formula {
+  padding: 1rem;
+  overflow-x: auto;
+  border: 1px solid #dbe4de;
+  border-radius: 1rem;
+  background: #fbfaf5;
+  text-align: center;
+}
+
+.lesson-summary {
+  margin-top: .5rem;
+  padding: 1.5rem;
+  border: 2px solid color-mix(in srgb, var(--subject-accent) 45%, #dbe4de);
+  border-radius: 1.25rem;
+  background: white;
+}
+
+.lesson-cta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #dbe4de;
+}
+
+.lesson-cta div {
+  display: grid;
+  gap: .2rem;
+}
+
+.lesson-cta span,
+.lesson-score-note {
+  color: #66756f;
+}
+
+.lesson-cta button {
+  min-height: 3.2rem;
+  padding: .8rem 1.2rem;
+  border-radius: .9rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.lesson-finish {
+  position: relative;
+  overflow: hidden;
+}
+
+.lesson-outcome-mark {
+  display: grid;
+  width: 4rem;
+  height: 4rem;
+  margin-bottom: 1rem;
+  place-items: center;
+  border-radius: 1.2rem;
+  color: white;
+  background: #075b45;
+  font-size: 2rem;
+  font-weight: 850;
+}
+
+.lesson-finish.failed .lesson-outcome-mark {
+  background: #e3a31b;
+}
+
+.lesson-finish-stats {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.lesson-score-note {
+  margin: 0;
+  font-size: .85rem;
+}
+
 .parents-activity li > div {
   display: grid;
 }
@@ -1470,6 +1828,20 @@ button:disabled {
     grid-column: 1 / -1;
   }
 
+  .learning-card {
+    grid-template-columns: 3.25rem minmax(0, 1fr);
+    padding: 1rem;
+  }
+
+  .learning-card-mark {
+    width: 3.25rem;
+    height: 3.25rem;
+  }
+
+  .learning-card button {
+    grid-column: 1 / -1;
+  }
+
   .run-shell {
     width: min(100% - 1rem, 56rem);
     padding-top: .75rem;
@@ -1484,8 +1856,42 @@ button:disabled {
   }
 
   .finish-stats,
-  .finish-grid {
+  .finish-grid,
+  .lesson-finish-stats {
     grid-template-columns: 1fr;
+  }
+
+  .lesson-shell {
+    width: min(100% - 1rem, 62rem);
+    padding-top: .75rem;
+  }
+
+  .lesson-paper {
+    padding: 1.25rem;
+    border-radius: 1.35rem;
+  }
+
+  .lesson-header small {
+    display: none;
+  }
+
+  .lesson-lead {
+    grid-template-columns: 1fr;
+  }
+
+  .lesson-subject-mark {
+    width: 4rem;
+    height: 4rem;
+  }
+
+  .lesson-thread > section {
+    grid-template-columns: 2.7rem minmax(0, 1fr);
+    gap: .65rem;
+  }
+
+  .lesson-cta {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .profile-shell {

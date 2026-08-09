@@ -17,7 +17,7 @@ export interface RunTask {
   material?: string;
   material_format?: 'none' | 'text' | 'math';
   choices?: string[];
-  hint: string;
+  hint?: string;
   difficulty: number;
   answer_format: AnswerFormat;
 }

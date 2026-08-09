@@ -1,7 +1,7 @@
 import type { Subject } from './home-api';
 import { requestJson } from './http';
 
-export type ParentsRunKind = 'run' | 'triage' | 'boss';
+export type ParentsRunKind = 'run' | 'triage' | 'boss' | 'lesson';
 
 export interface ParentsForecast {
   subject: Subject;

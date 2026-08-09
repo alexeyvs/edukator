@@ -36,7 +36,7 @@ function task(db: Database, topicId: string): number {
   ).run(topicId).lastInsertRowid);
 }
 
-function run(db: Database, subject: Topic['subject'], topicId: string, kind: 'run' | 'triage' | 'boss',
+function run(db: Database, subject: Topic['subject'], topicId: string, kind: 'run' | 'triage' | 'boss' | 'lesson',
   startedAt: string, finishedAt: string, total = 1, correct = 1): number {
   return Number(db.prepare(
     `INSERT INTO runs
@@ -169,16 +169,34 @@ describe('readParentsDashboard', () => {
     const first = run(db, 'math', 'math.fractions', 'run', '2026-08-07T09:00:00.000Z', '2026-08-07T10:00:00.000Z', 2, 1);
     const second = run(db, 'russian', 'russian.not', 'triage', '2026-08-07T09:30:00.000Z', '2026-08-07T10:00:00.000Z');
     const boss = run(db, 'math', 'math.fractions', 'boss', '2026-08-08T09:00:00.000Z', '2026-08-08T10:00:00.000Z', 1, 0);
+    const lesson = run(db, 'math', 'math.fractions', 'lesson', '2026-08-08T10:15:00.000Z', '2026-08-08T10:30:00.000Z', 5, 4);
     db.prepare("INSERT INTO boss_batches (topic_id, run_id, status, finished_at) VALUES (?, ?, 'lost', ?)")
       .run('math.fractions', boss, '2026-08-08T10:00:00.000Z');
     attempt(db, 'math.fractions', '2026-08-07T09:45:00.000Z', 90_000, first);
     attempt(db, 'russian.not', '2026-08-07T09:45:00.000Z', 30_000, second);
     attempt(db, 'math.fractions', '2026-08-08T09:45:00.000Z', 45_000, boss);
+    attempt(db, 'math.fractions', '2026-08-08T10:20:00.000Z', 120_000, lesson);
 
     expect(readParentsDashboard(db, graph, NOW).activity).toEqual([
+      expect.objectContaining({ kind: 'lesson', activeMinutes: 2, total: 5, correct: 4 }),
       expect.objectContaining({ kind: 'boss', bossOutcome: 'lost', activeMinutes: 0.75 }),
       expect.objectContaining({ kind: 'triage', activeMinutes: 0.5 }),
       expect.objectContaining({ kind: 'run', activeMinutes: 1.5 }),
+    ]);
+  });
+
+  it('учитывает в общем времени только ответы lesson-run, без времени чтения', () => {
+    const { db, graph } = setup();
+    const lesson = run(
+      db, 'math', 'math.fractions', 'lesson',
+      '2026-08-08T09:00:00.000Z', '2026-08-08T09:20:00.000Z', 5, 4,
+    );
+    attempt(db, 'math.fractions', '2026-08-08T09:10:00.000Z', 90_000, lesson);
+
+    const dashboard = readParentsDashboard(db, graph, NOW);
+    expect(dashboard.time.actualMinutes).toBe(1.5);
+    expect(dashboard.activity).toEqual([
+      expect.objectContaining({ kind: 'lesson', activeMinutes: 1.5 }),
     ]);
   });
 

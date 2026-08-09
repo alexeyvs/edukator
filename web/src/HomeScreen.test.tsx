@@ -10,6 +10,7 @@ import './test-setup';
 afterEach(cleanup);
 
 const PLAN: DayPlanResponse = {
+  learning: [],
   plan: [
     { subject: 'math', topic: { id: 'math.fractions', title: 'Обыкновенные дроби' }, priority: 1, triagePassed: true },
     { subject: 'russian', topic: { id: 'russian.vowels', title: 'Безударные гласные' }, priority: 2, triagePassed: false },
@@ -85,6 +86,39 @@ function apiWith(plan: DayPlanResponse): HomeApi {
 }
 
 describe('главный экран', () => {
+  it('показывает персональные разборы перед планом дня только когда они готовы или открыты', async () => {
+    const navigate = vi.fn();
+    const view = render(<HomeScreen api={apiWith(PLAN)} navigate={navigate} />);
+
+    await screen.findByRole('heading', { name: 'Забеги на сегодня' });
+    expect(screen.queryByRole('heading', { name: 'Разобрать слабое место' })).not.toBeInTheDocument();
+
+    view.unmount();
+    render(<HomeScreen api={apiWith({
+      ...PLAN,
+      learning: [
+        {
+          id: 21, subject: 'math', topic: { id: 'math.fractions', title: 'Обыкновенные дроби' },
+          recommendationReason: 'Ошибки со знаменателями', estimatedMinutes: 12, status: 'ready',
+        },
+        {
+          id: 22, subject: 'english', topic: { id: 'english.articles', title: 'Артикли' },
+          recommendationReason: 'Путаются a и the', estimatedMinutes: 10, status: 'active',
+        },
+      ],
+    })} navigate={navigate} />);
+
+    const offer = await screen.findByRole('heading', { name: 'Разобрать слабое место' });
+    const dayPlan = screen.getByRole('heading', { name: 'Забеги на сегодня' });
+    expect(offer.compareDocumentPosition(dayPlan) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(screen.getByText('Ошибки со знаменателями')).toBeInTheDocument();
+    expect(screen.getByText('Математика · 12 минут')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Разобрать тему' }));
+    expect(navigate).toHaveBeenCalledWith('/?learningId=21');
+    fireEvent.click(screen.getByRole('button', { name: 'Продолжить разбор' }));
+    expect(navigate).toHaveBeenCalledWith('/?learningId=22');
+  });
+
   it.each([
     [{ current: 0, best: 0, completedToday: false }, 'Первый день серии впереди', 'Один обычный забег положит начало.'],
     [{ current: 3, best: 5, completedToday: false }, '3 дн. подряд', 'Сегодняшний забег продолжит серию.'],

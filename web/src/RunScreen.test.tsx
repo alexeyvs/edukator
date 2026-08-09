@@ -12,6 +12,7 @@ import {
   type RunApi,
 } from './run-api';
 import './test-setup';
+import type { FinishLearningResponse } from './learning-api';
 
 afterEach(cleanup);
 
@@ -85,6 +86,58 @@ function apiWith(overrides: Partial<RunApi> = {}): RunApi {
 }
 
 describe('экран забега', () => {
+  it('переиспользует механику для теста по разбору без подсказок и после ответа оставляет ссылку в тесте', async () => {
+    const lessonTask = task(1, 'Сколько будет одна вторая плюс одна вторая?');
+    lessonTask.progress = { total: 0, correct: 0, target: 5, done: false };
+    delete lessonTask.task.hint;
+    const lessonAnswer = answer(true);
+    lessonAnswer.progress = { total: 1, correct: 1, target: 5, done: false };
+    const api = apiWith({
+      next: vi.fn().mockResolvedValueOnce(lessonTask).mockReturnValue(deferred<NextTaskResponse>()),
+      answer: vi.fn().mockResolvedValue(lessonAnswer),
+    });
+    render(<RunScreen runId={31} kind="lesson" api={api} />);
+
+    expect(await screen.findByText('Проверка темы')).toBeInTheDocument();
+    expect(screen.getByLabelText('Прогресс: 0 из 5')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Нужна подсказка' })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Число'), { target: { value: '1' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+
+    expect(await screen.findByText('Верно')).toBeInTheDocument();
+    expect(api.answer).toHaveBeenCalledWith(expect.objectContaining({ hintUsed: false }));
+    expect(screen.getByRole('link', { name: 'Вернуться к тесту' }))
+      .toHaveAttribute('href', '/?runId=31&kind=lesson');
+  });
+
+  it('завершает пятый ответ только через learning API и показывает зачёт', async () => {
+    const last = task(5, 'Последний вопрос разбора');
+    last.progress = { total: 4, correct: 3, target: 5, done: false };
+    delete last.task.hint;
+    const finalAnswer = answer(true);
+    finalAnswer.progress = { total: 5, correct: 4, target: 5, done: true };
+    const api = apiWith({
+      next: vi.fn().mockResolvedValue(last),
+      answer: vi.fn().mockResolvedValue(finalAnswer),
+      finish: vi.fn(),
+    });
+    const finish: FinishLearningResponse = {
+      ...finishSummary(), runId: 31, materialId: 21, total: 5, correct: 4, xp: 100,
+      outcome: 'passed', masteryBefore: .3, masteryAfter: .6,
+    };
+    const learningApi = { finish: vi.fn().mockResolvedValue(finish) };
+    render(<RunScreen runId={31} kind="lesson" api={api} learningApi={learningApi} />);
+
+    await screen.findByRole('heading', { name: 'Последний вопрос разбора' });
+    fireEvent.change(screen.getByLabelText('Число'), { target: { value: '10' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Завершить тест' }));
+
+    expect(await screen.findByRole('heading', { name: 'Зачёт' })).toBeInTheDocument();
+    expect(learningApi.finish).toHaveBeenCalledWith(31);
+    expect(api.finish).not.toHaveBeenCalled();
+  });
+
   it('для choice блокирует пустую отправку и отправляет текст radio-варианта', async () => {
     const choice = task(1);
     Object.assign(choice.task, {

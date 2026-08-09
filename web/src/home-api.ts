@@ -37,8 +37,18 @@ export interface HomeTopic {
   readiness: BossReadiness;
 }
 
+export interface LearningMaterialCard {
+  id: number;
+  subject: Subject;
+  topic: { id: string; title: string };
+  recommendationReason: string;
+  estimatedMinutes: number;
+  status: 'ready' | 'active';
+}
+
 export interface DayPlanResponse {
   plan: PlannedRun[];
+  learning: LearningMaterialCard[];
   forecasts: SubjectForecast[];
   triage: Array<{ subject: Subject; passed: boolean }>;
   streak: Streak;

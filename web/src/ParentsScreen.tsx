@@ -6,6 +6,7 @@ const KIND_NAMES = {
   run: 'Обычный забег',
   triage: 'Триаж',
   boss: 'Босс',
+  lesson: 'Тест по разбору',
 } as const;
 
 const dayFormatter = new Intl.DateTimeFormat('en-CA', {

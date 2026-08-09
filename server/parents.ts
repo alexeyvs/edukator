@@ -10,7 +10,7 @@ const STALE_RUN_DAYS = 3;
 const STALLED_FORECAST_DAYS = 5;
 export const PARENTS_PLANNED_MINUTES = 630;
 
-type RunKind = 'run' | 'triage' | 'boss';
+type RunKind = 'run' | 'triage' | 'boss' | 'lesson';
 type BossOutcome = 'won' | 'lost';
 
 interface ParentsForecast {
@@ -107,7 +107,7 @@ function subjectOf(value: string, label: string): Subject {
 }
 
 function kindOf(value: string): RunKind {
-  if (value !== 'run' && value !== 'triage' && value !== 'boss') {
+  if (value !== 'run' && value !== 'triage' && value !== 'boss' && value !== 'lesson') {
     throw new Error(`Дашборд родителей: неизвестный kind (${value})`);
   }
   return value;

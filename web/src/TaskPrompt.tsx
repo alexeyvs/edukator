@@ -15,7 +15,7 @@ export interface TaskPromptProps {
   readOnly?: boolean;
 }
 
-const MathMaterial = memo(function MathMaterial({ source }: { source: string }) {
+export const SafeFormula = memo(function SafeFormula({ source }: { source: string }) {
   try {
     const html = katex.renderToString(source, {
       displayMode: true,
@@ -71,7 +71,7 @@ export function TaskPrompt({ task, answer, onAnswerChange, answerId, headingId, 
       <h1 id={headingId} className="task-instruction">{instruction}</h1>
       {materialFormat !== 'none' && (
         <section className={`material-sheet ${materialFormat === 'math' ? 'math' : 'text'}`} aria-label="Материал задания">
-          {materialFormat === 'math' ? <MathMaterial source={material} /> : <p>{material}</p>}
+          {materialFormat === 'math' ? <SafeFormula source={material} /> : <p>{material}</p>}
         </section>
       )}
       {task.answer_format === 'choice' && (task.choices?.length ?? 0) > 0 ? (
