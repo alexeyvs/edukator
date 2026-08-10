@@ -12,6 +12,7 @@ import {
   DEFAULT_PORT,
   HOST,
   openSessionDatabase,
+  readHost,
   readPort,
   readVersion,
   syncCurriculumState,
@@ -519,6 +520,18 @@ describe('GET /api/health', () => {
       for (const value of ['abc', '0', '-1', '65536', '3000.5', 'Infinity']) {
         expect(() => readPort(value), value).toThrow(/PORT должен быть целым числом от 1 до 65535/u);
       }
+    });
+  });
+
+  describe('readHost', () => {
+    it('берёт адрес по умолчанию на незаданной и пустой переменной', () => {
+      expect(readHost(undefined)).toBe(HOST);
+      expect(readHost('')).toBe(HOST);
+      expect(readHost('   ')).toBe(HOST);
+    });
+
+    it('принимает заданный адрес и убирает пробелы по краям', () => {
+      expect(readHost(' 192.168.100.141 ')).toBe('192.168.100.141');
     });
   });
 

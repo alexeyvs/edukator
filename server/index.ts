@@ -209,7 +209,7 @@ function syncLoadedCurriculum(path: string, graph: TopicGraph): SyncResult {
   }
 }
 
-/** Слушаем все интерфейсы — чтобы заходить с других устройств домашней сети. */
+/** Адрес по умолчанию; скрипт рабочего запуска переопределяет его через `HOST`. */
 export const HOST = '0.0.0.0';
 
 /** Порт по умолчанию; переопределяется переменной `PORT` (см. `readPort`). */
@@ -533,6 +533,12 @@ export function readPort(value: string | undefined): number {
   return port;
 }
 
+/** Адрес прослушивания из окружения; пустое значение не отменяет умолчание. */
+export function readHost(value: string | undefined): string {
+  const host = value?.trim();
+  return host === undefined || host === '' ? HOST : host;
+}
+
 const isDirectRun = process.argv[1] !== undefined
   && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
@@ -550,6 +556,7 @@ if (isDirectRun) {
   }
 
   if (port !== undefined) {
+    const host = readHost(process.env.HOST);
     const app = buildServer();
     closeOnSignals(app);
     // Отказ прослушивания перехватывается, как и в обеих точках входа CLI: занятое
@@ -557,8 +564,8 @@ if (isDirectRun) {
     // `await` печатал бы стек `node:net` и уносил процесс мимо `app.close()`, то
     // есть оставлял бы соединение занятия незакрытым, а WAL — непереселённым.
     try {
-      await app.listen({ host: HOST, port });
-      console.log(`edukator слушает http://${HOST}:${port}`);
+      await app.listen({ host, port });
+      console.log(`edukator слушает http://${host}:${port}`);
     } catch (error) {
       process.stderr.write(`edukator не поднялся на порту ${port}: ${(error as Error).message}\n`);
       await app.close();
