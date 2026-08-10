@@ -39,6 +39,14 @@ function prompt(value = '', onChange = vi.fn(), overrides: Partial<RunTask> = {}
 }
 
 describe('структурированное задание', () => {
+  it('не запирает числовой ответ в десятичной клавиатуре', () => {
+    prompt();
+
+    const input = screen.getByLabelText('Число');
+    expect(input).not.toHaveAttribute('inputmode');
+    expect(input).toHaveAttribute('type', 'text');
+  });
+
   it('разделяет инструкцию и многострочный текстовый материал', () => {
     prompt('', vi.fn(), { material: 'Прочитай отрывок.\nНайди главную мысль.' });
 

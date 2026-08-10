@@ -81,8 +81,8 @@ export function TaskPrompt({ task, answer, onAnswerChange, answerId, headingId, 
           <label htmlFor={answerId}>{label}</label>
           <input
             id={answerId}
+            type="text"
             autoComplete="off"
-            inputMode={task.answer_format === 'number' ? 'decimal' : undefined}
             placeholder={task.answer_format === 'number' ? 'Введи число' : 'Напиши ответ'}
             value={answer}
             readOnly={readOnly}
