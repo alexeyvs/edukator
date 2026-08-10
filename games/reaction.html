@@ -17,6 +17,9 @@
     --wait: #b3202e;
     --go: #12a150;
     --fail: #7a4a12;
+    /* цифры — по-приборному моноширинные; SF Mono и Menlo есть в iOS,
+       так что подмена шрифта на телефоне не всплывёт */
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
     --safe-top: env(safe-area-inset-top, 0px);
     --safe-bottom: env(safe-area-inset-bottom, 0px);
   }
@@ -103,9 +106,11 @@
   #pad[data-state="false"]   { background: var(--fail); }
 
   #big {
-    font-size: clamp(38px, 16vw, 92px);
+    font-family: var(--mono);
+    font-size: clamp(38px, 15vw, 88px);
     font-weight: 700;
     font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
     line-height: 1;
   }
 
@@ -132,7 +137,8 @@
 
   .cell b {
     display: block;
-    font-size: 20px;
+    font-family: var(--mono);
+    font-size: 19px;
     font-variant-numeric: tabular-nums;
     font-weight: 600;
   }
