@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<!-- viewport-fit=cover — под «чёлку»; user-scalable=no убирает двойной тап-зум,
+     который на iOS съедает первый тап и портит замер -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#12151c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Скорость реакции</title>
+<style>
+  :root {
+    --bg: #12151c;
+    --fg: #e8ecf4;
+    --muted: #8b93a7;
+    --wait: #b3202e;
+    --go: #12a150;
+    --fail: #7a4a12;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    overflow: hidden;
+    /* iOS тянет страницу за края даже без прокрутки — резинка сбивает нажатие */
+    overscroll-behavior: none;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    /* fixed вместо потока — иначе Safari прячет адресную строку и двигает layout */
+    position: fixed;
+    inset: 0;
+  }
+
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: calc(var(--safe-top) + 12px) 12px calc(var(--safe-bottom) + 12px);
+    gap: 12px;
+  }
+
+  header {
+    text-align: center;
+    flex: 0 0 auto;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+  }
+
+  #hint {
+    margin: 4px 0 0;
+    min-height: 1.4em;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  #pad {
+    flex: 1 1 auto;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    border: 0;
+    border-radius: 22px;
+    background: #1c212c;
+    color: var(--fg);
+    font: inherit;
+    padding: 16px;
+    /* без manipulation Safari ждёт второй тап, чтобы решить — не зум ли это */
+    touch-action: manipulation;
+    /* никакого transition: плавная заливка растянула бы сам сигнал на кадры
+       и добавила бы к результату время анимации */
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  #pad:focus { outline: none; }
+  #pad:focus-visible { outline: 3px solid #4f8cff; outline-offset: 3px; }
+
+  #pad[data-state="waiting"] { background: var(--wait); }
+  #pad[data-state="go"]      { background: var(--go); }
+  #pad[data-state="false"]   { background: var(--fail); }
+
+  #big {
+    font-size: clamp(38px, 16vw, 92px);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+
+  #sub {
+    font-size: 15px;
+    opacity: 0.85;
+    text-align: center;
+    max-width: 22em;
+  }
+
+  #stats {
+    flex: 0 0 auto;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    text-align: center;
+  }
+
+  .cell {
+    background: #1c212c;
+    border-radius: 12px;
+    padding: 8px 4px;
+  }
+
+  .cell b {
+    display: block;
+    font-size: 20px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+
+  .cell span {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  #reset {
+    flex: 0 0 auto;
+    align-self: center;
+    background: none;
+    border: 0;
+    color: var(--muted);
+    font: inherit;
+    font-size: 13px;
+    padding: 6px 12px;
+    touch-action: manipulation;
+  }
+
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Скорость реакции</h1>
+    <p id="hint">Тапни, когда экран станет зелёным</p>
+  </header>
+
+  <button id="pad" type="button" data-state="idle" aria-live="polite">
+    <span id="big">Старт</span>
+    <span id="sub">Нажми, чтобы начать</span>
+  </button>
+
+  <div id="stats">
+    <div class="cell"><b id="s-last">—</b><span>последняя</span></div>
+    <div class="cell"><b id="s-best">—</b><span>лучшая</span></div>
+    <div class="cell"><b id="s-avg">—</b><span>среднее из 5</span></div>
+  </div>
+
+  <button id="reset" type="button">Сбросить результаты</button>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var MIN_WAIT = 1200;
+  var MAX_WAIT = 4500;
+  var HISTORY = 5;
+  var STORE_KEY = 'reaction.best.v1';
+
+  var pad = document.getElementById('pad');
+  var big = document.getElementById('big');
+  var sub = document.getElementById('sub');
+  var hint = document.getElementById('hint');
+  var out = {
+    last: document.getElementById('s-last'),
+    best: document.getElementById('s-best'),
+    avg: document.getElementById('s-avg')
+  };
+
+  var state = 'idle';   // idle | waiting | go | result | false
+  var timer = 0;
+  var goAt = 0;         // отметка появления сигнала, performance.now()
+  var recent = [];
+  var best = load();
+
+  render();
+
+  // Замер снимаем на pointerdown: click в Safari приходит уже после подъёма
+  // пальца и добавляет к результату чужие десятки миллисекунд.
+  if (window.PointerEvent) {
+    pad.addEventListener('pointerdown', press);
+  } else {
+    pad.addEventListener('touchstart', press, { passive: false });
+    pad.addEventListener('mousedown', press);
+  }
+
+  // Пробел/Enter для настольного браузера. Синтетический click игнорируем:
+  // обработчика на нём нет, поэтому двойного срабатывания не будет.
+  pad.addEventListener('keydown', function (e) {
+    if (e.repeat) return;
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      press(e);
+    }
+  });
+
+  document.getElementById('reset').addEventListener('click', function () {
+    recent = [];
+    best = null;
+    save();
+    stop();
+    setIdle('Старт', 'Нажми, чтобы начать');
+  });
+
+  // Уход в фон во время ожидания обнулил бы замер: таймеры в свёрнутом Safari
+  // тормозят, и «сигнал» покажется сразу после возврата.
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden && (state === 'waiting' || state === 'go')) {
+      stop();
+      setIdle('Пауза', 'Забег отменён — начни заново');
+    }
+  });
+
+  function press(e) {
+    if (e.cancelable) e.preventDefault();
+
+    if (state === 'waiting') {
+      stop();
+      state = 'false';
+      pad.dataset.state = 'false';
+      big.textContent = 'Рано!';
+      sub.textContent = 'Дождись зелёного. Тапни, чтобы повторить';
+      hint.textContent = 'Фальстарт не засчитывается';
+      return;
+    }
+
+    if (state === 'go') {
+      var ms = Math.round(performance.now() - goAt);
+      finish(ms);
+      return;
+    }
+
+    // idle | result | false — начинаем новый забег
+    start();
+  }
+
+  function start() {
+    state = 'waiting';
+    pad.dataset.state = 'waiting';
+    big.textContent = 'Ждём…';
+    sub.textContent = 'Не нажимай, пока красное';
+    hint.textContent = 'Тапни, когда экран станет зелёным';
+
+    var delay = MIN_WAIT + Math.random() * (MAX_WAIT - MIN_WAIT);
+    timer = setTimeout(function () {
+      timer = 0;
+      pad.dataset.state = 'go';
+      big.textContent = 'ЖМИ!';
+      sub.textContent = '';
+      state = 'go';
+      // Отсчёт — от кадра, в котором цвет реально отрисован, а не от таймера:
+      // между setTimeout и краской проходит целый кадр.
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+          goAt = performance.now();
+        });
+      });
+    }, delay);
+  }
+
+  function finish(ms) {
+    state = 'result';
+    pad.dataset.state = 'idle';
+    recent.push(ms);
+    if (recent.length > HISTORY) recent.shift();
+
+    var isRecord = best === null || ms < best;
+    if (isRecord) {
+      best = ms;
+      save();
+    }
+
+    big.textContent = ms + ' мс';
+    sub.textContent = isRecord ? 'Новый рекорд! Тапни для следующей попытки' : grade(ms);
+    hint.textContent = 'Тапни, чтобы попробовать ещё раз';
+    render();
+  }
+
+  function grade(ms) {
+    if (ms < 200) return 'Отличная реакция. Тапни для следующей попытки';
+    if (ms < 300) return 'Хороший результат. Тапни для следующей попытки';
+    if (ms < 450) return 'Средний темп. Тапни для следующей попытки';
+    return 'Можно быстрее. Тапни для следующей попытки';
+  }
+
+  function setIdle(title, text) {
+    state = 'idle';
+    pad.dataset.state = 'idle';
+    big.textContent = title;
+    sub.textContent = text;
+    hint.textContent = 'Тапни, когда экран станет зелёным';
+    render();
+  }
+
+  function stop() {
+    if (timer) {
+      clearTimeout(timer);
+      timer = 0;
+    }
+  }
+
+  function render() {
+    out.last.textContent = recent.length ? recent[recent.length - 1] + ' мс' : '—';
+    out.best.textContent = best === null ? '—' : best + ' мс';
+    if (recent.length) {
+      var sum = 0;
+      for (var i = 0; i < recent.length; i++) sum += recent[i];
+      out.avg.textContent = Math.round(sum / recent.length) + ' мс';
+    } else {
+      out.avg.textContent = '—';
+    }
+  }
+
+  // Приватный режим Safari бросает на записи в localStorage — рекорд не повод
+  // ронять игру.
+  function load() {
+    try {
+      var raw = localStorage.getItem(STORE_KEY);
+      var n = raw === null ? NaN : parseInt(raw, 10);
+      return isFinite(n) && n > 0 ? n : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function save() {
+    try {
+      if (best === null) localStorage.removeItem(STORE_KEY);
+      else localStorage.setItem(STORE_KEY, String(best));
+    } catch (err) {
+      /* нет хранилища — играем без рекорда между сессиями */
+    }
+  }
+})();
+</script>
+</body>
+</html>
