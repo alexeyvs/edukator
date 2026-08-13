@@ -143,7 +143,7 @@ describe('экран забега', () => {
     });
     const finish: FinishLearningResponse = {
       ...finishSummary(), runId: 31, materialId: 21, total: 5, correct: 4, xp: 100,
-      outcome: 'passed', masteryBefore: .3, masteryAfter: .6, passScore: 4,
+      outcome: 'passed', required: true, masteryBefore: .3, masteryAfter: .6, passScore: 4,
     };
     const learningApi = { finish: vi.fn().mockResolvedValue(finish) };
     render(<RunScreen runId={31} kind="lesson" api={api} learningApi={learningApi} />);

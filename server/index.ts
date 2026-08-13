@@ -390,6 +390,7 @@ export function buildServer(
         db: sessionDb,
         graph,
         budget,
+        ...(options.now === undefined ? {} : { now: options.now }),
         ...(options.log === undefined ? {} : { log: options.log }),
         ...(options.worker ?? {}),
       });

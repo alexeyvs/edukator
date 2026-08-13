@@ -25,6 +25,14 @@ interface DailyGateRow {
   material_status: string | null;
 }
 
+interface DailyGateParams {
+  dayStart: string;
+  dayEnd: string;
+  previousDayStart: string;
+  now: string;
+  targetOffset: number;
+}
+
 /**
  * Время третьего результата фиксирует состав обязательств на день: более
  * поздняя публикация не отбирает уже полученный доступ. Закрытые до начала дня
@@ -32,32 +40,54 @@ interface DailyGateRow {
  */
 export function readDailyGate(db: Database, now: Date = new Date()): DailyGateState {
   const [start, next] = moscowDayBounds(now);
-  const row = db.prepare<[string, string, string, string], DailyGateRow>(
-    `WITH daily_runs AS (
+  const [previousStart] = moscowDayBounds(new Date(Date.parse(start) - 1));
+  const row = db.prepare<DailyGateParams, DailyGateRow>(
+    `WITH current_day_runs AS (
        SELECT id, finished_at FROM runs
         WHERE kind = 'run' AND summary IS NOT NULL
-          AND finished_at >= ? AND finished_at < ?
-     ), run_gate AS (
+          AND finished_at >= @dayStart AND finished_at < @dayEnd
+     ), current_day_gate AS (
        SELECT COUNT(*) AS completed,
-              (SELECT finished_at FROM daily_runs
-                ORDER BY finished_at, id LIMIT 1 OFFSET 2) AS third_finished_at
-         FROM daily_runs
+              (SELECT finished_at FROM current_day_runs
+                ORDER BY finished_at, id LIMIT 1 OFFSET @targetOffset) AS third_finished_at
+         FROM current_day_runs
+     ), previous_day_runs AS (
+       SELECT id, finished_at FROM runs
+        WHERE kind = 'run' AND summary IS NOT NULL
+          AND finished_at >= @previousDayStart AND finished_at < @dayStart
+     ), previous_day_gate AS (
+       SELECT (SELECT finished_at FROM previous_day_runs
+                ORDER BY finished_at, id LIMIT 1 OFFSET @targetOffset) AS third_finished_at
      )
-     SELECT run_gate.completed,
+     SELECT current_day_gate.completed,
             learning_materials.id AS material_id,
             learning_materials.status AS material_status
-       FROM run_gate
+       FROM current_day_gate, previous_day_gate
        LEFT JOIN learning_materials ON learning_materials.id = (
          SELECT id FROM learning_materials
           WHERE ready_at IS NOT NULL
-            AND ready_at <= COALESCE(run_gate.third_finished_at, ?)
             AND (
-              status IN ('ready', 'active', 'failed')
-              OR (status IN ('passed', 'retired') AND finished_at >= ?)
+              (ready_at <= COALESCE(current_day_gate.third_finished_at, @now)
+                AND (
+                  status IN ('ready', 'active')
+                  OR (status IN ('passed', 'retired') AND finished_at >= @dayStart)
+                ))
+              OR (
+                status IN ('passed', 'retired')
+                AND previous_day_gate.third_finished_at IS NOT NULL
+                AND ready_at > previous_day_gate.third_finished_at
+                AND ready_at >= @previousDayStart AND ready_at < @dayStart
+              )
             )
           ORDER BY ready_at, id LIMIT 1
        )`,
-  ).get(start, next, now.toISOString(), start);
+  ).get({
+    dayStart: start,
+    dayEnd: next,
+    previousDayStart: previousStart,
+    now: now.toISOString(),
+    targetOffset: DAILY_RUN_TARGET - 1,
+  });
   const completed = row?.completed ?? 0;
   const remaining = Math.max(0, DAILY_RUN_TARGET - completed);
   const materialId = row?.material_id ?? null;
@@ -65,7 +95,7 @@ export function readDailyGate(db: Database, now: Date = new Date()): DailyGateSt
   const learning = {
     materialId,
     required: materialStatus === 'ready' || materialStatus === 'active' ||
-      materialStatus === 'passed' || materialStatus === 'failed',
+      materialStatus === 'passed',
     passed: materialStatus === 'passed',
   };
 

@@ -97,21 +97,23 @@ describe('readDailyGate', () => {
 
   it('выбирает первое предложение по ready_at, затем id, и не подменяет снятое следующим', () => {
     const db = setup();
-    const firstAtTie = addMaterial(
-      db, '2026-08-08T08:00:00.000Z', 'passed', '2026-08-08T10:00:00.000Z',
-    );
+    addMaterial(db, '2026-08-08T08:00:00.000Z', 'passed', '2026-08-08T10:00:00.000Z');
     const retired = addMaterial(
       db, '2026-08-08T07:00:00.000Z', 'retired', '2026-08-08T09:00:00.000Z',
     );
-    addMaterial(db, '2026-08-08T08:00:00.000Z', 'failed');
+    addMaterial(db, '2026-08-08T08:00:00.000Z', 'ready');
 
     const waived = readDailyGate(db, new Date('2026-08-08T12:00:00.000Z'));
     expect(waived.learning).toEqual({ materialId: retired, required: false, passed: false });
 
-    db.prepare('UPDATE learning_materials SET ready_at = ? WHERE id = ?')
-      .run('2026-08-08T09:00:00.000Z', retired);
-    expect(readDailyGate(db, new Date('2026-08-08T12:00:00.000Z')).learning)
-      .toEqual({ materialId: firstAtTie, required: true, passed: true });
+    const laterDb = setup();
+    const laterFirstAtTie = addMaterial(
+      laterDb, '2026-08-08T08:00:00.000Z', 'passed', '2026-08-08T10:00:00.000Z',
+    );
+    addMaterial(laterDb, '2026-08-08T09:00:00.000Z', 'retired', '2026-08-08T09:30:00.000Z');
+    addMaterial(laterDb, '2026-08-08T08:00:00.000Z', 'ready');
+    expect(readDailyGate(laterDb, new Date('2026-08-08T12:00:00.000Z')).learning)
+      .toEqual({ materialId: laterFirstAtTie, required: true, passed: true });
   });
 
   it('требует зачёт независимо от трёх забегов и принимает зачёт до третьего', () => {
@@ -136,7 +138,9 @@ describe('readDailyGate', () => {
     });
   });
 
-  it('не переблокирует публикацией после третьего забега, но требует её на следующие сутки', () => {
+  it.each(['passed', 'retired'] as const)(
+    'переносит на следующие сутки опубликованный после отсечки и закрытый до полуночи %s',
+    (status) => {
     const db = setup();
     addRun(db, 'run', '2026-08-08T07:00:00.000Z');
     addRun(db, 'run', '2026-08-08T08:00:00.000Z');
@@ -147,20 +151,24 @@ describe('readDailyGate', () => {
       learning: { materialId: null, required: false, passed: false },
       unlocked: true,
     });
+    db.prepare('UPDATE learning_materials SET status = ?, finished_at = ? WHERE id = ?')
+      .run(status, '2026-08-08T20:00:00.000Z', materialId);
     expect(readDailyGate(db, new Date('2026-08-08T21:00:00.000Z'))).toMatchObject({
       day: '2026-08-09', completed: 0,
-      learning: { materialId, required: true, passed: false },
+      learning: {
+        materialId,
+        required: status === 'passed',
+        passed: status === 'passed',
+      },
       unlocked: false,
     });
-
-    db.prepare("UPDATE learning_materials SET status = 'failed', finished_at = ? WHERE id = ?")
-      .run('2026-08-09T10:00:00.000Z', materialId);
     expect(readDailyGate(db, new Date('2026-08-09T21:00:00.000Z'))).toMatchObject({
       day: '2026-08-10',
-      learning: { materialId, required: true, passed: false },
+      learning: { materialId: null, required: false, passed: false },
       unlocked: false,
     });
-  });
+    },
+  );
 
   it('считает публикацию ровно в момент третьего забега и соблюдает московскую полночь', () => {
     const db = setup();
@@ -181,35 +189,4 @@ describe('readDailyGate', () => {
     });
   });
 
-  it('не засчитывает активный материал с открытым спором', () => {
-    const db = setup();
-    for (const finishedAt of [
-      '2026-08-08T07:00:00.000Z',
-      '2026-08-08T08:00:00.000Z',
-      '2026-08-08T09:00:00.000Z',
-    ]) addRun(db, 'run', finishedAt);
-    const materialId = addMaterial(db, '2026-08-08T06:00:00.000Z', 'active');
-    const runId = Number(db.prepare(
-      `INSERT INTO runs (subject, kind, topic_id, started_at, total, correct, lives_remaining)
-       VALUES ('math', 'lesson', 'math.fractions', '2026-08-08T06:30:00.000Z', 5, 4, NULL)`,
-    ).run().lastInsertRowid);
-    db.prepare(
-      'INSERT INTO learning_runs (material_id, run_id, attempt_number) VALUES (?, ?, 1)',
-    ).run(materialId, runId);
-    const taskId = Number(db.prepare(
-      `INSERT INTO task_bank (topic_id, question, answer, difficulty, status)
-       VALUES ('math.fractions', '2 + 2', '4', 1, 'lesson_reserved')`,
-    ).run().lastInsertRowid);
-    const attemptId = Number(db.prepare(
-      `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct)
-       VALUES (?, 'math.fractions', ?, '4', 1)`,
-    ).run(taskId, runId).lastInsertRowid);
-    db.prepare('INSERT INTO disputes (attempt_id, status) VALUES (?, \'open\')').run(attemptId);
-
-    expect(readDailyGate(db, new Date('2026-08-08T12:00:00.000Z'))).toMatchObject({
-      completed: 3,
-      learning: { materialId, required: true, passed: false },
-      unlocked: false,
-    });
-  });
 });

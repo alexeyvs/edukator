@@ -208,8 +208,6 @@ test('карточка ведёт через материал и пять отв
   });
   try {
     const materialId = await harness.waitForLearningMaterial('math.1');
-    harness.db.prepare('UPDATE learning_materials SET ready_at = ? WHERE id = ?')
-      .run('2026-08-08T11:00:00.000Z', materialId);
     const initialPlan = await page.request.get(`${harness.url}/api/run/plan`);
     expect(initialPlan.ok()).toBe(true);
     const initial = await initialPlan.json() as {
@@ -296,9 +294,7 @@ test('после незачёта повтор ведёт к повторном�
     learningForecastFixture: 'math',
   });
   try {
-    const materialId = await harness.waitForLearningMaterial('math.1');
-    harness.db.prepare('UPDATE learning_materials SET ready_at = ? WHERE id = ?')
-      .run('2026-08-08T11:00:00.000Z', materialId);
+    await harness.waitForLearningMaterial('math.1');
     await page.goto(harness.url);
     await page.locator('.learning-card').filter({
       has: page.getByText('Тема math 1', { exact: true }),

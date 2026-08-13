@@ -410,7 +410,7 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
       graph,
       budget,
       log,
-      ...(options.now === undefined ? {} : { now: options.now() }),
+      ...(options.now === undefined ? {} : { now: options.now }),
       ...(options.learningProduce === undefined ? {} : { produce: options.learningProduce }),
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.run === undefined ? {} : { run: options.run }),

@@ -385,15 +385,19 @@ describe('банк заданий', () => {
         batch(5),
       );
       expect(ready).toBe(true);
-      expect(learningTaskAtPosition(db, materialId, 2)?.id).toBe(stored[1]?.id);
+      const runId = Number(db.prepare(
+        `INSERT INTO runs (subject, kind, topic_id, started_at, lives_remaining)
+         VALUES ('math', 'lesson', ?, '2026-08-08T08:00:00.000Z', NULL)`,
+      ).run(TOPIC).lastInsertRowid);
+      expect(learningTaskAtPosition(db, materialId, 2, runId)?.id).toBe(stored[1]?.id);
 
       db.prepare(
-        `INSERT INTO attempts (task_id, topic_id, answer, is_correct)
-         VALUES (?, ?, '4', 1)`,
-      ).run(stored[1]?.id, TOPIC);
-      expect(learningTaskAtPosition(db, materialId, 2)).toBeNull();
-      expect(() => learningTaskAtPosition(db, materialId, 0)).toThrow(/от 1 до 5/u);
-      expect(() => learningTaskAtPosition(db, materialId, 6)).toThrow(/от 1 до 5/u);
+        `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct)
+         VALUES (?, ?, ?, '4', 1)`,
+      ).run(stored[1]?.id, TOPIC, runId);
+      expect(learningTaskAtPosition(db, materialId, 2, runId)).toBeNull();
+      expect(() => learningTaskAtPosition(db, materialId, 0, runId)).toThrow(/от 1 до 5/u);
+      expect(() => learningTaskAtPosition(db, materialId, 6, runId)).toThrow(/от 1 до 5/u);
     });
 
     it('отклоняет claim до публикации, если содержимое не прошло схему', () => {

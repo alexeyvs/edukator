@@ -8,10 +8,11 @@ import './test-setup';
 
 afterEach(cleanup);
 
-function result(outcome: 'passed' | 'failed'): FinishLearningResponse {
+function result(outcome: 'passed' | 'failed', required = true): FinishLearningResponse {
   return {
     runId: 31,
     materialId: 21,
+    required,
     outcome,
     total: 5,
     correct: outcome === 'passed' ? 4 : 3,
@@ -51,5 +52,26 @@ describe('итог персонального разбора', () => {
       'Перечитай эту же теорию и попробуй тот же тест ещё раз. Зачёт нужен для доступа к компьютеру.',
     )).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Вернуться к плану' })).not.toBeInTheDocument();
+  });
+
+  it('показывает нейтральное изменение знания после повторной попытки', () => {
+    render(<LearningFinishScreen result={{
+      ...result('passed'), masteryBefore: .42, masteryAfter: .42, xp: 0,
+    }} />);
+
+    expect(screen.getByText('42%')).toBeInTheDocument();
+    expect(screen.getByText('0 п.п.')).toBeInTheDocument();
+  });
+
+  it('не выдаёт добровольный незачёт за блокировку и разрешает вернуться к плану', () => {
+    render(<LearningFinishScreen result={result('failed', false)} />);
+
+    expect(screen.getByText(
+      'Перечитай эту же теорию и попробуй тот же тест ещё раз, когда будешь готов.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/доступа к компьютеру/u)).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Вернуться к плану' })).toHaveAttribute('href', '/');
+    expect(screen.getByRole('link', { name: 'Повторить разбор' }))
+      .toHaveAttribute('href', '/?learningId=21');
   });
 });

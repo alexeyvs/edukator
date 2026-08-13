@@ -44,6 +44,7 @@ export interface StartLearningTestResponse {
 
 export interface FinishLearningResponse extends FinishRunResponse {
   materialId: number;
+  required: boolean;
   outcome: 'passed' | 'failed';
   masteryBefore: number;
   masteryAfter: number;

@@ -22,6 +22,7 @@ import type { GeneratedTask } from '../server/codex/task-schema.js';
 import { storeTasks } from '../server/codex/bank.js';
 import { everyRefillFailed, runWarmupCycle } from '../server/codex/worker.js';
 import { claimLearningMaterial } from '../server/learning.js';
+import { readDailyGate } from '../server/daily-gate.js';
 
 const NOW = new Date('2026-08-09T10:00:00.000Z');
 
@@ -129,7 +130,7 @@ describe('отбор и подготовка учебных материалов
     const budget = new CodexConcurrency(1);
     const requests: LearningProduceRequest[] = [];
     const report = await prepareLearningMaterials({
-      db, graph, now: NOW, budget,
+      db, graph, now: () => NOW, budget,
       produce: (request) => {
         expect(budget.active).toBe(1);
         requests.push(request);
@@ -145,10 +146,59 @@ describe('отбор и подготовка учебных материалов
       .toEqual({ n: 10 });
 
     const repeat = await prepareLearningMaterials({
-      db, graph, now: new Date(NOW.getTime() + 1),
+      db, graph, now: () => new Date(NOW.getTime() + 1),
       produce: () => Promise.reject(new Error('не должен вызываться')),
     });
     expect(repeat.prepared).toEqual([]);
+  });
+
+  it('ставит время фактической публикации и не блокирует доступ после третьего забега', async () => {
+    triage(db, 'math', 'math.best');
+    storeTasks(db, 'math.best', Array.from({ length: 8 }, () => task('warm')));
+    const insertRun = db.prepare(
+      `INSERT INTO runs (subject, kind, topic_id, started_at, finished_at, summary)
+       VALUES ('math', 'run', 'math.best', ?, ?, '{}')`,
+    );
+    insertRun.run('2026-08-09T08:00:00.000Z', '2026-08-09T08:30:00.000Z');
+    insertRun.run('2026-08-09T09:00:00.000Z', '2026-08-09T09:30:00.000Z');
+
+    let current = new Date('2026-08-09T10:00:00.000Z');
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let publish: ((value: LearningPackage) => void) | undefined;
+    const generated = new Promise<LearningPackage>((resolve) => {
+      publish = resolve;
+    });
+    let generationStartedAt: string | undefined;
+    const cycle = runWarmupCycle({
+      db,
+      graph: buildTopicGraph([topic('math.best')]),
+      now: () => current,
+      learningProduce: () => {
+        generationStartedAt = current.toISOString();
+        markStarted?.();
+        return generated;
+      },
+    });
+    await started;
+
+    const thirdFinishedAt = '2026-08-09T10:05:00.000Z';
+    insertRun.run('2026-08-09T10:01:00.000Z', thirdFinishedAt);
+    current = new Date('2026-08-09T10:06:00.000Z');
+    publish?.(learningPackage('after-cutoff'));
+    await cycle;
+
+    expect(generationStartedAt).toBe('2026-08-09T10:00:00.000Z');
+    expect(db.prepare('SELECT ready_at FROM learning_materials').get()).toEqual({
+      ready_at: current.toISOString(),
+    });
+    expect(readDailyGate(db, current)).toMatchObject({
+      completed: 3,
+      learning: { materialId: null, required: false, passed: false },
+      unlocked: true,
+    });
   });
 
   it('двум соединениям не позволяет захватить разные темы одного предмета', () => {
@@ -197,9 +247,16 @@ describe('отбор и подготовка учебных материалов
       `INSERT INTO attempts (task_id, topic_id, answer, is_correct, created_at)
        VALUES (?, ?, 'исправленный ответ', 1, ?)`,
     ).run(corrected.id, dependent.id, new Date(NOW.getTime() + 101).toISOString());
+    const neutral = storeTasks(db, dependent.id, [task('нейтральная-ошибка')]).stored[0];
+    if (neutral === undefined) throw new Error('нейтральная задача не сохранена');
+    db.prepare(
+      `INSERT INTO attempts
+        (task_id, topic_id, answer, is_correct, affects_progress, created_at)
+       VALUES (?, ?, 'ответ повтора', 0, 0, ?)`,
+    ).run(neutral.id, dependent.id, new Date(NOW.getTime() + 102).toISOString());
     let captured: LearningProduceRequest | undefined;
     await prepareLearningMaterials({
-      db, graph, now: NOW,
+      db, graph, now: () => NOW,
       produce: (request) => {
         captured = request;
         return Promise.resolve(learningPackage('context'));
@@ -213,12 +270,13 @@ describe('отбор и подготовка учебных материалов
     ]);
     expect(captured?.recentErrors.map(({ answer }) => answer))
       .not.toContain('старый ошибочный ответ');
+    expect(captured?.recentErrors.map(({ answer }) => answer)).not.toContain('ответ повтора');
   });
 
   it('восстанавливает зависший claim, а недоступность codex включает backoff воркера', async () => {
     triage(db, 'math', 'math.best');
     const failed = await prepareLearningMaterials({
-      db, graph, now: NOW,
+      db, graph, now: () => NOW,
       produce: () => Promise.reject(new CodexUnavailableError('codex не найден')),
     });
     expect(failed.codexUnavailable).toBe(true);
@@ -226,7 +284,7 @@ describe('отбор и подготовка учебных материалов
     expect(db.prepare('SELECT status FROM learning_materials').get()).toEqual({ status: 'preparing' });
 
     const restored = await prepareLearningMaterials({
-      db, graph, now: new Date(NOW.getTime() + 30 * 60 * 1000 + 1),
+      db, graph, now: () => new Date(NOW.getTime() + 30 * 60 * 1000 + 1),
       produce: () => Promise.resolve(learningPackage('restored')),
     });
     expect(restored.prepared[0]).toMatchObject({ ready: true, recovered: true, stored: 5 });
@@ -243,7 +301,7 @@ describe('отбор и подготовка учебных материалов
     expect(stale).toBeDefined();
 
     const report = await prepareLearningMaterials({
-      db, graph, now: new Date(NOW.getTime() + 30 * 60 * 1000 + 1),
+      db, graph, now: () => new Date(NOW.getTime() + 30 * 60 * 1000 + 1),
       produce: () => Promise.resolve(learningPackage('новый-приоритет')),
     });
     expect(report.prepared[0]).toMatchObject({ topicId: 'math.best', ready: true });
@@ -256,10 +314,12 @@ describe('отбор и подготовка учебных материалов
   it('retire возвращает задания в банк, когда тема перестала быть пробелом', async () => {
     triage(db, 'math', 'math.best');
     await prepareLearningMaterials({
-      db, graph, now: NOW, produce: () => Promise.resolve(learningPackage('old')),
+      db, graph, now: () => NOW, produce: () => Promise.resolve(learningPackage('old')),
     });
     db.prepare("UPDATE topic_state SET mastery = 0.9, attempts = 2 WHERE topic_id LIKE 'math.%'").run();
-    const report = await prepareLearningMaterials({ db, graph, now: new Date(NOW.getTime() + 1) });
+    const report = await prepareLearningMaterials({
+      db, graph, now: () => new Date(NOW.getTime() + 1),
+    });
     expect(report.retired).toHaveLength(1);
     expect(db.prepare('SELECT status FROM learning_materials').get()).toEqual({ status: 'retired' });
     expect(db.prepare("SELECT COUNT(*) AS n FROM task_bank WHERE status = 'valid'").get())
@@ -275,7 +335,7 @@ describe('отбор и подготовка учебных материалов
     ).run(JSON.stringify({ ...content, introduction: 'Старая аналогия с пиццей.' }), NOW.toISOString());
     let previous: string[] = [];
     const report = await prepareLearningMaterials({
-      db, graph, now: new Date(NOW.getTime() + 1),
+      db, graph, now: () => new Date(NOW.getTime() + 1),
       produce: (request) => {
         previous = request.previousApproaches;
         return Promise.resolve(learningPackage('new-approach'));
@@ -290,7 +350,7 @@ describe('отбор и подготовка учебных материалов
     const duplicate = task('повтор');
     storeTasks(db, 'math.best', [duplicate]);
     const report = await prepareLearningMaterials({
-      db, graph, now: NOW,
+      db, graph, now: () => NOW,
       produce: () => Promise.resolve({ content, tasks: [duplicate, ...learningPackage('fresh').tasks.slice(0, 4)] }),
     });
     expect(report.prepared[0]).toMatchObject({ ready: false, stored: 0, error: expect.stringContaining('отпечатком') });
@@ -416,7 +476,7 @@ describe('производитель полного комплекта', () => {
         ]).flat(),
       ];
       const report = await prepareLearningMaterials({
-        db, graph, now: NOW,
+        db, graph, now: () => NOW,
         run: () => Promise.resolve(answers.shift() ?? '{}'),
       });
       expect(report.prepared[0]).toMatchObject({ ready: false, stored: 0 });

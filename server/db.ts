@@ -10,7 +10,7 @@ const projectRoot = resolve(here, '..');
  * Версия схемы. Хранится в `PRAGMA user_version`; миграция сравнивает её со
  * своей и пропускает работу, если база уже актуальна.
  */
-export const SCHEMA_VERSION = 14;
+export const SCHEMA_VERSION = 15;
 
 /** Таблицы приложения. Тесты сверяют состав базы именно с этим списком. */
 export const TABLES = [
@@ -267,6 +267,27 @@ const LEARNING_SCHEMA = `
     ON learning_materials (subject)
     WHERE status IN ('preparing', 'ready', 'active');
 
+  CREATE TRIGGER IF NOT EXISTS learning_material_ready_at_insert
+  BEFORE INSERT ON learning_materials
+  WHEN NEW.status IN ('ready', 'active', 'passed') AND NEW.ready_at IS NULL
+  BEGIN
+    SELECT RAISE(ABORT, 'Опубликованный учебный материал должен хранить время публикации');
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS learning_material_ready_at_update
+  BEFORE UPDATE OF status, ready_at ON learning_materials
+  WHEN NEW.status IN ('ready', 'active', 'passed') AND NEW.ready_at IS NULL
+  BEGIN
+    SELECT RAISE(ABORT, 'Опубликованный учебный материал должен хранить время публикации');
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS learning_material_ready_at_immutable
+  BEFORE UPDATE OF ready_at ON learning_materials
+  WHEN OLD.ready_at IS NOT NULL AND NEW.ready_at IS NOT OLD.ready_at
+  BEGIN
+    SELECT RAISE(ABORT, 'Время публикации учебного материала нельзя изменять');
+  END;
+
   CREATE TABLE IF NOT EXISTS learning_runs (
     material_id   INTEGER NOT NULL REFERENCES learning_materials (id) ON DELETE CASCADE,
     run_id        INTEGER NOT NULL UNIQUE REFERENCES runs (id) ON DELETE CASCADE,
@@ -287,7 +308,7 @@ const LEARNING_SCHEMA = `
   WHEN (SELECT topic_id FROM task_bank WHERE id = NEW.task_id) <>
        (SELECT topic_id FROM learning_materials WHERE id = NEW.material_id)
   BEGIN
-    SELECT RAISE(ABORT, 'learning task must match material topic');
+    SELECT RAISE(ABORT, 'Задание учебного материала должно относиться к его теме');
   END;
 
   CREATE TRIGGER IF NOT EXISTS learning_tasks_consistency_update
@@ -295,7 +316,7 @@ const LEARNING_SCHEMA = `
   WHEN (SELECT topic_id FROM task_bank WHERE id = NEW.task_id) <>
        (SELECT topic_id FROM learning_materials WHERE id = NEW.material_id)
   BEGIN
-    SELECT RAISE(ABORT, 'learning task must match material topic');
+    SELECT RAISE(ABORT, 'Задание учебного материала должно относиться к его теме');
   END;
 
   CREATE TRIGGER IF NOT EXISTS learning_run_consistency_insert
@@ -307,7 +328,7 @@ const LEARNING_SCHEMA = `
        AND runs.subject = learning_materials.subject
   )
   BEGIN
-    SELECT RAISE(ABORT, 'learning material must reference matching lesson run');
+    SELECT RAISE(ABORT, 'Учебный запуск должен соответствовать материалу');
   END;
 
   CREATE TRIGGER IF NOT EXISTS learning_run_consistency_update
@@ -319,7 +340,7 @@ const LEARNING_SCHEMA = `
        AND runs.subject = learning_materials.subject
   )
   BEGIN
-    SELECT RAISE(ABORT, 'learning material must reference matching lesson run');
+    SELECT RAISE(ABORT, 'Учебный запуск должен соответствовать материалу');
   END;
 
   CREATE TRIGGER IF NOT EXISTS learning_material_runs_consistency_update
@@ -330,7 +351,7 @@ const LEARNING_SCHEMA = `
        AND (runs.kind <> 'lesson' OR runs.topic_id <> NEW.topic_id OR runs.subject <> NEW.subject)
   )
   BEGIN
-    SELECT RAISE(ABORT, 'learning material must keep matching lesson runs');
+    SELECT RAISE(ABORT, 'Учебный материал должен соответствовать связанным запускам');
   END;
 
   CREATE TRIGGER IF NOT EXISTS learning_material_ready_complete
@@ -343,7 +364,7 @@ const LEARNING_SCHEMA = `
       AND task_bank.status = 'lesson_reserved'
   ) <> ${LEARNING_TASK_COUNT}
   BEGIN
-    SELECT RAISE(ABORT, 'ready learning material must contain five reserved tasks');
+    SELECT RAISE(ABORT, 'Готовый учебный материал должен содержать пять зарезервированных заданий');
   END;
 
   CREATE TRIGGER IF NOT EXISTS learning_tasks_complete_delete
@@ -353,7 +374,7 @@ const LEARNING_SCHEMA = `
      WHERE id = OLD.material_id AND status IN ('ready', 'active')
   )
   BEGIN
-    SELECT RAISE(ABORT, 'live learning material must keep all tasks');
+    SELECT RAISE(ABORT, 'Опубликованный учебный материал должен сохранять все задания');
   END;
 `;
 
@@ -831,7 +852,11 @@ export function migrate(db: Database.Database): void {
              opened_at, finished_at)
           SELECT id, subject, topic_id, status, content, recommendation_reason,
                  estimated_minutes, mastery_before, created_at, updated_at,
-                 CASE WHEN status IN ('ready', 'active', 'passed') THEN created_at ELSE NULL END,
+                 CASE
+                   WHEN status = 'ready' THEN updated_at
+                   WHEN status IN ('active', 'passed') THEN COALESCE(opened_at, updated_at)
+                   ELSE NULL
+                 END,
                  opened_at, finished_at
             FROM learning_materials_v13;
           INSERT INTO learning_tasks (material_id, task_id, position)
@@ -850,6 +875,30 @@ export function migrate(db: Database.Database): void {
       }
     }
 
+    if (version === 14) {
+      // v14 не защищала ready_at. Чиним уже опубликованные строки до установки
+      // триггеров; исторические failed с NULL остаются необязательной историей.
+      db.exec(`
+        UPDATE learning_materials
+           SET ready_at = COALESCE(opened_at, updated_at, created_at)
+         WHERE status IN ('ready', 'active', 'passed') AND ready_at IS NULL;
+      `);
+    }
+
+    // CREATE TRIGGER IF NOT EXISTS не обновляет текст уже установленного
+    // триггера, поэтому v14 должна получить и новые инварианты, и русские ошибки.
+    db.exec(`
+      DROP TRIGGER IF EXISTS learning_material_ready_at_insert;
+      DROP TRIGGER IF EXISTS learning_material_ready_at_update;
+      DROP TRIGGER IF EXISTS learning_material_ready_at_immutable;
+      DROP TRIGGER IF EXISTS learning_tasks_consistency_insert;
+      DROP TRIGGER IF EXISTS learning_tasks_consistency_update;
+      DROP TRIGGER IF EXISTS learning_run_consistency_insert;
+      DROP TRIGGER IF EXISTS learning_run_consistency_update;
+      DROP TRIGGER IF EXISTS learning_material_runs_consistency_update;
+      DROP TRIGGER IF EXISTS learning_material_ready_complete;
+      DROP TRIGGER IF EXISTS learning_tasks_complete_delete;
+    `);
     db.exec(LEARNING_SCHEMA);
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   }).immediate();
@@ -882,6 +931,9 @@ const REQUIRED_AUXILIARY_OBJECTS = [
   'boss_batches_live_topic',
   'learning_materials_live_topic',
   'learning_materials_live_subject',
+  'learning_material_ready_at_insert',
+  'learning_material_ready_at_update',
+  'learning_material_ready_at_immutable',
   'learning_tasks_consistency_insert',
   'learning_tasks_consistency_update',
   'learning_run_consistency_insert',

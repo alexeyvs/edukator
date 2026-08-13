@@ -15,19 +15,21 @@ export function LearningFinishScreen({ result }: { result: FinishLearningRespons
         <h1>{passed ? 'Зачёт' : 'Тему стоит повторить'}</h1>
         <p className="finish-lead">{passed
           ? `Ты разобрал тему и подтвердил результат в ${result.total} вопросах.`
-          : 'Перечитай эту же теорию и попробуй тот же тест ещё раз. Зачёт нужен для доступа к компьютеру.'}</p>
+          : result.required
+            ? 'Перечитай эту же теорию и попробуй тот же тест ещё раз. Зачёт нужен для доступа к компьютеру.'
+            : 'Перечитай эту же теорию и попробуй тот же тест ещё раз, когда будешь готов.'}</p>
         <div className="finish-stats lesson-finish-stats">
           <div><strong>{result.correct}/{result.total}</strong><span>верных ответов</span></div>
           <div><strong>{masteryPercent(result.masteryAfter)}</strong><span>знание темы</span></div>
-          <div><strong>{delta >= 0 ? '+' : ''}{Math.round(delta * 100)} п.п.</strong><span>изменение знания</span></div>
+          <div><strong>{delta > 0 ? '+' : ''}{Math.round(delta * 100)} п.п.</strong><span>изменение знания</span></div>
         </div>
         <p className="lesson-score-note">
           Порог зачёта — {result.passScore} из {result.total}.
         </p>
-        <a
-          className="primary finish-home"
-          href={passed ? '/' : `/?learningId=${result.materialId}`}
-        >
+        {!passed && !result.required && (
+          <a className="secondary finish-home" href="/">Вернуться к плану</a>
+        )}
+        <a className="primary finish-home" href={passed ? '/' : `/?learningId=${result.materialId}`}>
           {passed ? 'Вернуться к плану' : 'Повторить разбор'}
         </a>
       </section>

@@ -246,7 +246,9 @@ describe('слой данных учебных материалов', () => {
     const retryResult = finishLearningMaterial(db, GRAPH, retry.runId, {
       now: new Date(START.getTime() + 3000),
     });
-    expect(retryResult).toMatchObject({ outcome: 'passed', xp: 0, masteryAfter: 0.46 });
+    expect(retryResult).toMatchObject({
+      outcome: 'passed', xp: 0, masteryBefore: 0.46, masteryAfter: 0.46,
+    });
     expect(retryResult.touchedTopics).toEqual([]);
     expect(db.prepare('SELECT mastery, attempts FROM topic_state WHERE topic_id = ?').get(TOPIC))
       .toEqual({ mastery: 0.46, attempts: 5 });

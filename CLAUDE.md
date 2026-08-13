@@ -83,6 +83,8 @@ npm run prefetch                  # ручной прогрев/экспорт �
   обычных забега и зачёт первого обязательного персонального разбора. Материал
   выбирается по `ready_at`, затем `id`, но публикация после третьего забега
   переносится на следующие московские сутки. Триаж, boss и lesson не считаются;
+  автоматически `retired` кандидат остаётся выбранным с `required=false` до
+  конца назначенных суток, чтобы следующий материал не подменил отменённое обязательство;
   `/api/run/plan` и `/api/gate/status` обязаны использовать один результат.
 - `controller/` — отдельный Python-контроллер закрытого мобильного API Microsoft
   Family Safety. Он знает только read-only `gate/status`, не читает SQLite и не
@@ -145,7 +147,7 @@ npm run prefetch                  # ручной прогрев/экспорт �
   файл, `fsync`, `rename`. Такой файл пишется только через `writeFileAtomic` —
   оборванная запись оставила бы вместо снимка битый JSON. Уборка в `catch`
   обёрнута своими `try`: отказ закрытия не имеет права заслонить причину.
-- Схема версии 14 содержит двенадцать таблиц: `profile`, `topic_state`, `task_bank`,
+- Схема версии 15 содержит двенадцать таблиц: `profile`, `topic_state`, `task_bank`,
   `runs`, `attempts`, `disputes`, `forecast_snapshots`, `boss_batches` и
   `boss_tasks`, `learning_materials`, `learning_runs`, `learning_tasks`. `topic_state.closed_at`
   закрывает тему постоянно;

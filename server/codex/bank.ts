@@ -419,14 +419,14 @@ export function learningTaskAtPosition(
   db: Database,
   materialId: number,
   position: number,
-  runId?: number,
+  runId: number,
 ): BankTask | null {
   if (!Number.isInteger(position) || position < 1 || position > LEARNING_TASK_COUNT) {
     throw new Error(
       `Банк заданий: позиция материала должна быть от 1 до ${LEARNING_TASK_COUNT}, получено ${position}`,
     );
   }
-  const row = db.prepare<[number, number, number | null, number], TaskRow>(
+  const row = db.prepare<[number, number, number], TaskRow>(
     `SELECT ${TASK_COLUMNS.replaceAll(/\bid\b/gu, 'task_bank.id')}
        FROM learning_tasks
        JOIN task_bank ON task_bank.id = learning_tasks.task_id
@@ -434,9 +434,9 @@ export function learningTaskAtPosition(
         AND task_bank.status = 'lesson_reserved'
         AND NOT EXISTS (
           SELECT 1 FROM attempts
-           WHERE attempts.task_id = task_bank.id AND (? IS NULL OR attempts.run_id = ?)
+           WHERE attempts.task_id = task_bank.id AND attempts.run_id = ?
         )`,
-  ).get(materialId, position, runId ?? null, runId ?? 0);
+  ).get(materialId, position, runId);
   return row === undefined ? null : toBankTask(row);
 }
 

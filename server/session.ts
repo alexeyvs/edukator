@@ -581,16 +581,18 @@ export function submitAnswer(
       );
     }
 
-    if (run?.kind === 'lesson') {
-      const position = db.prepare<[number, number], { position: number }>(
-        `SELECT learning_tasks.position
+    const lessonContext = run?.kind === 'lesson'
+      ? db.prepare<[number, number], { position: number; attempt_number: number }>(
+        `SELECT learning_tasks.position, learning_runs.attempt_number
            FROM learning_runs
            JOIN learning_materials ON learning_materials.id = learning_runs.material_id
            JOIN learning_tasks ON learning_tasks.material_id = learning_materials.id
           WHERE learning_runs.run_id = ? AND learning_tasks.task_id = ?
             AND learning_materials.status = 'active'`,
-      ).get(run.id, row.id)?.position;
-      if (position !== run.total + 1) {
+      ).get(run.id, row.id)
+      : undefined;
+    if (run?.kind === 'lesson') {
+      if (lessonContext === undefined || lessonContext.position !== run.total + 1) {
         throw new SessionError(
           'task-not-in-run',
           `Учебный тест ${run.id} ожидает задание позиции ${run.total + 1}`,
@@ -598,14 +600,7 @@ export function submitAnswer(
       }
     }
 
-    const affectsProgress = run?.kind !== 'lesson' || db.prepare<[number], { attempt_number: number }>(
-      'SELECT attempt_number FROM learning_runs WHERE run_id = ?',
-    ).get(run.id)?.attempt_number === 1;
-    if (run?.kind === 'lesson' && db.prepare<[number], { found: number }>(
-      'SELECT 1 AS found FROM learning_runs WHERE run_id = ?',
-    ).get(run.id) === undefined) {
-      throw new Error(`Lesson-run ${run.id} не связан с учебным материалом`);
-    }
+    const affectsProgress = run?.kind !== 'lesson' || lessonContext?.attempt_number === 1;
     const currentAttempt = db.prepare<
       [number, number | null, number],
       { id: number; is_correct: number; hint_used: number; run_id: number | null }

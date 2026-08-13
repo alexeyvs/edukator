@@ -18,6 +18,7 @@ import {
   readProfile,
   writeProfile,
 } from '../server/db.js';
+import { readDailyGate } from '../server/daily-gate.js';
 
 /** Формат, в котором отметки времени пишет код: сравнение по колонке — строковое. */
 const ISO_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -360,7 +361,7 @@ describe('база данных', () => {
     // рабочую базу, поэтому число прибито буквально и меняется только вместе с
     // новой ступенью и её тестом обновления.
     it('держит номер версии схемы', () => {
-      expect(SCHEMA_VERSION).toBe(14);
+      expect(SCHEMA_VERSION).toBe(15);
     });
 
     it('создаёт все двенадцать таблиц на пустой базе', () => {
@@ -457,7 +458,7 @@ describe('база данных', () => {
         "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger'",
       ).get();
       expect(version.user_version).toBe(SCHEMA_VERSION);
-      expect(triggers?.n).toBe(11);
+      expect(triggers?.n).toBe(14);
     });
 
     it('обновляет ISO-умолчания реальной схемы версии 1 и сохраняет данные', () => {
@@ -686,7 +687,7 @@ describe('база данных', () => {
         const triggers = migrated.prepare<[], { n: number }>(
           "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger'",
         ).get();
-        expect(triggers?.n).toBe(11);
+        expect(triggers?.n).toBe(14);
         migrated
           .prepare(
             `INSERT INTO task_bank (topic_id, question, answer, difficulty, fingerprint)
@@ -990,6 +991,19 @@ describe('база данных', () => {
       const legacy = createVersionThirteenDatabase(path);
       const failedTopic = seedTopic(legacy, 'math.failed');
       const activeTopic = seedTopic(legacy, 'russian.active');
+      const readyTopic = seedTopic(legacy, 'english.ready');
+      const passedTopic = seedTopic(legacy, 'math.passed');
+      for (const finishedAt of [
+        '2026-08-11T09:00:00.000Z',
+        '2026-08-11T09:30:00.000Z',
+        '2026-08-11T09:50:00.000Z',
+      ]) {
+        legacy.prepare(
+          `INSERT INTO runs
+            (subject, kind, topic_id, started_at, finished_at, summary, total, correct)
+           VALUES ('math', 'run', ?, ?, ?, '{}', 12, 12)`,
+        ).run(failedTopic, finishedAt, finishedAt);
+      }
       const failedRunId = Number(legacy.prepare(
         `INSERT INTO runs
            (subject, kind, topic_id, started_at, finished_at, total, correct, lives_remaining)
@@ -1025,8 +1039,40 @@ describe('база данных', () => {
         activeTopic,
         activeRunId,
         '2026-08-11T08:50:00.000Z',
-        '2026-08-11T09:00:00.000Z',
-        '2026-08-11T08:55:00.000Z',
+        '2026-08-11T10:15:00.000Z',
+        '2026-08-11T10:10:00.000Z',
+      ).lastInsertRowid);
+      const readyMaterialId = Number(legacy.prepare(
+        `INSERT INTO learning_materials
+           (subject, topic_id, status, recommendation_reason, mastery_before,
+            created_at, updated_at)
+         VALUES ('english', ?, 'ready', 'Опубликованный разбор', 0.25, ?, ?)`,
+      ).run(
+        readyTopic,
+        '2026-08-11T08:00:00.000Z',
+        '2026-08-11T10:00:00.000Z',
+      ).lastInsertRowid);
+      const passedRunId = Number(legacy.prepare(
+        `INSERT INTO runs
+           (subject, kind, topic_id, started_at, finished_at, total, correct, lives_remaining)
+         VALUES ('math', 'lesson', ?, ?, ?, 5, 4, NULL)`,
+      ).run(
+        passedTopic,
+        '2026-08-11T10:06:00.000Z',
+        '2026-08-11T10:20:00.000Z',
+      ).lastInsertRowid);
+      const passedMaterialId = Number(legacy.prepare(
+        `INSERT INTO learning_materials
+           (subject, topic_id, status, recommendation_reason, run_id, mastery_before,
+            created_at, updated_at, opened_at, finished_at)
+         VALUES ('math', ?, 'passed', 'Пройденный разбор', ?, 0.35, ?, ?, ?, ?)`,
+      ).run(
+        passedTopic,
+        passedRunId,
+        '2026-08-11T08:10:00.000Z',
+        '2026-08-11T10:20:00.000Z',
+        '2026-08-11T10:05:00.000Z',
+        '2026-08-11T10:20:00.000Z',
       ).lastInsertRowid);
       const taskId = seedTask(legacy, failedTopic);
       legacy.prepare(
@@ -1041,17 +1087,67 @@ describe('база данных', () => {
           'SELECT id, status, ready_at FROM learning_materials ORDER BY id',
         ).all()).toEqual([
           { id: failedMaterialId, status: 'failed', ready_at: null },
-          { id: activeMaterialId, status: 'active', ready_at: '2026-08-11T08:50:00.000Z' },
+          { id: activeMaterialId, status: 'active', ready_at: '2026-08-11T10:10:00.000Z' },
+          { id: readyMaterialId, status: 'ready', ready_at: '2026-08-11T10:00:00.000Z' },
+          { id: passedMaterialId, status: 'passed', ready_at: '2026-08-11T10:05:00.000Z' },
         ]);
         expect(migrated.prepare(
           'SELECT material_id, run_id, attempt_number FROM learning_runs ORDER BY material_id',
         ).all()).toEqual([
           { material_id: failedMaterialId, run_id: failedRunId, attempt_number: 1 },
           { material_id: activeMaterialId, run_id: activeRunId, attempt_number: 1 },
+          { material_id: passedMaterialId, run_id: passedRunId, attempt_number: 1 },
         ]);
         expect(migrated.prepare('SELECT affects_progress FROM attempts').get())
           .toEqual({ affects_progress: 1 });
         expect(migrated.pragma('foreign_key_check')).toEqual([]);
+        expect(readDailyGate(migrated, new Date('2026-08-11T12:00:00.000Z')).learning)
+          .toEqual({ materialId: null, required: false, passed: false });
+        expect(readDailyGate(migrated, new Date('2026-08-11T21:00:00.000Z')).learning)
+          .toEqual({ materialId: readyMaterialId, required: true, passed: false });
+      } finally {
+        migrated.close();
+      }
+    });
+
+    it('мигрирует v14, восстанавливает ready_at опубликованных строк и сохраняет failed как историю', () => {
+      const path = join(tempDir, 'версия-14.db');
+      const legacy = openDatabase(path);
+      for (const topicId of ['math.ready', 'russian.active', 'english.passed', 'math.failed']) {
+        seedTopic(legacy, topicId);
+      }
+      legacy.exec(`
+        DROP TRIGGER learning_material_ready_at_insert;
+        DROP TRIGGER learning_material_ready_at_update;
+        DROP TRIGGER learning_material_ready_at_immutable;
+      `);
+      const insert = legacy.prepare(
+        `INSERT INTO learning_materials
+           (subject, topic_id, status, recommendation_reason, mastery_before,
+            created_at, updated_at, ready_at)
+         VALUES (?, ?, ?, 'Исторический материал', 0.2, ?, ?, NULL)`,
+      );
+      insert.run('math', 'math.ready', 'ready', '2026-08-12T08:00:00.000Z', '2026-08-12T09:00:00.000Z');
+      insert.run('russian', 'russian.active', 'active', '2026-08-12T08:00:00.000Z', '2026-08-12T09:10:00.000Z');
+      insert.run('english', 'english.passed', 'passed', '2026-08-12T08:00:00.000Z', '2026-08-12T09:20:00.000Z');
+      insert.run('math', 'math.failed', 'failed', '2026-08-12T08:00:00.000Z', '2026-08-12T09:30:00.000Z');
+      legacy.pragma('user_version = 14');
+      legacy.close();
+
+      const migrated = openDatabase(path);
+      try {
+        expect(migrated.prepare(
+          'SELECT status, ready_at FROM learning_materials ORDER BY id',
+        ).all()).toEqual([
+          { status: 'ready', ready_at: '2026-08-12T09:00:00.000Z' },
+          { status: 'active', ready_at: '2026-08-12T09:10:00.000Z' },
+          { status: 'passed', ready_at: '2026-08-12T09:20:00.000Z' },
+          { status: 'failed', ready_at: null },
+        ]);
+        expect(() => migrated.prepare(
+          'UPDATE learning_materials SET ready_at = ? WHERE topic_id = ?',
+        ).run('2026-08-12T10:00:00.000Z', 'math.ready'))
+          .toThrow(/Время публикации.*нельзя изменять/u);
       } finally {
         migrated.close();
       }
@@ -1211,17 +1307,45 @@ describe('база данных', () => {
       const topicId = seedTopic(db);
       const insert = db.prepare(
         `INSERT INTO learning_materials
-           (subject, topic_id, status, recommendation_reason, mastery_before)
-         VALUES ('math', ?, ?, 'Нужно закрепить дроби', 0.35)`,
+           (subject, topic_id, status, recommendation_reason, mastery_before, ready_at)
+         VALUES ('math', ?, ?, 'Нужно закрепить дроби', 0.35,
+                 CASE WHEN ? = 'ready' THEN '2026-08-09T10:00:00.000Z' END)`,
       );
-      insert.run(topicId, 'preparing');
+      insert.run(topicId, 'preparing', 'preparing');
 
-      expect(() => insert.run(topicId, 'ready')).toThrow(/UNIQUE constraint failed/);
-      expect(() => insert.run(topicId, 'unknown')).toThrow(/CHECK constraint failed/);
+      expect(() => insert.run(topicId, 'ready', 'ready')).toThrow(/UNIQUE constraint failed/);
+      expect(() => insert.run(topicId, 'unknown', 'unknown')).toThrow(/CHECK constraint failed/);
 
       db.prepare("UPDATE learning_materials SET status = 'rejected' WHERE topic_id = ?")
         .run(topicId);
-      expect(() => insert.run(topicId, 'preparing')).not.toThrow();
+      expect(() => insert.run(topicId, 'preparing', 'preparing')).not.toThrow();
+    });
+
+    it('требует ready_at для опубликованных состояний и запрещает менять его после установки', () => {
+      const topicId = seedTopic(db);
+      const materialId = Number(db.prepare(
+        `INSERT INTO learning_materials
+           (subject, topic_id, recommendation_reason, mastery_before)
+         VALUES ('math', ?, 'Нужно закрепить дроби', 0.35)`,
+      ).run(topicId).lastInsertRowid);
+
+      expect(() => db.prepare(
+        "UPDATE learning_materials SET status = 'active' WHERE id = ?",
+      ).run(materialId)).toThrow(/должен хранить время публикации/u);
+      db.prepare('UPDATE learning_materials SET ready_at = ? WHERE id = ?')
+        .run('2026-08-09T10:00:00.000Z', materialId);
+      expect(() => db.prepare(
+        'UPDATE learning_materials SET ready_at = ? WHERE id = ?',
+      ).run('2026-08-09T11:00:00.000Z', materialId))
+        .toThrow(/Время публикации.*нельзя изменять/u);
+      expect(() => db.prepare(
+        'UPDATE learning_materials SET ready_at = NULL WHERE id = ?',
+      ).run(materialId)).toThrow(/нельзя изменять/u);
+      expect(() => db.prepare(
+        `INSERT INTO learning_materials
+           (subject, topic_id, status, recommendation_reason, mastery_before)
+         VALUES ('russian', ?, 'active', 'Нельзя публиковать без времени', 0.1)`,
+      ).run(seedTopic(db, 'russian.no-ready'))).toThrow(/должен хранить время публикации/u);
     });
 
     it('требует пять упорядоченных заданий темы до публикации материала', () => {
@@ -1241,7 +1365,7 @@ describe('база данных', () => {
 
       expect(() => db.prepare(
         'INSERT INTO learning_tasks (material_id, task_id, position) VALUES (?, ?, 1)',
-      ).run(materialId, foreignTask)).toThrow(/learning task must match material topic/);
+      ).run(materialId, foreignTask)).toThrow(/должно относиться к его теме/);
       expect(() => db.prepare(
         'INSERT INTO learning_tasks (material_id, task_id, position) VALUES (?, ?, 6)',
       ).run(materialId, taskIds[0])).toThrow(/CHECK constraint failed/);
@@ -1251,16 +1375,16 @@ describe('база данных', () => {
       );
       taskIds.slice(0, 4).forEach((taskId, index) => link.run(materialId, taskId, index + 1));
       expect(() => db.prepare(
-        "UPDATE learning_materials SET status = 'ready' WHERE id = ?",
-      ).run(materialId)).toThrow(/five reserved tasks/);
+        "UPDATE learning_materials SET status = 'ready', ready_at = ? WHERE id = ?",
+      ).run('2026-08-09T10:00:00.000Z', materialId)).toThrow(/пять зарезервированных заданий/);
 
       link.run(materialId, taskIds[4], 5);
       expect(() => db.prepare(
-        "UPDATE learning_materials SET status = 'ready' WHERE id = ?",
-      ).run(materialId)).not.toThrow();
+        "UPDATE learning_materials SET status = 'ready', ready_at = ? WHERE id = ?",
+      ).run('2026-08-09T10:00:00.000Z', materialId)).not.toThrow();
       expect(() => db.prepare(
         'DELETE FROM learning_tasks WHERE material_id = ? AND position = 5',
-      ).run(materialId)).toThrow(/keep all tasks/);
+      ).run(materialId)).toThrow(/должен сохранять все задания/);
     });
 
     it('связывает материал с несколькими lesson-run той же темы и предмета', () => {
@@ -1290,11 +1414,11 @@ describe('база данных', () => {
         `INSERT INTO learning_runs (material_id, run_id, attempt_number) VALUES (?, ?, ?)`,
       );
 
-      expect(() => link.run(materialId, ordinaryRunId, 1)).toThrow(/matching lesson run/);
-      expect(() => link.run(materialId, wrongTopicRunId, 1)).toThrow(/matching lesson run/);
+      expect(() => link.run(materialId, ordinaryRunId, 1)).toThrow(/должен соответствовать материалу/);
+      expect(() => link.run(materialId, wrongTopicRunId, 1)).toThrow(/должен соответствовать материалу/);
       expect(() => link.run(materialId, lessonRunId, 1)).not.toThrow();
       expect(() => link.run(materialId, secondLessonRunId, 2)).not.toThrow();
-      expect(() => link.run(materialId, 9999, 3)).toThrow(/matching lesson run|FOREIGN KEY/);
+      expect(() => link.run(materialId, 9999, 3)).toThrow(/должен соответствовать материалу|FOREIGN KEY/);
       expect(() => link.run(materialId, secondLessonRunId, 3)).toThrow(/UNIQUE constraint failed/);
       expect(db.prepare(
         'SELECT run_id, attempt_number FROM learning_runs WHERE material_id = ? ORDER BY attempt_number',

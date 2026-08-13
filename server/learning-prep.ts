@@ -236,7 +236,8 @@ export function createLearningProducer(options: {
 export interface PrepareLearningOptions {
   db: Database;
   graph: TopicGraph;
-  now?: Date;
+  /** Часы цикла: перечитываются после асинхронной генерации перед публикацией. */
+  now?: () => Date;
   produce?: LearningProducer;
   budget?: CodexConcurrency;
   run?: CodexRunner;
@@ -248,7 +249,7 @@ export interface PrepareLearningOptions {
 export async function prepareLearningMaterials(
   options: PrepareLearningOptions,
 ): Promise<LearningPreparationReport> {
-  const now = options.now ?? new Date();
+  const now = options.now?.() ?? new Date();
   const log = options.log ?? (() => undefined);
   const retired = retireResolvedMaterials(options.db, options.graph, now);
   const recoveredTopics = expireStaleLearningClaims(options.db, { now });
@@ -299,7 +300,7 @@ export async function prepareLearningMaterials(
         claim.materialId,
         result.content,
         result.tasks,
-        now,
+        options.now?.() ?? new Date(),
       );
       if (!published.ready) {
         const error = 'полный тест столкнулся с уже сохранённым отпечатком';
@@ -314,7 +315,9 @@ export async function prepareLearningMaterials(
     } catch (error) {
       const unavailable = error instanceof CodexUnavailableError;
       codexUnavailable ||= unavailable;
-      if (!unavailable) rejectLearningMaterial(options.db, claim.materialId, { now });
+      if (!unavailable) {
+        rejectLearningMaterial(options.db, claim.materialId, { now: options.now?.() ?? new Date() });
+      }
       const message = (error as Error).message;
       prepared.push({ topicId: candidate.topic.id, materialId: claim.materialId, ready: false,
         recovered: claim.recovered || recoveredTopics.has(candidate.topic.id), stored: 0, error: message });

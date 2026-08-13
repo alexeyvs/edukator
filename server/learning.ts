@@ -34,22 +34,52 @@ export class LearningError extends Error {
   }
 }
 
-interface MaterialRow {
+interface MaterialLifecycleRow {
+  id: number;
+  status: LearningMaterialStatus;
+}
+
+interface MaterialStartRow extends MaterialLifecycleRow {
+  subject: Subject;
+  topic_id: string;
+  latest_run_id: number | null;
+  latest_attempt_number: number | null;
+  latest_run_kind: string | null;
+  latest_run_finished_at: string | null;
+}
+
+interface MaterialCardRow {
+  id: number;
+  subject: Subject;
+  topic_id: string;
+  status: 'ready' | 'active';
+  recommendation_reason: string;
+  estimated_minutes: number;
+}
+
+interface MaterialViewRow {
   id: number;
   subject: Subject;
   topic_id: string;
   status: LearningMaterialStatus;
-  run_id: number | null;
-  attempt_number: number | null;
-  mastery_before: number;
-  created_at: string;
-  updated_at: string;
-}
-
-interface PublicMaterialRow extends MaterialRow {
   content: string | null;
   recommendation_reason: string;
   estimated_minutes: number;
+  latest_run_id: number | null;
+  latest_run_finished_at: string | null;
+}
+
+interface FinishLearningRow {
+  id: number;
+  topic_id: string;
+  status: LearningMaterialStatus;
+  mastery_before: number;
+  finished_at: string | null;
+  summary: string | null;
+  total: number;
+  correct: number;
+  run_kind: string;
+  attempt_number: number;
 }
 
 export interface LearningMaterialCard {
@@ -124,15 +154,35 @@ function timestamp(value: Date, operation: string): string {
   return value.toISOString();
 }
 
-function materialRow(db: Database, materialId: number): MaterialRow {
-  const row = db.prepare<[number], MaterialRow>(
-    `SELECT id, subject, topic_id, status, mastery_before, created_at, updated_at,
-            (SELECT run_id FROM learning_runs WHERE material_id = learning_materials.id
-              ORDER BY attempt_number DESC LIMIT 1) AS run_id,
-            (SELECT attempt_number FROM learning_runs WHERE material_id = learning_materials.id
-              ORDER BY attempt_number DESC LIMIT 1) AS attempt_number
-       FROM learning_materials WHERE id = ?`,
+function materialLifecycleRow(db: Database, materialId: number): MaterialLifecycleRow {
+  const row = db.prepare<[number], MaterialLifecycleRow>(
+    'SELECT id, status FROM learning_materials WHERE id = ?',
   ).get(materialId);
+  if (row === undefined) {
+    throw new LearningError('learning-not-found', `Учебный материал ${materialId} не найден`);
+  }
+  return row;
+}
+
+function materialStartRow(db: Database, materialId: number): MaterialStartRow {
+  const row = db.prepare<[number, number], MaterialStartRow>(
+    `WITH latest_run AS (
+       SELECT run_id, attempt_number
+         FROM learning_runs
+        WHERE material_id = ?
+        ORDER BY attempt_number DESC LIMIT 1
+     )
+     SELECT learning_materials.id, learning_materials.subject,
+            learning_materials.topic_id, learning_materials.status,
+            latest_run.run_id AS latest_run_id,
+            latest_run.attempt_number AS latest_attempt_number,
+            runs.kind AS latest_run_kind,
+            runs.finished_at AS latest_run_finished_at
+       FROM learning_materials
+       LEFT JOIN latest_run ON TRUE
+       LEFT JOIN runs ON runs.id = latest_run.run_id
+      WHERE learning_materials.id = ?`,
+  ).get(materialId, materialId);
   if (row === undefined) {
     throw new LearningError('learning-not-found', `Учебный материал ${materialId} не найден`);
   }
@@ -141,13 +191,8 @@ function materialRow(db: Database, materialId: number): MaterialRow {
 
 /** Карточки главного экрана: claim и закрытая история наружу не попадают. */
 export function learningMaterialCards(db: Database): LearningMaterialCard[] {
-  return db.prepare<[], PublicMaterialRow>(
-    `SELECT id, subject, topic_id, status, mastery_before,
-            content, recommendation_reason, estimated_minutes, created_at, updated_at,
-            (SELECT run_id FROM learning_runs WHERE material_id = learning_materials.id
-              ORDER BY attempt_number DESC LIMIT 1) AS run_id,
-            (SELECT attempt_number FROM learning_runs WHERE material_id = learning_materials.id
-              ORDER BY attempt_number DESC LIMIT 1) AS attempt_number
+  return db.prepare<[], MaterialCardRow>(
+    `SELECT id, subject, topic_id, status, recommendation_reason, estimated_minutes
        FROM learning_materials
       WHERE status IN ('ready', 'active')
       ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, created_at, id`,
@@ -163,15 +208,23 @@ export function learningMaterialCards(db: Database): LearningMaterialCard[] {
 
 /** Безопасно разбирает только опубликованное содержимое и текущий прогресс. */
 export function readLearningMaterial(db: Database, materialId: number): LearningMaterialView {
-  const row = db.prepare<[number], PublicMaterialRow>(
-    `SELECT id, subject, topic_id, status, mastery_before,
-            content, recommendation_reason, estimated_minutes, created_at, updated_at,
-            (SELECT run_id FROM learning_runs WHERE material_id = learning_materials.id
-              ORDER BY attempt_number DESC LIMIT 1) AS run_id,
-            (SELECT attempt_number FROM learning_runs WHERE material_id = learning_materials.id
-              ORDER BY attempt_number DESC LIMIT 1) AS attempt_number
-       FROM learning_materials WHERE id = ?`,
-  ).get(materialId);
+  const row = db.prepare<[number, number], MaterialViewRow>(
+    `WITH latest_run AS (
+       SELECT run_id FROM learning_runs
+        WHERE material_id = ?
+        ORDER BY attempt_number DESC LIMIT 1
+     )
+     SELECT learning_materials.id, learning_materials.subject,
+            learning_materials.topic_id, learning_materials.status,
+            learning_materials.content,
+            learning_materials.recommendation_reason, learning_materials.estimated_minutes,
+            latest_run.run_id AS latest_run_id,
+            runs.finished_at AS latest_run_finished_at
+       FROM learning_materials
+       LEFT JOIN latest_run ON TRUE
+       LEFT JOIN runs ON runs.id = latest_run.run_id
+      WHERE learning_materials.id = ?`,
+  ).get(materialId, materialId);
   if (row === undefined) {
     throw new LearningError('learning-not-found', `Учебный материал ${materialId} не найден`);
   }
@@ -183,15 +236,9 @@ export function readLearningMaterial(db: Database, materialId: number): Learning
       `Учебный материал ${materialId} нельзя читать в состоянии ${row.status}`,
     );
   }
-  const latestRunFinished = row.run_id === null ? null : db.prepare<[number], { finished_at: string | null }>(
-    'SELECT finished_at FROM runs WHERE id = ?',
-  ).get(row.run_id)?.finished_at;
-  if (row.run_id !== null && latestRunFinished === undefined) {
-    throw new LearningError('learning-inconsistent', `Материал ${materialId} связан с исчезнувшим lesson-run`);
-  }
-  const progress = row.run_id === null || latestRunFinished !== null
+  const progress = row.latest_run_id === null || row.latest_run_finished_at !== null
     ? { total: 0, correct: 0, target: LEARNING_TASK_COUNT, done: false }
-    : runProgress(db, row.run_id);
+    : runProgress(db, row.latest_run_id);
   if (progress.total > 0) {
     return {
       id: row.id,
@@ -310,7 +357,7 @@ export function openLearningMaterial(
 ): OpenLearningMaterialResult {
   const nowIso = timestamp(options.now ?? new Date(), 'открытия');
   return db.transaction((): OpenLearningMaterialResult => {
-    const material = materialRow(db, materialId);
+    const material = materialLifecycleRow(db, materialId);
     if (material.status === 'active') return { materialId, resumed: true };
     if (material.status !== 'ready') {
       throw new LearningError(
@@ -332,7 +379,7 @@ export function openLearningMaterial(
   }).immediate();
 }
 
-function ensureCompleteMaterial(db: Database, material: MaterialRow): void {
+function ensureCompleteMaterial(db: Database, materialId: number): void {
   const row = db.prepare<[number], { count: number; first: number | null; last: number | null; bad: number }>(
     `SELECT COUNT(*) AS count, MIN(learning_tasks.position) AS first,
             MAX(learning_tasks.position) AS last,
@@ -342,14 +389,14 @@ function ensureCompleteMaterial(db: Database, material: MaterialRow): void {
        LEFT JOIN learning_tasks ON learning_tasks.material_id = learning_materials.id
        LEFT JOIN task_bank ON task_bank.id = learning_tasks.task_id
       WHERE learning_materials.id = ?`,
-  ).get(material.id);
+  ).get(materialId);
   if (
     row === undefined || row.count !== LEARNING_TASK_COUNT || row.first !== 1 ||
     row.last !== LEARNING_TASK_COUNT || row.bad !== 0
   ) {
     throw new LearningError(
       'learning-inconsistent',
-      `Учебный материал ${material.id} не содержит полный согласованный тест`,
+      `Учебный материал ${materialId} не содержит полный согласованный тест`,
     );
   }
 }
@@ -368,12 +415,9 @@ export function startLearningRun(
 ): StartLearningRunResult {
   const nowIso = timestamp(options.now ?? new Date(), 'теста');
   return db.transaction((): StartLearningRunResult => {
-    const material = materialRow(db, materialId);
-    if (material.run_id !== null) {
-      const run = db.prepare<[number], { kind: string; finished_at: string | null }>(
-        'SELECT kind, finished_at FROM runs WHERE id = ?',
-      ).get(material.run_id);
-      if (run?.kind !== 'lesson') {
+    const material = materialStartRow(db, materialId);
+    if (material.latest_run_id !== null) {
+      if (material.latest_run_kind !== 'lesson') {
         throw new LearningError('learning-inconsistent', `Материал ${materialId} связан не с lesson-run`);
       }
       if (material.status === 'passed' || material.status === 'failed') {
@@ -385,15 +429,15 @@ export function startLearningRun(
           `Материал ${materialId} нельзя продолжить в состоянии ${material.status}`,
         );
       }
-      if (run.finished_at === null) {
-        return { materialId, runId: material.run_id, resumed: true };
+      if (material.latest_run_finished_at === null) {
+        return { materialId, runId: material.latest_run_id, resumed: true };
       }
     }
     if (material.status !== 'active') {
       throw new LearningError('learning-not-ready', `Материал ${materialId} ещё не открыт`);
     }
-    ensureCompleteMaterial(db, material);
-    const attemptNumber = (material.attempt_number ?? 0) + 1;
+    ensureCompleteMaterial(db, material.id);
+    const attemptNumber = (material.latest_attempt_number ?? 0) + 1;
 
     const runId = Number(db.prepare(
       `INSERT INTO runs (subject, kind, topic_id, started_at, lives_remaining)
@@ -443,18 +487,10 @@ export function finishLearningMaterial(
   const now = options.now ?? new Date();
   const nowIso = timestamp(now, 'завершения');
   return db.transaction((): FinishLearningMaterialResult => {
-    const joined = db.prepare<[number], MaterialRow & {
-      finished_at: string | null;
-      summary: string | null;
-      total: number;
-      correct: number;
-      run_kind: string;
-      attempt_number: number;
-    }>(
-      `SELECT learning_materials.id, learning_materials.subject,
-              learning_materials.topic_id, learning_materials.status,
-              learning_runs.run_id, learning_materials.mastery_before,
-              learning_materials.created_at, learning_materials.updated_at,
+    const joined = db.prepare<[number], FinishLearningRow>(
+      `SELECT learning_materials.id, learning_materials.topic_id,
+              learning_materials.status,
+              learning_materials.mastery_before,
               runs.finished_at, runs.summary, runs.total, runs.correct, runs.kind AS run_kind,
               learning_runs.attempt_number
          FROM learning_runs
@@ -507,7 +543,7 @@ export function finishLearningMaterial(
       ...runResult,
       materialId: joined.id,
       outcome,
-      masteryBefore: joined.mastery_before,
+      masteryBefore: joined.attempt_number === 1 ? joined.mastery_before : masteryAfter,
       masteryAfter,
       passScore: LEARNING_PASS_SCORE,
     };
@@ -544,7 +580,7 @@ export function retireLearningMaterial(
 ): boolean {
   const nowIso = timestamp(options.now ?? new Date(), 'retirement');
   return db.transaction((): boolean => {
-    const material = materialRow(db, materialId);
+    const material = materialLifecycleRow(db, materialId);
     if (material.status === 'retired') return false;
     if (material.status !== 'preparing' && material.status !== 'ready') return false;
 
@@ -572,7 +608,7 @@ export function rejectLearningMaterial(
 ): boolean {
   const nowIso = timestamp(options.now ?? new Date(), 'отбраковки');
   return db.transaction((): boolean => {
-    materialRow(db, materialId);
+    materialLifecycleRow(db, materialId);
     const changed = db.prepare(
       `UPDATE learning_materials
           SET status = 'rejected', finished_at = ?, updated_at = ?

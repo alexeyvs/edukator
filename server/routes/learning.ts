@@ -10,6 +10,7 @@ import {
   startLearningRun,
 } from '../learning.js';
 import { runProgress } from '../run.js';
+import { readDailyGate } from '../daily-gate.js';
 
 export interface LearningRoutesOptions {
   db: Database;
@@ -116,12 +117,18 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
     const stopped = unavailable(options, reply);
     if (stopped !== undefined) return stopped;
     try {
-      return reply.send(finishLearningMaterial(
+      const at = now();
+      const result = finishLearningMaterial(
         db,
         graph,
         readPathId(request.params.runId, 'Идентификатор lesson-run'),
-        { now: now() },
-      ));
+        { now: at },
+      );
+      const learningGate = readDailyGate(db, at).learning;
+      return reply.send({
+        ...result,
+        required: learningGate.required && learningGate.materialId === result.materialId,
+      });
     } catch (error) {
       return fail(reply, error);
     }
