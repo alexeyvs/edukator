@@ -16,6 +16,9 @@ npm run build:web                 # Vite production build в web/dist
 npm run test:e2e                  # Playwright: забег, спор, триаж, босс, /parents
 npm run dev                       # tsx watch на :3000 + Vite на :5173
 npm start                         # сервер и собранная статика на :3000
+npm run family:setup              # отдельное Python-окружение контроллера Family Safety
+npm run family:login              # первичная авторизация родительского аккаунта
+npm run start:family              # сервер и Family Safety controller одним запуском
 npm run extract-toc               # оглавление учебника из PDF (OCR через swift + Vision)
 npm run build-curriculum          # карта тем по извлечённому оглавлению, через codex
 npm run prefetch                  # ручной прогрев/экспорт банка; сервер также генерирует через startWorker
@@ -75,6 +78,12 @@ npm run prefetch                  # ручной прогрев/экспорт �
   прогнозы, активное время из `attempts.duration_ms`, пробелы, ленту и флаги.
   Округлять миллисекунды можно только в read model; дневные значения и итог
   должны происходить из одной выборки.
+- `server/daily-gate.ts` — единственный расчёт дневного доступа: три завершённых
+  обычных забега в московские сутки. Триаж, boss и lesson не считаются;
+  `/api/run/plan` и `/api/gate/status` обязаны использовать один результат.
+- `controller/` — отдельный Python-контроллер закрытого мобильного API Microsoft
+  Family Safety. Он знает только read-only `gate/status`, не читает SQLite и не
+  хранит refresh token в репозитории. Живой Microsoft API не вызывается тестами.
 - `server/routes/{run,triage,profile,boss,learning,parents}.ts` — тонкие HTTP-адаптеры
   над доменными модулями и `writeProfile`; бизнес-логику держать вне маршрутов.
 - `server/codex/concurrency.ts` — процессные семафоры вызовов codex:

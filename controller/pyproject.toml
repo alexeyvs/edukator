@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "edukator-family-controller"
+version = "0.1.0"
+description = "Связывает дневной план Edukator с Microsoft Family Safety"
+requires-python = ">=3.11"
+dependencies = ["pyfamilysafety==2.0.0"]
+
+[project.scripts]
+edukator-family-controller = "edukator_family_controller.main:main"
+edukator-family-login = "edukator_family_controller.login:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

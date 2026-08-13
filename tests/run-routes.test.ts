@@ -99,6 +99,7 @@ describe('маршруты забега', () => {
       plan: Array<{ subject: string; topic: { id: string; title: string } }>;
       forecasts: Array<{ subject: string; score: number }>;
       streak: { current: number; best: number; completedToday: boolean };
+      gate: { day: string; required: number; completed: number; remaining: number; unlocked: boolean };
       topics: Array<{ id: string; title: string; subject: string; readiness: Record<string, unknown> }>;
     };
     expect(plan.plan).toHaveLength(3);
@@ -110,6 +111,9 @@ describe('маршруты забега', () => {
     expect(plan.forecasts.map((item) => item.subject)).toEqual(SUBJECTS);
     expect(plan.forecasts.every((item) => item.score === 2)).toBe(true);
     expect(plan.streak).toEqual({ current: 0, best: 0, completedToday: false });
+    expect(plan.gate).toEqual({
+      day: '2026-08-08', required: 3, completed: 0, remaining: 3, unlocked: false,
+    });
     expect(plan.topics).toHaveLength(3);
     expect(plan.topics[0]).toMatchObject({
       id: expect.stringMatching(/\.a$/), title: expect.stringContaining('Тема'),
@@ -151,6 +155,46 @@ describe('маршруты забега', () => {
     expect(finish.json()).toMatchObject({ runId, total: 12, correct: 12, xp: 300 });
     expect(db.prepare('SELECT finished_at, total, correct FROM runs WHERE id = ?').get(runId))
       .toEqual({ finished_at: NOW.toISOString(), total: 12, correct: 12 });
+  });
+
+  it('отдаёт состояние доступа и оставляет в плане только незакрытые слоты', async () => {
+    const insert = db.prepare(
+      `INSERT INTO runs (subject, kind, topic_id, started_at, finished_at, summary)
+       VALUES (?, 'run', ?, ?, ?, '{}')`,
+    );
+    insert.run('math', 'math.a', '2026-08-08T07:00:00.000Z', '2026-08-08T08:00:00.000Z');
+    insert.run('russian', 'russian.a', '2026-08-08T09:00:00.000Z', '2026-08-08T10:00:00.000Z');
+
+    const plan = await app.inject({ method: 'GET', url: '/api/run/plan' });
+    expect(plan.statusCode).toBe(200);
+    expect(plan.json()).toMatchObject({
+      gate: { completed: 2, remaining: 1, unlocked: false },
+      plan: [{ subject: 'english' }],
+    });
+    const status = await app.inject({ method: 'GET', url: '/api/gate/status' });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toEqual({
+      day: '2026-08-08', required: 3, completed: 2, remaining: 1, unlocked: false,
+    });
+
+    insert.run('english', 'english.a', '2026-08-08T10:30:00.000Z', '2026-08-08T11:00:00.000Z');
+    expect((await app.inject({ method: 'GET', url: '/api/run/plan' })).json()).toMatchObject({
+      gate: { completed: 3, remaining: 0, unlocked: true },
+      plan: [],
+    });
+  });
+
+  it('показывает незавершённый обычный забег как оставшийся слот', async () => {
+    db.prepare(
+      `INSERT INTO runs (subject, kind, topic_id, started_at)
+       VALUES ('math', 'run', 'math.a', ?)`,
+    ).run('2026-08-08T08:00:00.000Z');
+
+    const response = await app.inject({ method: 'GET', url: '/api/run/plan' });
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { plan: Array<{ active?: boolean; subject: string }> };
+    expect(body.plan).toHaveLength(3);
+    expect(body.plan[0]).toMatchObject({ active: true, subject: 'math' });
   });
 
   it('переводит доменные отказы в 404/409 и не пишет чужую попытку', async () => {

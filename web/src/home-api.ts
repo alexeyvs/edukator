@@ -8,6 +8,7 @@ export interface PlannedRun {
   topic: { id: string; title: string };
   priority: number;
   triagePassed: boolean;
+  active?: true;
 }
 
 export interface SubjectForecast {
@@ -22,6 +23,14 @@ export interface Streak {
   current: number;
   best: number;
   completedToday: boolean;
+}
+
+export interface DailyGateState {
+  day: string;
+  required: number;
+  completed: number;
+  remaining: number;
+  unlocked: boolean;
 }
 
 export type BossReadiness =
@@ -53,6 +62,7 @@ export interface DayPlanResponse {
   triage: Array<{ subject: Subject; passed: boolean }>;
   streak: Streak;
   topics: HomeTopic[];
+  gate: DailyGateState;
 }
 
 export interface ProfileSummary {

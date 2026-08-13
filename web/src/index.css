@@ -88,6 +88,94 @@ button:focus-visible {
   margin-bottom: 3.5rem;
 }
 
+.access-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(16rem, .7fr);
+  align-items: center;
+  gap: 1.5rem 2rem;
+  margin-bottom: 1rem;
+  padding: 1.35rem 1.5rem;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 1.25rem;
+}
+
+.access-card-locked {
+  border-color: rgb(196 106 56 / 22%);
+  background: linear-gradient(120deg, #fff4ec, rgb(255 255 255 / 72%));
+}
+
+.access-card-open {
+  border-color: rgb(11 124 93 / 22%);
+  background: linear-gradient(120deg, #eaf8f1, rgb(255 255 255 / 72%));
+}
+
+.access-card-copy p,
+.access-card-copy h2,
+.access-card-copy span {
+  margin: 0;
+}
+
+.access-card-copy p {
+  margin-bottom: .25rem;
+  color: #9b4b27;
+  font-size: .7rem;
+  font-weight: 850;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.access-card-open .access-card-copy p {
+  color: var(--leaf);
+}
+
+.access-card-copy h2 {
+  font-size: clamp(1.3rem, 3vw, 1.75rem);
+  letter-spacing: -.025em;
+}
+
+.access-card-copy span {
+  display: block;
+  margin-top: .35rem;
+  color: #52625c;
+  line-height: 1.45;
+}
+
+.access-card-progress > div:first-child {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: .55rem;
+  color: #66756f;
+  font-size: .78rem;
+  font-weight: 750;
+}
+
+.access-card-progress strong {
+  color: var(--ink);
+  font-size: 1.05rem;
+}
+
+.access-progress-track {
+  height: .7rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgb(23 35 31 / 12%);
+}
+
+.access-progress-track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #d36b36, var(--amber));
+  transition: width .25s ease;
+}
+
+.access-card-open .access-progress-track > span {
+  background: linear-gradient(90deg, var(--leaf), #4caf83);
+}
+
 .streak-card {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -1789,6 +1877,7 @@ button:focus-visible {
   }
 
   .home-intro,
+  .access-card,
   .forecast-cards,
   .topic-map-subjects {
     grid-template-columns: 1fr;

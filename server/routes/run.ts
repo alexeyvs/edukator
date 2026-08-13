@@ -14,9 +14,8 @@ import { SessionError } from '../session-error.js';
 import { readStreak } from '../streak.js';
 import { bossTopicState } from '../boss.js';
 import { learningMaterialCards } from '../learning.js';
-
-/** День состоит из 2–3 забегов; главный экран показывает верхние три. */
-export const DAILY_RUNS = 3;
+import { readDailyGate } from '../daily-gate.js';
+import { moscowDayBounds } from '../moscow-time.js';
 
 export interface RunRoutesOptions {
   db: Database;
@@ -36,6 +35,45 @@ function triagedSubjects(db: Database): Set<Subject> {
 }
 
 class BadRequest extends Error {}
+
+interface ActiveRunCard {
+  subject: Subject;
+  topic: { id: string; title: string };
+  priority: number;
+  triagePassed: boolean;
+  active: true;
+}
+
+function activeRunCards(
+  db: Database,
+  graph: TopicGraph,
+  triaged: ReadonlySet<Subject>,
+  now: Date,
+  limit: number,
+): ActiveRunCard[] {
+  if (limit <= 0) return [];
+  const [start, next] = moscowDayBounds(now);
+  return db.prepare<[string, string, number], { subject: Subject; topic_id: string }>(
+    `SELECT subject, topic_id FROM runs
+      WHERE kind = 'run' AND finished_at IS NULL
+        AND started_at >= ? AND started_at < ?
+        AND EXISTS (
+          SELECT 1 FROM topic_state
+           WHERE topic_state.topic_id = runs.topic_id AND topic_state.closed_at IS NULL
+        )
+      ORDER BY started_at DESC, id DESC LIMIT ?`,
+  ).all(start, next, limit).flatMap((row) => {
+    const topic = graph.byId.get(row.topic_id);
+    if (topic === undefined || topic.subject !== row.subject) return [];
+    return [{
+      subject: row.subject,
+      topic: { id: topic.id, title: topic.title },
+      priority: 0,
+      triagePassed: triaged.has(row.subject),
+      active: true as const,
+    }];
+  });
+}
 
 function unavailable(options: RunRoutesOptions, reply: FastifyReply): FastifyReply | undefined {
   if (options.available?.() !== false) return undefined;
@@ -85,12 +123,15 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
 
     const at = now();
     const triaged = triagedSubjects(db);
-    const plan = planFromDatabase(db, graph, DAILY_RUNS, at).map((item) => ({
+    const gate = readDailyGate(db, at);
+    const active = activeRunCards(db, graph, triaged, at, gate.remaining);
+    const planned = planFromDatabase(db, graph, gate.remaining - active.length, at).map((item) => ({
       subject: item.subject,
       topic: { id: item.topic.id, title: item.topic.title },
       priority: item.priority,
       triagePassed: triaged.has(item.subject),
     }));
+    const plan = [...active, ...planned];
     const states = readTopicStates(db);
     const forecasts = SUBJECTS.flatMap((subject) => {
       const forecast = forecastFor(graph, states, subject, at);
@@ -123,7 +164,15 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
       };
     });
 
-    return reply.send({ plan, learning, forecasts, triage, streak: readStreak(db, at), topics });
+    return reply.send({
+      plan,
+      learning,
+      forecasts,
+      triage,
+      streak: readStreak(db, at),
+      topics,
+      gate,
+    });
   });
 
   app.post('/api/run/start', (request, reply) => {

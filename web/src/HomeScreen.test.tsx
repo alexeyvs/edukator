@@ -10,6 +10,7 @@ import './test-setup';
 afterEach(cleanup);
 
 const PLAN: DayPlanResponse = {
+  gate: { day: '2026-08-08', required: 3, completed: 1, remaining: 2, unlocked: false },
   learning: [],
   plan: [
     { subject: 'math', topic: { id: 'math.fractions', title: 'Обыкновенные дроби' }, priority: 1, triagePassed: true },
@@ -86,6 +87,29 @@ function apiWith(plan: DayPlanResponse): HomeApi {
 }
 
 describe('главный экран', () => {
+  it('показывает блокировку и точное число оставшихся обычных забегов', async () => {
+    render(<HomeScreen api={apiWith(PLAN)} />);
+
+    const card = await screen.findByRole('heading', { name: 'Компьютер заблокирован' })
+      .then((heading) => heading.closest('section'));
+    expect(card).toHaveTextContent('Осталось 2 обычных забега до разблокировки.');
+    expect(card).toHaveTextContent('1 / 3');
+    expect(within(card!).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '1');
+  });
+
+  it('показывает открытый доступ после выполнения дневного плана', async () => {
+    render(<HomeScreen api={apiWith({
+      ...PLAN,
+      gate: { ...PLAN.gate, completed: 3, remaining: 0, unlocked: true },
+    })} />);
+
+    const card = await screen.findByRole('heading', { name: 'Компьютер разблокирован' })
+      .then((heading) => heading.closest('section'));
+    expect(card).toHaveTextContent('План выполнен. Доступ открыт до следующего дня.');
+    expect(card).toHaveTextContent('3 / 3');
+    expect(within(card!).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '3');
+  });
+
   it('показывает персональные разборы перед планом дня только когда они готовы или открыты', async () => {
     const navigate = vi.fn();
     const view = render(<HomeScreen api={apiWith(PLAN)} navigate={navigate} />);
@@ -155,10 +179,26 @@ describe('главный экран', () => {
   });
 
   it('пустой план дня даёт явное завершённое состояние', async () => {
-    render(<HomeScreen api={apiWith({ ...PLAN, plan: [] })} />);
+    render(<HomeScreen api={apiWith({
+      ...PLAN,
+      gate: { ...PLAN.gate, completed: 3, remaining: 0, unlocked: true },
+      plan: [],
+    })} />);
 
     expect(await screen.findByText('На сегодня всё закрыто')).toBeInTheDocument();
+    expect(screen.getByText('3 из 3 завершено')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Начать' })).not.toBeInTheDocument();
+  });
+
+  it('показывает и продолжает активный слот дневного плана', async () => {
+    const api = apiWith({
+      ...PLAN,
+      plan: [{ ...PLAN.plan[0]!, active: true }, PLAN.plan[1]!],
+    });
+    render(<HomeScreen api={api} navigate={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Продолжить' }));
+    await waitFor(() => expect(api.start).toHaveBeenCalledWith('math', 'math.fractions'));
   });
 
   it('не показывает двойку, пока данных по предмету слишком мало', async () => {

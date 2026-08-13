@@ -26,6 +26,7 @@ import { registerProfileRoutes, registerUnavailableProfile } from './routes/prof
 import { registerBossRoutes, registerUnavailableBoss } from './routes/boss.js';
 import { registerParentsRoutes, registerUnavailableParents } from './routes/parents.js';
 import { registerLearningRoutes, registerUnavailableLearning } from './routes/learning.js';
+import { registerGateRoutes, registerUnavailableGate } from './routes/gate.js';
 import { codexConcurrency, disputeConcurrency, type CodexConcurrency } from './codex/concurrency.js';
 import { startWorker, type StartWorkerOptions, type WorkerHandle } from './codex/worker.js';
 
@@ -378,6 +379,11 @@ export function buildServer(
       available: sessionAvailable,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
+    registerGateRoutes(app, {
+      db: sessionDb,
+      available: sessionAvailable,
+      ...(options.now === undefined ? {} : { now: options.now }),
+    });
     app.addHook('onListen', async () => {
       if (options.worker === false || worker !== undefined) return;
       worker = startWorker({
@@ -422,6 +428,10 @@ export function buildServer(
       graph === undefined ? 'карта тем не загружена' : 'база недоступна',
     );
     registerUnavailableLearning(
+      app,
+      graph === undefined ? 'карта тем не загружена' : 'база недоступна',
+    );
+    registerUnavailableGate(
       app,
       graph === undefined ? 'карта тем не загружена' : 'база недоступна',
     );

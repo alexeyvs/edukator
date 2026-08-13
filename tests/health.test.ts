@@ -308,6 +308,9 @@ describe('GET /api/health', () => {
       expect(
         (await replacing.inject({ method: 'GET', url: '/api/session/next' })).statusCode,
       ).toBe(503);
+      expect(
+        (await replacing.inject({ method: 'GET', url: '/api/gate/status' })).statusCode,
+      ).toBe(503);
 
       const db = openDatabase(path);
       try {

@@ -67,6 +67,50 @@ function StreakCard({ streak }: { streak: DayPlanResponse['streak'] }) {
   );
 }
 
+function remainingRunsText(remaining: number): string {
+  if (remaining === 1) return 'Остался 1 обычный забег до разблокировки.';
+  if (remaining >= 2 && remaining <= 4) {
+    return `Осталось ${remaining} обычных забега до разблокировки.`;
+  }
+  return `Осталось ${remaining} обычных забегов до разблокировки.`;
+}
+
+function AccessCard({ gate }: { gate: DayPlanResponse['gate'] }) {
+  const progress = gate.required === 0
+    ? 100
+    : Math.min(100, Math.round((gate.completed / gate.required) * 100));
+  const title = gate.unlocked ? 'Компьютер разблокирован' : 'Компьютер заблокирован';
+  const note = gate.unlocked
+    ? 'План выполнен. Доступ открыт до следующего дня.'
+    : remainingRunsText(gate.remaining);
+
+  return (
+    <section
+      className={`access-card ${gate.unlocked ? 'access-card-open' : 'access-card-locked'}`}
+      aria-labelledby="access-card-title"
+    >
+      <div className="access-card-copy">
+        <p>{gate.unlocked ? 'Доступ открыт' : 'Доступ закрыт'}</p>
+        <h2 id="access-card-title">{title}</h2>
+        <span>{note}</span>
+      </div>
+      <div className="access-card-progress">
+        <div><span>Обычные забеги сегодня</span><strong>{gate.completed} / {gate.required}</strong></div>
+        <div
+          className="access-progress-track"
+          role="progressbar"
+          aria-label="Прогресс разблокировки компьютера"
+          aria-valuemin={0}
+          aria-valuemax={gate.required}
+          aria-valuenow={gate.completed}
+        >
+          <span style={{ width: `${progress}%` }} />
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function topicStatus(topic: HomeTopic): string {
   switch (topic.readiness.status) {
     case 'preparing': return 'Босс готовится';
@@ -159,7 +203,7 @@ export function HomeScreen({
         <a className="profile-link" href="/?screen=profile">Профиль</a>
       </header>
 
-
+      {plan !== null && <AccessCard gate={plan.gate} />}
       {plan !== null && <StreakCard streak={plan.streak} />}
 
       <section className="home-intro">
@@ -255,7 +299,10 @@ export function HomeScreen({
 
           <section className="day-plan" aria-labelledby="day-plan-title">
             <div className="section-heading day-plan-heading">
-              <div><p>2–3 подхода</p><h2 id="day-plan-title">Забеги на сегодня</h2></div>
+              <div>
+                <p>{plan.gate.completed} из {plan.gate.required} завершено</p>
+                <h2 id="day-plan-title">Забеги на сегодня</h2>
+              </div>
               {plan.triage.some((item) => !item.passed) && (
                 <button
                   className="secondary compact-triage"
@@ -281,7 +328,9 @@ export function HomeScreen({
                       disabled={starting !== null}
                       onClick={() => void start(item.subject, 'run', item.topic.id)}
                     >
-                      {starting === item.subject ? 'Начинаю…' : 'Начать'}
+                      {starting === item.subject
+                        ? 'Начинаю…'
+                        : item.active === true ? 'Продолжить' : 'Начать'}
                     </button>
                   </article>
                 ))}
