@@ -30,6 +30,11 @@ export interface DailyGateState {
   required: number;
   completed: number;
   remaining: number;
+  learning: {
+    materialId: number | null;
+    required: boolean;
+    passed: boolean;
+  };
   unlocked: boolean;
 }
 

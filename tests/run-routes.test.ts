@@ -99,7 +99,11 @@ describe('маршруты забега', () => {
       plan: Array<{ subject: string; topic: { id: string; title: string } }>;
       forecasts: Array<{ subject: string; score: number }>;
       streak: { current: number; best: number; completedToday: boolean };
-      gate: { day: string; required: number; completed: number; remaining: number; unlocked: boolean };
+      gate: {
+        day: string; required: number; completed: number; remaining: number;
+        learning: { materialId: number | null; required: boolean; passed: boolean };
+        unlocked: boolean;
+      };
       topics: Array<{ id: string; title: string; subject: string; readiness: Record<string, unknown> }>;
     };
     expect(plan.plan).toHaveLength(3);
@@ -112,7 +116,8 @@ describe('маршруты забега', () => {
     expect(plan.forecasts.every((item) => item.score === 2)).toBe(true);
     expect(plan.streak).toEqual({ current: 0, best: 0, completedToday: false });
     expect(plan.gate).toEqual({
-      day: '2026-08-08', required: 3, completed: 0, remaining: 3, unlocked: false,
+      day: '2026-08-08', required: 3, completed: 0, remaining: 3,
+      learning: { materialId: null, required: false, passed: false }, unlocked: false,
     });
     expect(plan.topics).toHaveLength(3);
     expect(plan.topics[0]).toMatchObject({
@@ -396,8 +401,10 @@ describe('маршруты забега', () => {
     const status = await app.inject({ method: 'GET', url: '/api/gate/status' });
     expect(status.statusCode).toBe(200);
     expect(status.json()).toEqual({
-      day: '2026-08-08', required: 3, completed: 2, remaining: 1, unlocked: false,
+      day: '2026-08-08', required: 3, completed: 2, remaining: 1,
+      learning: { materialId: null, required: false, passed: false }, unlocked: false,
     });
+    expect((plan.json() as { gate: unknown }).gate).toEqual(status.json());
 
     insert.run('english', 'english.a', '2026-08-08T10:30:00.000Z', '2026-08-08T11:00:00.000Z');
     expect((await app.inject({ method: 'GET', url: '/api/run/plan' })).json()).toMatchObject({

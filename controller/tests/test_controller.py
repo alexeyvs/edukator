@@ -16,17 +16,27 @@ from edukator_family_controller.config import (
     save_config,
     save_pending_login,
 )
-from edukator_family_controller.gate import GateState, parse_gate
+from edukator_family_controller.gate import GateState, LearningGateState, parse_gate
 from edukator_family_controller.family import MicrosoftFamilyClient
 from edukator_family_controller.login import update_family_with_retry
 from edukator_family_controller.main import ReconcileState, reconcile, run_controller
 
 
 LOCKED = GateState(
-    day="2026-08-12", required=3, completed=1, remaining=2, unlocked=False
+    day="2026-08-12",
+    required=3,
+    completed=1,
+    remaining=2,
+    learning=LearningGateState(material_id=None, required=False, passed=False),
+    unlocked=False,
 )
 UNLOCKED = GateState(
-    day="2026-08-12", required=3, completed=3, remaining=0, unlocked=True
+    day="2026-08-12",
+    required=3,
+    completed=3,
+    remaining=0,
+    learning=LearningGateState(material_id=7, required=True, passed=True),
+    unlocked=True,
 )
 
 
@@ -61,21 +71,72 @@ class GateContractTests(unittest.TestCase):
                     "required": 3,
                     "completed": 2,
                     "remaining": 1,
+                    "learning": {
+                        "materialId": 7,
+                        "required": True,
+                        "passed": True,
+                    },
                     "unlocked": False,
                 }
             ),
-            GateState("2026-08-12", 3, 2, 1, False),
+            GateState(
+                "2026-08-12",
+                3,
+                2,
+                1,
+                LearningGateState(7, True, True),
+                False,
+            ),
         )
 
-    def test_rejects_contradictory_state(self) -> None:
+    def test_accepts_unlocked_state_without_material(self) -> None:
+        state = parse_gate(
+            {
+                "day": "2026-08-12",
+                "required": 3,
+                "completed": 3,
+                "remaining": 0,
+                "learning": {
+                    "materialId": None,
+                    "required": False,
+                    "passed": False,
+                },
+                "unlocked": True,
+            }
+        )
+        self.assertTrue(state.unlocked)
+
+    def test_rejects_unlocked_state_with_unpassed_required_material(self) -> None:
         with self.assertRaisesRegex(ValueError, "противоречат"):
             parse_gate(
                 {
                     "day": "2026-08-12",
                     "required": 3,
-                    "completed": 2,
+                    "completed": 3,
                     "remaining": 0,
+                    "learning": {
+                        "materialId": 7,
+                        "required": True,
+                        "passed": False,
+                    },
                     "unlocked": True,
+                }
+            )
+
+    def test_rejects_invalid_learning_state(self) -> None:
+        with self.assertRaisesRegex(ValueError, "ссылаться на материал"):
+            parse_gate(
+                {
+                    "day": "2026-08-12",
+                    "required": 3,
+                    "completed": 2,
+                    "remaining": 1,
+                    "learning": {
+                        "materialId": None,
+                        "required": True,
+                        "passed": False,
+                    },
+                    "unlocked": False,
                 }
             )
 

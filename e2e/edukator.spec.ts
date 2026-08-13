@@ -255,7 +255,9 @@ test('карточка ведёт через материал и пять отв
       status: string;
     }>(
       `SELECT runs.kind, runs.total, runs.correct, learning_materials.status
-         FROM runs JOIN learning_materials ON learning_materials.run_id = runs.id
+         FROM runs
+         JOIN learning_runs ON learning_runs.run_id = runs.id
+         JOIN learning_materials ON learning_materials.id = learning_runs.material_id
         ORDER BY runs.id DESC LIMIT 1`,
     ).get();
     expect(lesson).toEqual({ kind: 'lesson', total: 5, correct: 5, status: 'passed' });

@@ -10,7 +10,10 @@ import './test-setup';
 afterEach(cleanup);
 
 const PLAN: DayPlanResponse = {
-  gate: { day: '2026-08-08', required: 3, completed: 1, remaining: 2, unlocked: false },
+  gate: {
+    day: '2026-08-08', required: 3, completed: 1, remaining: 2,
+    learning: { materialId: null, required: false, passed: false }, unlocked: false,
+  },
   learning: [],
   plan: [
     { subject: 'math', topic: { id: 'math.fractions', title: 'Обыкновенные дроби' }, priority: 1, triagePassed: true },
