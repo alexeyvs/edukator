@@ -96,24 +96,50 @@ describe('главный экран', () => {
     const card = await screen.findByRole('heading', { name: 'Компьютер заблокирован' })
       .then((heading) => heading.closest('section'));
     expect(card).toHaveTextContent('Осталось 2 обычных забега до разблокировки.');
-    expect(card).toHaveTextContent('1 / 3');
+    expect(card).toHaveTextContent('Обычные забеги: 1/3');
+    expect(card).toHaveTextContent('Разбор темы: не требуется');
     expect(within(card!).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '1');
+  });
+
+  it('раздельно показывает оба условия доступа, пока обязательный разбор не зачтён', async () => {
+    render(<HomeScreen api={apiWith({
+      ...PLAN,
+      gate: {
+        ...PLAN.gate,
+        completed: 3,
+        remaining: 0,
+        learning: { materialId: 22, required: true, passed: false },
+      },
+    })} />);
+
+    const card = await screen.findByRole('heading', { name: 'Компьютер заблокирован' })
+      .then((heading) => heading.closest('section'));
+    expect(card).toHaveTextContent('Обычные забеги: 3/3');
+    expect(card).toHaveTextContent('Разбор темы: нужен зачёт');
+    expect(card).toHaveTextContent('Обычные забеги завершены. Для доступа нужен зачёт за разбор темы.');
   });
 
   it('показывает открытый доступ после выполнения дневного плана', async () => {
     render(<HomeScreen api={apiWith({
       ...PLAN,
-      gate: { ...PLAN.gate, completed: 3, remaining: 0, unlocked: true },
+      gate: {
+        ...PLAN.gate,
+        completed: 3,
+        remaining: 0,
+        learning: { materialId: 22, required: true, passed: true },
+        unlocked: true,
+      },
     })} />);
 
     const card = await screen.findByRole('heading', { name: 'Компьютер разблокирован' })
       .then((heading) => heading.closest('section'));
     expect(card).toHaveTextContent('План выполнен. Доступ открыт до следующего дня.');
-    expect(card).toHaveTextContent('3 / 3');
+    expect(card).toHaveTextContent('Обычные забеги: 3/3');
+    expect(card).toHaveTextContent('Разбор темы: зачтён');
     expect(within(card!).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '3');
   });
 
-  it('показывает персональные разборы перед планом дня только когда они готовы или открыты', async () => {
+  it('показывает обязательный персональный разбор первым и явно отмечает его', async () => {
     const navigate = vi.fn();
     const view = render(<HomeScreen api={apiWith(PLAN)} navigate={navigate} />);
 
@@ -123,6 +149,10 @@ describe('главный экран', () => {
     view.unmount();
     render(<HomeScreen api={apiWith({
       ...PLAN,
+      gate: {
+        ...PLAN.gate,
+        learning: { materialId: 22, required: true, passed: false },
+      },
       learning: [
         {
           id: 21, subject: 'math', topic: { id: 'math.fractions', title: 'Обыкновенные дроби' },
@@ -138,6 +168,12 @@ describe('главный экран', () => {
     const offer = await screen.findByRole('heading', { name: 'Разобрать слабое место' });
     const dayPlan = screen.getByRole('heading', { name: 'Забеги на сегодня' });
     expect(offer.compareDocumentPosition(dayPlan) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    const cards = screen.getAllByRole('article').filter((card) => card.classList.contains('learning-card'));
+    expect(cards).toHaveLength(2);
+    expect(cards[0]).toHaveTextContent('Артикли');
+    expect(cards[0]).toHaveTextContent('Обязательный разбор');
+    expect(cards[1]).toHaveTextContent('Обыкновенные дроби');
+    expect(cards[1]).not.toHaveTextContent('Обязательный разбор');
     expect(screen.getByText('Ошибки со знаменателями')).toBeInTheDocument();
     expect(screen.getByText('Математика · 12 минут')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Разобрать тему' }));

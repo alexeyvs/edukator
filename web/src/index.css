@@ -141,15 +141,22 @@ button:focus-visible {
   line-height: 1.45;
 }
 
-.access-card-progress > div:first-child {
+.access-condition {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 1rem;
-  margin-bottom: .55rem;
   color: #66756f;
   font-size: .78rem;
   font-weight: 750;
+}
+
+.access-condition:first-child {
+  margin-bottom: .55rem;
+}
+
+.access-condition:last-child {
+  margin-top: .65rem;
 }
 
 .access-card-progress strong {
@@ -342,6 +349,12 @@ button:focus-visible {
   background: rgb(255 255 255 / 78%);
 }
 
+.learning-card-required {
+  border-width: 2px;
+  background: color-mix(in srgb, var(--subject-accent) 7%, white);
+  box-shadow: 0 12px 32px color-mix(in srgb, var(--subject-accent) 13%, transparent);
+}
+
 .learning-card-russian {
   --subject-accent: #28729b;
 }
@@ -364,6 +377,19 @@ button:focus-visible {
 
 .learning-card-copy {
   min-width: 0;
+}
+
+.learning-required-badge {
+  display: table;
+  margin-bottom: .35rem;
+  padding: .2rem .5rem;
+  border-radius: 999px;
+  color: white;
+  background: var(--subject-accent);
+  font-size: .72rem;
+  font-weight: 850;
+  letter-spacing: .04em;
+  text-transform: uppercase;
 }
 
 .learning-card small {

@@ -80,9 +80,19 @@ function AccessCard({ gate }: { gate: DayPlanResponse['gate'] }) {
     ? 100
     : Math.min(100, Math.round((gate.completed / gate.required) * 100));
   const title = gate.unlocked ? 'Компьютер разблокирован' : 'Компьютер заблокирован';
-  const note = gate.unlocked
-    ? 'План выполнен. Доступ открыт до следующего дня.'
-    : remainingRunsText(gate.remaining);
+  let note: string;
+  if (gate.unlocked) {
+    note = 'План выполнен. Доступ открыт до следующего дня.';
+  } else if (gate.remaining === 0 && gate.learning.required && !gate.learning.passed) {
+    note = 'Обычные забеги завершены. Для доступа нужен зачёт за разбор темы.';
+  } else if (gate.learning.required && !gate.learning.passed) {
+    note = 'Для доступа заверши обычные забеги и получи зачёт за разбор темы.';
+  } else {
+    note = remainingRunsText(gate.remaining);
+  }
+  const learningStatus = gate.learning.required
+    ? gate.learning.passed ? 'зачтён' : 'нужен зачёт'
+    : 'не требуется';
 
   return (
     <section
@@ -95,7 +105,9 @@ function AccessCard({ gate }: { gate: DayPlanResponse['gate'] }) {
         <span>{note}</span>
       </div>
       <div className="access-card-progress">
-        <div><span>Обычные забеги сегодня</span><strong>{gate.completed} / {gate.required}</strong></div>
+        <div className="access-condition">
+          <span>Обычные забеги:{' '}</span><strong>{gate.completed}/{gate.required}</strong>
+        </div>
         <div
           className="access-progress-track"
           role="progressbar"
@@ -105,6 +117,9 @@ function AccessCard({ gate }: { gate: DayPlanResponse['gate'] }) {
           aria-valuenow={gate.completed}
         >
           <span style={{ width: `${progress}%` }} />
+        </div>
+        <div className="access-condition">
+          <span>Разбор темы:{' '}</span><strong>{learningStatus}</strong>
         </div>
       </div>
     </section>
@@ -194,6 +209,12 @@ export function HomeScreen({
     plan?.topics.filter((topic) => topic.readiness.status === 'closed').map((topic) => topic.id) ?? [],
   );
   const visiblePlan = plan?.plan.filter((item) => !closedTopicIds.has(item.topic.id)) ?? [];
+  const visibleLearning = plan === null ? [] : [...plan.learning].sort((left, right) => {
+    const requiredId = plan.gate.learning.required ? plan.gate.learning.materialId : null;
+    if (left.id === requiredId) return -1;
+    if (right.id === requiredId) return 1;
+    return 0;
+  });
 
   return (
     <main className="home-shell">
@@ -243,30 +264,38 @@ export function HomeScreen({
         </section>
       ) : (
         <>
-          {plan.learning.length > 0 && (
+          {visibleLearning.length > 0 && (
             <section className="learning-offer" aria-labelledby="learning-offer-title">
               <div className="section-heading">
                 <p>Персональный разбор</p>
                 <h2 id="learning-offer-title">Разобрать слабое место</h2>
               </div>
               <div className="learning-cards">
-                {plan.learning.map((material) => (
-                  <article className={`learning-card learning-card-${material.subject}`} key={material.id}>
-                    <span className="learning-card-mark" aria-hidden="true">{SUBJECT_MARKS[material.subject]}</span>
-                    <div className="learning-card-copy">
-                      <small>{SUBJECT_NAMES[material.subject]} · {material.estimatedMinutes} минут</small>
-                      <h3>{material.topic.title}</h3>
-                      <p>{material.recommendationReason}</p>
-                    </div>
-                    <button
-                      className="primary"
-                      type="button"
-                      onClick={() => navigate(`/?learningId=${material.id}`)}
+                {visibleLearning.map((material) => {
+                  const required = plan.gate.learning.required &&
+                    plan.gate.learning.materialId === material.id;
+                  return (
+                    <article
+                      className={`learning-card learning-card-${material.subject}${required ? ' learning-card-required' : ''}`}
+                      key={material.id}
                     >
-                      {material.status === 'active' ? 'Продолжить разбор' : 'Разобрать тему'}
-                    </button>
-                  </article>
-                ))}
+                      <span className="learning-card-mark" aria-hidden="true">{SUBJECT_MARKS[material.subject]}</span>
+                      <div className="learning-card-copy">
+                        {required && <span className="learning-required-badge">Обязательный разбор</span>}
+                        <small>{SUBJECT_NAMES[material.subject]} · {material.estimatedMinutes} минут</small>
+                        <h3>{material.topic.title}</h3>
+                        <p>{material.recommendationReason}</p>
+                      </div>
+                      <button
+                        className="primary"
+                        type="button"
+                        onClick={() => navigate(`/?learningId=${material.id}`)}
+                      >
+                        {material.status === 'active' ? 'Продолжить разбор' : 'Разобрать тему'}
+                      </button>
+                    </article>
+                  );
+                })}
               </div>
             </section>
           )}

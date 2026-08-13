@@ -38,6 +38,18 @@ describe('итог персонального разбора', () => {
     expect(screen.getByText(mastery)).toBeInTheDocument();
     expect(screen.getByText(delta)).toBeInTheDocument();
     expect(screen.getByText('Порог зачёта — 4 из 5.')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Вернуться к плану' })).toHaveAttribute('href', '/');
+    const action = outcome === 'passed'
+      ? screen.getByRole('link', { name: 'Вернуться к плану' })
+      : screen.getByRole('link', { name: 'Повторить разбор' });
+    expect(action).toHaveAttribute('href', outcome === 'passed' ? '/' : '/?learningId=21');
+  });
+
+  it('после незачёта отправляет перечитать ту же теорию перед новой попыткой', () => {
+    render(<LearningFinishScreen result={result('failed')} />);
+
+    expect(screen.getByText(
+      'Перечитай эту же теорию и попробуй тот же тест ещё раз. Зачёт нужен для доступа к компьютеру.',
+    )).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Вернуться к плану' })).not.toBeInTheDocument();
   });
 });

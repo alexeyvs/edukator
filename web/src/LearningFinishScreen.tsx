@@ -15,7 +15,7 @@ export function LearningFinishScreen({ result }: { result: FinishLearningRespons
         <h1>{passed ? 'Зачёт' : 'Тему стоит повторить'}</h1>
         <p className="finish-lead">{passed
           ? `Ты разобрал тему и подтвердил результат в ${result.total} вопросах.`
-          : 'Попытка засчитана. Новый разбор появится, если тема останется в приоритете.'}</p>
+          : 'Перечитай эту же теорию и попробуй тот же тест ещё раз. Зачёт нужен для доступа к компьютеру.'}</p>
         <div className="finish-stats lesson-finish-stats">
           <div><strong>{result.correct}/{result.total}</strong><span>верных ответов</span></div>
           <div><strong>{masteryPercent(result.masteryAfter)}</strong><span>знание темы</span></div>
@@ -24,7 +24,12 @@ export function LearningFinishScreen({ result }: { result: FinishLearningRespons
         <p className="lesson-score-note">
           Порог зачёта — {result.passScore} из {result.total}.
         </p>
-        <a className="primary finish-home" href="/">Вернуться к плану</a>
+        <a
+          className="primary finish-home"
+          href={passed ? '/' : `/?learningId=${result.materialId}`}
+        >
+          {passed ? 'Вернуться к плану' : 'Повторить разбор'}
+        </a>
       </section>
     </main>
   );

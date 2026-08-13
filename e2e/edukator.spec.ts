@@ -208,6 +208,8 @@ test('карточка ведёт через материал и пять отв
   });
   try {
     const materialId = await harness.waitForLearningMaterial('math.1');
+    harness.db.prepare('UPDATE learning_materials SET ready_at = ? WHERE id = ?')
+      .run('2026-08-08T11:00:00.000Z', materialId);
     const initialPlan = await page.request.get(`${harness.url}/api/run/plan`);
     expect(initialPlan.ok()).toBe(true);
     const initial = await initialPlan.json() as {
@@ -222,9 +224,11 @@ test('карточка ведёт через материал и пять отв
 
     await page.goto(harness.url);
     await expect(page.getByRole('heading', { name: 'Разобрать слабое место' })).toBeVisible();
+    await expect(page.getByText('Разбор темы: нужен зачёт')).toBeVisible();
     const card = page.locator('.learning-card').filter({
       has: page.getByText('Тема math 1', { exact: true }),
     });
+    await expect(card).toContainText('Обязательный разбор');
     await expect(card).toContainText('Математика · 12 минут');
     await card.getByRole('button', { name: 'Разобрать тему' }).click();
 
@@ -270,6 +274,7 @@ test('карточка ведёт через материал и пять отв
     expect(latestForecast?.score).toBeGreaterThan(forecastBefore as number);
 
     await page.getByRole('link', { name: 'Вернуться к плану' }).click();
+    await expect(page.getByText('Разбор темы: зачтён')).toBeVisible();
     const mathForecast = page.locator('.forecast-cards article').filter({ hasText: 'Математика' });
     await expect(mathForecast).toContainText((latestForecast?.score ?? 0).toFixed(1));
     await expect(page.locator('.learning-card').filter({
@@ -278,6 +283,44 @@ test('карточка ведёт через материал и пять отв
     await expect(page.locator('.plan-cards article')).toHaveCount(initial.plan.length);
     await expect(page.getByLabel('Серия занятий')).toContainText('Первый день серии впереди');
     expect(initial.streak).toEqual({ current: 0, best: 0, completedToday: false });
+    harness.assertCodexNotCalled();
+  } finally {
+    await harness.close();
+  }
+});
+
+test('после незачёта повтор ведёт к повторному чтению той же теории', async ({ page }) => {
+  const harness = await startE2eHarness({
+    triagePassed: 'math',
+    controlledWorker: true,
+    learningForecastFixture: 'math',
+  });
+  try {
+    const materialId = await harness.waitForLearningMaterial('math.1');
+    harness.db.prepare('UPDATE learning_materials SET ready_at = ? WHERE id = ?')
+      .run('2026-08-08T11:00:00.000Z', materialId);
+    await page.goto(harness.url);
+    await page.locator('.learning-card').filter({
+      has: page.getByText('Тема math 1', { exact: true }),
+    }).getByRole('button', { name: 'Разобрать тему' }).click();
+    await expect(page.getByText('Тестовый материал 1 по теме Тема math 1.')).toBeVisible();
+    await page.getByRole('button', { name: 'Перейти к тесту' }).click();
+
+    for (let answered = 1; answered <= 5; answered += 1) {
+      await expect(page.getByRole('heading', { name: /вычисли значение/ })).toBeVisible();
+      await page.getByLabel('Число').fill('0');
+      await page.getByRole('button', { name: 'Проверить' }).click();
+      await expect(page.locator('.verdict')).toContainText('Пока не сошлось');
+      await page.getByRole('button', {
+        name: answered === 5 ? 'Завершить тест' : 'Следующее задание',
+      }).click();
+    }
+
+    await expect(page.getByRole('heading', { name: 'Тему стоит повторить' })).toBeVisible();
+    await page.getByRole('link', { name: 'Повторить разбор' }).click();
+    await expect(page.getByText('Тестовый материал 1 по теме Тема math 1.')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Перейти к тесту' })).toBeVisible();
+    await expect(page).toHaveURL(/learningId=/u);
     harness.assertCodexNotCalled();
   } finally {
     await harness.close();
