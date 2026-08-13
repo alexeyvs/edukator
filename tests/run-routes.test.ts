@@ -193,7 +193,7 @@ describe('маршруты забега', () => {
         total: 1,
         correct: 0,
         done: false,
-        lives: { total: 3, remaining: 2, retryAvailable: true },
+        lives: { total: 3, remaining: 3, retryAvailable: true },
       },
     });
 
@@ -211,7 +211,7 @@ describe('маршруты забега', () => {
         explain: '40 + 5 = 45.',
         joke: 'Пять единиц не спрятались.',
       },
-      progress: { lives: { remaining: 2, retryAvailable: true } },
+      progress: { lives: { remaining: 3, retryAvailable: true } },
     });
     expect((restored.json() as { retry: Record<string, unknown> }).retry)
       .not.toHaveProperty('dispute_status');
@@ -324,7 +324,7 @@ describe('маршруты забега', () => {
         total: 2,
         correct: 1,
         done: false,
-        lives: { total: 3, remaining: 1, retryAvailable: false },
+        lives: { total: 3, remaining: 2, retryAvailable: false },
       },
     });
 

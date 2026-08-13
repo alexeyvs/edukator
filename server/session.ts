@@ -682,7 +682,7 @@ export function submitAnswer(
       db.prepare('UPDATE attempts SET is_current = 0 WHERE id = ?').run(currentAttempt?.id);
     }
     const lifeCharged =
-      run?.kind === 'run' && !check.correct && (run.lives_remaining ?? 0) > 0;
+      run?.kind === 'run' && retrying && (run.lives_remaining ?? 0) > 0;
     const info = db
       .prepare(
         `INSERT INTO attempts
@@ -729,7 +729,7 @@ export function submitAnswer(
         throw new Error(`Обычный забег ${run.id} не хранит число оставшихся жизней`);
       }
       const livesRemaining = run.lives_remaining - (lifeCharged ? 1 : 0);
-      const retryTaskId = !check.correct && lifeCharged ? row.id : null;
+      const retryTaskId = !check.correct && livesRemaining > 0 ? row.id : null;
       if (retrying) {
         db.prepare(
           `UPDATE runs
@@ -815,7 +815,7 @@ export function submitAnswer(
   return outcome;
 }
 
-/** Закрывает доступное исправление без возврата уже потраченной жизни. */
+/** Закрывает доступное исправление, не тратя жизнь без повторной отправки. */
 export function skipRetry(db: Database, runId: number, taskId: number): RunProgress {
   return db.transaction((): RunProgress => {
     const run = readActiveRun(db, runId);

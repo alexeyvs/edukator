@@ -59,7 +59,7 @@ test('ошибка с исправлением не увеличивает 12 в
     await page.getByLabel('Число').fill('44');
     await page.getByRole('button', { name: 'Проверить' }).click();
     await expect(page.locator('.verdict')).toContainText('Пока не сошлось');
-    await expect(page.getByText('Жизни: 2 из 3')).toBeVisible();
+    await expect(page.getByText('Жизни: 3 из 3')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Я всё-таки прав' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Исправить ответ' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Следующее задание' })).toBeVisible();
@@ -69,6 +69,7 @@ test('ошибка с исправлением не увеличивает 12 в
     await page.getByLabel('Число').fill('45');
     await page.getByRole('button', { name: 'Проверить' }).click();
     await expect(page.locator('.verdict')).toContainText('Верно');
+    await expect(page.getByText('Жизни: 2 из 3')).toBeVisible();
     await expect(page.getByLabel('Прогресс: 1 из 12')).toBeVisible();
 
     for (let answered = 2; answered <= 12; answered += 1) {

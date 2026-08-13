@@ -375,7 +375,7 @@ describe('маршруты занятия', () => {
       const attemptId = (checked.json() as { attempt_id: number }).attempt_id;
       expect(checked.json()).toMatchObject({
         correct: false,
-        progress: { lives: { remaining: 2, retryAvailable: true } },
+        progress: { lives: { remaining: 3, retryAvailable: true } },
       });
 
       expect((await dispute({ attempt_id: attemptId })).statusCode).toBe(202);

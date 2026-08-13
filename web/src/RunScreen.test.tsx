@@ -57,7 +57,7 @@ function retryableWrong(overrides: Partial<AnswerResponse> = {}): AnswerResponse
       correct: 0,
       target: 12,
       done: false,
-      lives: lives(2, true),
+      lives: lives(3, true),
     },
     ...overrides,
   };
@@ -210,7 +210,7 @@ describe('экран забега', () => {
     }));
   });
 
-  it('показывает обычному забегу три сердца и обновляет их после ошибки', async () => {
+  it('не списывает сердце за ошибку до отправки ретрая', async () => {
     const first = task(1);
     first.progress.lives = lives(3, false);
     const api = apiWith({
@@ -227,9 +227,9 @@ describe('экран забега', () => {
     fireEvent.change(screen.getByLabelText('Число'), { target: { value: '3' } });
     fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
 
-    expect(await screen.findByText('Жизни: 2 из 3')).toBeInTheDocument();
-    expect(view.container.querySelectorAll('.life-full')).toHaveLength(2);
-    expect(view.container.querySelectorAll('.life-empty')).toHaveLength(1);
+    expect(await screen.findByText('Жизни: 3 из 3')).toBeInTheDocument();
+    expect(view.container.querySelectorAll('.life-full')).toHaveLength(3);
+    expect(view.container.querySelectorAll('.life-empty')).toHaveLength(0);
   });
 
   it('исправляет ответ с очищенным вводом, сохранённой подсказкой и ссылкой на попытку', async () => {
@@ -284,7 +284,7 @@ describe('экран забега', () => {
       .mockResolvedValueOnce(second)
       .mockReturnValue(deferred<NextTaskResponse>());
     const skipRetry = vi.fn().mockResolvedValue({
-      progress: { total: 1, correct: 0, target: 12, done: false, lives: lives(2, false) },
+      progress: { total: 1, correct: 0, target: 12, done: false, lives: lives(3, false) },
     });
     const api = apiWith({ next, answer: vi.fn().mockResolvedValue(retryableWrong()), skipRetry });
     render(<RunScreen runId={9} api={api} />);
@@ -298,7 +298,7 @@ describe('экран забега', () => {
     expect(await screen.findByRole('heading', { name: 'Второй вопрос' })).toBeInTheDocument();
     expect(skipRetry).toHaveBeenCalledWith(9, 1);
     expect(screen.getByLabelText('Прогресс: 1 из 12')).toBeInTheDocument();
-    expect(screen.getByText('Жизни: 2 из 3')).toBeInTheDocument();
+    expect(screen.getByText('Жизни: 3 из 3')).toBeInTheDocument();
   });
 
   it('после пропуска исправления двенадцатого ответа сразу завершает забег', async () => {
@@ -307,13 +307,13 @@ describe('экран забега', () => {
       total: 11, correct: 10, target: 12, done: false, lives: lives(3, false),
     };
     const wrong = retryableWrong({
-      progress: { total: 12, correct: 10, target: 12, done: false, lives: lives(2, true) },
+      progress: { total: 12, correct: 10, target: 12, done: false, lives: lives(3, true) },
     });
     const api = apiWith({
       next: vi.fn().mockResolvedValue(last),
       answer: vi.fn().mockResolvedValue(wrong),
       skipRetry: vi.fn().mockResolvedValue({
-        progress: { total: 12, correct: 10, target: 12, done: true, lives: lives(2, false) },
+        progress: { total: 12, correct: 10, target: 12, done: true, lives: lives(3, false) },
       }),
       finish: vi.fn().mockResolvedValue(finishSummary()),
     });
@@ -395,7 +395,7 @@ describe('экран забега', () => {
     expect(skip).toBeEnabled();
   });
 
-  it('после подтверждённого спора возвращает жизнь, XP и закрывает исправление', async () => {
+  it('после подтверждённого спора начисляет XP и закрывает исправление', async () => {
     const first = task(1);
     first.progress.lives = lives(3, false);
     const api = apiWith({

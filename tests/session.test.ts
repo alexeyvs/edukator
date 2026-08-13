@@ -390,40 +390,32 @@ describe('занятие', () => {
       );
     }
 
-    it('даёт три оплаченных исправления, а четвёртую ошибку оставляет окончательной', () => {
+    it('списывает жизнь только за отправленный ретрай и даёт три исправления', () => {
       const runId = ordinaryRun();
       const taskId = issue('math.a', {}, runId);
       let result = submitAnswer(db, graph, { taskId, runId, answer: '0', hintUsed: true });
       expect(result.progress).toMatchObject({
         total: 1, correct: 0,
-        lives: { remaining: 2, retryAvailable: true },
+        lives: { remaining: 3, retryAvailable: true },
       });
 
-      for (const remaining of [1, 0]) {
+      for (const remaining of [2, 1, 0]) {
         result = submitAnswer(db, graph, {
           taskId, runId, answer: '0', retryAttemptId: result.attemptId,
         });
         expect(result.progress).toMatchObject({
           total: 1, correct: 0,
-          lives: { remaining, retryAvailable: true },
+          lives: { remaining, retryAvailable: remaining > 0 },
         });
       }
-      result = submitAnswer(db, graph, {
-        taskId, runId, answer: '0', retryAttemptId: result.attemptId,
-      });
-
-      expect(result.progress).toMatchObject({
-        total: 1, correct: 0,
-        lives: { remaining: 0, retryAvailable: false },
-      });
       expect(db.prepare(
         `SELECT is_current, life_charged, hint_used FROM attempts
           WHERE task_id = ? ORDER BY id`,
       ).all(taskId)).toEqual([
+        { is_current: 0, life_charged: 0, hint_used: 1 },
         { is_current: 0, life_charged: 1, hint_used: 1 },
         { is_current: 0, life_charged: 1, hint_used: 1 },
-        { is_current: 0, life_charged: 1, hint_used: 1 },
-        { is_current: 1, life_charged: 0, hint_used: 1 },
+        { is_current: 1, life_charged: 1, hint_used: 1 },
       ]);
       expect(readTopicState(db, 'math.a').attempts).toBe(1);
     });
@@ -609,7 +601,7 @@ describe('занятие', () => {
       });
       expect(skipRetry(db, runId, taskId)).toMatchObject({
         total: 1, correct: 0,
-        lives: { remaining: 2, retryAvailable: false },
+        lives: { remaining: 3, retryAvailable: false },
       });
       expect(() => skipRetry(db, runId, taskId))
         .toThrow(expect.objectContaining({ code: 'task-not-in-run' }));
@@ -974,7 +966,7 @@ describe('занятие', () => {
       ).get(runId)).toEqual({ lives_remaining: 3, correct: 1 });
     });
 
-    it('отклонённый спор сохраняет жизнь списанной и оставляет исправление доступным', async () => {
+    it('отклонённый спор первого ответа не списывает жизнь и оставляет исправление', async () => {
       const runId = Number(db.prepare(
         'INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)',
       ).run('math', 'math.a', new Date().toISOString()).lastInsertRowid);
@@ -989,11 +981,32 @@ describe('занятие', () => {
 
       expect(rejected.progress).toMatchObject({
         correct: 0,
-        lives: { remaining: 2, retryAvailable: true },
+        lives: { remaining: 3, retryAvailable: true },
       });
       expect(skipRetry(db, runId, taskId).lives).toMatchObject({
-        remaining: 2, retryAvailable: false,
+        remaining: 3, retryAvailable: false,
       });
+    });
+
+    it('подтверждённый спор ретрая возвращает списанную за него жизнь', async () => {
+      const runId = Number(db.prepare(
+        'INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)',
+      ).run('math', 'math.a', new Date().toISOString()).lastInsertRowid);
+      const taskId = issue('math.a', {}, runId);
+      const first = submitAnswer(db, graph, { taskId, runId, answer: '0' });
+      const retry = submitAnswer(db, graph, {
+        taskId, runId, answer: 'сорок пять', retryAttemptId: first.attemptId,
+      });
+      expect(retry.progress?.lives).toMatchObject({ remaining: 2, retryAvailable: true });
+      const dispute = openDispute(db, retry.attemptId);
+      const { review } = reviewer({ studentCorrect: true, note: 'то же число словами' });
+
+      const resolved = await resolveDispute(db, graph, dispute.id, review);
+
+      expect(resolved.progress?.lives).toMatchObject({ remaining: 3, retryAvailable: false });
+      expect(db.prepare(
+        'SELECT life_charged, is_correct FROM attempts WHERE id = ?',
+      ).get(retry.attemptId)).toEqual({ life_charged: 1, is_correct: 1 });
     });
 
     it('не открывает новый спор после завершения забега', () => {
