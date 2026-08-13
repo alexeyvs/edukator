@@ -366,11 +366,16 @@ describe('Learning API', () => {
     ).get()).toEqual({ count: (beforeSnapshots as { count: number }).count + 1 });
     expect(readStreak(db, NOW)).toEqual({ current: 0, best: 0, completedToday: false });
     expect(db.prepare('SELECT status FROM learning_materials WHERE id = ?').get(materialId))
-      .toEqual({ status: outcome });
+      .toEqual({ status: outcome === 'passed' ? 'passed' : 'active' });
 
     const restart = await app.inject({ method: 'POST', url: `/api/learning/${materialId}/test` });
-    expect(restart.statusCode).toBe(409);
-    expect(restart.json()).toMatchObject({ code: 'learning-finished' });
+    if (outcome === 'passed') {
+      expect(restart.statusCode).toBe(409);
+      expect(restart.json()).toMatchObject({ code: 'learning-finished' });
+    } else {
+      expect(restart.statusCode).toBe(200);
+      expect(restart.json()).toMatchObject({ materialId, resumed: false, progress: { total: 0 } });
+    }
 
     const repeated = await app.inject({
       method: 'POST', url: `/api/learning/run/${runId}/finish`,
@@ -379,6 +384,100 @@ describe('Learning API', () => {
     expect(db.prepare(
       "SELECT COUNT(*) AS count FROM forecast_snapshots WHERE subject = 'math'",
     ).get()).toEqual({ count: (beforeSnapshots as { count: number }).count + 1 });
+  });
+
+  it('повторяет тот же тест до зачёта без повторных XP и mastery и открывает дневной гейт', async () => {
+    const { materialId, taskIds } = readyMaterial();
+    for (const finishedAt of [
+      '2026-08-09T09:00:00.000Z',
+      '2026-08-09T10:00:00.000Z',
+      '2026-08-09T12:00:00.000Z',
+    ]) {
+      db.prepare(
+        `INSERT INTO runs
+           (subject, kind, topic_id, started_at, finished_at, summary, total, correct)
+         VALUES ('math', 'run', 'math.a', ?, ?, '{}', 12, 12)`,
+      ).run(finishedAt, finishedAt);
+    }
+    const firstRunId = await openAndStart(materialId);
+    await answerFive(firstRunId, 3);
+    const masteryAfterFirst = db.prepare<[], { mastery: number; attempts: number }>(
+      "SELECT mastery, attempts FROM topic_state WHERE topic_id = 'math.a'",
+    ).get();
+    const firstFinish = await app.inject({
+      method: 'POST', url: `/api/learning/run/${firstRunId}/finish`,
+    });
+    expect(firstFinish.json()).toMatchObject({ outcome: 'failed', xp: 75 });
+    expect((await app.inject({ method: 'GET', url: '/api/gate/status' })).json())
+      .toMatchObject({ learning: { materialId, required: true, passed: false }, unlocked: false });
+
+    const reread = await app.inject({ method: 'GET', url: `/api/learning/${materialId}` });
+    expect(reread.json()).toMatchObject({
+      content: CONTENT,
+      progress: { total: 0, correct: 0, target: 5, done: false },
+    });
+    const retryStart = await app.inject({ method: 'POST', url: `/api/learning/${materialId}/test` });
+    expect(retryStart.statusCode).toBe(200);
+    const retryRunId = (retryStart.json() as { runId: number }).runId;
+    expect(retryRunId).not.toBe(firstRunId);
+
+    const firstRetryTask = (await app.inject({
+      method: 'GET', url: `/api/session/next?runId=${retryRunId}`,
+    })).json() as { task: { id: number } };
+    expect(firstRetryTask.task.id).toBe(taskIds[0]);
+    const firstRetryAnswer = await app.inject({
+      method: 'POST', url: '/api/session/answer',
+      payload: {
+        task_id: firstRetryTask.task.id, runId: retryRunId, answer: '4',
+        hint_used: false, duration_ms: 1000,
+      },
+    });
+    expect(firstRetryAnswer.json()).toMatchObject({ xp: 0, progress: { total: 1, correct: 1 } });
+    const resumed = await app.inject({ method: 'POST', url: `/api/learning/${materialId}/test` });
+    expect(resumed.json()).toMatchObject({ runId: retryRunId, resumed: true, progress: { total: 1 } });
+
+    for (let index = 1; index < taskIds.length; index += 1) {
+      const next = (await app.inject({
+        method: 'GET', url: `/api/session/next?runId=${retryRunId}`,
+      })).json() as { task: { id: number } };
+      expect(next.task.id).toBe(taskIds[index]);
+      const answer = await app.inject({
+        method: 'POST', url: '/api/session/answer',
+        payload: { task_id: next.task.id, runId: retryRunId, answer: '4', hint_used: false },
+      });
+      expect(answer.json()).toMatchObject({ xp: 0 });
+    }
+    expect(db.prepare(
+      `SELECT learning_runs.run_id, learning_runs.attempt_number, COUNT(attempts.id) AS answers,
+              SUM(attempts.affects_progress) AS progress_answers
+         FROM learning_runs LEFT JOIN attempts ON attempts.run_id = learning_runs.run_id
+        WHERE learning_runs.material_id = ?
+        GROUP BY learning_runs.run_id, learning_runs.attempt_number
+        ORDER BY learning_runs.attempt_number`,
+    ).all(materialId)).toEqual([
+      { run_id: firstRunId, attempt_number: 1, answers: 5, progress_answers: 5 },
+      { run_id: retryRunId, attempt_number: 2, answers: 5, progress_answers: 0 },
+    ]);
+    expect(db.prepare("SELECT mastery, attempts FROM topic_state WHERE topic_id = 'math.a'").get())
+      .toEqual(masteryAfterFirst);
+
+    const snapshotsBeforeRetryFinish = db.prepare(
+      "SELECT COUNT(*) AS count FROM forecast_snapshots WHERE subject = 'math'",
+    ).get();
+    const retryFinish = await app.inject({
+      method: 'POST', url: `/api/learning/run/${retryRunId}/finish`,
+    });
+    expect(retryFinish.json()).toMatchObject({
+      outcome: 'passed', xp: 0, masteryAfter: masteryAfterFirst?.mastery,
+      touchedTopics: [],
+    });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM forecast_snapshots WHERE subject = 'math'").get())
+      .toEqual(snapshotsBeforeRetryFinish);
+    expect((await app.inject({ method: 'GET', url: '/api/gate/status' })).json())
+      .toMatchObject({ learning: { materialId, required: true, passed: true }, unlocked: true });
+    expect((await app.inject({
+      method: 'POST', url: `/api/learning/run/${firstRunId}/finish`,
+    })).json()).toEqual(firstFinish.json());
   });
 
   it('не завершает неполный тест и lesson-run с открытым спором', async () => {

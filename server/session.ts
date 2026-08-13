@@ -210,7 +210,7 @@ function nextTaskFromSnapshot(
     if (material === undefined || material.status !== 'active') {
       throw new SessionError('task-not-in-run', `Lesson-run ${run.id} не связан с активным материалом`);
     }
-    const task = learningTaskAtPosition(db, material.id, run.total + 1);
+    const task = learningTaskAtPosition(db, material.id, run.total + 1, run.id);
     if (task === null || task.topicId !== run.topic_id) {
       throw new Error(`Lesson-run ${run.id} не содержит задание позиции ${run.total + 1}`);
     }
@@ -598,13 +598,23 @@ export function submitAnswer(
       }
     }
 
+    const affectsProgress = run?.kind !== 'lesson' || db.prepare<[number], { attempt_number: number }>(
+      'SELECT attempt_number FROM learning_runs WHERE run_id = ?',
+    ).get(run.id)?.attempt_number === 1;
+    if (run?.kind === 'lesson' && db.prepare<[number], { found: number }>(
+      'SELECT 1 AS found FROM learning_runs WHERE run_id = ?',
+    ).get(run.id) === undefined) {
+      throw new Error(`Lesson-run ${run.id} не связан с учебным материалом`);
+    }
     const currentAttempt = db.prepare<
-      [number],
+      [number, number | null, number],
       { id: number; is_correct: number; hint_used: number; run_id: number | null }
     >(
       `SELECT id, is_correct, hint_used, run_id FROM attempts
-        WHERE task_id = ? AND is_current = 1 LIMIT 1`,
-    ).get(request.taskId);
+        WHERE task_id = ? AND is_current = 1
+          AND (? IS NULL OR run_id = ?)
+        ORDER BY id DESC LIMIT 1`,
+    ).get(request.taskId, run?.kind === 'lesson' ? run.id : null, run?.id ?? 0);
     const retrying = run?.kind === 'run' && run.retry_task_id === row.id;
     if (run?.kind === 'run' && run.retry_task_id !== null && !retrying) {
       throw new SessionError(
@@ -682,10 +692,10 @@ export function submitAnswer(
       .prepare(
         `INSERT INTO attempts
           (task_id, topic_id, run_id, answer, is_correct, hint_used, duration_ms,
-           is_current, life_charged, created_at)
+           is_current, life_charged, affects_progress, created_at)
          VALUES
           (@taskId, @topicId, @runId, @answer, @isCorrect, @hintUsed, @durationMs,
-           1, @lifeCharged, @createdAt)`,
+           1, @lifeCharged, @affectsProgress, @createdAt)`,
       )
       .run({
         taskId: row.id,
@@ -698,10 +708,13 @@ export function submitAnswer(
         hintUsed: effectiveHintUsed ? 1 : 0,
         durationMs,
         lifeCharged: lifeCharged ? 1 : 0,
+        affectsProgress: affectsProgress ? 1 : 0,
         createdAt: at.toISOString(),
       });
 
-    const state = retrying
+    const state = !affectsProgress
+      ? readTopicState(db, row.topic_id)
+      : retrying
       ? recomputeTopicState(db, row.topic_id)
       : recordAttempt(db, row.topic_id, {
           correct: check.correct,
@@ -709,11 +722,13 @@ export function submitAnswer(
           hintUsed: effectiveHintUsed,
           at,
         });
-    const xp = taskXp({
-      difficulty: row.difficulty,
-      correct: check.correct,
-      hintUsed: effectiveHintUsed,
-    });
+    const xp = affectsProgress
+      ? taskXp({
+          difficulty: row.difficulty,
+          correct: check.correct,
+          hintUsed: effectiveHintUsed,
+        })
+      : 0;
     if (run?.kind === 'run') {
       if (run.lives_remaining === null) {
         throw new Error(`Обычный забег ${run.id} не хранит число оставшихся жизней`);
@@ -954,6 +969,7 @@ interface DisputeRow {
   life_charged: number;
   hint_used: number;
   difficulty: number;
+  affects_progress: number;
 }
 
 function disputeProgress(db: Database, row: DisputeRow): RunProgress | null {
@@ -961,7 +977,7 @@ function disputeProgress(db: Database, row: DisputeRow): RunProgress | null {
 }
 
 function disputeXp(row: DisputeRow): number {
-  return row.status === 'upheld' && row.is_current === 1
+  return row.status === 'upheld' && row.is_current === 1 && row.affects_progress === 1
     ? taskXp({ difficulty: row.difficulty, correct: true, hintUsed: row.hint_used === 1 })
     : 0;
 }
@@ -972,7 +988,7 @@ function readDispute(db: Database, disputeId: number): DisputeRow {
       `SELECT disputes.id, disputes.status, disputes.resolution,
               attempts.id AS attempt_id, attempts.run_id, runs.kind AS run_kind,
               attempts.topic_id, attempts.is_current, attempts.is_correct,
-              attempts.life_charged, attempts.hint_used,
+              attempts.life_charged, attempts.hint_used, attempts.affects_progress,
               attempts.answer AS given,
               task_bank.id AS task_id, task_bank.question, task_bank.answer, task_bank.accept,
               task_bank.difficulty
@@ -1144,7 +1160,7 @@ export async function resolveDispute(
       status,
       resolution: verdict.note,
       accept: next,
-      state: recomputeTopicState(db, fresh.topic_id),
+      state: fresh.affects_progress === 1 ? recomputeTopicState(db, fresh.topic_id) : null,
       progress: disputeProgress(db, upheld),
       xp: disputeXp(upheld),
     };

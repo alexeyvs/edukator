@@ -328,6 +328,7 @@ export function recomputeTopicState(db: Database, topicId: string): TopicState {
            FROM attempts
            JOIN task_bank ON task_bank.id = attempts.task_id
           WHERE attempts.topic_id = ? AND attempts.is_current = 1
+            AND attempts.affects_progress = 1
           ORDER BY attempts.created_at, attempts.id`,
       )
       .all(topicId);

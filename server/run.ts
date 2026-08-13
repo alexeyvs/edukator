@@ -106,6 +106,7 @@ interface RunAttemptRow {
   hint_used: number;
   difficulty: number;
   created_at: string;
+  affects_progress: number;
 }
 
 function progressFrom(row: RunCounters): RunProgress {
@@ -249,7 +250,7 @@ function topicChanges(
   const touched = db
     .prepare<[number], { topic_id: string }>(
       `SELECT DISTINCT topic_id FROM attempts
-        WHERE run_id = ? AND is_current = 1 ORDER BY topic_id`,
+        WHERE run_id = ? AND is_current = 1 AND affects_progress = 1 ORDER BY topic_id`,
     )
     .all(runId)
     .map((row) => row.topic_id);
@@ -261,10 +262,12 @@ function topicChanges(
   const rows = db
     .prepare<unknown[], RunAttemptRow>(
       `SELECT attempts.id, attempts.topic_id, attempts.run_id, attempts.is_correct,
-              attempts.hint_used, task_bank.difficulty, attempts.created_at
+              attempts.hint_used, task_bank.difficulty, attempts.created_at,
+              attempts.affects_progress
          FROM attempts
          JOIN task_bank ON task_bank.id = attempts.task_id
         WHERE attempts.topic_id IN (${placeholders}) AND attempts.is_current = 1
+          AND attempts.affects_progress = 1
         ORDER BY attempts.created_at, attempts.id`,
     )
     .all(...touched);
@@ -354,7 +357,8 @@ export function finishRun(
     const attempts = db
       .prepare<[number], RunAttemptRow>(
         `SELECT attempts.id, attempts.topic_id, attempts.run_id, attempts.is_correct,
-                attempts.hint_used, task_bank.difficulty, attempts.created_at
+                attempts.hint_used, task_bank.difficulty, attempts.created_at,
+                attempts.affects_progress
            FROM attempts
            JOIN task_bank ON task_bank.id = attempts.task_id
           WHERE attempts.run_id = ? AND attempts.is_current = 1
@@ -414,20 +418,22 @@ export function finishRun(
     const correct = attempts.reduce((sum, attempt) => sum + attempt.is_correct, 0);
     const xp = attempts.reduce(
       (sum, attempt) =>
-        sum +
-        taskXp({
-          difficulty: attempt.difficulty,
-          correct: attempt.is_correct === 1,
-          hintUsed: attempt.hint_used === 1,
-        }),
+        sum + (attempt.affects_progress === 1
+          ? taskXp({
+              difficulty: attempt.difficulty,
+              correct: attempt.is_correct === 1,
+              hintUsed: attempt.hint_used === 1,
+            })
+          : 0),
       0,
     );
     const changes = topicChanges(db, graph, runId);
     const previous = readSnapshots(db, run.subject).at(-1);
-
-    const forecast = recordForecasts(db, graph, now).find(
-      (snapshot) => snapshot.subject === run.subject,
-    );
+    const recordsForecast = run.kind !== 'lesson' ||
+      attempts.some((attempt) => attempt.affects_progress === 1);
+    const forecast = recordsForecast
+      ? recordForecasts(db, graph, now).find((snapshot) => snapshot.subject === run.subject)
+      : previous;
     if (forecast === undefined) {
       throw new Error(`Забег: для предмета «${run.subject}» прогноз не посчитан`);
     }

@@ -9,6 +9,7 @@ import {
   claimLearningMaterial,
   finishLearningMaterial,
   openLearningMaterial,
+  readLearningMaterial,
   rejectLearningMaterial,
   retireLearningMaterial,
   startLearningRun,
@@ -199,9 +200,66 @@ describe('слой данных учебных материалов', () => {
     expect(finishLearningMaterial(db, GRAPH, runId, { now: new Date(START.getTime() + 5000) }))
       .toEqual(result);
     expect(db.prepare('SELECT status, finished_at FROM learning_materials WHERE id = ?').get(materialId))
-      .toEqual({ status: outcome, finished_at: START.toISOString() });
+      .toEqual(outcome === 'passed'
+        ? { status: 'passed', finished_at: START.toISOString() }
+        : { status: 'active', finished_at: null });
     expect(db.prepare("SELECT COUNT(*) AS n FROM task_bank WHERE status = 'used'").get())
-      .toEqual({ n: 5 });
+      .toEqual({ n: outcome === 'passed' ? 5 : 0 });
+  });
+
+  it('создаёт повтор с теми же вопросами, сохраняет историю и не меняет прогресс', () => {
+    const { materialId, taskIds, runId: firstRunId } = activeRun(db);
+    taskIds.forEach((taskId, index) => db.prepare(
+      `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct, duration_ms)
+       VALUES (?, ?, ?, '4', ?, 1000)`,
+    ).run(taskId, TOPIC, firstRunId, index < 3 ? 1 : 0));
+    db.prepare('UPDATE runs SET total = 5, correct = 3 WHERE id = ?').run(firstRunId);
+    db.prepare('UPDATE topic_state SET mastery = 0.46, attempts = 5 WHERE topic_id = ?').run(TOPIC);
+    const firstResult = finishLearningMaterial(db, GRAPH, firstRunId, { now: START });
+
+    expect(firstResult).toMatchObject({ outcome: 'failed', xp: 75 });
+    expect(readLearningMaterial(db, materialId)).toMatchObject({
+      content: CONTENT,
+      progress: { total: 0, correct: 0, target: 5, done: false },
+    });
+    const retry = startLearningRun(db, materialId, { now: new Date(START.getTime() + 1000) });
+    expect(retry).toMatchObject({ materialId, resumed: false });
+    expect(retry.runId).not.toBe(firstRunId);
+    expect(startLearningRun(db, materialId, { now: new Date(START.getTime() + 2000) }))
+      .toEqual({ materialId, runId: retry.runId, resumed: true });
+    expect(db.prepare(
+      `SELECT run_id, attempt_number FROM learning_runs
+        WHERE material_id = ? ORDER BY attempt_number`,
+    ).all(materialId)).toEqual([
+      { run_id: firstRunId, attempt_number: 1 },
+      { run_id: retry.runId, attempt_number: 2 },
+    ]);
+    expect(db.prepare('SELECT id, issued_run_id FROM task_bank ORDER BY id').all())
+      .toEqual(taskIds.map((id) => ({ id, issued_run_id: retry.runId })));
+
+    taskIds.forEach((taskId) => db.prepare(
+      `INSERT INTO attempts
+         (task_id, topic_id, run_id, answer, is_correct, duration_ms, affects_progress)
+       VALUES (?, ?, ?, '4', 1, 1000, 0)`,
+    ).run(taskId, TOPIC, retry.runId));
+    db.prepare('UPDATE runs SET total = 5, correct = 5 WHERE id = ?').run(retry.runId);
+    const retryResult = finishLearningMaterial(db, GRAPH, retry.runId, {
+      now: new Date(START.getTime() + 3000),
+    });
+    expect(retryResult).toMatchObject({ outcome: 'passed', xp: 0, masteryAfter: 0.46 });
+    expect(retryResult.touchedTopics).toEqual([]);
+    expect(db.prepare('SELECT mastery, attempts FROM topic_state WHERE topic_id = ?').get(TOPIC))
+      .toEqual({ mastery: 0.46, attempts: 5 });
+    expect(db.prepare(
+      `SELECT run_id, affects_progress, COUNT(*) AS count FROM attempts
+        WHERE task_id IN (${taskIds.map(() => '?').join(', ')})
+        GROUP BY run_id, affects_progress ORDER BY run_id`,
+    ).all(...taskIds)).toEqual([
+      { run_id: firstRunId, affects_progress: 1, count: 5 },
+      { run_id: retry.runId, affects_progress: 0, count: 5 },
+    ]);
+    expect(finishLearningMaterial(db, GRAPH, firstRunId, { now: new Date(START.getTime() + 4000) }))
+      .toEqual(firstResult);
   });
 
   it('не завершает неполный тест или тест с открытым спором', () => {
