@@ -11,7 +11,7 @@
 [`docs/plans/completed/20260808-edukator-run-triage.md`](docs/plans/completed/20260808-edukator-run-triage.md) (этап 3),
 [`docs/plans/completed/20260808-edukator-game-parents.md`](docs/plans/completed/20260808-edukator-game-parents.md) (этап 4),
 [`docs/plans/completed/20260809-background-learning-materials.md`](docs/plans/completed/20260809-background-learning-materials.md) (персональные разборы),
-[`docs/plans/20260813-required-personal-review-gate.md`](docs/plans/20260813-required-personal-review-gate.md) (обязательный первый разбор).
+[`docs/plans/completed/20260813-required-personal-review-gate.md`](docs/plans/completed/20260813-required-personal-review-gate.md) (обязательный первый разбор).
 
 ## Что уже есть
 
