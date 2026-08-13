@@ -45,6 +45,57 @@ test('полный забег из двенадцати заданий прив�
   }
 });
 
+test('ошибка с исправлением не увеличивает 12 вопросов и приводит на финал', async ({ page }) => {
+  const harness = await startE2eHarness({ triagePassed: 'math' });
+  try {
+    const started = await page.request.post(`${harness.url}/api/run/start`, {
+      data: { subject: 'math' },
+    });
+    expect(started.ok()).toBe(true);
+    const { runId } = await started.json() as { runId: number };
+    await page.goto(`${harness.url}/?runId=${runId}`);
+
+    await expect(page.getByText('Жизни: 3 из 3')).toBeVisible();
+    await page.getByLabel('Число').fill('44');
+    await page.getByRole('button', { name: 'Проверить' }).click();
+    await expect(page.locator('.verdict')).toContainText('Пока не сошлось');
+    await expect(page.getByText('Жизни: 2 из 3')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Я всё-таки прав' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Исправить ответ' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Следующее задание' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Исправить ответ' }).click();
+    await expect(page.getByLabel('Число')).toHaveValue('');
+    await page.getByLabel('Число').fill('45');
+    await page.getByRole('button', { name: 'Проверить' }).click();
+    await expect(page.locator('.verdict')).toContainText('Верно');
+    await expect(page.getByLabel('Прогресс: 1 из 12')).toBeVisible();
+
+    for (let answered = 2; answered <= 12; answered += 1) {
+      await page.getByRole('button', { name: 'Следующее задание' }).click();
+      await expect(page.getByRole('heading', { name: /вычисли значение/ })).toBeVisible();
+      await page.getByLabel('Число').fill('45');
+      await page.getByRole('button', { name: 'Проверить' }).click();
+      await expect(page.locator('.verdict')).toContainText('Верно');
+    }
+    await page.getByRole('button', { name: 'Завершить забег' }).click();
+
+    await expect(page.getByRole('heading', { name: 'Вот что получилось' })).toBeVisible();
+    expect(harness.db.prepare<[number], {
+      total: number; correct: number; current_attempts: number; all_attempts: number;
+    }>(
+      `SELECT runs.total, runs.correct,
+              SUM(attempts.is_current) AS current_attempts,
+              COUNT(attempts.id) AS all_attempts
+         FROM runs JOIN attempts ON attempts.run_id = runs.id
+        WHERE runs.id = ? GROUP BY runs.id`,
+    ).get(runId)).toEqual({ total: 12, correct: 12, current_attempts: 12, all_attempts: 13 });
+    harness.assertCodexNotCalled();
+  } finally {
+    await harness.close();
+  }
+});
+
 test('текстовый ответ проходит обычный забег', async ({ page }) => {
   const harness = await startE2eHarness({ triagePassed: 'russian' });
   try {

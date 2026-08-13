@@ -49,6 +49,7 @@ function finish(): FinishRunResponse {
 function apiWith(overrides: Partial<RunApi> = {}): RunApi {
   return {
     next: vi.fn(() => deferred<NextTaskResponse>()),
+    skipRetry: vi.fn(() => deferred<{ progress: NextTaskResponse['progress'] }>()),
     dispute: vi.fn(() => deferred<DisputeResponse>()),
     finish: vi.fn(() => Promise.resolve(finish())),
     triageNext: vi.fn(() => Promise.resolve({

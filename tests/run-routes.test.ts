@@ -157,6 +157,228 @@ describe('маршруты забега', () => {
       .toEqual({ finished_at: NOW.toISOString(), total: 12, correct: 12 });
   });
 
+  it('восстанавливает ретрай и переводит все его отказы в 4xx', async () => {
+    const runId = await start('math');
+    const first = await app.inject({
+      method: 'GET',
+      url: `/api/session/next?runId=${runId}`,
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({
+      progress: {
+        total: 0,
+        correct: 0,
+        target: 12,
+        done: false,
+        lives: { total: 3, remaining: 3, retryAvailable: false },
+      },
+    });
+    const taskId = (first.json() as { task: { id: number } }).task.id;
+
+    const wrong = await app.inject({
+      method: 'POST',
+      url: '/api/session/answer',
+      payload: { runId, task_id: taskId, answer: '0', hint_used: true },
+    });
+    expect(wrong.statusCode).toBe(200);
+    const attemptId = (wrong.json() as { attempt_id: number }).attempt_id;
+    expect(wrong.json()).toMatchObject({
+      correct: false,
+      progress: {
+        total: 1,
+        correct: 0,
+        done: false,
+        lives: { total: 3, remaining: 2, retryAvailable: true },
+      },
+    });
+
+    const restored = await app.inject({
+      method: 'GET',
+      url: `/api/session/next?runId=${runId}`,
+    });
+    expect(restored.statusCode).toBe(200);
+    expect(restored.json()).toMatchObject({
+      task: { id: taskId },
+      retry: {
+        attempt_id: attemptId,
+        previous_answer: '0',
+        answer: '45',
+        explain: '40 + 5 = 45.',
+        joke: 'Пять единиц не спрятались.',
+      },
+      progress: { lives: { remaining: 2, retryAvailable: true } },
+    });
+    expect((restored.json() as { retry: Record<string, unknown> }).retry)
+      .not.toHaveProperty('dispute_status');
+
+    const russianRun = await start('russian');
+    const russianNext = await app.inject({
+      method: 'GET',
+      url: `/api/session/next?runId=${russianRun}`,
+    });
+    const foreignTaskId = (russianNext.json() as { task: { id: number } }).task.id;
+    const foreignAnswer = await app.inject({
+      method: 'POST',
+      url: '/api/session/answer',
+      payload: {
+        runId,
+        task_id: foreignTaskId,
+        answer: '45',
+        retry_attempt_id: attemptId,
+      },
+    });
+    expect(foreignAnswer.statusCode).toBe(409);
+    expect(foreignAnswer.json()).toMatchObject({ code: 'task-not-in-run' });
+    const foreignSkip = await app.inject({
+      method: 'POST',
+      url: '/api/session/retry/skip',
+      payload: { runId, task_id: foreignTaskId },
+    });
+    expect(foreignSkip.statusCode).toBe(409);
+    expect(foreignSkip.json()).toMatchObject({ code: 'task-not-in-run' });
+
+    const triageId = Number(db.prepare(
+      `INSERT INTO runs (subject, kind, topic_id, started_at)
+       VALUES ('math', 'triage', 'math.a', ?)`,
+    ).run(NOW.toISOString()).lastInsertRowid);
+    const unusual = await app.inject({
+      method: 'POST',
+      url: '/api/session/retry/skip',
+      payload: { runId: triageId, task_id: taskId },
+    });
+    expect(unusual.statusCode).toBe(409);
+    expect(unusual.json()).toMatchObject({ code: 'task-not-in-run' });
+
+    db.prepare('INSERT INTO disputes (attempt_id) VALUES (?)').run(attemptId);
+    const disputed = await app.inject({
+      method: 'GET',
+      url: `/api/session/next?runId=${runId}`,
+    });
+    expect(disputed.json()).toMatchObject({ retry: { dispute_status: 'open' } });
+    for (const response of [
+      await app.inject({
+        method: 'POST',
+        url: '/api/session/retry/skip',
+        payload: { runId, task_id: taskId },
+      }),
+      await app.inject({
+        method: 'POST',
+        url: '/api/session/answer',
+        payload: { runId, task_id: taskId, answer: '45', retry_attempt_id: attemptId },
+      }),
+    ]) {
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({ code: 'run-not-ready' });
+    }
+
+    db.prepare('DELETE FROM disputes WHERE attempt_id = ?').run(attemptId);
+    const corrected = await app.inject({
+      method: 'POST',
+      url: '/api/session/answer',
+      payload: {
+        runId,
+        task_id: taskId,
+        answer: '45',
+        retry_attempt_id: attemptId,
+        hint_used: false,
+      },
+    });
+    expect(corrected.statusCode).toBe(200);
+    expect(corrected.json()).toMatchObject({
+      correct: true,
+      xp: 20,
+      progress: {
+        total: 1,
+        correct: 1,
+        lives: { total: 3, remaining: 2, retryAvailable: false },
+      },
+    });
+    expect(db.prepare(
+      'SELECT COUNT(*) AS versions, SUM(is_current) AS current FROM attempts WHERE task_id = ?',
+    ).get(taskId)).toEqual({ versions: 2, current: 1 });
+
+    const second = await app.inject({
+      method: 'GET',
+      url: `/api/session/next?runId=${runId}`,
+    });
+    const secondTaskId = (second.json() as { task: { id: number } }).task.id;
+    const secondWrong = await app.inject({
+      method: 'POST',
+      url: '/api/session/answer',
+      payload: { runId, task_id: secondTaskId, answer: '0' },
+    });
+    expect(secondWrong.statusCode).toBe(200);
+    const skipped = await app.inject({
+      method: 'POST',
+      url: '/api/session/retry/skip',
+      payload: { runId, task_id: secondTaskId },
+    });
+    expect(skipped.statusCode).toBe(200);
+    expect(skipped.json()).toMatchObject({
+      progress: {
+        total: 2,
+        correct: 1,
+        done: false,
+        lives: { total: 3, remaining: 1, retryAvailable: false },
+      },
+    });
+
+    const third = await app.inject({
+      method: 'GET',
+      url: `/api/session/next?runId=${runId}`,
+    });
+    const thirdTaskId = (third.json() as { task: { id: number } }).task.id;
+    const thirdWrong = await app.inject({
+      method: 'POST',
+      url: '/api/session/answer',
+      payload: { runId, task_id: thirdTaskId, answer: '0' },
+    });
+    const thirdAttemptId = (thirdWrong.json() as { attempt_id: number }).attempt_id;
+    db.prepare('UPDATE runs SET finished_at = ? WHERE id = ?').run(NOW.toISOString(), runId);
+    for (const response of [
+      await app.inject({
+        method: 'POST',
+        url: '/api/session/retry/skip',
+        payload: { runId, task_id: thirdTaskId },
+      }),
+      await app.inject({
+        method: 'POST',
+        url: '/api/session/answer',
+        payload: {
+          runId,
+          task_id: thirdTaskId,
+          answer: '45',
+          retry_attempt_id: thirdAttemptId,
+        },
+      }),
+    ]) {
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({ code: 'run-finished' });
+    }
+  });
+
+  it('отвечает 400 на небезопасные и кривые retry-идентификаторы', async () => {
+    for (const payload of [
+      {},
+      { runId: 1, task_id: '2' },
+      { runId: Number.MAX_SAFE_INTEGER + 1, task_id: 2 },
+    ]) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/session/retry/skip',
+        payload,
+      });
+      expect(response.statusCode).toBe(400);
+    }
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/session/answer',
+      payload: { task_id: 1, answer: '45', retry_attempt_id: Number.MAX_SAFE_INTEGER + 1 },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
   it('отдаёт состояние доступа и оставляет в плане только незакрытые слоты', async () => {
     const insert = db.prepare(
       `INSERT INTO runs (subject, kind, topic_id, started_at, finished_at, summary)

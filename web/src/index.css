@@ -609,6 +609,34 @@ button:focus-visible {
   flex: 1;
 }
 
+.lives-block {
+  display: grid;
+  flex: 0 0 auto;
+  justify-items: center;
+  gap: .15rem;
+  color: #6f3a32;
+  font-size: .72rem;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.lives-hearts {
+  display: flex;
+  gap: .24rem;
+  font-size: 1.25rem;
+  letter-spacing: .02em;
+  line-height: 1;
+}
+
+.life-full {
+  color: #d95547;
+  filter: drop-shadow(0 2px 3px rgb(217 85 71 / 22%));
+}
+
+.life-empty {
+  color: #b9c3bd;
+}
+
 .progress-copy {
   display: flex;
   justify-content: space-between;
@@ -1938,6 +1966,16 @@ button:focus-visible {
 
   .run-card {
     border-radius: 1.35rem;
+  }
+
+  .run-header {
+    flex-wrap: wrap;
+  }
+
+  .lives-block {
+    width: 100%;
+    grid-template-columns: auto auto;
+    justify-content: flex-end;
   }
 
   .task-actions button {

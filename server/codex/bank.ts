@@ -140,6 +140,14 @@ function toBankTask(row: TaskRow): BankTask {
   };
 }
 
+/** Читает конкретное сохранённое задание независимо от статуса и истории ответов. */
+export function readBankTask(db: Database, taskId: number): BankTask | null {
+  const row = db.prepare<[number], TaskRow>(
+    `SELECT ${TASK_COLUMNS} FROM task_bank WHERE id = ?`,
+  ).get(taskId);
+  return row === undefined ? null : toBankTask(row);
+}
+
 /**
  * Читает строку как задание, а негодную выводит из очереди. Без пометки строка
  * остаётся `used` без попытки, то есть ровно тем, что `issuedTask` находит

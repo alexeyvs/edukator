@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Worker } from 'node:worker_threads';
 import type { Database } from 'better-sqlite3';
 import { openDatabase } from '../server/db.js';
 import {
@@ -16,12 +17,14 @@ import type { DisputeContext, DisputeReview, DisputeReviewer } from '../server/c
 import { readTopicState } from '../server/mastery.js';
 import { planFromDatabase } from '../server/scheduler.js';
 import { checkAnswer } from '../server/normalize.js';
+import { finishRun } from '../server/run.js';
 import {
   SessionError,
   nextTask,
   openDispute,
   openDisputes,
   resolveDispute,
+  skipRetry,
   submitAnswer,
 } from '../server/session.js';
 
@@ -340,7 +343,12 @@ describe('занятие', () => {
         expect(result.status).toBe('ok');
         if (result.status !== 'ok') return;
         used.add(result.task.topicId);
-        submitAnswer(db, runGraph, { taskId: result.task.id, runId, answer: 'не знаю' });
+        const answer = submitAnswer(db, runGraph, {
+          taskId: result.task.id, runId, answer: 'не знаю',
+        });
+        if (answer.progress?.lives?.retryAvailable === true) {
+          skipRetry(db, runId, result.task.id);
+        }
       }
 
       expect([...used].sort()).toEqual(['math.a', 'math.b', 'math.c']);
@@ -375,6 +383,251 @@ describe('занятие', () => {
   });
 
   describe('приём ответа', () => {
+    function ordinaryRun(): number {
+      return Number(
+        db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+          .run('math', 'math.a', new Date().toISOString()).lastInsertRowid,
+      );
+    }
+
+    it('даёт три оплаченных исправления, а четвёртую ошибку оставляет окончательной', () => {
+      const runId = ordinaryRun();
+      const taskId = issue('math.a', {}, runId);
+      let result = submitAnswer(db, graph, { taskId, runId, answer: '0', hintUsed: true });
+      expect(result.progress).toMatchObject({
+        total: 1, correct: 0,
+        lives: { remaining: 2, retryAvailable: true },
+      });
+
+      for (const remaining of [1, 0]) {
+        result = submitAnswer(db, graph, {
+          taskId, runId, answer: '0', retryAttemptId: result.attemptId,
+        });
+        expect(result.progress).toMatchObject({
+          total: 1, correct: 0,
+          lives: { remaining, retryAvailable: true },
+        });
+      }
+      result = submitAnswer(db, graph, {
+        taskId, runId, answer: '0', retryAttemptId: result.attemptId,
+      });
+
+      expect(result.progress).toMatchObject({
+        total: 1, correct: 0,
+        lives: { remaining: 0, retryAvailable: false },
+      });
+      expect(db.prepare(
+        `SELECT is_current, life_charged, hint_used FROM attempts
+          WHERE task_id = ? ORDER BY id`,
+      ).all(taskId)).toEqual([
+        { is_current: 0, life_charged: 1, hint_used: 1 },
+        { is_current: 0, life_charged: 1, hint_used: 1 },
+        { is_current: 0, life_charged: 1, hint_used: 1 },
+        { is_current: 1, life_charged: 0, hint_used: 1 },
+      ]);
+      expect(readTopicState(db, 'math.a').attempts).toBe(1);
+    });
+
+    it('исправляет ответ без роста total и сохраняет использованную подсказку', () => {
+      const runId = ordinaryRun();
+      const taskId = issue('math.a', { difficulty: 3 }, runId);
+      const wrong = submitAnswer(db, graph, {
+        taskId, runId, answer: '0', hintUsed: true,
+      });
+      const fixed = submitAnswer(db, graph, {
+        taskId, runId, answer: '45', retryAttemptId: wrong.attemptId,
+      });
+
+      expect(fixed).toMatchObject({ correct: true, xp: 30 });
+      expect(fixed.progress).toMatchObject({
+        total: 1, correct: 1,
+        lives: { remaining: 2, retryAvailable: false },
+      });
+      expect(readTopicState(db, 'math.a').attempts).toBe(1);
+      expect(db.prepare(
+        'SELECT is_current, is_correct, hint_used FROM attempts WHERE id = ?',
+      ).get(fixed.attemptId)).toEqual({ is_current: 1, is_correct: 1, hint_used: 1 });
+    });
+
+    it('считает финальные correct и XP только по текущим версиям', () => {
+      const runId = ordinaryRun();
+      const retriedTask = issue('math.a', { difficulty: 3 }, runId);
+      const wrong = submitAnswer(db, graph, {
+        taskId: retriedTask, runId, answer: '0', hintUsed: true,
+      });
+      submitAnswer(db, graph, {
+        taskId: retriedTask, runId, answer: '45', retryAttemptId: wrong.attemptId,
+      });
+      for (let index = 0; index < 11; index += 1) {
+        submitAnswer(db, graph, {
+          taskId: issue('math.a', {}, runId), runId, answer: '45',
+        });
+      }
+
+      const summary = finishRun(db, graph, runId);
+
+      expect(summary).toMatchObject({ total: 12, correct: 12, xp: 305 });
+      const finalState = readTopicState(db, 'math.a');
+      expect(finalState.attempts).toBe(12);
+      expect(summary.touchedTopics).toEqual([{
+        topicId: 'math.a', title: 'Тема math.a', before: 0, after: finalState.mastery,
+      }]);
+      expect(summary.declinedTopics).toEqual([]);
+      expect(db.prepare(
+        'SELECT COUNT(*) AS count FROM attempts WHERE run_id = ?',
+      ).get(runId)).toEqual({ count: 13 });
+    });
+
+    it('атомарно отвергает чужое задание ретрая', () => {
+      const runId = ordinaryRun();
+      const taskId = issue('math.a', {}, runId);
+      const otherTaskId = issue('math.a', {}, runId);
+      const wrong = submitAnswer(db, graph, { taskId, runId, answer: '0' });
+
+      expect(() => submitAnswer(db, graph, {
+        taskId: otherTaskId, runId, answer: '45',
+      })).toThrow(expect.objectContaining({ code: 'task-not-in-run' }));
+      const fixed = submitAnswer(db, graph, {
+        taskId, runId, answer: '45', retryAttemptId: wrong.attemptId,
+      });
+      expect(() => submitAnswer(db, graph, {
+        taskId, runId, answer: '0', retryAttemptId: wrong.attemptId,
+      })).toThrow(expect.objectContaining({ code: 'already-answered' }));
+      expect(db.prepare(
+        'SELECT total, correct FROM runs WHERE id = ?',
+      ).get(runId)).toEqual({ total: 1, correct: 1 });
+      expect(db.prepare(
+        'SELECT COUNT(*) AS count FROM attempts WHERE task_id = ?',
+      ).get(taskId)).toEqual({ count: 2 });
+      expect(fixed.correct).toBe(true);
+    });
+
+    it('двум конкурентным соединениям засчитывает только одно исправление', async () => {
+      const runId = ordinaryRun();
+      const taskId = issue('math.a', {}, runId);
+      const wrong = submitAnswer(db, graph, { taskId, runId, answer: '0' });
+      const gate = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+      const source = `
+        import { parentPort, workerData } from 'node:worker_threads';
+        const [{ openDatabase }, { buildTopicGraph }, { submitAnswer }] = await Promise.all([
+          import(workerData.dbModule),
+          import(workerData.curriculumModule),
+          import(workerData.sessionModule),
+        ]);
+        const connection = openDatabase(workerData.dbPath, { fileMustExist: true });
+        const graph = buildTopicGraph(workerData.topics);
+        const gate = new Int32Array(workerData.gate);
+        parentPort.postMessage({ type: 'ready' });
+        Atomics.wait(gate, 0, 0);
+        try {
+          const answer = submitAnswer(connection, graph, workerData.request);
+          parentPort.postMessage({ type: 'result', ok: true, attemptId: answer.attemptId });
+        } catch (error) {
+          parentPort.postMessage({
+            type: 'result', ok: false, code: error?.code, message: error?.message,
+          });
+        } finally {
+          connection.close();
+        }
+      `;
+      const workerData = {
+        dbPath: join(tempDir, 'session.db'),
+        topics: [...graph.byId.values()],
+        gate: gate.buffer,
+        request: {
+          taskId, runId, answer: '45', retryAttemptId: wrong.attemptId,
+        },
+        dbModule: new URL('../server/db.ts', import.meta.url).href,
+        curriculumModule: new URL('../server/curriculum.ts', import.meta.url).href,
+        sessionModule: new URL('../server/session.ts', import.meta.url).href,
+      };
+      type WorkerResult = { type: 'result'; ok: boolean; attemptId?: number; code?: string; message?: string };
+      function competitor(): { ready: Promise<void>; result: Promise<WorkerResult> } {
+        const workerOptions: ConstructorParameters<typeof Worker>[1] & { type: 'module' } = {
+          eval: true,
+          type: 'module',
+          execArgv: ['--import', 'tsx'],
+          workerData,
+        };
+        const worker = new Worker(source, workerOptions);
+        let readyResolve: (() => void) | undefined;
+        let readyReject: ((error: Error) => void) | undefined;
+        const ready = new Promise<void>((resolve, reject) => {
+          readyResolve = resolve;
+          readyReject = reject;
+        });
+        const result = new Promise<WorkerResult>((resolve, reject) => {
+          worker.on('message', (message: { type: string }) => {
+            if (message.type === 'ready') readyResolve?.();
+            if (message.type === 'result') resolve(message as WorkerResult);
+          });
+          worker.on('error', (error) => {
+            readyReject?.(error);
+            reject(error);
+          });
+          worker.on('exit', (code) => {
+            if (code !== 0) reject(new Error(`worker завершился с кодом ${code}`));
+          });
+        });
+        void result.catch(() => undefined);
+        return { ready, result };
+      }
+      const first = competitor();
+      const second = competitor();
+      await Promise.all([first.ready, second.ready]);
+      Atomics.store(gate, 0, 1);
+      Atomics.notify(gate, 0, 2);
+      const outcomes = await Promise.all([first.result, second.result]);
+
+      expect(outcomes.filter(({ ok }) => ok)).toHaveLength(1);
+      expect(outcomes.filter(({ ok }) => !ok)).toEqual([
+        expect.objectContaining({ code: 'already-answered' }),
+      ]);
+      expect(db.prepare(
+        `SELECT COUNT(*) AS versions, SUM(is_current) AS current
+           FROM attempts WHERE task_id = ?`,
+      ).get(taskId)).toEqual({ versions: 2, current: 1 });
+      expect(db.prepare(
+        'SELECT total, correct, lives_remaining, retry_task_id FROM runs WHERE id = ?',
+      ).get(runId)).toEqual({ total: 1, correct: 1, lives_remaining: 2, retry_task_id: null });
+      expect(readTopicState(db, 'math.a').attempts).toBe(1);
+    });
+
+    it('восстанавливает исправление после перезагрузки и позволяет его пропустить', () => {
+      const runId = ordinaryRun();
+      const taskId = issue('math.a', {}, runId);
+      const wrong = submitAnswer(db, graph, { taskId, runId, answer: 'мой ответ' });
+
+      const restored = nextTask(db, graph, { runId, seedDir });
+      expect(restored).toMatchObject({
+        status: 'ok', task: { id: taskId },
+        retry: {
+          attemptId: wrong.attemptId,
+          previousAnswer: 'мой ответ',
+          answer: '45',
+        },
+      });
+      expect(skipRetry(db, runId, taskId)).toMatchObject({
+        total: 1, correct: 0,
+        lives: { remaining: 2, retryAvailable: false },
+      });
+      expect(() => skipRetry(db, runId, taskId))
+        .toThrow(expect.objectContaining({ code: 'task-not-in-run' }));
+    });
+
+    it('не завершает двенадцатый вопрос, пока доступно исправление', () => {
+      const runId = ordinaryRun();
+      db.prepare('UPDATE runs SET total = 11, correct = 11 WHERE id = ?').run(runId);
+      const taskId = issue('math.a', {}, runId);
+
+      const wrong = submitAnswer(db, graph, { taskId, runId, answer: '0' });
+      expect(wrong.progress).toMatchObject({ total: 12, done: false });
+      expect(() => nextTask(db, graph, { runId, seedDir })).not.toThrow();
+      expect(skipRetry(db, runId, taskId)).toMatchObject({ total: 12, done: true });
+      expect(() => nextTask(db, graph, { runId, seedDir }))
+        .toThrow(expect.objectContaining({ code: 'run-complete' }));
+    });
+
     it('засчитывает верный ответ и двигает модель знаний вверх', () => {
       const id = issue();
 
@@ -440,7 +693,8 @@ describe('занятие', () => {
       const result = submitAnswer(db, runGraph, { taskId, runId, answer: '45' });
 
       expect(result.xp).toBe(35);
-      expect(result.progress).toEqual({ total: 1, correct: 1, target: 12, done: false });
+      expect(result.progress).toEqual({ total: 1, correct: 1, target: 12, done: false,
+        lives: { total: 3, remaining: 3, retryAvailable: false } });
       expect(
         db.prepare<[number], { run_id: number }>('SELECT run_id FROM attempts WHERE id = ?')
           .get(result.attemptId),
@@ -702,11 +956,43 @@ describe('занятие', () => {
       const dispute = openDispute(db, attempt.attemptId);
       const { review } = reviewer({ studentCorrect: true, note: 'то же число словами' });
 
-      await resolveDispute(db, graph, dispute.id, review);
+      const resolved = await resolveDispute(db, graph, dispute.id, review);
 
       expect(db.prepare('SELECT total, correct FROM runs WHERE id = ?').get(runId)).toEqual({
         total: 1,
         correct: 1,
+      });
+      expect(resolved.progress).toMatchObject({
+        total: 1, correct: 1,
+        lives: { remaining: 3, retryAvailable: false },
+      });
+      expect(resolved.xp).toBe(25);
+      const repeated = await resolveDispute(db, graph, dispute.id, review);
+      expect(repeated.progress).toEqual(resolved.progress);
+      expect(db.prepare(
+        'SELECT lives_remaining, correct FROM runs WHERE id = ?',
+      ).get(runId)).toEqual({ lives_remaining: 3, correct: 1 });
+    });
+
+    it('отклонённый спор сохраняет жизнь списанной и оставляет исправление доступным', async () => {
+      const runId = Number(db.prepare(
+        'INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)',
+      ).run('math', 'math.a', new Date().toISOString()).lastInsertRowid);
+      const taskId = issue('math.a', {}, runId);
+      const wrong = submitAnswer(db, graph, { taskId, runId, answer: '0' });
+      const dispute = openDispute(db, wrong.attemptId);
+      expect(() => skipRetry(db, runId, taskId))
+        .toThrow(expect.objectContaining({ code: 'run-not-ready' }));
+      const { review } = reviewer({ studentCorrect: false, note: 'ответ неверен' });
+
+      const rejected = await resolveDispute(db, graph, dispute.id, review);
+
+      expect(rejected.progress).toMatchObject({
+        correct: 0,
+        lives: { remaining: 2, retryAvailable: true },
+      });
+      expect(skipRetry(db, runId, taskId).lives).toMatchObject({
+        remaining: 2, retryAvailable: false,
       });
     });
 

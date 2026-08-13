@@ -186,6 +186,17 @@ describe('отбор и подготовка учебных материалов
          VALUES (?, ?, ?, 0, ?)`,
       ).run(stored.id, dependent.id, `ответ-${index}`, new Date(NOW.getTime() + index).toISOString());
     }
+    const corrected = storeTasks(db, dependent.id, [task('исправленная-ошибка')]).stored[0];
+    if (corrected === undefined) throw new Error('задача исправления не сохранена');
+    db.prepare(
+      `INSERT INTO attempts
+        (task_id, topic_id, answer, is_correct, is_current, created_at)
+       VALUES (?, ?, 'старый ошибочный ответ', 0, 0, ?)`,
+    ).run(corrected.id, dependent.id, new Date(NOW.getTime() + 100).toISOString());
+    db.prepare(
+      `INSERT INTO attempts (task_id, topic_id, answer, is_correct, created_at)
+       VALUES (?, ?, 'исправленный ответ', 1, ?)`,
+    ).run(corrected.id, dependent.id, new Date(NOW.getTime() + 101).toISOString());
     let captured: LearningProduceRequest | undefined;
     await prepareLearningMaterials({
       db, graph, now: NOW,
@@ -200,6 +211,8 @@ describe('отбор и подготовка учебных материалов
     expect(captured?.recentErrors.map(({ answer }) => answer)).toEqual([
       'ответ-2', 'ответ-3', 'ответ-4', 'ответ-5', 'ответ-6',
     ]);
+    expect(captured?.recentErrors.map(({ answer }) => answer))
+      .not.toContain('старый ошибочный ответ');
   });
 
   it('восстанавливает зависший claim, а недоступность codex включает backoff воркера', async () => {

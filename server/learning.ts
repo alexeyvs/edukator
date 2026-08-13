@@ -374,8 +374,8 @@ export function startLearningRun(
     ensureCompleteMaterial(db, material);
 
     const runId = Number(db.prepare(
-      `INSERT INTO runs (subject, kind, topic_id, started_at)
-       VALUES (?, 'lesson', ?, ?)`,
+      `INSERT INTO runs (subject, kind, topic_id, started_at, lives_remaining)
+       VALUES (?, 'lesson', ?, ?, NULL)`,
     ).run(material.subject, material.topic_id, nowIso).lastInsertRowid);
     const linked = db.prepare(
       `UPDATE learning_materials

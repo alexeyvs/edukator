@@ -283,6 +283,19 @@ function createVersionElevenDatabase(path: string): Database {
   return legacy;
 }
 
+/** Версия 12 ещё не хранила жизни и версии ответов. */
+function createVersionTwelveDatabase(path: string): Database {
+  const legacy = openDatabase(path);
+  legacy.exec(`
+    ALTER TABLE attempts DROP COLUMN life_charged;
+    ALTER TABLE attempts DROP COLUMN is_current;
+    ALTER TABLE runs DROP COLUMN retry_task_id;
+    ALTER TABLE runs DROP COLUMN lives_remaining;
+  `);
+  legacy.pragma('user_version = 12');
+  return legacy;
+}
+
 describe('база данных', () => {
   let tempDir: string;
   let dbFile: string;
@@ -307,7 +320,7 @@ describe('база данных', () => {
     // рабочую базу, поэтому число прибито буквально и меняется только вместе с
     // новой ступенью и её тестом обновления.
     it('держит номер версии схемы', () => {
-      expect(SCHEMA_VERSION).toBe(12);
+      expect(SCHEMA_VERSION).toBe(13);
     });
 
     it('создаёт все одиннадцать таблиц на пустой базе', () => {
@@ -886,6 +899,44 @@ describe('база данных', () => {
         expect(() => migrated.prepare(
           "INSERT INTO runs (subject, kind, topic_id, started_at) VALUES ('math', 'lesson', ?, ?)",
         ).run(topicId, '2026-08-09T10:00:00.000Z')).not.toThrow();
+      } finally {
+        migrated.close();
+      }
+    });
+
+    it('мигрирует v12 в версии ответов и жизни, не меняя готовый summary', () => {
+      const path = join(tempDir, 'версия-12.db');
+      const legacy = createVersionTwelveDatabase(path);
+      const topicId = seedTopic(legacy);
+      const summary = JSON.stringify({ runId: 1, total: 12, correct: 7, xp: 123 });
+      const runId = Number(legacy.prepare(
+        `INSERT INTO runs
+          (subject, kind, topic_id, started_at, finished_at, summary, total, correct)
+         VALUES ('math', 'run', ?, ?, ?, ?, 12, 7)`,
+      ).run(topicId, '2026-08-07T10:00:00.000Z', '2026-08-07T11:00:00.000Z', summary)
+        .lastInsertRowid);
+      legacy.prepare(
+        `INSERT INTO runs (subject, kind, topic_id, started_at)
+         VALUES ('math', 'triage', ?, ?)`,
+      ).run(topicId, '2026-08-08T10:00:00.000Z');
+      const taskId = seedTask(legacy, topicId);
+      legacy.prepare(
+        `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct)
+         VALUES (?, ?, ?, '4', 1)`,
+      ).run(taskId, topicId, runId);
+      legacy.close();
+
+      const migrated = openDatabase(path);
+      try {
+        expect(migrated.prepare(
+          'SELECT lives_remaining, retry_task_id, summary FROM runs WHERE id = ?',
+        ).get(runId)).toEqual({ lives_remaining: 3, retry_task_id: null, summary });
+        expect(migrated.prepare(
+          "SELECT lives_remaining FROM runs WHERE kind = 'triage'",
+        ).get()).toEqual({ lives_remaining: null });
+        expect(migrated.prepare(
+          'SELECT is_current, life_charged FROM attempts',
+        ).get()).toEqual({ is_current: 1, life_charged: 0 });
       } finally {
         migrated.close();
       }

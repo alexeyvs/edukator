@@ -10,7 +10,7 @@ const projectRoot = resolve(here, '..');
  * Версия схемы. Хранится в `PRAGMA user_version`; миграция сравнивает её со
  * своей и пропускает работу, если база уже актуальна.
  */
-export const SCHEMA_VERSION = 12;
+export const SCHEMA_VERSION = 13;
 
 /** Таблицы приложения. Тесты сверяют состав базы именно с этим списком. */
 export const TABLES = [
@@ -140,7 +140,11 @@ const CORE_SCHEMA = `
     finished_at TEXT,
     summary     TEXT,
     total       INTEGER NOT NULL DEFAULT 0 CHECK (total >= 0),
-    correct     INTEGER NOT NULL DEFAULT 0 CHECK (correct >= 0 AND correct <= total)
+    correct     INTEGER NOT NULL DEFAULT 0 CHECK (correct >= 0 AND correct <= total),
+    -- Жизни есть только у обычного забега. NULL у служебных режимов не даёт
+    -- им случайно унаследовать механику повторов.
+    lives_remaining INTEGER DEFAULT 3 CHECK (lives_remaining BETWEEN 0 AND 3),
+    retry_task_id INTEGER REFERENCES task_bank (id) ON DELETE SET NULL
   );
 
   CREATE TABLE IF NOT EXISTS attempts (
@@ -152,6 +156,8 @@ const CORE_SCHEMA = `
     is_correct  INTEGER NOT NULL CHECK (is_correct IN (0, 1)),
     hint_used   INTEGER NOT NULL DEFAULT 0 CHECK (hint_used IN (0, 1)),
     duration_ms INTEGER NOT NULL DEFAULT 0 CHECK (duration_ms >= 0),
+    is_current  INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1)),
+    life_charged INTEGER NOT NULL DEFAULT 0 CHECK (life_charged IN (0, 1)),
     created_at  TEXT    NOT NULL DEFAULT (${NOW_ISO})
   );
 
@@ -729,6 +735,36 @@ export function migrate(db: Database.Database): void {
       }
     }
 
+    if (version <= 12) {
+      const runColumns = db
+        .prepare<[], { name: string }>('PRAGMA table_info(runs)')
+        .all()
+        .map((column) => column.name);
+      if (!runColumns.includes('lives_remaining')) {
+        db.exec(`
+          ALTER TABLE runs ADD COLUMN lives_remaining INTEGER DEFAULT 3
+            CHECK (lives_remaining BETWEEN 0 AND 3);
+          ALTER TABLE runs ADD COLUMN retry_task_id INTEGER
+            REFERENCES task_bank (id) ON DELETE SET NULL;
+        `);
+      }
+      db.exec(`UPDATE runs SET lives_remaining = 3 WHERE kind = 'run' AND lives_remaining IS NULL;`);
+      db.exec(`UPDATE runs SET lives_remaining = NULL WHERE kind <> 'run';`);
+
+      const attemptColumns = db
+        .prepare<[], { name: string }>('PRAGMA table_info(attempts)')
+        .all()
+        .map((column) => column.name);
+      if (!attemptColumns.includes('is_current')) {
+        db.exec(`
+          ALTER TABLE attempts ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1
+            CHECK (is_current IN (0, 1));
+          ALTER TABLE attempts ADD COLUMN life_charged INTEGER NOT NULL DEFAULT 0
+            CHECK (life_charged IN (0, 1));
+        `);
+      }
+    }
+
     db.exec(LEARNING_SCHEMA);
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   }).immediate();
@@ -738,8 +774,8 @@ const REQUIRED_COLUMNS: Readonly<Record<(typeof TABLES)[number], readonly string
   profile: ['id', 'name', 'interests', 'exam_date', 'partner_name'],
   topic_state: ['topic_id', 'mastery', 'confidence', 'attempts', 'last_seen', 'next_review', 'closed_at'],
   task_bank: ['id', 'topic_id', 'question', 'instruction', 'material', 'material_format', 'choices', 'answer', 'accept', 'hint', 'explain', 'joke', 'difficulty', 'status', 'fingerprint', 'issued_run_id', 'created_at'],
-  runs: ['id', 'subject', 'kind', 'topic_id', 'started_at', 'finished_at', 'summary', 'total', 'correct'],
-  attempts: ['id', 'task_id', 'topic_id', 'run_id', 'answer', 'is_correct', 'hint_used', 'duration_ms', 'created_at'],
+  runs: ['id', 'subject', 'kind', 'topic_id', 'started_at', 'finished_at', 'summary', 'total', 'correct', 'lives_remaining', 'retry_task_id'],
+  attempts: ['id', 'task_id', 'topic_id', 'run_id', 'answer', 'is_correct', 'hint_used', 'duration_ms', 'is_current', 'life_charged', 'created_at'],
   disputes: ['id', 'attempt_id', 'status', 'resolution', 'created_at', 'resolved_at'],
   forecast_snapshots: ['id', 'subject', 'score', 'band', 'created_at'],
   boss_batches: ['id', 'topic_id', 'run_id', 'status', 'created_at', 'activated_at', 'finished_at'],

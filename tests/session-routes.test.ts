@@ -359,6 +359,43 @@ describe('маршруты занятия', () => {
       ).toBe('upheld');
     });
 
+    it('после подтверждённого спора отдаёт обновлённые progress и XP обычного забега', async () => {
+      const started = await app.inject({
+        method: 'POST',
+        url: '/api/run/start',
+        payload: { subject: 'math' },
+      });
+      const runId = (started.json() as { runId: number }).runId;
+      const issued = await app.inject({
+        method: 'GET',
+        url: `/api/session/next?runId=${runId}`,
+      });
+      const taskId = (issued.json() as { task: { id: number } }).task.id;
+      const checked = await answer({ runId, task_id: taskId, answer: 'сорок пять' });
+      const attemptId = (checked.json() as { attempt_id: number }).attempt_id;
+      expect(checked.json()).toMatchObject({
+        correct: false,
+        progress: { lives: { remaining: 2, retryAvailable: true } },
+      });
+
+      expect((await dispute({ attempt_id: attemptId })).statusCode).toBe(202);
+      await Promise.all(pending);
+      const resolved = await dispute({ attempt_id: attemptId });
+
+      expect(resolved.statusCode).toBe(200);
+      expect(resolved.json()).toMatchObject({
+        status: 'upheld',
+        xp: 25,
+        progress: {
+          total: 1,
+          correct: 1,
+          target: 12,
+          done: false,
+          lives: { total: 3, remaining: 3, retryAvailable: false },
+        },
+      });
+    });
+
     it('отклонённый спор оставляет всё как было', async () => {
       verdict = { studentCorrect: false, note: 'это другое число' };
       const { attemptId, taskId } = await wrongAnswer();

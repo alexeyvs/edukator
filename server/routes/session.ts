@@ -16,12 +16,13 @@ import {
   nextTask,
   openDispute,
   openDisputes,
+  readResolvedDispute,
   resolveDispute,
+  skipRetry,
   submitAnswer,
   SessionError,
   type SessionErrorCode,
 } from '../session.js';
-import { runProgress } from '../run.js';
 import { issuedTaskJson } from './task-json.js';
 
 /** Код ответа на отказ по состоянию занятия. */
@@ -90,7 +91,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 /** Целое из тела запроса: `"12"` и `12.5` — не идентификатор, а ошибка клиента. */
 function readId(body: unknown, field: string): number {
   const value = isObject(body) ? body[field] : undefined;
-  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
     throw new BadRequest(`Поле ${field} должно быть положительным целым числом`);
   }
   return value;
@@ -255,10 +256,25 @@ export function registerSessionRoutes(
             code: 'no-task',
           });
       }
+      if (runId !== undefined && result.progress === undefined) {
+        throw new Error(`Занятие: выдача для забега ${runId} не вернула progress`);
+      }
 
       return reply.send({
         task: issuedTaskJson(result.task),
-        ...(runId === undefined ? {} : { progress: runProgress(db, runId) }),
+        ...(result.retry === undefined ? {} : {
+          retry: {
+            attempt_id: result.retry.attemptId,
+            previous_answer: result.retry.previousAnswer,
+            answer: result.retry.answer,
+            explain: result.retry.explain,
+            joke: result.retry.joke,
+            ...(result.retry.disputeStatus === undefined
+              ? {}
+              : { dispute_status: result.retry.disputeStatus }),
+          },
+        }),
+        ...(runId === undefined ? {} : { progress: result.progress }),
       });
     } catch (error) {
       return fail(reply, error);
@@ -272,6 +288,9 @@ export function registerSessionRoutes(
       const body = request.body;
       const taskId = readId(body, 'task_id');
       const runId = isObject(body) && body['runId'] !== undefined ? readId(body, 'runId') : undefined;
+      const retryAttemptId = isObject(body) && body['retry_attempt_id'] !== undefined
+        ? readId(body, 'retry_attempt_id')
+        : undefined;
       const answer = isObject(body) ? body['answer'] : undefined;
       if (typeof answer !== 'string') {
         throw new BadRequest('Поле answer должно быть строкой');
@@ -306,6 +325,7 @@ export function registerSessionRoutes(
         at: now(),
         log,
         ...(runId === undefined ? {} : { runId }),
+        ...(retryAttemptId === undefined ? {} : { retryAttemptId }),
         ...(hintUsed === undefined ? {} : { hintUsed }),
         ...(durationMs === undefined ? {} : { durationMs }),
       });
@@ -332,6 +352,18 @@ export function registerSessionRoutes(
     }
   });
 
+  app.post('/api/session/retry/skip', (request, reply) => {
+    const stopped = unavailable(reply);
+    if (stopped !== undefined) return stopped;
+    try {
+      const runId = readId(request.body, 'runId');
+      const taskId = readId(request.body, 'task_id');
+      return reply.send({ progress: skipRetry(db, runId, taskId) });
+    } catch (error) {
+      return fail(reply, error);
+    }
+  });
+
   app.post('/api/session/dispute', (request, reply) => {
     const stopped = unavailable(reply);
     if (stopped !== undefined) return stopped;
@@ -346,9 +378,14 @@ export function registerSessionRoutes(
 
       // 202: спор принят, но вердикта ещё нет — его приносит следующий запрос
       // состояния, а не этот ответ.
+      const resolved = dispute.status === 'open' ? null : readResolvedDispute(db, dispute.id);
       return reply
         .code(dispute.created ? 202 : 200)
-        .send({ dispute_id: dispute.id, status: dispute.status });
+        .send({
+          dispute_id: dispute.id,
+          status: dispute.status,
+          ...(resolved === null ? {} : resolved),
+        });
     } catch (error) {
       return fail(reply, error);
     }
@@ -387,4 +424,5 @@ export function registerUnavailableSession(app: FastifyInstance, reason: string)
   app.get('/api/session/next', handler);
   app.post('/api/session/answer', handler);
   app.post('/api/session/dispute', handler);
+  app.post('/api/session/retry/skip', handler);
 }

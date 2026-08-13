@@ -64,11 +64,20 @@ describe('браузерные API-адаптеры', () => {
     await browserRunApi.next(3, 9);
     await browserRunApi.answer({
       runId: 3,
+      taskId: 8,
+      answer: '40',
+      hintUsed: false,
+      durationMs: 900,
+    });
+    await browserRunApi.answer({
+      runId: 3,
       taskId: 9,
       answer: '45',
       hintUsed: true,
       durationMs: 1200,
+      retryAttemptId: 17,
     });
+    await browserRunApi.skipRetry(3, 9);
     await browserRunApi.dispute(11);
     await browserRunApi.finish(3);
     await browserRunApi.triageNext(4);
@@ -80,11 +89,26 @@ describe('браузерные API-адаптеры', () => {
         method: 'POST',
         body: JSON.stringify({
           runId: 3,
+          task_id: 8,
+          answer: '40',
+          hint_used: false,
+          duration_ms: 900,
+        }),
+      })],
+      ['/api/session/answer', expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          runId: 3,
           task_id: 9,
           answer: '45',
           hint_used: true,
           duration_ms: 1200,
+          retry_attempt_id: 17,
         }),
+      })],
+      ['/api/session/retry/skip', expect.objectContaining({
+        method: 'POST',
+        body: '{"runId":3,"task_id":9}',
       })],
       ['/api/session/dispute', expect.objectContaining({
         method: 'POST',

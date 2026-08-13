@@ -48,11 +48,13 @@ function run(db: Database, subject: Topic['subject'], topicId: string, kind: 'ru
   ).lastInsertRowid);
 }
 
-function attempt(db: Database, topicId: string, at: string, durationMs: number, runId: number | null = null): void {
+function attempt(db: Database, topicId: string, at: string, durationMs: number, runId: number | null = null): number {
+  const taskId = task(db, topicId);
   db.prepare(
     `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct, duration_ms, created_at)
      VALUES (?, ?, ?, 'a', 1, ?, ?)`,
-  ).run(task(db, topicId), topicId, runId, durationMs, at);
+  ).run(taskId, topicId, runId, durationMs, at);
+  return taskId;
 }
 
 function snapshot(db: Database, subject: Topic['subject'], score: number, band: number, at: string): void {
@@ -172,16 +174,26 @@ describe('readParentsDashboard', () => {
     const lesson = run(db, 'math', 'math.fractions', 'lesson', '2026-08-08T10:15:00.000Z', '2026-08-08T10:30:00.000Z', 5, 4);
     db.prepare("INSERT INTO boss_batches (topic_id, run_id, status, finished_at) VALUES (?, ?, 'lost', ?)")
       .run('math.fractions', boss, '2026-08-08T10:00:00.000Z');
-    attempt(db, 'math.fractions', '2026-08-07T09:45:00.000Z', 90_000, first);
+    const retriedTask = attempt(
+      db, 'math.fractions', '2026-08-07T09:45:00.000Z', 90_000, first,
+    );
+    db.prepare('UPDATE attempts SET is_current = 0 WHERE task_id = ?').run(retriedTask);
+    db.prepare(
+      `INSERT INTO attempts
+        (task_id, topic_id, run_id, answer, is_correct, duration_ms, created_at)
+       VALUES (?, 'math.fractions', ?, 'a', 1, 30000, '2026-08-07T09:46:00.000Z')`,
+    ).run(retriedTask, first);
     attempt(db, 'russian.not', '2026-08-07T09:45:00.000Z', 30_000, second);
     attempt(db, 'math.fractions', '2026-08-08T09:45:00.000Z', 45_000, boss);
     attempt(db, 'math.fractions', '2026-08-08T10:20:00.000Z', 120_000, lesson);
 
-    expect(readParentsDashboard(db, graph, NOW).activity).toEqual([
+    const dashboard = readParentsDashboard(db, graph, NOW);
+    expect(dashboard.time.actualMinutes).toBe(5.25);
+    expect(dashboard.activity).toEqual([
       expect.objectContaining({ kind: 'lesson', activeMinutes: 2, total: 5, correct: 4 }),
       expect.objectContaining({ kind: 'boss', bossOutcome: 'lost', activeMinutes: 0.75 }),
       expect.objectContaining({ kind: 'triage', activeMinutes: 0.5 }),
-      expect.objectContaining({ kind: 'run', activeMinutes: 1.5 }),
+      expect.objectContaining({ kind: 'run', activeMinutes: 2 }),
     ]);
   });
 

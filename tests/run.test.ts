@@ -110,12 +110,14 @@ describe('жизненный цикл забега', () => {
     expect(first).toEqual({
       runId: expect.any(Number),
       resumed: false,
-      progress: { total: 0, correct: 0, target: 12, done: false },
+      progress: { total: 0, correct: 0, target: 12, done: false,
+        lives: { total: 3, remaining: 3, retryAvailable: false } },
     });
     expect(second).toEqual({
       runId: first.runId,
       resumed: true,
-      progress: { total: 4, correct: 3, target: 12, done: false },
+      progress: { total: 4, correct: 3, target: 12, done: false,
+        lives: { total: 3, remaining: 3, retryAvailable: false } },
     });
     expect(db.prepare('SELECT COUNT(*) AS count FROM runs').get()).toEqual({ count: 1 });
     expect(db.prepare('SELECT subject, topic_id FROM runs WHERE id = ?').get(first.runId)).toEqual({
@@ -248,7 +250,8 @@ describe('жизненный цикл забега', () => {
     const { runId } = startRun(db, graph, 'math', { now: at(0) });
     db.prepare('UPDATE runs SET total = 12, correct = 9 WHERE id = ?').run(runId);
 
-    expect(runProgress(db, runId)).toEqual({ total: 12, correct: 9, target: 12, done: true });
+    expect(runProgress(db, runId)).toEqual({ total: 12, correct: 9, target: 12, done: true,
+      lives: { total: 3, remaining: 3, retryAvailable: false } });
   });
 
   it('при возобновлении отдаёт готовность забега к финальному экрану', () => {
@@ -258,7 +261,8 @@ describe('жизненный цикл забега', () => {
     expect(startRun(db, graph, 'math', { now: at(0, 18) })).toEqual({
       runId: first.runId,
       resumed: true,
-      progress: { total: 12, correct: 8, target: 12, done: true },
+      progress: { total: 12, correct: 8, target: 12, done: true,
+        lives: { total: 3, remaining: 3, retryAvailable: false } },
     });
   });
 

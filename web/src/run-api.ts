@@ -5,6 +5,11 @@ export interface RunProgress {
   correct: number;
   target: number;
   done: boolean;
+  lives?: {
+    total: 3;
+    remaining: number;
+    retryAvailable: boolean;
+  };
 }
 
 export interface RunTask {
@@ -25,6 +30,14 @@ export interface RunTask {
 export interface NextTaskResponse {
   task: RunTask;
   progress: RunProgress;
+  retry?: {
+    attempt_id: number;
+    previous_answer: string;
+    answer: string;
+    explain: string;
+    joke: string;
+    dispute_status?: DisputeStatus;
+  };
 }
 
 export interface AnswerResponse {
@@ -75,6 +88,8 @@ export type DisputeStatus = 'open' | 'upheld' | 'rejected';
 export interface DisputeResponse {
   dispute_id: number;
   status: DisputeStatus;
+  progress?: RunProgress | null;
+  xp?: number;
 }
 
 export interface RunApi {
@@ -85,7 +100,9 @@ export interface RunApi {
     answer: string;
     hintUsed: boolean;
     durationMs: number;
+    retryAttemptId?: number;
   }): Promise<AnswerResponse>;
+  skipRetry(runId: number, taskId: number): Promise<{ progress: RunProgress }>;
   dispute(attemptId: number): Promise<DisputeResponse>;
   finish(runId: number): Promise<FinishRunResponse>;
   triageNext(runId: number): Promise<NextTriageResponse>;
@@ -116,7 +133,14 @@ export const browserRunApi: RunApi = {
       answer: input.answer,
       hint_used: input.hintUsed,
       duration_ms: input.durationMs,
+      ...(input.retryAttemptId === undefined
+        ? {}
+        : { retry_attempt_id: input.retryAttemptId }),
   })),
+  skipRetry: (runId, taskId) => request<{ progress: RunProgress }>(
+    '/api/session/retry/skip',
+    jsonRequest('POST', { runId, task_id: taskId }),
+  ),
   dispute: (attemptId) => request<DisputeResponse>('/api/session/dispute', jsonRequest('POST', { attempt_id: attemptId })),
   finish: (runId) => request<FinishRunResponse>(`/api/run/${runId}/finish`, jsonRequest('POST')),
   triageNext: (runId) => request<NextTriageResponse>(`/api/triage/${runId}/next`),

@@ -21,6 +21,7 @@ import { LEARNING_TASK_COUNT } from './learning-constants.js';
 
 /** Число ответов, после которого забег готов к финальному экрану. */
 export const RUN_TARGET = 12;
+export const RUN_LIVES = 3;
 
 export type RunKind = 'run' | 'triage' | 'boss' | 'lesson';
 
@@ -34,6 +35,11 @@ export interface RunProgress {
   correct: number;
   target: number;
   done: boolean;
+  lives?: {
+    total: 3;
+    remaining: number;
+    retryAvailable: boolean;
+  };
 }
 
 export interface StartRunOptions {
@@ -80,6 +86,8 @@ interface RunCounters {
   total: number;
   correct: number;
   kind: RunKind;
+  lives_remaining: number | null;
+  retry_task_id: number | null;
 }
 
 interface FinishableRun {
@@ -102,17 +110,30 @@ interface RunAttemptRow {
 
 function progressFrom(row: RunCounters): RunProgress {
   const target = row.kind === 'lesson' ? LEARNING_TASK_COUNT : RUN_TARGET;
-  return {
+  const progress: RunProgress = {
     total: row.total,
     correct: row.correct,
     target,
-    done: row.total >= target,
+    done: row.total >= target && row.retry_task_id === null,
   };
+  if (row.kind === 'run') {
+    if (row.lives_remaining === null) {
+      throw new Error('Обычный забег не хранит число оставшихся жизней');
+    }
+    progress.lives = {
+      total: RUN_LIVES,
+      remaining: row.lives_remaining,
+      retryAvailable: row.retry_task_id !== null,
+    };
+  }
+  return progress;
 }
 
 function readRunProgress(db: Database, runId: number): RunProgress {
   const row = db
-    .prepare<[number], RunCounters>('SELECT total, correct, kind FROM runs WHERE id = ?')
+    .prepare<[number], RunCounters>(
+      'SELECT total, correct, kind, lives_remaining, retry_task_id FROM runs WHERE id = ?',
+    )
     .get(runId);
   if (row === undefined) throw new Error(`Забег ${runId} не найден`);
   return progressFrom(row);
@@ -201,8 +222,15 @@ export function startRun(
 
     const runId = Number(
       db.prepare(
-        'INSERT INTO runs (subject, kind, topic_id, started_at) VALUES (?, ?, ?, ?)',
-      ).run(subject, kind, chosen.topic.id, now.toISOString()).lastInsertRowid,
+        `INSERT INTO runs (subject, kind, topic_id, started_at, lives_remaining)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(
+        subject,
+        kind,
+        chosen.topic.id,
+        now.toISOString(),
+        kind === 'run' ? RUN_LIVES : null,
+      ).lastInsertRowid,
     );
 
     return { runId, resumed: false, progress: readRunProgress(db, runId) };
@@ -220,7 +248,8 @@ function topicChanges(
 } {
   const touched = db
     .prepare<[number], { topic_id: string }>(
-      'SELECT DISTINCT topic_id FROM attempts WHERE run_id = ? ORDER BY topic_id',
+      `SELECT DISTINCT topic_id FROM attempts
+        WHERE run_id = ? AND is_current = 1 ORDER BY topic_id`,
     )
     .all(runId)
     .map((row) => row.topic_id);
@@ -235,7 +264,7 @@ function topicChanges(
               attempts.hint_used, task_bank.difficulty, attempts.created_at
          FROM attempts
          JOIN task_bank ON task_bank.id = attempts.task_id
-        WHERE attempts.topic_id IN (${placeholders})
+        WHERE attempts.topic_id IN (${placeholders}) AND attempts.is_current = 1
         ORDER BY attempts.created_at, attempts.id`,
     )
     .all(...touched);
@@ -328,7 +357,7 @@ export function finishRun(
                 attempts.hint_used, task_bank.difficulty, attempts.created_at
            FROM attempts
            JOIN task_bank ON task_bank.id = attempts.task_id
-          WHERE attempts.run_id = ?
+          WHERE attempts.run_id = ? AND attempts.is_current = 1
           ORDER BY attempts.created_at, attempts.id`,
       )
       .all(runId);
@@ -338,6 +367,17 @@ export function finishRun(
         'run-not-ready',
         `Забег ${runId} нельзя завершить раньше ${RUN_TARGET} ответов`,
       );
+    }
+    if (run.kind === 'run') {
+      const retry = db.prepare<[number], { retry_task_id: number | null }>(
+        'SELECT retry_task_id FROM runs WHERE id = ?',
+      ).get(runId);
+      if (retry?.retry_task_id !== null) {
+        throw new SessionError(
+          'run-not-ready',
+          `Забег ${runId} нельзя завершить, пока доступно исправление ответа`,
+        );
+      }
     }
     if (run.kind === 'triage' && total < TRIAGE_TARGET) {
       const attempted = new Set(attempts.map((attempt) => attempt.topic_id));

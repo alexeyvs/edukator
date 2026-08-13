@@ -26,7 +26,7 @@ import {
 } from './mastery.js';
 import { checkAnswer, type CheckResult, type RejectReason } from './normalize.js';
 import { activeTopics } from './scheduler.js';
-import { issuedTask, learningTaskAtPosition, type BankTask } from './codex/bank.js';
+import { issuedTask, learningTaskAtPosition, readBankTask, type BankTask } from './codex/bank.js';
 import { takeTaskOrSeed } from './codex/seed-bank.js';
 import { duplicateKey, fitsAccept } from './codex/task-schema.js';
 import type { DisputeContext, DisputeReviewer } from './codex/dispute.js';
@@ -43,8 +43,25 @@ export type { IssuedTask } from './issued-task.js';
 
 export { SessionError, type SessionErrorCode };
 
+export interface RetryTaskState {
+  attemptId: number;
+  previousAnswer: string;
+  answer: string;
+  explain: string;
+  joke: string;
+  disputeStatus?: DisputeStatus;
+}
+
+interface NextTaskOk {
+  status: 'ok';
+  task: IssuedTask;
+  retry?: RetryTaskState;
+  /** Снимок прогресса того же run, в котором восстановлено или выдано задание. */
+  progress?: RunProgress;
+}
+
 export type NextTaskResult =
-  | { status: 'ok'; task: IssuedTask }
+  | NextTaskOk
   /** Планировщику нечего предложить: всё освоено или закрыто предпосылками. */
   | { status: 'no-topic' }
   /** Тема выбрана, но очередь и посев по ней пусты. */
@@ -79,7 +96,7 @@ function balanceRunTopics(db: Database, runId: number, topics: Topic[]): Topic[]
   const rows = db.prepare<[number, number], TopicAllocationRow>(
     `SELECT topic_id, COUNT(*) AS allocated
        FROM (
-         SELECT topic_id FROM attempts WHERE run_id = ?
+         SELECT topic_id FROM attempts WHERE run_id = ? AND is_current = 1
          UNION ALL
          SELECT topic_id FROM task_bank
           WHERE issued_run_id = ? AND status = 'used'
@@ -97,8 +114,56 @@ function balanceRunTopics(db: Database, runId: number, topics: Topic[]): Topic[]
     .map(({ topic }) => topic);
 }
 
-function issuedResult(topic: Topic, task: BankTask, exposeHint = true): NextTaskResult {
-  return { status: 'ok', task: projectIssuedTask(topic, task, { exposeHint }) };
+function issuedResult(
+  topic: Topic,
+  task: BankTask,
+  exposeHint = true,
+  progress?: RunProgress,
+): NextTaskOk {
+  return {
+    status: 'ok',
+    task: projectIssuedTask(topic, task, { exposeHint }),
+    ...(progress === undefined ? {} : { progress }),
+  };
+}
+
+function retryResult(
+  db: Database,
+  graph: TopicGraph,
+  run: SessionRun,
+  progress: RunProgress,
+): NextTaskOk {
+  if (run.retry_task_id === null) throw new Error(`Забег ${run.id} не ожидает исправления`);
+  const task = readBankTask(db, run.retry_task_id);
+  if (task === null || task.topicId === undefined) {
+    throw new Error(`Забег ${run.id} ссылается на отсутствующее задание исправления`);
+  }
+  const attempt = db.prepare<
+    [number, number],
+    { id: number; answer: string; dispute_status: DisputeStatus | null }
+  >(
+    `SELECT attempts.id, attempts.answer, disputes.status AS dispute_status
+       FROM attempts
+       LEFT JOIN disputes ON disputes.attempt_id = attempts.id
+      WHERE attempts.run_id = ? AND attempts.task_id = ? AND attempts.is_current = 1
+      ORDER BY disputes.id DESC LIMIT 1`,
+  ).get(run.id, task.id);
+  if (attempt === undefined) {
+    throw new Error(`Забег ${run.id} не хранит текущую попытку для исправления ${task.id}`);
+  }
+  return {
+    status: 'ok',
+    task: projectIssuedTask(topicOf(graph, task.topicId), task),
+    progress,
+    retry: {
+      attemptId: attempt.id,
+      previousAnswer: attempt.answer,
+      answer: task.answer,
+      explain: task.explain,
+      joke: task.joke,
+      ...(attempt.dispute_status === null ? {} : { disputeStatus: attempt.dispute_status }),
+    },
+  };
 }
 
 /**
@@ -123,7 +188,7 @@ function issuedResult(topic: Topic, task: BankTask, exposeHint = true): NextTask
  * забега — а уже выданное по ней задание осталось бы висеть навсегда, потому что
  * `issuedTask` по выпавшей теме никто не спросит.
  */
-export function nextTask(
+function nextTaskFromSnapshot(
   db: Database,
   graph: TopicGraph,
   options: NextTaskOptions = {},
@@ -131,6 +196,7 @@ export function nextTask(
   const now = options.now ?? new Date();
   const log = options.log ?? ((message: string): void => void process.stderr.write(`${message}\n`));
   const run = options.runId === undefined ? undefined : readActiveRun(db, options.runId);
+  const progress = run === undefined ? undefined : runProgress(db, run.id);
   if (run?.kind === 'lesson') {
     if (run.total >= LEARNING_TASK_COUNT) {
       throw new SessionError('run-complete', `Lesson-run ${run.id} достиг цели и готов к завершению`);
@@ -150,7 +216,7 @@ export function nextTask(
     ).get(task.id, run.id) === undefined) {
       throw new SessionError('task-not-in-run', `Задание ${task.id} не принадлежит lesson-run ${run.id}`);
     }
-    return issuedResult(topicOf(graph, task.topicId), task, false);
+    return issuedResult(topicOf(graph, task.topicId), task, false, progress);
   }
   if (run?.kind !== undefined && run.kind !== 'run') {
     throw new SessionError(
@@ -160,7 +226,11 @@ export function nextTask(
         : `Забег ${run.id} является триажем`,
     );
   }
-  if (run !== undefined && runProgress(db, run.id).done) {
+  if (run?.retry_task_id !== null && run?.retry_task_id !== undefined) {
+    if (progress === undefined) throw new Error(`Забег ${run.id} не хранит progress`);
+    return retryResult(db, graph, run, progress);
+  }
+  if (run !== undefined && progress?.done === true) {
     throw new SessionError('run-complete', `Забег ${run.id} достиг цели и готов к завершению`);
   }
   if (run !== undefined && options.subject !== undefined && run.subject !== options.subject) {
@@ -191,7 +261,7 @@ export function nextTask(
     for (const topic of recovery.values()) {
       try {
         const task = issuedTask(db, topic.id, run.id, options.excludeTaskId);
-        if (task !== null) return issuedResult(topic, task);
+        if (task !== null) return issuedResult(topic, task, true, progress);
       } catch (error) {
         log(`выданная тема «${topic.id}» пропущена: ${(error as Error).message}`);
       }
@@ -229,7 +299,7 @@ export function nextTask(
     }
     if (task === null) continue;
 
-    return issuedResult(topic, task);
+    return issuedResult(topic, task, true, progress);
   }
 
   if (firstFailure !== undefined && failed === planned.length) throw firstFailure;
@@ -238,10 +308,25 @@ export function nextTask(
   return { status: 'no-task', topicId: planned[0]?.id ?? first.id };
 }
 
+/**
+ * Выдача и её progress читаются из одного снимка. Иначе другое соединение
+ * могло закрыть ретрай между чтением `retry_task_id`, текущей попытки и
+ * счётчиков, а HTTP-ответ склеил бы уже несовместимые состояния.
+ */
+export function nextTask(
+  db: Database,
+  graph: TopicGraph,
+  options: NextTaskOptions = {},
+): NextTaskResult {
+  return db.transaction(() => nextTaskFromSnapshot(db, graph, options)).immediate();
+}
+
 export interface AnswerRequest {
   taskId: number;
   answer: string;
   runId?: number;
+  /** Идентификатор заменяемой версии; обязателен для явного исправления. */
+  retryAttemptId?: number;
   hintUsed?: boolean;
   durationMs?: number;
   /** Время попытки; по умолчанию — сейчас. Задаётся явно в тестах. */
@@ -277,6 +362,8 @@ interface SessionRun {
   finished_at: string | null;
   total: number;
   correct: number;
+  lives_remaining: number | null;
+  retry_task_id: number | null;
 }
 
 type SessionRunRow = Omit<SessionRun, 'kind'> & { kind: string };
@@ -284,7 +371,9 @@ type SessionRunRow = Omit<SessionRun, 'kind'> & { kind: string };
 function readActiveRun(db: Database, runId: number): SessionRun {
   const row = db
     .prepare<[number], SessionRunRow>(
-      'SELECT id, subject, topic_id, kind, finished_at, total, correct FROM runs WHERE id = ?',
+      `SELECT id, subject, topic_id, kind, finished_at, total, correct,
+              lives_remaining, retry_task_id
+         FROM runs WHERE id = ?`,
     )
     .get(runId);
   if (row === undefined) {
@@ -505,10 +594,40 @@ export function submitAnswer(
       }
     }
 
-    const answered = db
-      .prepare<[number], { id: number }>('SELECT id FROM attempts WHERE task_id = ? LIMIT 1')
-      .get(request.taskId);
-    if (answered !== undefined) {
+    const currentAttempt = db.prepare<
+      [number],
+      { id: number; is_correct: number; hint_used: number; run_id: number | null }
+    >(
+      `SELECT id, is_correct, hint_used, run_id FROM attempts
+        WHERE task_id = ? AND is_current = 1 LIMIT 1`,
+    ).get(request.taskId);
+    const retrying = run?.kind === 'run' && run.retry_task_id === row.id;
+    if (run?.kind === 'run' && run.retry_task_id !== null && !retrying) {
+      throw new SessionError(
+        'task-not-in-run',
+        `Забег ${run.id} ожидает исправления задания ${run.retry_task_id}`,
+      );
+    }
+    if (retrying) {
+      if (currentAttempt === undefined || currentAttempt.run_id !== run.id) {
+        throw new Error(`Забег ${run.id} не хранит текущую версию ответа ${row.id}`);
+      }
+      if (request.retryAttemptId !== currentAttempt.id) {
+        throw new SessionError(
+          'already-answered',
+          `Занятие: исправление должно ссылаться на текущую попытку ${currentAttempt.id}`,
+        );
+      }
+      const open = db.prepare<[number], { id: number }>(
+        "SELECT id FROM disputes WHERE attempt_id = ? AND status = 'open' LIMIT 1",
+      ).get(currentAttempt.id);
+      if (open !== undefined) {
+        throw new SessionError(
+          'run-not-ready',
+          `Забег ${run.id}: исправление недоступно, пока разбирается спор`,
+        );
+      }
+    } else if (currentAttempt !== undefined || request.retryAttemptId !== undefined) {
       throw new SessionError(
         'already-answered',
         `Занятие: на задание ${request.taskId} уже отвечали`,
@@ -549,12 +668,20 @@ export function submitAnswer(
       return { defect: (error as Error).message };
     }
 
+    const effectiveHintUsed = hintUsed || currentAttempt?.hint_used === 1;
+    if (retrying) {
+      db.prepare('UPDATE attempts SET is_current = 0 WHERE id = ?').run(currentAttempt?.id);
+    }
+    const lifeCharged =
+      run?.kind === 'run' && !check.correct && (run.lives_remaining ?? 0) > 0;
     const info = db
       .prepare(
         `INSERT INTO attempts
-          (task_id, topic_id, run_id, answer, is_correct, hint_used, duration_ms, created_at)
+          (task_id, topic_id, run_id, answer, is_correct, hint_used, duration_ms,
+           is_current, life_charged, created_at)
          VALUES
-          (@taskId, @topicId, @runId, @answer, @isCorrect, @hintUsed, @durationMs, @createdAt)`,
+          (@taskId, @topicId, @runId, @answer, @isCorrect, @hintUsed, @durationMs,
+           1, @lifeCharged, @createdAt)`,
       )
       .run({
         taskId: row.id,
@@ -564,19 +691,61 @@ export function submitAnswer(
         // получить заново, а вот разбор спора смотрит именно на исходную.
         answer: request.answer.trim(),
         isCorrect: check.correct ? 1 : 0,
-        hintUsed: hintUsed ? 1 : 0,
+        hintUsed: effectiveHintUsed ? 1 : 0,
         durationMs,
+        lifeCharged: lifeCharged ? 1 : 0,
         createdAt: at.toISOString(),
       });
 
-    const state = recordAttempt(db, row.topic_id, {
-      correct: check.correct,
+    const state = retrying
+      ? recomputeTopicState(db, row.topic_id)
+      : recordAttempt(db, row.topic_id, {
+          correct: check.correct,
+          difficulty: row.difficulty,
+          hintUsed: effectiveHintUsed,
+          at,
+        });
+    const xp = taskXp({
       difficulty: row.difficulty,
-      hintUsed,
-      at,
+      correct: check.correct,
+      hintUsed: effectiveHintUsed,
     });
-    const xp = taskXp({ difficulty: row.difficulty, correct: check.correct, hintUsed });
-    if (run !== undefined) {
+    if (run?.kind === 'run') {
+      if (run.lives_remaining === null) {
+        throw new Error(`Обычный забег ${run.id} не хранит число оставшихся жизней`);
+      }
+      const livesRemaining = run.lives_remaining - (lifeCharged ? 1 : 0);
+      const retryTaskId = !check.correct && lifeCharged ? row.id : null;
+      if (retrying) {
+        db.prepare(
+          `UPDATE runs
+              SET correct = correct + @correct - @previousCorrect,
+                  lives_remaining = @livesRemaining,
+                  retry_task_id = @retryTaskId
+            WHERE id = @runId`,
+        ).run({
+          runId: run.id,
+          correct: check.correct ? 1 : 0,
+          previousCorrect: currentAttempt?.is_correct ?? 0,
+          livesRemaining,
+          retryTaskId,
+        });
+      } else {
+        db.prepare(
+          `UPDATE runs
+              SET total = total + 1,
+                  correct = correct + @correct,
+                  lives_remaining = @livesRemaining,
+                  retry_task_id = @retryTaskId
+            WHERE id = @runId`,
+        ).run({
+          runId: run.id,
+          correct: check.correct ? 1 : 0,
+          livesRemaining,
+          retryTaskId,
+        });
+      }
+    } else if (run !== undefined) {
       db.prepare(
         `UPDATE runs
             SET total = total + 1,
@@ -632,6 +801,42 @@ export function submitAnswer(
   return outcome;
 }
 
+/** Закрывает доступное исправление без возврата уже потраченной жизни. */
+export function skipRetry(db: Database, runId: number, taskId: number): RunProgress {
+  return db.transaction((): RunProgress => {
+    const run = readActiveRun(db, runId);
+    if (run.kind !== 'run' || run.retry_task_id !== taskId) {
+      throw new SessionError(
+        'task-not-in-run',
+        `Забег ${runId} не ожидает исправления задания ${taskId}`,
+      );
+    }
+    const current = db.prepare<[number, number], { id: number }>(
+      `SELECT id FROM attempts
+        WHERE run_id = ? AND task_id = ? AND is_current = 1`,
+    ).get(runId, taskId);
+    if (current === undefined) {
+      throw new Error(`Забег ${runId} не хранит текущую попытку задания ${taskId}`);
+    }
+    const open = db.prepare<[number], { id: number }>(
+      "SELECT id FROM disputes WHERE attempt_id = ? AND status = 'open' LIMIT 1",
+    ).get(current.id);
+    if (open !== undefined) {
+      throw new SessionError(
+        'run-not-ready',
+        `Забег ${runId}: пропуск недоступен, пока разбирается спор`,
+      );
+    }
+    const changed = db.prepare(
+      'UPDATE runs SET retry_task_id = NULL WHERE id = ? AND retry_task_id = ?',
+    ).run(runId, taskId);
+    if (changed.changes !== 1) {
+      throw new SessionError('run-not-ready', `Исправление задания ${taskId} уже закрыто`);
+    }
+    return runProgress(db, runId);
+  }).immediate();
+}
+
 export type DisputeStatus = 'open' | 'upheld' | 'rejected';
 
 export interface OpenDisputeResult {
@@ -653,10 +858,11 @@ export function openDispute(db: Database, attemptId: number): OpenDisputeResult 
         [number],
         {
           id: number; is_correct: number; run_id: number | null;
-          finished_at: string | null; kind: string | null;
+          finished_at: string | null; kind: string | null; is_current: number;
         }
       >(
-        `SELECT attempts.id, attempts.is_correct, attempts.run_id, runs.finished_at, runs.kind
+        `SELECT attempts.id, attempts.is_correct, attempts.run_id, attempts.is_current,
+                runs.finished_at, runs.kind
            FROM attempts
            LEFT JOIN runs ON runs.id = attempts.run_id
           WHERE attempts.id = ?`,
@@ -679,6 +885,13 @@ export function openDispute(db: Database, attemptId: number): OpenDisputeResult 
 
     if (attempt.run_id !== null && attempt.finished_at !== null) {
       throw new SessionError('run-finished', `Забег ${attempt.run_id} уже завершён`);
+    }
+
+    if (attempt.is_current !== 1) {
+      throw new SessionError(
+        'attempt-not-found',
+        `Занятие: попытка ${attemptId} уже заменена исправлением`,
+      );
     }
 
     if (attempt.is_correct === 1) {
@@ -714,6 +927,9 @@ export interface ResolveDisputeResult {
   accept: string[];
   /** Состояние темы после пересчёта; `null`, если пересчитывать было нечего. */
   state: TopicState | null;
+  /** Обновлённый прогресс забега и XP текущей версии ответа. */
+  progress: RunProgress | null;
+  xp: number;
 }
 
 interface DisputeRow {
@@ -729,6 +945,21 @@ interface DisputeRow {
   question: string;
   answer: string;
   accept: string;
+  is_current: number;
+  is_correct: number;
+  life_charged: number;
+  hint_used: number;
+  difficulty: number;
+}
+
+function disputeProgress(db: Database, row: DisputeRow): RunProgress | null {
+  return row.run_id === null ? null : runProgress(db, row.run_id);
+}
+
+function disputeXp(row: DisputeRow): number {
+  return row.status === 'upheld' && row.is_current === 1
+    ? taskXp({ difficulty: row.difficulty, correct: true, hintUsed: row.hint_used === 1 })
+    : 0;
 }
 
 function readDispute(db: Database, disputeId: number): DisputeRow {
@@ -736,9 +967,11 @@ function readDispute(db: Database, disputeId: number): DisputeRow {
     .prepare<[number], DisputeRow>(
       `SELECT disputes.id, disputes.status, disputes.resolution,
               attempts.id AS attempt_id, attempts.run_id, runs.kind AS run_kind,
-              attempts.topic_id,
+              attempts.topic_id, attempts.is_current, attempts.is_correct,
+              attempts.life_charged, attempts.hint_used,
               attempts.answer AS given,
-              task_bank.id AS task_id, task_bank.question, task_bank.answer, task_bank.accept
+              task_bank.id AS task_id, task_bank.question, task_bank.answer, task_bank.accept,
+              task_bank.difficulty
          FROM disputes
          JOIN attempts ON attempts.id = disputes.attempt_id
          LEFT JOIN runs ON runs.id = attempts.run_id
@@ -750,6 +983,17 @@ function readDispute(db: Database, disputeId: number): DisputeRow {
     throw new SessionError('dispute-not-found', `Занятие: спора ${disputeId} нет`);
   }
   return row;
+}
+
+/** Сохранённый результат уже завершённого спора без повторного вызова модели. */
+export function readResolvedDispute(
+  db: Database,
+  disputeId: number,
+): Pick<ResolveDisputeResult, 'progress' | 'xp'> | null {
+  const row = readDispute(db, disputeId);
+  return row.status === 'open'
+    ? null
+    : { progress: disputeProgress(db, row), xp: disputeXp(row) };
 }
 
 /**
@@ -784,6 +1028,8 @@ export async function resolveDispute(
       resolution: dispute.resolution ?? '',
       accept,
       state: null,
+      progress: disputeProgress(db, dispute),
+      xp: disputeXp(dispute),
     };
   }
 
@@ -811,6 +1057,8 @@ export async function resolveDispute(
         resolution: fresh.resolution ?? '',
         accept: current,
         state: null,
+        progress: disputeProgress(db, fresh),
+        xp: disputeXp(fresh),
       };
     }
 
@@ -827,7 +1075,16 @@ export async function resolveDispute(
       if (fresh.run_kind === 'boss' && fresh.run_id !== null) {
         finishBossLoss(db, fresh.run_id, resolvedAt);
       }
-      return { id: disputeId, status, resolution: verdict.note, accept: current, state: null };
+      const rejected = readDispute(db, disputeId);
+      return {
+        id: disputeId,
+        status,
+        resolution: verdict.note,
+        accept: current,
+        state: null,
+        progress: disputeProgress(db, rejected),
+        xp: 0,
+      };
     }
 
     const given = fresh.given.trim();
@@ -846,7 +1103,26 @@ export async function resolveDispute(
     });
     db.prepare('UPDATE attempts SET is_correct = 1 WHERE id = ?').run(fresh.attempt_id);
     if (fresh.run_id !== null) {
-      db.prepare('UPDATE runs SET correct = correct + 1 WHERE id = ?').run(fresh.run_id);
+      if (fresh.run_kind === 'run') {
+        db.prepare(
+          `UPDATE runs
+              SET correct = correct + 1,
+                  lives_remaining = CASE
+                    WHEN @lifeCharged = 1 THEN MIN(3, lives_remaining + 1)
+                    ELSE lives_remaining
+                  END,
+                  retry_task_id = CASE
+                    WHEN retry_task_id = @taskId THEN NULL ELSE retry_task_id
+                  END
+            WHERE id = @runId`,
+        ).run({
+          runId: fresh.run_id,
+          taskId: fresh.task_id,
+          lifeCharged: fresh.life_charged,
+        });
+      } else {
+        db.prepare('UPDATE runs SET correct = correct + 1 WHERE id = ?').run(fresh.run_id);
+      }
       if (fresh.run_kind === 'boss') {
         const fight = readBossFight(db, fresh.run_id);
         if (fight === undefined || !bossFightConsistent(fight)) {
@@ -858,12 +1134,15 @@ export async function resolveDispute(
       }
     }
 
+    const upheld = readDispute(db, disputeId);
     return {
       id: disputeId,
       status,
       resolution: verdict.note,
       accept: next,
       state: recomputeTopicState(db, fresh.topic_id),
+      progress: disputeProgress(db, upheld),
+      xp: disputeXp(upheld),
     };
   }).immediate();
 }

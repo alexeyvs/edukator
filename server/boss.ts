@@ -149,8 +149,8 @@ export function startBoss(
     ensureCompleteBatch(db, batch);
 
     const runId = Number(db.prepare(
-      `INSERT INTO runs (subject, kind, topic_id, started_at)
-       VALUES (?, 'boss', ?, ?)`,
+      `INSERT INTO runs (subject, kind, topic_id, started_at, lives_remaining)
+       VALUES (?, 'boss', ?, ?, NULL)`,
     ).run(topic.subject, topicId, now.toISOString()).lastInsertRowid);
     const activated = db.prepare(
       `UPDATE boss_batches SET status = 'active', run_id = ?, activated_at = ?

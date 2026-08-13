@@ -73,6 +73,7 @@ export function RunScreen({
   const [progress, setProgress] = useState<RunProgress | null>(null);
   const [answer, setAnswer] = useState('');
   const [hintUsed, setHintUsed] = useState(false);
+  const [retryAttemptId, setRetryAttemptId] = useState<number | undefined>();
   const [result, setResult] = useState<AnswerResponse | null>(null);
   const [problem, setProblem] = useState<ScreenProblem | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -84,6 +85,33 @@ export function RunScreen({
   const prefetched = useRef<NextTaskResponse | null>(null);
   const prefetching = useRef<Promise<void> | null>(null);
   const generation = useRef(0);
+
+  const pollDispute = useCallback(async (attemptId: number): Promise<void> => {
+    const token = generation.current;
+    setDisputing(true);
+    let delay = DISPUTE_FIRST_DELAY_MS;
+    try {
+      while (generation.current === token) {
+        const state = await api.dispute(attemptId);
+        if (generation.current !== token) return;
+        setDisputeStatus(state.status);
+        if (state.progress != null) setProgress(state.progress);
+        setResult((previous) => previous === null ? null : {
+          ...previous,
+          ...(state.status === 'upheld' ? { correct: true } : {}),
+          ...(state.xp === undefined ? {} : { xp: state.xp }),
+          ...(state.progress == null ? {} : { progress: state.progress }),
+        });
+        if (state.status !== 'open') return;
+        await wait(delay);
+        delay = Math.min(delay * 2, DISPUTE_MAX_DELAY_MS);
+      }
+    } catch (error) {
+      if (generation.current === token) setProblem(problemOf(error));
+    } finally {
+      if (generation.current === token) setDisputing(false);
+    }
+  }, [api, wait]);
 
   const prefetchNext = useCallback((shownId: number, token = generation.current): void => {
     prefetched.current = null;
@@ -105,14 +133,27 @@ export function RunScreen({
     const shown = { ...next, progress: actualProgress };
     setCurrent(shown);
     setProgress(actualProgress);
-    setAnswer('');
+    setAnswer(next.retry?.previous_answer ?? '');
     setHintUsed(false);
-    setResult(null);
-    setDisputeStatus(null);
+    setRetryAttemptId(undefined);
+    setResult(next.retry === undefined ? null : {
+      attempt_id: next.retry.attempt_id,
+      correct: false,
+      normalized: next.retry.previous_answer,
+      answer: next.retry.answer,
+      explain: next.retry.explain,
+      joke: next.retry.joke,
+      xp: 0,
+      progress: actualProgress,
+    });
+    setDisputeStatus(next.retry?.dispute_status ?? null);
     setProblem(null);
     shownAt.current = Date.now();
-    if (actualProgress.total + 1 < actualProgress.target) prefetchNext(next.task.id);
-  }, [prefetchNext]);
+    if (next.retry?.dispute_status === 'open') void pollDispute(next.retry.attempt_id);
+    if (next.retry === undefined && actualProgress.total + 1 < actualProgress.target) {
+      prefetchNext(next.task.id);
+    }
+  }, [pollDispute, prefetchNext]);
 
   const load = useCallback(async (token = generation.current): Promise<void> => {
     try {
@@ -172,8 +213,10 @@ export function RunScreen({
         answer,
         hintUsed,
         durationMs: Math.max(0, Date.now() - shownAt.current),
+        ...(retryAttemptId === undefined ? {} : { retryAttemptId }),
       });
       if (generation.current !== token) return;
+      setRetryAttemptId(undefined);
       setResult(checked);
       setProgress(checked.progress);
     } catch (error) {
@@ -190,14 +233,14 @@ export function RunScreen({
     }
   }
 
-  async function nextTask(): Promise<void> {
+  async function nextTask(actualProgress = progress): Promise<void> {
     const token = generation.current;
     if (prefetching.current !== null) await prefetching.current;
     if (generation.current !== token) return;
     const ready = prefetched.current;
     prefetched.current = null;
     if (ready !== null) {
-      showTask(ready, progress ?? ready.progress);
+      showTask(ready, actualProgress ?? ready.progress);
       return;
     }
     await load(token);
@@ -221,25 +264,36 @@ export function RunScreen({
     }
   }
 
-  async function dispute(): Promise<void> {
-    if (result === null || disputing) return;
+  function retryAnswer(): void {
+    if (result === null || disputeStatus === 'open' || disputing) return;
+    setRetryAttemptId(result.attempt_id);
+    setAnswer('');
+    setResult(null);
+    setDisputeStatus(null);
+    shownAt.current = Date.now();
+  }
+
+  async function skipRetry(): Promise<void> {
+    if (current === null || result === null || disputeStatus === 'open' || disputing) return;
     const token = generation.current;
-    setDisputing(true);
-    let delay = DISPUTE_FIRST_DELAY_MS;
+    setSubmitting(true);
     try {
-      while (generation.current === token) {
-        const state = await api.dispute(result.attempt_id);
-        if (generation.current !== token) return;
-        setDisputeStatus(state.status);
-        if (state.status !== 'open') return;
-        await wait(delay);
-        delay = Math.min(delay * 2, DISPUTE_MAX_DELAY_MS);
-      }
+      const skipped = await api.skipRetry(runId, current.task.id);
+      if (generation.current !== token) return;
+      setProgress(skipped.progress);
+      setRetryAttemptId(undefined);
+      if (skipped.progress.done) await finishRun();
+      else await nextTask(skipped.progress);
     } catch (error) {
       if (generation.current === token) setProblem(problemOf(error));
     } finally {
-      if (generation.current === token) setDisputing(false);
+      if (generation.current === token) setSubmitting(false);
     }
+  }
+
+  async function dispute(): Promise<void> {
+    if (result === null || disputing) return;
+    await pollDispute(result.attempt_id);
   }
 
   if (learningFinish !== null) return <LearningFinishScreen result={learningFinish} />;
@@ -248,6 +302,7 @@ export function RunScreen({
   if (current === null || progress === null) {
     return <section className="run-card run-state" aria-label="Загрузка задания">Подбираю задание…</section>;
   }
+  const lives = kind === 'run' ? progress.lives : undefined;
 
   return (
     <main className="run-shell">
@@ -266,6 +321,18 @@ export function RunScreen({
             <span style={{ width: `${Math.min(100, progress.total / progress.target * 100)}%` }} />
           </div>
         </div>
+        {lives !== undefined && (
+          <div className="lives-block" aria-label={`Жизни: ${lives.remaining} из ${lives.total}`}>
+            <span className="lives-hearts" aria-hidden="true">
+              {Array.from({ length: lives.total }, (_, index) => (
+                <span className={index < lives.remaining ? 'life-full' : 'life-empty'} key={index}>
+                  {index < lives.remaining ? '♥' : '♡'}
+                </span>
+              ))}
+            </span>
+            <span>Жизни: {lives.remaining} из {lives.total}</span>
+          </div>
+        )}
       </header>
 
       <section className="run-card" aria-labelledby="task-question">
@@ -321,13 +388,29 @@ export function RunScreen({
                   Я всё-таки прав
                 </button>
               )}
+              {kind === 'run' && !result.correct && result.progress.lives?.retryAvailable === true && (
+                <button
+                  className="secondary"
+                  type="button"
+                  onClick={retryAnswer}
+                  disabled={submitting || disputing || disputeStatus === 'open'}
+                >
+                  Исправить ответ
+                </button>
+              )}
               <button
                 className="primary"
                 type="button"
                 disabled={submitting || disputing || disputeStatus === 'open'}
-                onClick={() => void (result.progress.done ? finishRun() : nextTask())}
+                onClick={() => void (
+                  kind === 'run' && !result.correct && result.progress.lives?.retryAvailable === true
+                    ? skipRetry()
+                    : result.progress.done ? finishRun() : nextTask()
+                )}
               >
-                {result.progress.done
+                {kind === 'run' && !result.correct && result.progress.lives?.retryAvailable === true
+                  ? 'Следующее задание'
+                  : result.progress.done
                   ? kind === 'lesson' ? 'Завершить тест' : 'Завершить забег'
                   : 'Следующее задание'}
               </button>

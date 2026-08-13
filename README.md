@@ -187,8 +187,11 @@ Refresh token сохраняется с правами `0600` в
    Четыре верных ответа дают зачёт. Тест начисляет XP, обновляет mastery и
    прогноз, но не заменяет обычный забег и не продлевает серию.
 4. Выбрать карточку плана дня и пройти забег из 12 заданий. Между заданиями
-   могут меняться темы одного предмета; за верные ответы начисляется XP, а
-   финал показывает закрытые и просевшие темы и изменение прогноза.
+   могут меняться темы одного предмета. В начале есть три жизни: каждая из
+   первых трёх ошибок тратит жизнь и разрешает исправить тот же ответ либо
+   перейти дальше; четвёртая ошибка уже окончательна. Исправление не считается
+   новым вопросом, а итог и XP определяются последней версией ответа. Финал
+   показывает закрытые и просевшие темы и изменение прогноза.
 5. Когда освоение темы станет выше 0.75 и фоновый воркер подготовит набор,
    пройти босса: пять свежих заданий подряд без подсказок. Только 5 из 5
    окончательно закрывают тему; после ошибки можно оспорить ответ или признать
@@ -219,8 +222,9 @@ Refresh token сохраняется с правами `0600` в
 | `POST /api/learning/:id/open` | идемпотентно открыть или продолжить чтение |
 | `POST /api/learning/:id/test` | создать или вернуть единственный `lesson`-забег из пяти заданий |
 | `POST /api/learning/run/:runId/finish` | атомарно закрыть тест и материал как `passed` или `failed` |
-| `GET /api/session/next` | задание по выбору планировщика; в забеге — `?runId=<id>`, **без** `answer`, `accept[]`, `explain` и `joke` |
-| `POST /api/session/answer` | `{ task_id, answer, runId?, hint_used?, duration_ms? }` → вердикт, XP, прогресс, разбор, шутка и новое состояние темы; `answer` длиннее 500 символов — 400 |
+| `GET /api/session/next` | задание по выбору планировщика; в забеге — `?runId=<id>`. Обычно эталон и разбор скрыты; при ожидающем исправлении `retry` восстанавливает ошибочный ответ и его разбор |
+| `POST /api/session/answer` | `{ task_id, answer, runId?, hint_used?, duration_ms?, retry_attempt_id? }` → вердикт, XP, прогресс, разбор, шутка и новое состояние темы; `answer` длиннее 500 символов — 400 |
+| `POST /api/session/retry/skip` | `{ runId, task_id }` → отказаться от доступного исправления без возврата потраченной жизни |
 | `POST /api/session/dispute` | `{ attempt_id }` → спор в очередь фоновой перепроверки: 202 при заведении, 200 с текущим `status` при повторном нажатии; нецелый или неположительный `attempt_id` — 400, неизвестный — 404 (`attempt-not-found`), уже засчитанная попытка — 400 (`attempt-correct`: спорить не о чем) |
 | `GET /api/profile`, `PUT /api/profile` | прочитать или изменить профиль и текст знакомства |
 | `GET /api/parents` | единый read-only снимок родительского дашборда за семь суток |
@@ -232,14 +236,18 @@ Refresh token сохраняется с правами `0600` в
   `{ runId, resumed, progress }`;
 - `GET /api/session/next?runId=<id>` → `{ task: { id, topic_id, topic_title,
   subject, question, hint, difficulty, answer_format }, progress: { total,
-  correct, target, done } }`; без `runId` поле `progress` отсутствует, а для
-  `kind = lesson` поле `hint` отсутствует;
+  correct, target, done, lives? } }`; у обычного забега `lives` содержит
+  `{ total: 3, remaining, retryAvailable }`. При ожидающем исправлении ответ
+  дополнительно содержит `{ retry: { attempt_id, previous_answer, answer,
+  explain, joke, dispute_status? } }`; без `runId` поле `progress` отсутствует,
+  а для `kind = lesson` поле `hint` отсутствует;
 - `POST /api/session/answer` → `{ attempt_id, correct, normalized, reason?,
   answer, explain, joke, xp, progress, topic: { id, mastery, attempts,
   next_review } }`, где `progress` равен `null` вне забега, а
   `reason` — `mismatch`, `empty`, `no-number` или `ambiguous-number`;
-- `POST /api/session/dispute` → `{ dispute_id, status }`, где `status` — `open`,
-  `upheld` или `rejected`.
+- `POST /api/session/dispute` → `{ dispute_id, status, progress?, xp? }`, где
+  `status` — `open`, `upheld` или `rejected`; подтверждённый спор обычного
+  забега возвращает обновлённые progress и XP;
 - `GET /api/triage/:id/next` → `{ status: "ok", task, progress }` либо
   `{ status: "done", total, target }`;
 - `POST /api/boss/start` → `{ batchId, runId, resumed }`; следующий вопрос
@@ -294,14 +302,17 @@ KaTeX с `trust: false`, произвольный HTML в содержимом �
 `hint_used`, если передан, обязан быть логическим; `duration_ms` — безопасным
 целым числом миллисекунд не меньше нуля.
 
-Ответ на задание принимается ровно один раз и только по выданному заданию:
+Первичный ответ на задание принимается ровно один раз и только по выданному заданию:
 выдача привязана к конкретному `runId`, поэтому другой забег того же предмета
 не может присвоить её себе. Триаж не принимается обычным `session/next` и не
 разрешает `hint_used: true`. Завершение до 12 ответов, до фактического исчерпания
 триажа или при открытом споре отвечает 409 (`run-not-ready`). После
-12-го ответа обычный забег больше не выдаёт и не принимает задания: до фиксации
-финала это состояние отвечает 409 (`run-complete`).
-Повторный ответ даёт 409, задание из очереди, которое ученику не выдавали, — тоже 409
+12-го уникального ответа обычный забег готов к завершению только после закрытия
+ожидающего исправления. Исправление создаёт новую текущую версию попытки, не
+увеличивает `runs.total` и наследует использованную подсказку; семантические
+расчёты используют только текущую версию, а родительское активное время — все
+версии. Без корректного `retry_attempt_id` повторный ответ даёт 409, задание из
+очереди, которое ученику не выдавали, — тоже 409
 (`task-not-issued`), а `id`, которого в банке нет вовсе, — 404. Когда предлагать
 нечего, `next` перебирает весь план тем и только потом отвечает 503 — 404
 читалось бы как ошибка клиента. Одной пустой темы для отказа мало: ответить по
@@ -359,11 +370,14 @@ EDUKATOR_DB=/absolute/path/edukator.db npm start
 запускаться. Поэтому `:memory:` и файловые системы, на которых WAL недоступен,
 для `EDUKATOR_DB` не подходят.
 
-Текущая схема — **v12**, одиннадцать таблиц: `profile`, `topic_state`,
+Текущая схема — **v13**, одиннадцать таблиц: `profile`, `topic_state`,
 `task_bank`, `runs`, `attempts`, `disputes`, `forecast_snapshots`,
 `boss_batches`, `boss_tasks`, `learning_materials`, `learning_tasks`.
 `runs.kind` допускает `run | triage | boss | lesson`, а `task_bank.status` — в
-том числе `lesson_reserved`. `learning_materials` хранит статус
+том числе `lesson_reserved`. `runs.lives_remaining` и `runs.retry_task_id`
+хранят жизни и ожидающее исправление обычного забега; `attempts.is_current`
+выбирает итоговую версию ответа, а `attempts.life_charged` позволяет спору
+вернуть ровно удержанную этой версией жизнь. `learning_materials` хранит статус
 `preparing | ready | active | passed | failed | rejected | retired`, JSON
 теории, причину рекомендации, оценку времени, `run_id`, `mastery_before` и
 временные отметки. `learning_tasks` фиксирует ровно пять позиций 1–5 и их

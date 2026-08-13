@@ -45,6 +45,24 @@ function answer(correct = true): AnswerResponse {
   };
 }
 
+function lives(remaining: number, retryAvailable: boolean): NonNullable<NextTaskResponse['progress']['lives']> {
+  return { total: 3, remaining, retryAvailable };
+}
+
+function retryableWrong(overrides: Partial<AnswerResponse> = {}): AnswerResponse {
+  return {
+    ...answer(false),
+    progress: {
+      total: 1,
+      correct: 0,
+      target: 12,
+      done: false,
+      lives: lives(2, true),
+    },
+    ...overrides,
+  };
+}
+
 function finishSummary(): FinishRunResponse {
   return {
     runId: 9,
@@ -78,6 +96,7 @@ function apiWith(overrides: Partial<RunApi> = {}): RunApi {
   return {
     next: vi.fn(() => deferred<NextTaskResponse>()),
     answer: vi.fn(() => Promise.resolve(answer())),
+    skipRetry: vi.fn(() => deferred<{ progress: NextTaskResponse['progress'] }>()),
     dispute: vi.fn(() => Promise.resolve({ dispute_id: 7, status: 'rejected' as const })),
     finish: vi.fn(() => deferred<FinishRunResponse>()),
     triageNext: vi.fn(() => deferred<NextTriageResponse>()),
@@ -100,6 +119,7 @@ describe('экран забега', () => {
 
     expect(await screen.findByText('Проверка темы')).toBeInTheDocument();
     expect(screen.getByLabelText('Прогресс: 0 из 5')).toBeInTheDocument();
+    expect(screen.queryByText(/Жизни:/u)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Нужна подсказка' })).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Число'), { target: { value: '1' } });
     fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
@@ -188,6 +208,221 @@ describe('экран забега', () => {
       answer: '2',
       hintUsed: true,
     }));
+  });
+
+  it('показывает обычному забегу три сердца и обновляет их после ошибки', async () => {
+    const first = task(1);
+    first.progress.lives = lives(3, false);
+    const api = apiWith({
+      next: vi.fn().mockResolvedValueOnce(first).mockReturnValue(deferred<NextTaskResponse>()),
+      answer: vi.fn().mockResolvedValue(retryableWrong()),
+    });
+    const view = render(<RunScreen runId={9} api={api} />);
+
+    await screen.findByRole('heading', { name: 'Сколько будет 1 + 1?' });
+    expect(screen.getByText('Жизни: 3 из 3')).toBeInTheDocument();
+    expect(view.container.querySelectorAll('.lives-hearts > span')).toHaveLength(3);
+    expect(view.container.querySelectorAll('.life-full')).toHaveLength(3);
+
+    fireEvent.change(screen.getByLabelText('Число'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+
+    expect(await screen.findByText('Жизни: 2 из 3')).toBeInTheDocument();
+    expect(view.container.querySelectorAll('.life-full')).toHaveLength(2);
+    expect(view.container.querySelectorAll('.life-empty')).toHaveLength(1);
+  });
+
+  it('исправляет ответ с очищенным вводом, сохранённой подсказкой и ссылкой на попытку', async () => {
+    const first = task(1);
+    first.progress.lives = lives(3, false);
+    const corrected = answer(true);
+    corrected.progress = {
+      total: 1, correct: 1, target: 12, done: false, lives: lives(2, false),
+    };
+    const submitAnswer = vi.fn()
+      .mockResolvedValueOnce(retryableWrong())
+      .mockResolvedValueOnce(corrected);
+    const api = apiWith({
+      next: vi.fn().mockResolvedValueOnce(first).mockReturnValue(deferred<NextTaskResponse>()),
+      answer: submitAnswer,
+    });
+    render(<RunScreen runId={9} api={api} />);
+
+    await screen.findByRole('heading', { name: 'Сколько будет 1 + 1?' });
+    fireEvent.click(screen.getByRole('button', { name: 'Нужна подсказка' }));
+    fireEvent.change(screen.getByLabelText('Число'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+
+    expect(await screen.findByRole('button', { name: 'Я всё-таки прав' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Исправить ответ' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Следующее задание' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Исправить ответ' }));
+
+    const input = screen.getByLabelText('Число');
+    expect(input).toHaveValue('');
+    expect(screen.getByText('Сложи одинаковые числа.')).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+
+    expect(await screen.findByText('Верно')).toBeInTheDocument();
+    expect(submitAnswer).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      taskId: 1,
+      answer: '2',
+      hintUsed: true,
+      retryAttemptId: 41,
+    }));
+    expect(screen.getByLabelText('Прогресс: 1 из 12')).toBeInTheDocument();
+  });
+
+  it('пропускает исправление и показывает предзагруженное следующее задание', async () => {
+    const first = task(1, 'Первый вопрос');
+    first.progress.lives = lives(3, false);
+    const second = task(2, 'Второй вопрос');
+    second.progress.lives = lives(3, false);
+    const next = vi.fn()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(second)
+      .mockReturnValue(deferred<NextTaskResponse>());
+    const skipRetry = vi.fn().mockResolvedValue({
+      progress: { total: 1, correct: 0, target: 12, done: false, lives: lives(2, false) },
+    });
+    const api = apiWith({ next, answer: vi.fn().mockResolvedValue(retryableWrong()), skipRetry });
+    render(<RunScreen runId={9} api={api} />);
+
+    await screen.findByRole('heading', { name: 'Первый вопрос' });
+    await waitFor(() => expect(next).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getByLabelText('Число'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Следующее задание' }));
+
+    expect(await screen.findByRole('heading', { name: 'Второй вопрос' })).toBeInTheDocument();
+    expect(skipRetry).toHaveBeenCalledWith(9, 1);
+    expect(screen.getByLabelText('Прогресс: 1 из 12')).toBeInTheDocument();
+    expect(screen.getByText('Жизни: 2 из 3')).toBeInTheDocument();
+  });
+
+  it('после пропуска исправления двенадцатого ответа сразу завершает забег', async () => {
+    const last = task(12, 'Последняя ошибка');
+    last.progress = {
+      total: 11, correct: 10, target: 12, done: false, lives: lives(3, false),
+    };
+    const wrong = retryableWrong({
+      progress: { total: 12, correct: 10, target: 12, done: false, lives: lives(2, true) },
+    });
+    const api = apiWith({
+      next: vi.fn().mockResolvedValue(last),
+      answer: vi.fn().mockResolvedValue(wrong),
+      skipRetry: vi.fn().mockResolvedValue({
+        progress: { total: 12, correct: 10, target: 12, done: true, lives: lives(2, false) },
+      }),
+      finish: vi.fn().mockResolvedValue(finishSummary()),
+    });
+    render(<RunScreen runId={9} api={api} />);
+
+    await screen.findByRole('heading', { name: 'Последняя ошибка' });
+    fireEvent.change(screen.getByLabelText('Число'), { target: { value: '25' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Следующее задание' }));
+
+    expect(await screen.findByRole('heading', { name: 'Вот что получилось' })).toBeInTheDocument();
+    expect(api.skipRetry).toHaveBeenCalledWith(9, 12);
+    expect(api.finish).toHaveBeenCalledWith(9);
+  });
+
+  it('после reload восстанавливает ошибку и доступные действия из next.retry', async () => {
+    const restored = task(4, 'Восстановленный вопрос');
+    restored.progress = {
+      total: 4, correct: 3, target: 12, done: false, lives: lives(1, true),
+    };
+    restored.retry = {
+      attempt_id: 77,
+      previous_answer: 'неверный ответ',
+      answer: 'верный ответ',
+      explain: 'Так работает правило.',
+      joke: 'Попытка номер два уже разминается.',
+      dispute_status: 'rejected',
+    };
+    const next = vi.fn().mockResolvedValue(restored);
+    const api = apiWith({ next });
+    render(<RunScreen runId={9} api={api} />);
+
+    expect(await screen.findByText('Пока не сошлось')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('неверный ответ')).toBeInTheDocument();
+    expect(screen.getByText('верный ответ')).toBeInTheDocument();
+    expect(screen.getByText('Так работает правило.')).toBeInTheDocument();
+    expect(screen.getByText('Попытка номер два уже разминается.')).toBeInTheDocument();
+    expect(screen.getByText('Проверил ещё раз: эталон остаётся в силе.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Исправить ответ' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Следующее задание' })).toBeEnabled();
+    expect(next).toHaveBeenCalledTimes(1);
+  });
+
+  it('после reload блокирует исправление и пропуск, пока спор открыт', async () => {
+    const restored = task(4, 'Вопрос со спором');
+    restored.progress = {
+      total: 4, correct: 3, target: 12, done: false, lives: lives(2, true),
+    };
+    restored.retry = {
+      attempt_id: 78,
+      previous_answer: 'мой ответ',
+      answer: 'эталон',
+      explain: 'Разбор.',
+      joke: 'Шутка.',
+      dispute_status: 'open',
+    };
+    const verdict = controlled<{ dispute_id: number; status: 'rejected' }>();
+    const skipRetry = vi.fn();
+    const api = apiWith({
+      next: vi.fn().mockResolvedValue(restored),
+      dispute: vi.fn(() => verdict.promise),
+      skipRetry,
+    });
+    render(<RunScreen runId={9} api={api} />);
+
+    expect(await screen.findByText('Разбираюсь. Это может занять пару минут…')).toBeInTheDocument();
+    const retry = screen.getByRole('button', { name: 'Исправить ответ' });
+    const skip = screen.getByRole('button', { name: 'Следующее задание' });
+    expect(retry).toBeDisabled();
+    expect(skip).toBeDisabled();
+    fireEvent.click(retry);
+    fireEvent.click(skip);
+    expect(skipRetry).not.toHaveBeenCalled();
+    expect(api.dispute).toHaveBeenCalledWith(78);
+
+    verdict.resolve({ dispute_id: 9, status: 'rejected' });
+    expect(await screen.findByText('Проверил ещё раз: эталон остаётся в силе.')).toBeInTheDocument();
+    expect(retry).toBeEnabled();
+    expect(skip).toBeEnabled();
+  });
+
+  it('после подтверждённого спора возвращает жизнь, XP и закрывает исправление', async () => {
+    const first = task(1);
+    first.progress.lives = lives(3, false);
+    const api = apiWith({
+      next: vi.fn().mockResolvedValueOnce(first).mockReturnValue(deferred<NextTaskResponse>()),
+      answer: vi.fn().mockResolvedValue(retryableWrong()),
+      dispute: vi.fn().mockResolvedValue({
+        dispute_id: 7,
+        status: 'upheld',
+        xp: 25,
+        progress: {
+          total: 1, correct: 1, target: 12, done: false, lives: lives(3, false),
+        },
+      }),
+    });
+    render(<RunScreen runId={9} api={api} />);
+
+    await screen.findByRole('heading', { name: 'Сколько будет 1 + 1?' });
+    fireEvent.change(screen.getByLabelText('Число'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Я всё-таки прав' }));
+
+    expect(await screen.findByText('Ты был прав — баллы вернулись.')).toBeInTheDocument();
+    expect(screen.getByText('Верно')).toBeInTheDocument();
+    expect(screen.getByText('+25 XP')).toBeInTheDocument();
+    expect(screen.getByText('Жизни: 3 из 3')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Исправить ответ' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Следующее задание' })).toBeEnabled();
   });
 
   it('предзагружает следующее задание сразу после показа текущего', async () => {

@@ -154,7 +154,7 @@ function recentErrors(db: Database, topicId: string): LearningErrorContext[] {
   return db.prepare<[string, number], LearningErrorContext>(
     `SELECT task_bank.question, attempts.answer
        FROM attempts JOIN task_bank ON task_bank.id = attempts.task_id
-      WHERE attempts.topic_id = ? AND attempts.is_correct = 0
+      WHERE attempts.topic_id = ? AND attempts.is_correct = 0 AND attempts.is_current = 1
       ORDER BY attempts.created_at DESC, attempts.id DESC LIMIT ?`,
   ).all(topicId, RECENT_LEARNING_ERRORS).reverse();
 }
