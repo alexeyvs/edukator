@@ -121,11 +121,12 @@ describe('слой данных учебных материалов', () => {
     const { materialId, taskIds } = readyMaterial(db);
 
     expect(db.prepare(
-      'SELECT status, content, updated_at FROM learning_materials WHERE id = ?',
+      'SELECT status, content, updated_at, ready_at FROM learning_materials WHERE id = ?',
     ).get(materialId)).toEqual({
       status: 'ready',
       content: JSON.stringify(CONTENT),
       updated_at: '2026-08-09T10:05:00.000Z',
+      ready_at: '2026-08-09T10:05:00.000Z',
     });
     expect(db.prepare(
       `SELECT learning_tasks.task_id, learning_tasks.position, task_bank.status

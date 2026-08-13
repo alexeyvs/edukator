@@ -371,9 +371,9 @@ export function reserveLearningTasks(
     result.stored.forEach(({ id }, index) => link.run(materialId, id, index + 1));
     const changed = db.prepare(
       `UPDATE learning_materials
-          SET content = ?, status = 'ready', updated_at = ?
+          SET content = ?, status = 'ready', updated_at = ?, ready_at = ?
         WHERE id = ? AND status = 'preparing'`,
-    ).run(serialized, nowIso, materialId);
+    ).run(serialized, nowIso, nowIso, materialId);
     if (changed.changes !== 1) throw new Error(`Банк заданий: claim материала ${materialId} изменился`);
     return { ...result, ready: true };
   }).immediate();

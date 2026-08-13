@@ -125,7 +125,9 @@ function timestamp(value: Date, operation: string): string {
 
 function materialRow(db: Database, materialId: number): MaterialRow {
   const row = db.prepare<[number], MaterialRow>(
-    `SELECT id, subject, topic_id, status, run_id, mastery_before, created_at, updated_at
+    `SELECT id, subject, topic_id, status, mastery_before, created_at, updated_at,
+            (SELECT run_id FROM learning_runs WHERE material_id = learning_materials.id
+              ORDER BY attempt_number DESC LIMIT 1) AS run_id
        FROM learning_materials WHERE id = ?`,
   ).get(materialId);
   if (row === undefined) {
@@ -137,8 +139,10 @@ function materialRow(db: Database, materialId: number): MaterialRow {
 /** Карточки главного экрана: claim и закрытая история наружу не попадают. */
 export function learningMaterialCards(db: Database): LearningMaterialCard[] {
   return db.prepare<[], PublicMaterialRow>(
-    `SELECT id, subject, topic_id, status, run_id, mastery_before,
-            content, recommendation_reason, estimated_minutes, created_at, updated_at
+    `SELECT id, subject, topic_id, status, mastery_before,
+            content, recommendation_reason, estimated_minutes, created_at, updated_at,
+            (SELECT run_id FROM learning_runs WHERE material_id = learning_materials.id
+              ORDER BY attempt_number DESC LIMIT 1) AS run_id
        FROM learning_materials
       WHERE status IN ('ready', 'active')
       ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, created_at, id`,
@@ -155,8 +159,10 @@ export function learningMaterialCards(db: Database): LearningMaterialCard[] {
 /** Безопасно разбирает только опубликованное содержимое и текущий прогресс. */
 export function readLearningMaterial(db: Database, materialId: number): LearningMaterialView {
   const row = db.prepare<[number], PublicMaterialRow>(
-    `SELECT id, subject, topic_id, status, run_id, mastery_before,
-            content, recommendation_reason, estimated_minutes, created_at, updated_at
+    `SELECT id, subject, topic_id, status, mastery_before,
+            content, recommendation_reason, estimated_minutes, created_at, updated_at,
+            (SELECT run_id FROM learning_runs WHERE material_id = learning_materials.id
+              ORDER BY attempt_number DESC LIMIT 1) AS run_id
        FROM learning_materials WHERE id = ?`,
   ).get(materialId);
   if (row === undefined) {
@@ -341,7 +347,7 @@ export interface StartLearningRunResult {
   resumed: boolean;
 }
 
-/** Создаёт единственный lesson-run либо возвращает уже связанный с материалом. */
+/** Создаёт первый lesson-run либо возвращает уже связанный незавершённый. */
 export function startLearningRun(
   db: Database,
   materialId: number,
@@ -379,14 +385,18 @@ export function startLearningRun(
     ).run(material.subject, material.topic_id, nowIso).lastInsertRowid);
     const linked = db.prepare(
       `UPDATE learning_materials
-          SET run_id = ?, mastery_before = (
+          SET mastery_before = (
                 SELECT mastery FROM topic_state WHERE topic_id = learning_materials.topic_id
               ), updated_at = ?
-        WHERE id = ? AND status = 'active' AND run_id IS NULL`,
-    ).run(runId, nowIso, materialId);
+        WHERE id = ? AND status = 'active'
+          AND NOT EXISTS (SELECT 1 FROM learning_runs WHERE material_id = learning_materials.id)`,
+    ).run(nowIso, materialId);
     if (linked.changes !== 1) {
       throw new LearningError('learning-inconsistent', `Материал ${materialId} изменился во время старта теста`);
     }
+    db.prepare(
+      `INSERT INTO learning_runs (material_id, run_id, attempt_number) VALUES (?, ?, 1)`,
+    ).run(materialId, runId);
     db.prepare(
       `UPDATE task_bank SET issued_run_id = ?
         WHERE id IN (SELECT task_id FROM learning_tasks WHERE material_id = ?)`,
@@ -422,10 +432,12 @@ export function finishLearningMaterial(
     }>(
       `SELECT learning_materials.id, learning_materials.subject,
               learning_materials.topic_id, learning_materials.status,
-              learning_materials.run_id, learning_materials.mastery_before,
+              learning_runs.run_id, learning_materials.mastery_before,
               learning_materials.created_at, learning_materials.updated_at,
               runs.finished_at, runs.summary, runs.total, runs.correct, runs.kind AS run_kind
-         FROM learning_materials JOIN runs ON runs.id = learning_materials.run_id
+         FROM learning_runs
+         JOIN learning_materials ON learning_materials.id = learning_runs.material_id
+         JOIN runs ON runs.id = learning_runs.run_id
         WHERE runs.id = ?`,
     ).get(runId);
     if (joined === undefined) {

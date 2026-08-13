@@ -202,7 +202,10 @@ function nextTaskFromSnapshot(
       throw new SessionError('run-complete', `Lesson-run ${run.id} достиг цели и готов к завершению`);
     }
     const material = db.prepare<[number], { id: number; status: string }>(
-      `SELECT id, status FROM learning_materials WHERE run_id = ?`,
+      `SELECT learning_materials.id, learning_materials.status
+         FROM learning_runs
+         JOIN learning_materials ON learning_materials.id = learning_runs.material_id
+        WHERE learning_runs.run_id = ?`,
     ).get(run.id);
     if (material === undefined || material.status !== 'active') {
       throw new SessionError('task-not-in-run', `Lesson-run ${run.id} не связан с активным материалом`);
@@ -581,9 +584,10 @@ export function submitAnswer(
     if (run?.kind === 'lesson') {
       const position = db.prepare<[number, number], { position: number }>(
         `SELECT learning_tasks.position
-           FROM learning_materials
+           FROM learning_runs
+           JOIN learning_materials ON learning_materials.id = learning_runs.material_id
            JOIN learning_tasks ON learning_tasks.material_id = learning_materials.id
-          WHERE learning_materials.run_id = ? AND learning_tasks.task_id = ?
+          WHERE learning_runs.run_id = ? AND learning_tasks.task_id = ?
             AND learning_materials.status = 'active'`,
       ).get(run.id, row.id)?.position;
       if (position !== run.total + 1) {

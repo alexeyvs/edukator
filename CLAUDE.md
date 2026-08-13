@@ -142,9 +142,9 @@ npm run prefetch                  # ручной прогрев/экспорт �
   файл, `fsync`, `rename`. Такой файл пишется только через `writeFileAtomic` —
   оборванная запись оставила бы вместо снимка битый JSON. Уборка в `catch`
   обёрнута своими `try`: отказ закрытия не имеет права заслонить причину.
-- Схема версии 13 содержит одиннадцать таблиц: `profile`, `topic_state`, `task_bank`,
+- Схема версии 14 содержит двенадцать таблиц: `profile`, `topic_state`, `task_bank`,
   `runs`, `attempts`, `disputes`, `forecast_snapshots`, `boss_batches` и
-  `boss_tasks`, `learning_materials`, `learning_tasks`. `topic_state.closed_at`
+  `boss_tasks`, `learning_materials`, `learning_runs`, `learning_tasks`. `topic_state.closed_at`
   закрывает тему постоянно;
   `task_bank.status = 'boss_reserved'` не виден обычной выдаче, а порядок боя
   задаётся только `boss_tasks.position`, не `task_bank.id` и не временем.
