@@ -620,6 +620,87 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(family.actions, [False])
         self.assertEqual(family.refreshes, 1)
 
+    async def test_confirmed_unlock_clears_block_renewal_marker(self) -> None:
+        family = FakeFamily(blocked=True)
+        state = ReconcileState(block_renewed_at=5)
+
+        await reconcile(UNLOCKED, family, state, 10, 300, lambda _: None)
+
+        self.assertIsNone(state.block_renewed_at)
+        self.assertFalse(state.block_renewal_uncertain)
+
+        # An independently-created short block must not be mistaken for the old
+        # controller-owned UNTIL when the server asks to block again.
+        family.blocked = True
+        await reconcile(LOCKED, family, state, 20, 300, lambda _: None)
+
+        self.assertEqual(family.actions, [False, True])
+        self.assertEqual(state.block_renewed_at, 20)
+
+    async def test_unblocked_noop_clears_block_renewal_marker(self) -> None:
+        family = FakeFamily(blocked=False)
+        state = ReconcileState(
+            actual_blocked=False,
+            desired_blocked=False,
+            verified_at=10,
+            block_renewed_at=5,
+        )
+
+        await reconcile(UNLOCKED, family, state, 20, 300, lambda _: None)
+
+        self.assertEqual(family.actions, [])
+        self.assertIsNone(state.block_renewed_at)
+        self.assertFalse(state.block_renewal_uncertain)
+
+    async def test_ambiguous_unlock_keeps_but_invalidates_marker_until_retry(
+        self,
+    ) -> None:
+        gate = forced_unlocked_gate()
+        for applied_before_failure in (False, True):
+            with self.subTest(applied=applied_before_failure):
+                family = FailFirstUnlockFamily(
+                    blocked=True,
+                    apply_before_failure=applied_before_failure,
+                )
+                state = ReconcileState(block_renewed_at=5)
+
+                with self.assertRaisesRegex(RuntimeError, "response lost"):
+                    await reconcile(gate, family, state, 10, 300, lambda _: None)
+
+                self.assertEqual(state.block_renewed_at, 5)
+                self.assertTrue(state.block_renewal_uncertain)
+
+                await reconcile(gate, family, state, 20, 300, lambda _: None)
+
+                self.assertEqual(family.actions, [False])
+                self.assertIsNone(state.block_renewed_at)
+                self.assertFalse(state.block_renewal_uncertain)
+
+    async def test_locked_gate_reapplies_after_ambiguous_unlock(self) -> None:
+        family = FailFirstUnlockFamily(blocked=True, apply_before_failure=True)
+        state = ReconcileState(
+            actual_blocked=True,
+            desired_blocked=True,
+            verified_at=5,
+            block_renewed_at=5,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "response lost"):
+            await reconcile(
+                forced_unlocked_gate(),
+                family,
+                state,
+                10,
+                300,
+                lambda _: None,
+            )
+
+        await reconcile(LOCKED, family, state, 20, 300, lambda _: None)
+
+        self.assertEqual(family.actions, [False, True])
+        self.assertEqual(state.block_renewed_at, 20)
+        self.assertFalse(state.block_renewal_uncertain)
+
     async def test_applies_both_forced_states_through_effective_gate(self) -> None:
         family = FakeFamily(blocked=True)
         state = ReconcileState()
@@ -810,6 +891,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(family.actions, [True, True])
         self.assertEqual(state.block_renewed_at, 10 + BLOCK_RENEW_SECONDS)
+        self.assertFalse(state.block_renewal_uncertain)
 
     async def test_long_locked_poll_wakes_for_block_renewal(self) -> None:
         family = FakeFamily(blocked=True)

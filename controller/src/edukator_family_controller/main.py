@@ -32,6 +32,7 @@ class ReconcileState:
     desired_blocked: bool | None = None
     verified_at: float = 0.0
     block_renewed_at: float | None = None
+    block_renewal_uncertain: bool = False
     access_expires_at: datetime | None = None
     last_gate_desired_blocked: bool | None = None
 
@@ -79,7 +80,7 @@ def cap_delay_to_safety_wake(
         renewed_at = state.block_renewed_at
         until_renewal = (
             0.0
-            if renewed_at is None
+            if renewed_at is None or state.block_renewal_uncertain
             else renewed_at + BLOCK_RENEW_SECONDS - monotonic_now
         )
         delay = min(delay, max(MIN_POLL_SECONDS, until_renewal))
@@ -87,6 +88,8 @@ def cap_delay_to_safety_wake(
 
 
 def block_renewal_due(state: ReconcileState, now: float) -> bool:
+    if state.block_renewal_uncertain:
+        return True
     renewed_at = state.block_renewed_at
     return renewed_at is None or now - renewed_at >= BLOCK_RENEW_SECONDS
 
@@ -118,11 +121,19 @@ async def reconcile(
     renew_block = desired and block_renewal_due(state, now)
     if state.actual_blocked != desired or renew_block:
         was_blocked = state.actual_blocked is True
+        if not desired:
+            # CANCEL may take effect even when its response is lost. Preserve the
+            # timestamp for diagnostics, but never trust it after such ambiguity.
+            state.block_renewal_uncertain = True
         await family.set_desktop_blocked(desired)
         state.actual_blocked = desired
         state.verified_at = now
         if desired:
             state.block_renewed_at = now
+            state.block_renewal_uncertain = False
+        else:
+            state.block_renewed_at = None
+            state.block_renewal_uncertain = False
         action = "блокировка продлена" if desired and was_blocked else (
             "заблокирован" if desired else "разблокирован"
         )
@@ -131,6 +142,11 @@ async def reconcile(
             f"завершено {gate.completed} из {gate.required}"
         )
     state.desired_blocked = desired
+    if not desired:
+        # A refreshed or cached unblocked no-op also confirms the old controller
+        # block no longer describes the current Family Safety state.
+        state.block_renewed_at = None
+        state.block_renewal_uncertain = False
     if next_access_expires_at is None:
         state.access_expires_at = None
 
@@ -173,6 +189,7 @@ async def ensure_fail_closed(
     if not actual_blocked or renew_block:
         await family.set_desktop_blocked(True)
         state.block_renewed_at = now
+        state.block_renewal_uncertain = False
         action = "блокировка продлена" if actual_blocked else "заблокирован"
         log(f"Desktop {action}: {reason}")
     state.actual_blocked = True
