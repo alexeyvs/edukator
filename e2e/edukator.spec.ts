@@ -431,3 +431,49 @@ test('/parents напрямую и после reload показывает про
     await harness.close();
   }
 });
+
+test('/parents меняет эффективный доступ: разблокировать, по плану, заблокировать', async ({ page }) => {
+  const parentPin = '123456';
+  const harness = await startE2eHarness({ parentPin });
+  try {
+    await page.goto(`${harness.url}/parents`);
+    await expect(page.getByRole('heading', { name: 'Картина подготовки без приукрашивания' })).toBeVisible();
+    await page.getByLabel('PIN родителя').fill(parentPin);
+
+    await page.getByRole('button', { name: 'Разблокировать' }).click();
+    await page.getByRole('dialog', { name: 'Временно разблокировать компьютер?' })
+      .getByRole('button', { name: 'Разблокировать' }).click();
+    await expect(page.getByRole('region', { name: 'Компьютер разблокирован' }))
+      .toContainText('Временный режим');
+    expect(await (await page.request.get(`${harness.url}/api/gate/status`)).json()).toMatchObject({
+      automaticUnlocked: false,
+      override: { mode: 'unlocked' },
+      unlocked: true,
+    });
+
+    await page.getByRole('button', { name: 'По плану' }).click();
+    await page.getByRole('dialog', { name: 'Вернуть режим «По плану»?' })
+      .getByRole('button', { name: 'Вернуть режим «По плану»' }).click();
+    await expect(page.getByRole('region', { name: 'Компьютер заблокирован' }))
+      .toContainText('Режим по плану');
+    expect(await (await page.request.get(`${harness.url}/api/gate/status`)).json()).toMatchObject({
+      automaticUnlocked: false,
+      override: null,
+      unlocked: false,
+    });
+
+    await page.getByRole('button', { name: 'Заблокировать' }).click();
+    await page.getByRole('dialog', { name: 'Временно заблокировать компьютер?' })
+      .getByRole('button', { name: 'Заблокировать' }).click();
+    await expect(page.getByRole('region', { name: 'Компьютер заблокирован' }))
+      .toContainText('Временный режим');
+    expect(await (await page.request.get(`${harness.url}/api/gate/status`)).json()).toMatchObject({
+      automaticUnlocked: false,
+      override: { mode: 'blocked' },
+      unlocked: false,
+    });
+    harness.assertCodexNotCalled();
+  } finally {
+    await harness.close();
+  }
+});

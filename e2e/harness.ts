@@ -35,6 +35,7 @@ interface HarnessOptions {
   controlledWorker?: boolean;
   controlledDispute?: boolean;
   learningForecastFixture?: Subject;
+  parentPin?: string;
 }
 
 function writeCurriculum(directory: string): void {
@@ -238,6 +239,7 @@ export async function startE2eHarness(
     seedDir,
     review,
     now: () => NOW,
+    ...(options.parentPin === undefined ? {} : { parentPin: options.parentPin }),
   });
   const db = openDatabase(process.env.EDUKATOR_DB);
   const graph = loadCurriculum(curriculumDir);
