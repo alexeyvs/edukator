@@ -102,6 +102,8 @@ describe('маршруты забега', () => {
       gate: {
         day: string; required: number; completed: number; remaining: number;
         learning: { materialId: number | null; required: boolean; passed: boolean };
+        automaticUnlocked: boolean;
+        override: null;
         unlocked: boolean;
       };
       topics: Array<{
@@ -120,7 +122,8 @@ describe('маршруты забега', () => {
     expect(plan.streak).toEqual({ current: 0, best: 0, completedToday: false });
     expect(plan.gate).toEqual({
       day: '2026-08-08', required: 3, completed: 0, remaining: 3,
-      learning: { materialId: null, required: false, passed: false }, unlocked: false,
+      learning: { materialId: null, required: false, passed: false },
+      automaticUnlocked: false, override: null, unlocked: false,
     });
     expect(plan.topics).toHaveLength(3);
     expect(plan.topics[0]).toMatchObject({
@@ -406,7 +409,8 @@ describe('маршруты забега', () => {
     expect(status.statusCode).toBe(200);
     expect(status.json()).toEqual({
       day: '2026-08-08', required: 3, completed: 2, remaining: 1,
-      learning: { materialId: null, required: false, passed: false }, unlocked: false,
+      learning: { materialId: null, required: false, passed: false },
+      automaticUnlocked: false, override: null, unlocked: false,
     });
     expect((plan.json() as { gate: unknown }).gate).toEqual(status.json());
 

@@ -383,9 +383,12 @@ EDUKATOR_DB=/absolute/path/edukator.db npm start
 запускаться. Поэтому `:memory:` и файловые системы, на которых WAL недоступен,
 для `EDUKATOR_DB` не подходят.
 
-Текущая схема — **v15**, двенадцать таблиц: `profile`, `topic_state`,
+Текущая схема — **v16**, тринадцать таблиц: `profile`, `topic_state`,
 `task_bank`, `runs`, `attempts`, `disputes`, `forecast_snapshots`,
-`boss_batches`, `boss_tasks`, `learning_materials`, `learning_runs`, `learning_tasks`.
+`boss_batches`, `boss_tasks`, `learning_materials`, `learning_runs`, `learning_tasks`,
+`computer_access_override`. Последняя хранит singleton-команду `blocked | unlocked`
+с временем изменения и сроком до следующей московской полуночи; после срока
+дневной доступ снова определяется автоматически.
 `runs.kind` допускает `run | triage | boss | lesson`, а `task_bank.status` — в
 том числе `lesson_reserved`. `runs.lives_remaining` и `runs.retry_task_id`
 хранят жизни и ожидающее исправление обычного забега; `attempts.is_current`

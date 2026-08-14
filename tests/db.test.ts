@@ -337,6 +337,14 @@ function createVersionThirteenDatabase(path: string): Database {
   return legacy;
 }
 
+/** v15 отличается от v16 только отсутствием ручной команды доступа. */
+function createVersionFifteenDatabase(path: string): Database {
+  const legacy = openDatabase(path);
+  legacy.exec('DROP TABLE computer_access_override;');
+  legacy.pragma('user_version = 15');
+  return legacy;
+}
+
 describe('база данных', () => {
   let tempDir: string;
   let dbFile: string;
@@ -361,10 +369,10 @@ describe('база данных', () => {
     // рабочую базу, поэтому число прибито буквально и меняется только вместе с
     // новой ступенью и её тестом обновления.
     it('держит номер версии схемы', () => {
-      expect(SCHEMA_VERSION).toBe(15);
+      expect(SCHEMA_VERSION).toBe(16);
     });
 
-    it('создаёт все двенадцать таблиц на пустой базе', () => {
+    it('создаёт все тринадцать таблиц на пустой базе', () => {
       expect(tableNames(db)).toEqual([...TABLES].sort());
     });
 
@@ -1151,6 +1159,40 @@ describe('база данных', () => {
       } finally {
         migrated.close();
       }
+    });
+
+    it('мигрирует v15→v16 и добавляет пустой singleton ручной команды', () => {
+      const path = join(tempDir, 'версия-15.db');
+      const legacy = createVersionFifteenDatabase(path);
+      seedTopic(legacy, 'math.saved');
+      legacy.close();
+
+      const migrated = openDatabase(path);
+      try {
+        expect((migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version)
+          .toBe(16);
+        expect(migrated.prepare('SELECT * FROM computer_access_override').all()).toEqual([]);
+        expect(migrated.prepare('SELECT topic_id FROM topic_state').get())
+          .toEqual({ topic_id: 'math.saved' });
+      } finally {
+        migrated.close();
+      }
+    });
+
+    it('ограничивает singleton, режим и порядок времён ручной команды', () => {
+      const insert = db.prepare(
+        `INSERT INTO computer_access_override (id, mode, changed_at, expires_at)
+         VALUES (?, ?, ?, ?)`,
+      );
+      expect(() => insert.run(
+        2, 'blocked', '2026-08-08T08:00:00.000Z', '2026-08-08T21:00:00.000Z',
+      )).toThrow(/CHECK constraint failed/u);
+      expect(() => insert.run(
+        1, 'automatic', '2026-08-08T08:00:00.000Z', '2026-08-08T21:00:00.000Z',
+      )).toThrow(/CHECK constraint failed/u);
+      expect(() => insert.run(
+        1, 'unlocked', '2026-08-08T21:00:00.000Z', '2026-08-08T21:00:00.000Z',
+      )).toThrow(/CHECK constraint failed/u);
     });
 
     it('атомарно откатывает DDL миграции 9→10 при отказе очистки очереди', () => {

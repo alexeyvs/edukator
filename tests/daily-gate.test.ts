@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
+import { setComputerAccessOverride } from '../server/computer-access.js';
 import { DAILY_RUN_TARGET, readDailyGate } from '../server/daily-gate.js';
 import { openDatabase } from '../server/db.js';
 
@@ -54,7 +55,8 @@ describe('readDailyGate', () => {
     expect(DAILY_RUN_TARGET).toBe(3);
     expect(readDailyGate(setup(), new Date('2026-08-08T12:00:00.000Z'))).toEqual({
       day: '2026-08-08', required: 3, completed: 0, remaining: 3,
-      learning: { materialId: null, required: false, passed: false }, unlocked: false,
+      learning: { materialId: null, required: false, passed: false },
+      automaticUnlocked: false, override: null, unlocked: false,
     });
   });
 
@@ -185,6 +187,47 @@ describe('readDailyGate', () => {
     expect(readDailyGate(db, new Date('2026-08-08T21:00:00.000Z'))).toMatchObject({
       day: '2026-08-09', completed: 0,
       learning: { materialId, required: true, passed: false },
+      unlocked: false,
+    });
+  });
+
+  it('применяет ручную команду независимо от выполненности автоматического плана', () => {
+    const db = setup();
+    const now = new Date('2026-08-08T12:00:00.000Z');
+    const forcedOpen = setComputerAccessOverride(db, 'unlocked', now);
+
+    expect(readDailyGate(db, now)).toMatchObject({
+      completed: 0,
+      automaticUnlocked: false,
+      override: forcedOpen,
+      unlocked: true,
+    });
+
+    for (let index = 0; index < DAILY_RUN_TARGET; index += 1) {
+      addRun(db, 'run', `2026-08-08T0${index + 7}:00:00.000Z`);
+    }
+    const forcedClosed = setComputerAccessOverride(db, 'blocked', now);
+
+    expect(readDailyGate(db, now)).toMatchObject({
+      completed: 3,
+      automaticUnlocked: true,
+      override: forcedClosed,
+      unlocked: false,
+    });
+  });
+
+  it('игнорирует override ровно с московской полуночи', () => {
+    const db = setup();
+    setComputerAccessOverride(db, 'unlocked', new Date('2026-08-08T20:59:59.999Z'));
+
+    expect(readDailyGate(db, new Date('2026-08-08T20:59:59.999Z'))).toMatchObject({
+      override: { mode: 'unlocked', expiresAt: '2026-08-08T21:00:00.000Z' },
+      unlocked: true,
+    });
+    expect(readDailyGate(db, new Date('2026-08-08T21:00:00.000Z'))).toMatchObject({
+      day: '2026-08-09',
+      automaticUnlocked: false,
+      override: null,
       unlocked: false,
     });
   });

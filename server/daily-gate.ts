@@ -1,4 +1,8 @@
 import type { Database } from 'better-sqlite3';
+import {
+  readComputerAccessOverride,
+  type ComputerAccessOverride,
+} from './computer-access.js';
 import { moscowDate, moscowDayBounds } from './moscow-time.js';
 
 /** Число обычных забегов, после которого компьютер можно разблокировать. */
@@ -16,6 +20,8 @@ export interface DailyGateState {
   completed: number;
   remaining: number;
   learning: DailyLearningGateState;
+  automaticUnlocked: boolean;
+  override: ComputerAccessOverride | null;
   unlocked: boolean;
 }
 
@@ -98,6 +104,9 @@ export function readDailyGate(db: Database, now: Date = new Date()): DailyGateSt
       materialStatus === 'passed',
     passed: materialStatus === 'passed',
   };
+  const automaticUnlocked = completed >= DAILY_RUN_TARGET &&
+    (!learning.required || learning.passed);
+  const override = readComputerAccessOverride(db, now);
 
   return {
     day: moscowDate(now),
@@ -105,6 +114,8 @@ export function readDailyGate(db: Database, now: Date = new Date()): DailyGateSt
     completed,
     remaining,
     learning,
-    unlocked: completed >= DAILY_RUN_TARGET && (!learning.required || learning.passed),
+    automaticUnlocked,
+    override,
+    unlocked: override === null ? automaticUnlocked : override.mode === 'unlocked',
   };
 }
