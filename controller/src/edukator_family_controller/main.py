@@ -33,10 +33,23 @@ class ReconcileState:
     verified_at: float = 0.0
     block_renewed_at: float | None = None
     unlocked_override_expires_at: datetime | None = None
-    gate_reconciled: bool = False
+    gate_received: bool = False
 
 
 BLOCK_RENEW_SECONDS = 24 * 60 * 60
+MIN_POLL_SECONDS = 1.0
+
+
+def cap_delay_to_override_expiry(
+    delay: float,
+    state: ReconcileState,
+    now: datetime,
+) -> float:
+    expires_at = state.unlocked_override_expires_at
+    if expires_at is None:
+        return delay
+    until_expiry = (expires_at - now).total_seconds()
+    return min(delay, max(MIN_POLL_SECONDS, until_expiry))
 
 
 async def reconcile(
@@ -143,6 +156,7 @@ async def run_controller(
         while True:
             try:
                 gate = await gate_reader(config.edukator_url)
+                state.gate_received = True
                 await reconcile(
                     gate,
                     family,
@@ -151,18 +165,25 @@ async def run_controller(
                     config.verify_seconds,
                     log,
                 )
-                state.gate_reconciled = True
+                await fail_closed_after_override_expiry(
+                    family, state, wall_clock(), log
+                )
                 if family.refresh_token != saved_token:
                     config = config.with_refresh_token(family.refresh_token)
                     config_saver(config)
                     saved_token = family.refresh_token
                 failures = 0
-                await sleep(config.poll_seconds)
+                delay = cap_delay_to_override_expiry(
+                    config.poll_seconds,
+                    state,
+                    wall_clock(),
+                )
+                await sleep(delay)
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # сеть и закрытый API должны восстанавливаться
                 try:
-                    if state.gate_reconciled:
+                    if state.gate_received:
                         await fail_closed_after_override_expiry(
                             family, state, wall_clock(), log
                         )
@@ -182,11 +203,11 @@ async def run_controller(
                 failures += 1
                 delay = min(300.0, config.poll_seconds * (2 ** min(failures - 1, 4)))
                 delay *= random.uniform(0.9, 1.1)
-                if state.unlocked_override_expires_at is not None:
-                    until_expiry = (
-                        state.unlocked_override_expires_at - wall_clock()
-                    ).total_seconds()
-                    delay = min(delay, max(1.0, until_expiry))
+                delay = cap_delay_to_override_expiry(
+                    delay,
+                    state,
+                    wall_clock(),
+                )
                 log(f"Сверка не выполнена: {error}; повтор через {delay:.0f} с")
                 await sleep(delay)
     finally:
