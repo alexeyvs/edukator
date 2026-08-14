@@ -25,7 +25,13 @@ from edukator_family_controller.gate import (
 )
 from edukator_family_controller.family import MicrosoftFamilyClient
 from edukator_family_controller.login import update_family_with_retry
-from edukator_family_controller.main import ReconcileState, reconcile, run_controller
+from edukator_family_controller.main import (
+    BLOCK_RENEW_SECONDS,
+    ReconcileState,
+    ensure_fail_closed,
+    reconcile,
+    run_controller,
+)
 
 
 LOCKED = GateState(
@@ -779,15 +785,91 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(family.actions, [True, True])
         self.assertEqual(family.refreshes, 2)
 
-    async def test_renews_existing_block_once_a_day(self) -> None:
+    async def test_normal_reconcile_renews_block_at_safe_interval(self) -> None:
         family = FakeFamily(blocked=True)
         state = ReconcileState()
 
         await reconcile(LOCKED, family, state, 10, 300, lambda _: None)
-        await reconcile(LOCKED, family, state, 1000, 300, lambda _: None)
-        await reconcile(LOCKED, family, state, 90_000, 300, lambda _: None)
+        await reconcile(
+            LOCKED,
+            family,
+            state,
+            10 + BLOCK_RENEW_SECONDS - 1,
+            300,
+            lambda _: None,
+        )
+        await reconcile(
+            LOCKED,
+            family,
+            state,
+            10 + BLOCK_RENEW_SECONDS,
+            300,
+            lambda _: None,
+        )
 
         self.assertEqual(family.actions, [True, True])
+        self.assertEqual(state.block_renewed_at, 10 + BLOCK_RENEW_SECONDS)
+
+    async def test_fail_closed_refreshes_before_proactive_renewal(self) -> None:
+        family = FakeFamily(blocked=True)
+        state = ReconcileState(block_renewed_at=100)
+
+        await ensure_fail_closed(
+            family,
+            state,
+            100 + BLOCK_RENEW_SECONDS - 1,
+            lambda _: None,
+            "test outage",
+        )
+
+        self.assertEqual(family.refreshes, 1)
+        self.assertEqual(family.actions, [])
+        self.assertEqual(state.block_renewed_at, 100)
+
+    async def test_fail_closed_proactively_renews_existing_block(self) -> None:
+        family = FakeFamily(blocked=True)
+        state = ReconcileState(block_renewed_at=100)
+
+        await ensure_fail_closed(
+            family,
+            state,
+            100 + BLOCK_RENEW_SECONDS,
+            lambda _: None,
+            "test long outage",
+        )
+
+        self.assertEqual(family.refreshes, 1)
+        self.assertEqual(family.actions, [True])
+        self.assertEqual(state.block_renewed_at, 100 + BLOCK_RENEW_SECONDS)
+
+    async def test_failed_fail_closed_renewal_keeps_timestamp_and_retries(
+        self,
+    ) -> None:
+        family = FailFirstBlockFamily(blocked=True)
+        state = ReconcileState(block_renewed_at=100)
+
+        with self.assertRaisesRegex(RuntimeError, "apply failed"):
+            await ensure_fail_closed(
+                family,
+                state,
+                100 + BLOCK_RENEW_SECONDS,
+                lambda _: None,
+                "test failed renewal",
+            )
+
+        self.assertEqual(state.block_renewed_at, 100)
+
+        await ensure_fail_closed(
+            family,
+            state,
+            101 + BLOCK_RENEW_SECONDS,
+            lambda _: None,
+            "test retry",
+        )
+
+        self.assertEqual(family.block_attempts, 2)
+        self.assertEqual(family.actions, [True])
+        self.assertEqual(state.block_renewed_at, 101 + BLOCK_RENEW_SECONDS)
 
     async def test_unavailable_edukator_on_startup_verifies_safe_block(self) -> None:
         family = FakeFamily(blocked=True)
@@ -808,7 +890,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(family.refreshes, 1)
-        self.assertEqual(family.actions, [])
+        self.assertEqual(family.actions, [True])
         self.assertTrue(family.closed)
 
     async def test_invalid_first_gate_still_fails_closed_on_startup(self) -> None:
@@ -1107,6 +1189,50 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(action_counts, [1, 2, 2, 3])
+        self.assertEqual(family.actions, [False, True, True])
+        self.assertEqual(family.refreshes, 4)
+        self.assertTrue(family.blocked)
+
+    async def test_expired_access_block_is_renewed_during_long_outage(
+        self,
+    ) -> None:
+        family = FakeFamily(blocked=True)
+        current = datetime(2026, 8, 12, 20, 59, 59, tzinfo=timezone.utc)
+        monotonic = 0.0
+        reads = 0
+        sleeps = 0
+
+        async def reader(_: str) -> GateState:
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return UNLOCKED
+            raise RuntimeError("нет связи")
+
+        async def advance_to_renewal(delay: float) -> None:
+            nonlocal current, monotonic, sleeps
+            sleeps += 1
+            if sleeps == 1:
+                current += timedelta(seconds=delay)
+                monotonic = 10
+            elif sleeps == 2:
+                monotonic = 10 + BLOCK_RENEW_SECONDS - 1
+            elif sleeps == 3:
+                monotonic = 10 + BLOCK_RENEW_SECONDS
+            else:
+                raise asyncio.CancelledError
+
+        with self.assertRaises(asyncio.CancelledError):
+            await run_controller(
+                ControllerConfig("refresh", "child"),
+                family,
+                gate_reader=reader,
+                sleep=advance_to_renewal,
+                clock=lambda: monotonic,
+                wall_clock=lambda: current,
+                log=lambda _: None,
+            )
+
         self.assertEqual(family.actions, [False, True, True])
         self.assertEqual(family.refreshes, 4)
         self.assertTrue(family.blocked)

@@ -36,7 +36,9 @@ class ReconcileState:
     last_gate_desired_blocked: bool | None = None
 
 
-BLOCK_RENEW_SECONDS = 24 * 60 * 60
+# Family Safety blocks are finite (minimum one day). Renew with enough margin so
+# a delayed poll cannot leave a gap when the current UNTIL reaches its boundary.
+BLOCK_RENEW_SECONDS = 12 * 60 * 60
 MIN_POLL_SECONDS = 1.0
 # Совпадает с серверным moscow-time.ts: Москва постоянно UTC+03:00 с 2014 года.
 MOSCOW_TIMEZONE = timezone(timedelta(hours=3))
@@ -69,6 +71,11 @@ def cap_delay_to_access_expiry(
     return min(delay, max(MIN_POLL_SECONDS, until_expiry))
 
 
+def block_renewal_due(state: ReconcileState, now: float) -> bool:
+    renewed_at = state.block_renewed_at
+    return renewed_at is None or now - renewed_at >= BLOCK_RENEW_SECONDS
+
+
 async def reconcile(
     gate: GateState,
     family: FamilyClient,
@@ -93,10 +100,7 @@ async def reconcile(
         state.actual_blocked = family.is_desktop_blocked()
         state.verified_at = now
 
-    renew_block = desired and (
-        state.block_renewed_at is None
-        or now - state.block_renewed_at >= BLOCK_RENEW_SECONDS
-    )
+    renew_block = desired and block_renewal_due(state, now)
     if state.actual_blocked != desired or renew_block:
         was_blocked = state.actual_blocked is True
         await family.set_desktop_blocked(desired)
@@ -120,6 +124,7 @@ async def fail_closed_after_access_expiry(
     family: FamilyClient,
     state: ReconcileState,
     now: datetime,
+    monotonic_now: float,
     log: Callable[[str], None],
 ) -> None:
     """Закрывает доступ по локальному дедлайну, пока сервер не подтвердит новый день."""
@@ -129,6 +134,7 @@ async def fail_closed_after_access_expiry(
     await ensure_fail_closed(
         family,
         state,
+        monotonic_now,
         log,
         "срок разрешённого доступа истёк",
     )
@@ -141,15 +147,19 @@ async def fail_closed_after_access_expiry(
 async def ensure_fail_closed(
     family: FamilyClient,
     state: ReconcileState,
+    now: float,
     log: Callable[[str], None],
     reason: str,
 ) -> None:
     """Проверяет безопасную блокировку, когда желаемое состояние неизвестно."""
     await family.refresh()
     actual_blocked = family.is_desktop_blocked()
-    if not actual_blocked:
+    renew_block = block_renewal_due(state, now)
+    if not actual_blocked or renew_block:
         await family.set_desktop_blocked(True)
-        log(f"Desktop заблокирован: {reason}")
+        state.block_renewed_at = now
+        action = "блокировка продлена" if actual_blocked else "заблокирован"
+        log(f"Desktop {action}: {reason}")
     state.actual_blocked = True
     state.desired_blocked = True
 
@@ -182,7 +192,7 @@ async def run_controller(
                     log,
                 )
                 await fail_closed_after_access_expiry(
-                    family, state, wall_clock(), log
+                    family, state, wall_clock(), clock(), log
                 )
                 if family.refresh_token != saved_token:
                     config = config.with_refresh_token(family.refresh_token)
@@ -203,6 +213,7 @@ async def run_controller(
                         await ensure_fail_closed(
                             family,
                             state,
+                            clock(),
                             log,
                             "Edukator ещё не подтвердил состояние после запуска",
                         )
@@ -210,13 +221,14 @@ async def run_controller(
                         await ensure_fail_closed(
                             family,
                             state,
+                            clock(),
                             log,
                             "Edukator подтвердил требование блокировки",
                         )
                         state.access_expires_at = None
                     else:
                         await fail_closed_after_access_expiry(
-                            family, state, wall_clock(), log
+                            family, state, wall_clock(), clock(), log
                         )
                 except asyncio.CancelledError:
                     raise
