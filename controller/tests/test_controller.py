@@ -594,7 +594,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(family.actions, [True, True])
 
-    async def test_unavailable_edukator_never_calls_microsoft(self) -> None:
+    async def test_unavailable_edukator_on_startup_verifies_safe_block(self) -> None:
         family = FakeFamily(blocked=True)
 
         async def failing_reader(_: str) -> GateState:
@@ -612,9 +612,57 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
                 log=lambda _: None,
             )
 
-        self.assertEqual(family.refreshes, 0)
+        self.assertEqual(family.refreshes, 1)
         self.assertEqual(family.actions, [])
         self.assertTrue(family.closed)
+
+    async def test_normal_startup_uses_gate_without_intermediate_safe_block(self) -> None:
+        family = FakeFamily(blocked=True)
+
+        async def stop_after_poll(_: float) -> None:
+            raise asyncio.CancelledError
+
+        with self.assertRaises(asyncio.CancelledError):
+            await run_controller(
+                ControllerConfig("refresh", "child"),
+                family,
+                gate_reader=lambda _: self._gate(UNLOCKED),
+                sleep=stop_after_poll,
+                log=lambda _: None,
+            )
+
+        self.assertEqual(family.actions, [False])
+        self.assertEqual(family.refreshes, 1)
+
+    async def test_startup_recovers_from_safe_block_when_api_returns(self) -> None:
+        family = FakeFamily(blocked=False)
+        reads = 0
+        sleeps = 0
+
+        async def recovering_reader(_: str) -> GateState:
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                raise RuntimeError("нет связи")
+            return UNLOCKED
+
+        async def retry_then_stop(_: float) -> None:
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps > 1:
+                raise asyncio.CancelledError
+
+        with self.assertRaises(asyncio.CancelledError):
+            await run_controller(
+                ControllerConfig("refresh", "child"),
+                family,
+                gate_reader=recovering_reader,
+                sleep=retry_then_stop,
+                log=lambda _: None,
+            )
+
+        self.assertEqual(family.actions, [True, False])
+        self.assertEqual(family.refreshes, 2)
 
     async def test_expired_unlocked_override_blocks_when_edukator_is_unavailable(self) -> None:
         family = FakeFamily(blocked=True)
@@ -671,6 +719,69 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(family.actions, [False, True])
         self.assertIn("срок временной разблокировки истёк", "\n".join(logs))
         self.assertTrue(family.closed)
+
+    async def test_restart_after_forced_unlock_fails_closed_across_expiry(self) -> None:
+        family = FakeFamily(blocked=True)
+        forced_unlocked = parse_gate(
+            {
+                "day": "2026-08-12",
+                "required": 3,
+                "completed": 0,
+                "remaining": 3,
+                "learning": {
+                    "materialId": None,
+                    "required": False,
+                    "passed": False,
+                },
+                "automaticUnlocked": False,
+                "override": {
+                    "mode": "unlocked",
+                    "changedAt": "2026-08-12T20:50:00.000Z",
+                    "expiresAt": "2026-08-12T21:00:00.000Z",
+                },
+                "unlocked": True,
+            }
+        )
+        await reconcile(
+            forced_unlocked,
+            family,
+            ReconcileState(),
+            10,
+            300,
+            lambda _: None,
+        )
+        current = datetime(2026, 8, 12, 20, 59, tzinfo=timezone.utc)
+        sleeps = 0
+
+        async def unavailable(_: str) -> GateState:
+            raise RuntimeError("нет связи")
+
+        async def cross_expiry_then_stop(_: float) -> None:
+            nonlocal current, sleeps
+            sleeps += 1
+            if sleeps == 1:
+                current = datetime(2026, 8, 12, 21, 1, tzinfo=timezone.utc)
+                return
+            raise asyncio.CancelledError
+
+        logs: list[str] = []
+        with self.assertRaises(asyncio.CancelledError):
+            await run_controller(
+                ControllerConfig("refresh", "child"),
+                family,
+                gate_reader=unavailable,
+                sleep=cross_expiry_then_stop,
+                wall_clock=lambda: current,
+                log=logs.append,
+            )
+
+        self.assertEqual(family.actions, [False, True])
+        self.assertTrue(family.blocked)
+        self.assertIn("ещё не подтвердил состояние после запуска", "\n".join(logs))
+
+    @staticmethod
+    async def _gate(gate: GateState) -> GateState:
+        return gate
 
 
 if __name__ == "__main__":

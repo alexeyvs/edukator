@@ -33,6 +33,7 @@ class ReconcileState:
     verified_at: float = 0.0
     block_renewed_at: float | None = None
     unlocked_override_expires_at: datetime | None = None
+    gate_reconciled: bool = False
 
 
 BLOCK_RENEW_SECONDS = 24 * 60 * 60
@@ -93,14 +94,29 @@ async def fail_closed_after_override_expiry(
     expires_at = state.unlocked_override_expires_at
     if expires_at is None or now < expires_at:
         return
+    await ensure_fail_closed(
+        family,
+        state,
+        log,
+        "срок временной разблокировки истёк",
+    )
+    state.unlocked_override_expires_at = None
+
+
+async def ensure_fail_closed(
+    family: FamilyClient,
+    state: ReconcileState,
+    log: Callable[[str], None],
+    reason: str,
+) -> None:
+    """Проверяет безопасную блокировку, когда желаемое состояние неизвестно."""
     await family.refresh()
     actual_blocked = family.is_desktop_blocked()
     if not actual_blocked:
         await family.set_desktop_blocked(True)
-        log("Desktop заблокирован: срок временной разблокировки истёк")
+        log(f"Desktop заблокирован: {reason}")
     state.actual_blocked = True
     state.desired_blocked = True
-    state.unlocked_override_expires_at = None
 
 
 async def run_controller(
@@ -129,6 +145,7 @@ async def run_controller(
                     config.verify_seconds,
                     log,
                 )
+                state.gate_reconciled = True
                 if family.refresh_token != saved_token:
                     config = config.with_refresh_token(family.refresh_token)
                     config_saver(config)
@@ -139,9 +156,17 @@ async def run_controller(
                 raise
             except Exception as error:  # сеть и закрытый API должны восстанавливаться
                 try:
-                    await fail_closed_after_override_expiry(
-                        family, state, wall_clock(), log
-                    )
+                    if state.gate_reconciled:
+                        await fail_closed_after_override_expiry(
+                            family, state, wall_clock(), log
+                        )
+                    else:
+                        await ensure_fail_closed(
+                            family,
+                            state,
+                            log,
+                            "Edukator ещё не подтвердил состояние после запуска",
+                        )
                 except asyncio.CancelledError:
                     raise
                 except Exception as safety_error:
