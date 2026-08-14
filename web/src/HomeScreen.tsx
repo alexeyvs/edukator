@@ -81,7 +81,11 @@ function AccessCard({ gate }: { gate: DayPlanResponse['gate'] }) {
     : Math.min(100, Math.round((gate.completed / gate.required) * 100));
   const title = gate.unlocked ? 'Компьютер разблокирован' : 'Компьютер заблокирован';
   let note: string;
-  if (gate.unlocked) {
+  if (gate.override?.mode === 'unlocked') {
+    note = 'Доступ временно открыт родителем. Учебный план продолжается.';
+  } else if (gate.override?.mode === 'blocked') {
+    note = 'Доступ временно закрыт родителем до следующего дня.';
+  } else if (gate.unlocked) {
     note = 'План выполнен. Доступ открыт до следующего дня.';
   } else if (gate.remaining === 0 && gate.learning.required && !gate.learning.passed) {
     note = 'Обычные забеги завершены. Для доступа нужен зачёт за разбор темы.';

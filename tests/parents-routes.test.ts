@@ -92,6 +92,7 @@ describe('маршрут родителей', () => {
       generatedAt: NOW.toISOString(),
       computerAccess: {
         day: '2026-08-08',
+        configured: true,
         automaticUnlocked: false,
         override: null,
         unlocked: false,
@@ -232,6 +233,9 @@ describe('маршрут родителей', () => {
     });
     await withoutPin.ready();
     try {
+      const dashboard = await withoutPin.inject({ method: 'GET', url: '/api/parents' });
+      expect(dashboard.statusCode).toBe(200);
+      expect(dashboard.json()).toMatchObject({ computerAccess: { configured: false } });
       const response = await withoutPin.inject({
         method: 'PUT',
         url: '/api/parents/computer-access',

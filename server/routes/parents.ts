@@ -66,7 +66,14 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
   app.get('/api/parents', (_request, reply) => {
     const stopped = unavailable(options, reply);
     if (stopped !== undefined) return stopped;
-    return reply.send(readParentsDashboard(options.db, options.graph, now()));
+    const dashboard = readParentsDashboard(options.db, options.graph, now());
+    return reply.send({
+      ...dashboard,
+      computerAccess: {
+        ...dashboard.computerAccess,
+        configured: options.parentPin !== undefined,
+      },
+    });
   });
 
   app.put('/api/parents/computer-access', (request, reply) => {
