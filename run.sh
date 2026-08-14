@@ -8,4 +8,5 @@ cd "$project_dir"
 npm run build:web
 
 export HOST='192.168.100.141'
-exec npm start
+export EDUKATOR_PARENT_PIN='000000'
+exec npm run start:family
