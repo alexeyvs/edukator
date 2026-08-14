@@ -50,6 +50,29 @@ UNLOCKED = GateState(
 )
 
 
+def forced_unlocked_gate() -> GateState:
+    return parse_gate(
+        {
+            "day": "2026-08-12",
+            "required": 3,
+            "completed": 0,
+            "remaining": 3,
+            "learning": {
+                "materialId": None,
+                "required": False,
+                "passed": False,
+            },
+            "automaticUnlocked": False,
+            "override": {
+                "mode": "unlocked",
+                "changedAt": "2026-08-12T20:59:00.000Z",
+                "expiresAt": "2026-08-12T21:00:00.000Z",
+            },
+            "unlocked": True,
+        }
+    )
+
+
 class FakeFamily:
     def __init__(self, blocked: bool) -> None:
         self.blocked = blocked
@@ -83,6 +106,29 @@ class FailFirstBlockFamily(FakeFamily):
             if self.block_attempts == 1:
                 raise RuntimeError("Family Safety apply failed")
         await super().set_desktop_blocked(blocked)
+
+
+class FailFirstUnlockFamily(FakeFamily):
+    def __init__(self, blocked: bool, *, apply_before_failure: bool = False) -> None:
+        super().__init__(blocked)
+        self.apply_before_failure = apply_before_failure
+        self.unlock_attempts = 0
+
+    async def set_desktop_blocked(self, blocked: bool) -> None:
+        if not blocked:
+            self.unlock_attempts += 1
+            if self.unlock_attempts == 1:
+                if self.apply_before_failure:
+                    await super().set_desktop_blocked(False)
+                raise RuntimeError("Family Safety unlock response lost")
+        await super().set_desktop_blocked(blocked)
+
+
+class FailFirstRefreshFamily(FakeFamily):
+    async def refresh(self) -> None:
+        await super().refresh()
+        if self.refreshes == 1:
+            raise RuntimeError("Family Safety refresh failed")
 
 
 class GateContractTests(unittest.TestCase):
@@ -609,6 +655,68 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(state.unlocked_override_expires_at)
         self.assertTrue(family.blocked)
 
+    async def test_forced_unlock_arms_deadline_before_pure_failure_and_retry(
+        self,
+    ) -> None:
+        gate = forced_unlocked_gate()
+        family = FailFirstUnlockFamily(blocked=True)
+        state = ReconcileState()
+
+        with self.assertRaisesRegex(RuntimeError, "response lost"):
+            await reconcile(gate, family, state, 10, 300, lambda _: None)
+
+        self.assertEqual(
+            state.unlocked_override_expires_at,
+            gate.override.expires_at,
+        )
+        self.assertTrue(family.blocked)
+
+        await reconcile(gate, family, state, 20, 300, lambda _: None)
+
+        self.assertEqual(family.unlock_attempts, 2)
+        self.assertEqual(family.actions, [False])
+        self.assertEqual(
+            state.unlocked_override_expires_at,
+            gate.override.expires_at,
+        )
+
+    async def test_forced_unlock_arms_deadline_before_refresh_and_on_noop(
+        self,
+    ) -> None:
+        gate = forced_unlocked_gate()
+        failing_family = FailFirstRefreshFamily(blocked=True)
+        failed_state = ReconcileState()
+
+        with self.assertRaisesRegex(RuntimeError, "refresh failed"):
+            await reconcile(
+                gate,
+                failing_family,
+                failed_state,
+                10,
+                300,
+                lambda _: None,
+            )
+
+        self.assertEqual(
+            failed_state.unlocked_override_expires_at,
+            gate.override.expires_at,
+        )
+
+        noop_family = FakeFamily(blocked=False)
+        noop_state = ReconcileState(
+            actual_blocked=False,
+            desired_blocked=False,
+            verified_at=10,
+        )
+        await reconcile(gate, noop_family, noop_state, 20, 300, lambda _: None)
+
+        self.assertEqual(noop_family.refreshes, 0)
+        self.assertEqual(noop_family.actions, [])
+        self.assertEqual(
+            noop_state.unlocked_override_expires_at,
+            gate.override.expires_at,
+        )
+
     async def test_successful_automatic_unlocked_noop_clears_previous_deadline(
         self,
     ) -> None:
@@ -831,6 +939,48 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(family.block_attempts, 2)
         self.assertEqual(family.actions, [False, True])
+        self.assertTrue(family.blocked)
+        self.assertIn("срок временной разблокировки истёк", "\n".join(logs))
+
+    async def test_ambiguous_unlock_is_blocked_after_expiry_during_api_outage(
+        self,
+    ) -> None:
+        family = FailFirstUnlockFamily(blocked=True, apply_before_failure=True)
+        forced_unlocked = forced_unlocked_gate()
+        current = datetime(2026, 8, 12, 20, 59, tzinfo=timezone.utc)
+        reads = 0
+        sleeps = 0
+
+        async def reader(_: str) -> GateState:
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return LOCKED
+            if reads == 2:
+                return forced_unlocked
+            raise RuntimeError("нет связи")
+
+        async def cross_expiry_then_stop(_: float) -> None:
+            nonlocal current, sleeps
+            sleeps += 1
+            if sleeps == 2:
+                current = datetime(2026, 8, 12, 21, 1, tzinfo=timezone.utc)
+            if sleeps < 3:
+                return
+            raise asyncio.CancelledError
+
+        logs: list[str] = []
+        with self.assertRaises(asyncio.CancelledError):
+            await run_controller(
+                ControllerConfig("refresh", "child"),
+                family,
+                gate_reader=reader,
+                sleep=cross_expiry_then_stop,
+                wall_clock=lambda: current,
+                log=logs.append,
+            )
+
+        self.assertEqual(family.actions, [True, False, True])
         self.assertTrue(family.blocked)
         self.assertIn("срок временной разблокировки истёк", "\n".join(logs))
 

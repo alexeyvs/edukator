@@ -47,11 +47,15 @@ async def reconcile(
     verify_seconds: float,
     log: Callable[[str], None],
 ) -> None:
-    next_unlocked_override_expires_at = (
+    forced_unlock_expires_at = (
         gate.override.expires_at
         if gate.override is not None and gate.override.mode == "unlocked"
         else None
     )
+    if forced_unlock_expires_at is not None:
+        # Family Safety may apply an unlock even when its response is lost. Arm
+        # the local fail-closed deadline before any external call can do that.
+        state.unlocked_override_expires_at = forced_unlock_expires_at
     desired = not gate.unlocked
     must_verify = (
         state.actual_blocked is None
@@ -82,7 +86,8 @@ async def reconcile(
             f"завершено {gate.completed} из {gate.required}"
         )
     state.desired_blocked = desired
-    state.unlocked_override_expires_at = next_unlocked_override_expires_at
+    if forced_unlock_expires_at is None:
+        state.unlocked_override_expires_at = None
 
 
 async def fail_closed_after_override_expiry(
