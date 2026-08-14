@@ -72,6 +72,19 @@ class FakeFamily:
         self.closed = True
 
 
+class FailFirstBlockFamily(FakeFamily):
+    def __init__(self, blocked: bool) -> None:
+        super().__init__(blocked)
+        self.block_attempts = 0
+
+    async def set_desktop_blocked(self, blocked: bool) -> None:
+        if blocked:
+            self.block_attempts += 1
+            if self.block_attempts == 1:
+                raise RuntimeError("Family Safety apply failed")
+        await super().set_desktop_blocked(blocked)
+
+
 class GateContractTests(unittest.TestCase):
     def test_accepts_legacy_state_without_override_fields(self) -> None:
         self.assertEqual(
@@ -572,6 +585,47 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         await reconcile(forced_blocked, family, state, 20, 300, lambda _: None)
 
         self.assertEqual(family.actions, [False, True])
+        self.assertIsNone(state.unlocked_override_expires_at)
+
+    async def test_failed_authoritative_apply_retains_unlocked_override_deadline(
+        self,
+    ) -> None:
+        deadline = datetime(2026, 8, 12, 21, tzinfo=timezone.utc)
+        family = FailFirstBlockFamily(blocked=False)
+        state = ReconcileState(
+            actual_blocked=False,
+            desired_blocked=False,
+            verified_at=10,
+            unlocked_override_expires_at=deadline,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "apply failed"):
+            await reconcile(LOCKED, family, state, 20, 300, lambda _: None)
+
+        self.assertEqual(state.unlocked_override_expires_at, deadline)
+
+        await reconcile(LOCKED, family, state, 30, 300, lambda _: None)
+
+        self.assertIsNone(state.unlocked_override_expires_at)
+        self.assertTrue(family.blocked)
+
+    async def test_successful_automatic_unlocked_noop_clears_previous_deadline(
+        self,
+    ) -> None:
+        family = FakeFamily(blocked=False)
+        state = ReconcileState(
+            actual_blocked=False,
+            desired_blocked=False,
+            verified_at=10,
+            unlocked_override_expires_at=datetime(
+                2026, 8, 12, 21, tzinfo=timezone.utc
+            ),
+        )
+
+        await reconcile(UNLOCKED, family, state, 20, 300, lambda _: None)
+
+        self.assertEqual(family.actions, [])
+        self.assertIsNone(state.unlocked_override_expires_at)
 
     async def test_periodic_verification_restores_manual_unblock(self) -> None:
         family = FakeFamily(blocked=True)
@@ -719,6 +773,66 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(family.actions, [False, True])
         self.assertIn("срок временной разблокировки истёк", "\n".join(logs))
         self.assertTrue(family.closed)
+
+    async def test_failed_locked_apply_keeps_expiry_watchdog_armed(self) -> None:
+        family = FailFirstBlockFamily(blocked=True)
+        forced_unlocked = parse_gate(
+            {
+                "day": "2026-08-12",
+                "required": 3,
+                "completed": 0,
+                "remaining": 3,
+                "learning": {
+                    "materialId": None,
+                    "required": False,
+                    "passed": False,
+                },
+                "automaticUnlocked": False,
+                "override": {
+                    "mode": "unlocked",
+                    "changedAt": "2026-08-12T20:59:00.000Z",
+                    "expiresAt": "2026-08-12T21:00:00.000Z",
+                },
+                "unlocked": True,
+            }
+        )
+        current = datetime(2026, 8, 12, 20, 59, tzinfo=timezone.utc)
+        reads = 0
+        sleeps = 0
+
+        async def reader(_: str) -> GateState:
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return forced_unlocked
+            if reads == 2:
+                return LOCKED
+            raise RuntimeError("нет связи")
+
+        async def cross_expiry_then_stop(_: float) -> None:
+            nonlocal current, sleeps
+            sleeps += 1
+            if sleeps == 2:
+                current = datetime(2026, 8, 12, 21, 1, tzinfo=timezone.utc)
+            if sleeps < 3:
+                return
+            raise asyncio.CancelledError
+
+        logs: list[str] = []
+        with self.assertRaises(asyncio.CancelledError):
+            await run_controller(
+                ControllerConfig("refresh", "child"),
+                family,
+                gate_reader=reader,
+                sleep=cross_expiry_then_stop,
+                wall_clock=lambda: current,
+                log=logs.append,
+            )
+
+        self.assertEqual(family.block_attempts, 2)
+        self.assertEqual(family.actions, [False, True])
+        self.assertTrue(family.blocked)
+        self.assertIn("срок временной разблокировки истёк", "\n".join(logs))
 
     async def test_restart_after_forced_unlock_fails_closed_across_expiry(self) -> None:
         family = FakeFamily(blocked=True)

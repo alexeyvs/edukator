@@ -47,7 +47,7 @@ async def reconcile(
     verify_seconds: float,
     log: Callable[[str], None],
 ) -> None:
-    state.unlocked_override_expires_at = (
+    next_unlocked_override_expires_at = (
         gate.override.expires_at
         if gate.override is not None and gate.override.mode == "unlocked"
         else None
@@ -82,6 +82,7 @@ async def reconcile(
             f"завершено {gate.completed} из {gate.required}"
         )
     state.desired_blocked = desired
+    state.unlocked_override_expires_at = next_unlocked_override_expires_at
 
 
 async def fail_closed_after_override_expiry(
