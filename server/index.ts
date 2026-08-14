@@ -29,6 +29,7 @@ import { registerLearningRoutes, registerUnavailableLearning } from './routes/le
 import { registerGateRoutes, registerUnavailableGate } from './routes/gate.js';
 import { codexConcurrency, disputeConcurrency, type CodexConcurrency } from './codex/concurrency.js';
 import { startWorker, type StartWorkerOptions, type WorkerHandle } from './codex/worker.js';
+import { readParentPin } from './parent-pin.js';
 
 export { databasePath };
 
@@ -228,12 +229,15 @@ export type ServerOptions = Omit<SessionRoutesOptions, 'db' | 'graph' | 'availab
   codexBudget?: CodexConcurrency;
   /** false оставляет статику Vite dev-серверу; строка подменяет каталог в тестах. */
   webDist?: string | false;
+  /** Явная подмена родительского PIN для HTTP-тестов. */
+  parentPin?: string;
 };
 
 export function buildServer(
   curriculumDir: string = CURRICULUM_DIR,
   options: ServerOptions = {},
 ): FastifyInstance {
+  const parentPin = readParentPin(options.parentPin ?? process.env.EDUKATOR_PARENT_PIN);
   const webDist = options.webDist
     ?? (process.env.EDUKATOR_WEB_DEV === '1' ? false : WEB_DIST_DIR);
   if (webDist !== false) {
@@ -370,6 +374,7 @@ export function buildServer(
     registerParentsRoutes(app, {
       db: sessionDb,
       graph,
+      ...(parentPin === undefined ? {} : { parentPin }),
       available: sessionAvailable,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
