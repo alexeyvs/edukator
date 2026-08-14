@@ -93,10 +93,25 @@ function ComputerAccessPanel({
   const [pin, setPin] = useState('');
   const [selected, setSelected] = useState<ComputerAccessMode | null>(null);
   const [pending, setPending] = useState(false);
+  const [accessClock, setAccessClock] = useState(() => Date.now());
   const [feedback, setFeedback] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
-  const current = accessMode(access);
-  const status = accessStatus(access);
+  const expiresAt = access.override === null ? null : Date.parse(access.override.expiresAt);
+  const overrideActive = expiresAt !== null && Number.isFinite(expiresAt) && expiresAt > accessClock;
+  const currentAccess = overrideActive
+    ? access
+    : { ...access, override: null, unlocked: access.automaticUnlocked };
+  const current = accessMode(currentAccess);
+  const status = accessStatus(currentAccess);
   const pinValid = /^\d{6,12}$/u.test(pin);
+
+  useEffect(() => {
+    if (expiresAt === null || !Number.isFinite(expiresAt) || expiresAt <= accessClock) return;
+    const timer = window.setTimeout(
+      () => setAccessClock(Date.now()),
+      Math.min(2_147_483_647, Math.max(0, expiresAt - Date.now())),
+    );
+    return () => window.clearTimeout(timer);
+  }, [accessClock, expiresAt]);
 
   async function confirm(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -122,7 +137,7 @@ function ComputerAccessPanel({
 
   return (
     <section
-      className={`parents-access${access.override === null ? '' : ' parents-access-temporary'}`}
+      className={`parents-access${overrideActive ? ' parents-access-temporary' : ''}`}
       aria-labelledby="parents-access-title"
     >
       <div className="parents-access-summary">

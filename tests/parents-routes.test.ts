@@ -224,6 +224,36 @@ describe('маршрут родителей', () => {
     }
   });
 
+  it('успешный PIN до лимита очищает ошибки этого IP', async () => {
+    const isolated = Fastify();
+    registerParentsRoutes(isolated, {
+      db,
+      graph: loadCurriculum(curriculumDir),
+      parentPin: PARENT_PIN,
+      now: () => NOW,
+    });
+    await isolated.ready();
+    const request = (pin: string) => isolated.inject({
+      method: 'PUT',
+      url: '/api/parents/computer-access',
+      remoteAddress: '192.0.2.10',
+      headers: { authorization: `Bearer ${pin}` },
+      payload: { mode: 'blocked' },
+    });
+    try {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        expect((await request('000000')).statusCode).toBe(401);
+      }
+      expect((await request(PARENT_PIN)).statusCode).toBe(200);
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        expect((await request('000000')).statusCode).toBe(401);
+      }
+      expect((await request(PARENT_PIN)).statusCode).toBe(429);
+    } finally {
+      await isolated.close();
+    }
+  });
+
   it('возвращает 503, когда PIN не настроен', async () => {
     const withoutPin = Fastify();
     registerParentsRoutes(withoutPin, {

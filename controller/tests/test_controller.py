@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -100,6 +101,25 @@ class GateContractTests(unittest.TestCase):
             ),
         )
 
+    def test_accepts_legacy_unlocked_state(self) -> None:
+        state = parse_gate(
+            {
+                "day": "2026-08-12",
+                "required": 3,
+                "completed": 3,
+                "remaining": 0,
+                "learning": {
+                    "materialId": None,
+                    "required": False,
+                    "passed": False,
+                },
+                "unlocked": True,
+            }
+        )
+
+        self.assertTrue(state.automatic_unlocked)
+        self.assertTrue(state.unlocked)
+
     def test_accepts_new_automatic_state_without_override(self) -> None:
         state = parse_gate(
             {
@@ -147,8 +167,8 @@ class GateContractTests(unittest.TestCase):
             state.override,
             ComputerAccessOverride(
                 mode="unlocked",
-                changed_at="2026-08-12T10:00:00.000Z",
-                expires_at="2026-08-12T21:00:00.000Z",
+                changed_at=datetime(2026, 8, 12, 10, tzinfo=timezone.utc),
+                expires_at=datetime(2026, 8, 12, 21, tzinfo=timezone.utc),
             ),
         )
         self.assertFalse(state.automatic_unlocked)
@@ -236,6 +256,79 @@ class GateContractTests(unittest.TestCase):
                     "unlocked": False,
                 }
             )
+
+    def test_rejects_incomplete_or_invalid_override_contract(self) -> None:
+        valid = {
+            "day": "2026-08-12",
+            "required": 3,
+            "completed": 1,
+            "remaining": 2,
+            "learning": {
+                "materialId": None,
+                "required": False,
+                "passed": False,
+            },
+            "automaticUnlocked": False,
+            "override": {
+                "mode": "unlocked",
+                "changedAt": "2026-08-12T10:00:00.000Z",
+                "expiresAt": "2026-08-12T21:00:00.000Z",
+            },
+            "unlocked": True,
+        }
+        cases: list[tuple[str, dict, str]] = []
+
+        without_automatic = dict(valid)
+        without_automatic.pop("automaticUnlocked")
+        cases.append(("нет automaticUnlocked", without_automatic, "automaticUnlocked"))
+
+        without_override = dict(valid)
+        without_override.pop("override")
+        cases.append(("нет override", without_override, "override"))
+
+        wrong_automatic = dict(valid, automaticUnlocked="false")
+        cases.append(("неверный тип automaticUnlocked", wrong_automatic, "логическим"))
+
+        wrong_override_type = dict(valid, override=[])
+        cases.append(("неверный тип override", wrong_override_type, "JSON-объектом"))
+
+        for mode in ("automatic", 1):
+            wrong_mode = dict(valid)
+            wrong_mode["override"] = {**valid["override"], "mode": mode}
+            cases.append((f"неверный mode {mode}", wrong_mode, "blocked или unlocked"))
+
+        for missing in ("mode", "changedAt", "expiresAt"):
+            incomplete = dict(valid)
+            override = dict(valid["override"])
+            override.pop(missing)
+            incomplete["override"] = override
+            cases.append((f"нет override.{missing}", incomplete, missing))
+
+        without_timezone = dict(valid)
+        without_timezone["override"] = {
+            **valid["override"],
+            "changedAt": "2026-08-12T10:00:00",
+        }
+        cases.append(("timestamp без timezone", without_timezone, "часовой пояс"))
+
+        for expires_at in (
+            "2026-08-12T10:00:00.000Z",
+            "2026-08-12T09:59:59.999Z",
+        ):
+            invalid_order = dict(valid)
+            invalid_order["override"] = {
+                **valid["override"],
+                "expiresAt": expires_at,
+            }
+            cases.append(("expiresAt не позже changedAt", invalid_order, "позже changedAt"))
+
+        missing_day = dict(valid)
+        missing_day.pop("day")
+        cases.append(("нет обязательного поля", missing_day, "нет поля day"))
+
+        for name, payload, message in cases:
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, message):
+                parse_gate(payload)
 
 
 class ConfigTests(unittest.TestCase):
@@ -521,6 +614,62 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(family.refreshes, 0)
         self.assertEqual(family.actions, [])
+        self.assertTrue(family.closed)
+
+    async def test_expired_unlocked_override_blocks_when_edukator_is_unavailable(self) -> None:
+        family = FakeFamily(blocked=True)
+        forced_unlocked = parse_gate(
+            {
+                "day": "2026-08-12",
+                "required": 3,
+                "completed": 0,
+                "remaining": 3,
+                "learning": {
+                    "materialId": None,
+                    "required": False,
+                    "passed": False,
+                },
+                "automaticUnlocked": False,
+                "override": {
+                    "mode": "unlocked",
+                    "changedAt": "2026-08-12T20:59:00.000Z",
+                    "expiresAt": "2026-08-12T21:00:00.000Z",
+                },
+                "unlocked": True,
+            }
+        )
+        current = datetime(2026, 8, 12, 20, 59, tzinfo=timezone.utc)
+        reads = 0
+        sleeps = 0
+
+        async def reader(_: str) -> GateState:
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return forced_unlocked
+            raise RuntimeError("нет связи")
+
+        async def advance_or_stop(_: float) -> None:
+            nonlocal current, sleeps
+            sleeps += 1
+            if sleeps == 1:
+                current = datetime(2026, 8, 12, 21, tzinfo=timezone.utc)
+                return
+            raise asyncio.CancelledError
+
+        logs: list[str] = []
+        with self.assertRaises(asyncio.CancelledError):
+            await run_controller(
+                ControllerConfig("refresh", "child"),
+                family,
+                gate_reader=reader,
+                sleep=advance_or_stop,
+                wall_clock=lambda: current,
+                log=logs.append,
+            )
+
+        self.assertEqual(family.actions, [False, True])
+        self.assertIn("срок временной разблокировки истёк", "\n".join(logs))
         self.assertTrue(family.closed)
 
 

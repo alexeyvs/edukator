@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import random
 import sys
 import time
@@ -31,6 +32,7 @@ class ReconcileState:
     desired_blocked: bool | None = None
     verified_at: float = 0.0
     block_renewed_at: float | None = None
+    unlocked_override_expires_at: datetime | None = None
 
 
 BLOCK_RENEW_SECONDS = 24 * 60 * 60
@@ -44,6 +46,11 @@ async def reconcile(
     verify_seconds: float,
     log: Callable[[str], None],
 ) -> None:
+    state.unlocked_override_expires_at = (
+        gate.override.expires_at
+        if gate.override is not None and gate.override.mode == "unlocked"
+        else None
+    )
     desired = not gate.unlocked
     must_verify = (
         state.actual_blocked is None
@@ -76,6 +83,26 @@ async def reconcile(
     state.desired_blocked = desired
 
 
+async def fail_closed_after_override_expiry(
+    family: FamilyClient,
+    state: ReconcileState,
+    now: datetime,
+    log: Callable[[str], None],
+) -> None:
+    """Закрывает доступ по локальному дедлайну, пока сервер не подтвердит автоматику."""
+    expires_at = state.unlocked_override_expires_at
+    if expires_at is None or now < expires_at:
+        return
+    await family.refresh()
+    actual_blocked = family.is_desktop_blocked()
+    if not actual_blocked:
+        await family.set_desktop_blocked(True)
+        log("Desktop заблокирован: срок временной разблокировки истёк")
+    state.actual_blocked = True
+    state.desired_blocked = True
+    state.unlocked_override_expires_at = None
+
+
 async def run_controller(
     config: ControllerConfig,
     family: FamilyClient,
@@ -83,6 +110,7 @@ async def run_controller(
     gate_reader: Callable[[str], Awaitable[GateState]] = fetch_gate,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     clock: Callable[[], float] = time.monotonic,
+    wall_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     log: Callable[[str], None] = print,
     config_saver: Callable[[ControllerConfig], None] = save_config,
 ) -> None:
@@ -110,9 +138,24 @@ async def run_controller(
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # сеть и закрытый API должны восстанавливаться
+                try:
+                    await fail_closed_after_override_expiry(
+                        family, state, wall_clock(), log
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as safety_error:
+                    error = RuntimeError(
+                        f"{error}; аварийная блокировка не выполнена: {safety_error}"
+                    )
                 failures += 1
                 delay = min(300.0, config.poll_seconds * (2 ** min(failures - 1, 4)))
                 delay *= random.uniform(0.9, 1.1)
+                if state.unlocked_override_expires_at is not None:
+                    until_expiry = (
+                        state.unlocked_override_expires_at - wall_clock()
+                    ).total_seconds()
+                    delay = min(delay, max(1.0, until_expiry))
                 log(f"Сверка не выполнена: {error}; повтор через {delay:.0f} с")
                 await sleep(delay)
     finally:

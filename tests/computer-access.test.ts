@@ -21,6 +21,16 @@ function setup(): Database {
   return db;
 }
 
+function setupConnections(): [Database, Database] {
+  const tempDir = mkdtempSync(join(tmpdir(), 'edukator-computer-access-'));
+  tempDirs.push(tempDir);
+  const path = join(tempDir, 'computer-access.db');
+  const first = openDatabase(path);
+  const second = openDatabase(path);
+  databases.push(first, second);
+  return [first, second];
+}
+
 afterEach(() => {
   while (databases.length > 0) databases.pop()?.close();
   while (tempDirs.length > 0) rmSync(tempDirs.pop() ?? '', { recursive: true, force: true });
@@ -55,6 +65,52 @@ describe('ручная команда доступа к компьютеру', (
       'blocked',
       new Date('2026-08-08T21:00:00.000Z'),
     ).expiresAt).toBe('2026-08-09T21:00:00.000Z');
+  });
+
+  it('согласует set и clear из независимых соединений без промежуточного состояния', () => {
+    const [first, second] = setupConnections();
+    setComputerAccessOverride(first, 'blocked', new Date('2026-08-08T08:30:00.000Z'));
+    const replacement = setComputerAccessOverride(
+      second,
+      'unlocked',
+      new Date('2026-08-08T09:45:00.000Z'),
+    );
+
+    expect(readComputerAccessOverride(first, new Date('2026-08-08T10:00:00.000Z')))
+      .toEqual(replacement);
+    clearComputerAccessOverride(first);
+    expect(readComputerAccessOverride(second, new Date('2026-08-08T10:00:00.000Z')))
+      .toBeNull();
+  });
+
+  it('при contention не теряет команду и повторяет операцию после освобождения writer lock', () => {
+    const [holder, contender] = setupConnections();
+    contender.pragma('busy_timeout = 1');
+    setComputerAccessOverride(holder, 'blocked', new Date('2026-08-08T08:30:00.000Z'));
+    holder.exec('BEGIN IMMEDIATE');
+    try {
+      expect(() => setComputerAccessOverride(
+        contender,
+        'unlocked',
+        new Date('2026-08-08T09:45:00.000Z'),
+      )).toThrow(/database is locked/u);
+      expect(() => clearComputerAccessOverride(contender)).toThrow(/database is locked/u);
+      expect(readComputerAccessOverride(contender, new Date('2026-08-08T10:00:00.000Z')))
+        .toMatchObject({ mode: 'blocked' });
+    } finally {
+      holder.exec('ROLLBACK');
+    }
+
+    setComputerAccessOverride(
+      contender,
+      'unlocked',
+      new Date('2026-08-08T09:45:00.000Z'),
+    );
+    expect(readComputerAccessOverride(holder, new Date('2026-08-08T10:00:00.000Z')))
+      .toMatchObject({ mode: 'unlocked' });
+    clearComputerAccessOverride(contender);
+    expect(readComputerAccessOverride(holder, new Date('2026-08-08T10:00:00.000Z')))
+      .toBeNull();
   });
 
   it('не возвращает истёкшую строку, но сохраняет её для диагностики', () => {

@@ -21,8 +21,8 @@ class LearningGateState:
 @dataclass(frozen=True)
 class ComputerAccessOverride:
     mode: str
-    changed_at: str
-    expires_at: str
+    changed_at: datetime
+    expires_at: datetime
 
 
 @dataclass(frozen=True)
@@ -65,8 +65,8 @@ def _parse_override(raw: Any) -> ComputerAccessOverride | None:
         raise ValueError("Поле override.expiresAt должно быть позже changedAt")
     return ComputerAccessOverride(
         mode=raw["mode"],
-        changed_at=raw["changedAt"],
-        expires_at=raw["expiresAt"],
+        changed_at=timestamps[0],
+        expires_at=timestamps[1],
     )
 
 

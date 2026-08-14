@@ -1,5 +1,25 @@
 import { expect, test } from '@playwright/test';
+import { execFile as execFileCallback } from 'node:child_process';
+import { resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { startE2eHarness } from './harness.js';
+
+const execFile = promisify(execFileCallback);
+
+async function assertControllerAcceptsGate(gate: unknown): Promise<void> {
+  const python = process.env.EDUKATOR_PYTHON ?? 'python3';
+  const script = [
+    'import json, sys',
+    'from edukator_family_controller.gate import parse_gate',
+    'parse_gate(json.loads(sys.argv[1]))',
+    "print('ok')",
+  ].join('; ');
+  const { stdout } = await execFile(python, ['-c', script, JSON.stringify(gate)], {
+    encoding: 'utf8',
+    env: { ...process.env, PYTHONPATH: resolve('controller/src') },
+  });
+  expect(stdout.trim()).toBe('ok');
+}
 
 async function startReadyBoss(page: import('@playwright/test').Page, url: string): Promise<void> {
   await page.goto(url);
@@ -436,6 +456,7 @@ test('/parents меняет эффективный доступ: разблок�
   const parentPin = '123456';
   const harness = await startE2eHarness({ parentPin });
   try {
+    await page.clock.setFixedTime(new Date('2026-08-08T12:00:00.000Z'));
     await page.goto(`${harness.url}/parents`);
     await expect(page.getByRole('heading', { name: 'Картина подготовки без приукрашивания' })).toBeVisible();
     await page.getByLabel('PIN родителя').fill(parentPin);
@@ -445,33 +466,39 @@ test('/parents меняет эффективный доступ: разблок�
       .getByRole('button', { name: 'Разблокировать' }).click();
     await expect(page.getByRole('region', { name: 'Компьютер разблокирован' }))
       .toContainText('Временный режим');
-    expect(await (await page.request.get(`${harness.url}/api/gate/status`)).json()).toMatchObject({
+    const forcedUnlocked = await (await page.request.get(`${harness.url}/api/gate/status`)).json();
+    expect(forcedUnlocked).toMatchObject({
       automaticUnlocked: false,
       override: { mode: 'unlocked' },
       unlocked: true,
     });
+    await assertControllerAcceptsGate(forcedUnlocked);
 
     await page.getByRole('button', { name: 'По плану' }).click();
     await page.getByRole('dialog', { name: 'Вернуть режим «По плану»?' })
       .getByRole('button', { name: 'Вернуть режим «По плану»' }).click();
     await expect(page.getByRole('region', { name: 'Компьютер заблокирован' }))
       .toContainText('Режим по плану');
-    expect(await (await page.request.get(`${harness.url}/api/gate/status`)).json()).toMatchObject({
+    const automatic = await (await page.request.get(`${harness.url}/api/gate/status`)).json();
+    expect(automatic).toMatchObject({
       automaticUnlocked: false,
       override: null,
       unlocked: false,
     });
+    await assertControllerAcceptsGate(automatic);
 
     await page.getByRole('button', { name: 'Заблокировать' }).click();
     await page.getByRole('dialog', { name: 'Временно заблокировать компьютер?' })
       .getByRole('button', { name: 'Заблокировать' }).click();
     await expect(page.getByRole('region', { name: 'Компьютер заблокирован' }))
       .toContainText('Временный режим');
-    expect(await (await page.request.get(`${harness.url}/api/gate/status`)).json()).toMatchObject({
+    const forcedBlocked = await (await page.request.get(`${harness.url}/api/gate/status`)).json();
+    expect(forcedBlocked).toMatchObject({
       automaticUnlocked: false,
       override: { mode: 'blocked' },
       unlocked: false,
     });
+    await assertControllerAcceptsGate(forcedBlocked);
     harness.assertCodexNotCalled();
   } finally {
     await harness.close();

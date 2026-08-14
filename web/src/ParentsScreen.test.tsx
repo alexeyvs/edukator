@@ -1,12 +1,15 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ParentsScreen } from './ParentsScreen';
 import { ComputerAccessError, type ParentsApi, type ParentsDashboard } from './parents-api';
 import './test-setup';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 const DASHBOARD: ParentsDashboard = {
   generatedAt: '2026-08-08T12:00:00.000Z',
@@ -50,8 +53,8 @@ function parentsApi(value: ParentsDashboard = DASHBOARD): ParentsApi {
       ...value.computerAccess,
       override: mode === 'automatic' ? null : {
         mode,
-        changedAt: '2026-08-08T12:00:00.000Z',
-        expiresAt: '2026-08-08T21:00:00.000Z',
+        changedAt: '2099-08-08T12:00:00.000Z',
+        expiresAt: '2099-08-08T21:00:00.000Z',
       },
       unlocked: mode === 'unlocked',
     })),
@@ -119,8 +122,8 @@ describe('родительский дашборд', () => {
         ...DASHBOARD.computerAccess,
         override: {
           mode,
-          changedAt: '2026-08-08T12:00:00.000Z',
-          expiresAt: '2026-08-08T21:00:00.000Z',
+          changedAt: '2099-08-08T12:00:00.000Z',
+          expiresAt: '2099-08-08T21:00:00.000Z',
         },
         unlocked: mode === 'unlocked',
       },
@@ -131,6 +134,36 @@ describe('родительский дашборд', () => {
     expect(panel).toHaveTextContent('Временный режим');
     expect(panel).toHaveTextContent(/До 9 августа.*00:00/u);
     expect(within(panel).getByRole('button', { name: buttonName })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('по expiresAt возвращает автоматику и позволяет повторно выбрать прежний режим', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-08T20:59:59.000Z'));
+    const api = parentsApi({
+      ...DASHBOARD,
+      computerAccess: {
+        ...DASHBOARD.computerAccess,
+        override: {
+          mode: 'unlocked',
+          changedAt: '2026-08-08T20:50:00.000Z',
+          expiresAt: '2026-08-08T21:00:00.000Z',
+        },
+        unlocked: true,
+      },
+    });
+    await act(async () => { render(<ParentsScreen api={api} />); });
+
+    expect(screen.getByRole('region', { name: 'Компьютер разблокирован' }))
+      .toHaveTextContent('Временный режим');
+    await act(async () => { vi.advanceTimersByTime(1_000); });
+
+    const panel = screen.getByRole('region', { name: 'Компьютер заблокирован' });
+    expect(panel).toHaveTextContent('Режим по плану');
+    expect(panel).not.toHaveClass('parents-access-temporary');
+    fireEvent.change(within(panel).getByLabelText(/PIN родителя/u), { target: { value: '123456' } });
+    fireEvent.click(within(panel).getByRole('button', { name: 'Разблокировать' }));
+    expect(screen.getByRole('dialog', { name: 'Временно разблокировать компьютер?' }))
+      .toBeInTheDocument();
   });
 
   it('подтверждает каждую смену отдельно и переиспользует PIN этой вкладки', async () => {
@@ -213,7 +246,7 @@ describe('родительский дашборд', () => {
     resolve({
       ...DASHBOARD.computerAccess,
       override: {
-        mode: 'blocked', changedAt: '2026-08-08T12:00:00.000Z', expiresAt: '2026-08-08T21:00:00.000Z',
+        mode: 'blocked', changedAt: '2099-08-08T12:00:00.000Z', expiresAt: '2099-08-08T21:00:00.000Z',
       },
     });
     expect(await screen.findByText('Режим доступа обновлён.')).toBeInTheDocument();
