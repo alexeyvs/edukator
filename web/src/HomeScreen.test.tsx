@@ -280,14 +280,79 @@ describe('главный экран', () => {
   });
 
   it('показывает и продолжает активный слот дневного плана', async () => {
+    const navigate = vi.fn();
     const api = apiWith({
       ...PLAN,
-      plan: [{ ...PLAN.plan[0]!, active: true }, PLAN.plan[1]!],
+      plan: [{
+        ...PLAN.plan[0]!,
+        active: {
+          runId: 17,
+          startedAt: '2026-08-07T12:00:00.000Z',
+          progress: {
+            total: 7,
+            correct: 4,
+            target: 12,
+            done: false,
+            lives: { total: 3, remaining: 1, retryAvailable: false },
+          },
+        },
+      }, PLAN.plan[1]!],
     });
-    render(<HomeScreen api={api} navigate={vi.fn()} />);
+    render(<HomeScreen
+      api={api}
+      navigate={navigate}
+      now={() => new Date('2026-08-08T12:00:00.000Z')}
+    />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Продолжить' }));
-    await waitFor(() => expect(api.start).toHaveBeenCalledWith('math', 'math.fractions'));
+    expect(screen.getByText('Математика · 7 из 12 · начат вчера')).toBeInTheDocument();
+    expect(navigate).toHaveBeenCalledWith('/?runId=17');
+    expect(api.start).not.toHaveBeenCalled();
+  });
+
+  it('завершает с главной активный забег, который уже достиг цели', async () => {
+    const summary: FinishRunResponse = {
+      runId: 18,
+      total: 12,
+      correct: 9,
+      xp: 180,
+      touchedTopics: [],
+      closedTopics: [],
+      declinedTopics: [],
+      forecast: { id: 1, subject: 'math', score: 4, band: .3, createdAt: '2026-08-08T12:00:00Z' },
+    };
+    const api = apiWith({
+      ...PLAN,
+      plan: [{
+        ...PLAN.plan[0]!,
+        active: {
+          runId: 18,
+          startedAt: '2026-08-06T12:00:00.000Z',
+          progress: {
+            total: 12,
+            correct: 9,
+            target: 12,
+            done: true,
+            lives: { total: 3, remaining: 0, retryAvailable: false },
+          },
+        },
+      }],
+    });
+    vi.mocked(api.finish).mockResolvedValue(summary);
+    const navigate = vi.fn();
+    render(<HomeScreen
+      api={api}
+      navigate={navigate}
+      now={() => new Date('2026-08-08T12:00:00.000Z')}
+    />);
+
+    expect(await screen.findByText('Математика · 12 из 12 · начат 6 августа')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Завершить' }));
+
+    expect(await screen.findByText('Забег завершён')).toBeInTheDocument();
+    expect(api.finish).toHaveBeenCalledWith(18);
+    expect(api.start).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it('не показывает двойку, пока данных по предмету слишком мало', async () => {

@@ -421,17 +421,83 @@ describe('маршруты забега', () => {
     });
   });
 
-  it('показывает незавершённый обычный забег как оставшийся слот', async () => {
-    db.prepare(
+  it('показывает вчерашний незавершённый обычный забег с прогрессом как оставшийся слот', async () => {
+    const runId = Number(db.prepare(
       `INSERT INTO runs (subject, kind, topic_id, started_at)
        VALUES ('math', 'run', 'math.a', ?)`,
-    ).run('2026-08-08T08:00:00.000Z');
+    ).run('2026-08-07T08:00:00.000Z').lastInsertRowid);
+    db.prepare('UPDATE runs SET total = 7, correct = 4, lives_remaining = 1 WHERE id = ?').run(runId);
 
     const response = await app.inject({ method: 'GET', url: '/api/run/plan' });
     expect(response.statusCode).toBe(200);
-    const body = response.json() as { plan: Array<{ active?: boolean; subject: string }> };
+    const body = response.json() as { plan: Array<{ active?: unknown; subject: string }> };
     expect(body.plan).toHaveLength(3);
-    expect(body.plan[0]).toMatchObject({ active: true, subject: 'math' });
+    expect(body.plan[0]).toMatchObject({
+      subject: 'math',
+      active: {
+        runId,
+        startedAt: '2026-08-07T08:00:00.000Z',
+        progress: {
+          total: 7,
+          correct: 4,
+          target: 12,
+          done: false,
+          lives: { total: 3, remaining: 1, retryAvailable: false },
+        },
+      },
+    });
+  });
+
+  it('не скрывает активные забеги после выполнения дневной нормы', async () => {
+    const finish = db.prepare(
+      `INSERT INTO runs (subject, kind, topic_id, started_at, finished_at, summary)
+       VALUES (?, 'run', ?, ?, ?, '{}')`,
+    );
+    for (const [subject, hour] of [['math', '08'], ['russian', '09'], ['english', '10']] as const) {
+      finish.run(
+        subject,
+        `${subject}.a`,
+        `2026-08-08T${hour}:00:00.000Z`,
+        `2026-08-08T${hour}:30:00.000Z`,
+      );
+    }
+    const active = db.prepare(
+      `INSERT INTO runs (subject, kind, topic_id, started_at)
+       VALUES (?, 'run', ?, ?)`,
+    );
+    const older = Number(active.run('math', 'math.a', '2026-08-06T08:00:00.000Z').lastInsertRowid);
+    const newer = Number(active.run('english', 'english.a', '2026-08-07T08:00:00.000Z').lastInsertRowid);
+
+    const response = await app.inject({ method: 'GET', url: '/api/run/plan' });
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      gate: { remaining: number };
+      plan: Array<{ active?: { runId: number } }>;
+    };
+    expect(body.gate.remaining).toBe(0);
+    expect(body.plan.map((item) => item.active?.runId)).toEqual([newer, older]);
+  });
+
+  it('засчитывает завершённый сегодня перенесённый забег в сегодняшний план', async () => {
+    const runId = Number(db.prepare(
+      `INSERT INTO runs (subject, kind, topic_id, started_at)
+       VALUES ('math', 'run', 'math.a', ?)`,
+    ).run('2026-08-07T08:00:00.000Z').lastInsertRowid);
+    for (let index = 0; index < 12; index += 1) {
+      const next = await app.inject({ method: 'GET', url: `/api/session/next?runId=${runId}` });
+      const taskId = (next.json() as { task: { id: number } }).task.id;
+      const answer = await app.inject({
+        method: 'POST',
+        url: '/api/session/answer',
+        payload: { runId, task_id: taskId, answer: '45' },
+      });
+      expect(answer.statusCode).toBe(200);
+    }
+
+    const finished = await app.inject({ method: 'POST', url: `/api/run/${runId}/finish` });
+    expect(finished.statusCode).toBe(200);
+    const plan = await app.inject({ method: 'GET', url: '/api/run/plan' });
+    expect(plan.json()).toMatchObject({ gate: { completed: 1, remaining: 2 } });
   });
 
   it('переводит доменные отказы в 404/409 и не пишет чужую попытку', async () => {

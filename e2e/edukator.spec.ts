@@ -37,6 +37,31 @@ async function answerBoss(page: import('@playwright/test').Page, answer: string)
   await page.getByRole('button', { name: 'Проверить' }).click();
 }
 
+test('главная показывает и открывает незавершённый забег прошлого дня', async ({ page }) => {
+  const harness = await startE2eHarness({ triagePassed: 'math' });
+  try {
+    const runId = Number(harness.db.prepare(
+      `INSERT INTO runs
+         (subject, kind, topic_id, started_at, total, correct, lives_remaining)
+       VALUES ('math', 'run', 'math.1', ?, 7, 4, 1)`,
+    ).run('2026-08-07T12:00:00.000Z').lastInsertRowid);
+
+    await page.goto(harness.url);
+    const card = page.locator('.plan-cards article').filter({ hasText: 'Тема math 1' });
+    await expect(card).toContainText('Математика · 7 из 12 · начат вчера');
+    await card.getByRole('button', { name: 'Продолжить' }).click();
+
+    await expect(page).toHaveURL(`${harness.url}/?runId=${runId}`);
+    await expect(page.getByLabel('Прогресс: 7 из 12')).toBeVisible();
+    await expect(page.getByRole('heading', { name: /вычисли значение/ })).toBeVisible();
+    expect(harness.db.prepare<[number], { finished_at: string | null }>(
+      'SELECT finished_at FROM runs WHERE id = ?',
+    ).get(runId)).toEqual({ finished_at: null });
+  } finally {
+    await harness.close();
+  }
+});
+
 test('полный забег из двенадцати заданий приводит на финальный экран', async ({ page }) => {
   const harness = await startE2eHarness({ triagePassed: 'math' });
   try {

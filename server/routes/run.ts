@@ -8,7 +8,7 @@ import type { TopicGraph } from '../curriculum.js';
 import { SUBJECTS, type Subject } from '../db.js';
 import { forecastFor } from '../forecast.js';
 import { readTopicStates } from '../mastery.js';
-import { finishRun, startRun } from '../run.js';
+import { finishRun, runProgress, startRun, type RunProgress } from '../run.js';
 import { planFromDatabase } from '../scheduler.js';
 import { SessionError } from '../session-error.js';
 import { readStreak } from '../streak.js';
@@ -16,7 +16,6 @@ import { bossTopicState } from '../boss.js';
 import { bossProgress } from '../boss-rules.js';
 import { learningMaterialCards } from '../learning.js';
 import { readDailyGate } from '../daily-gate.js';
-import { moscowDayBounds } from '../moscow-time.js';
 
 export interface RunRoutesOptions {
   db: Database;
@@ -42,28 +41,27 @@ interface ActiveRunCard {
   topic: { id: string; title: string };
   priority: number;
   triagePassed: boolean;
-  active: true;
+  active: {
+    runId: number;
+    startedAt: string;
+    progress: RunProgress;
+  };
 }
 
 function activeRunCards(
   db: Database,
   graph: TopicGraph,
   triaged: ReadonlySet<Subject>,
-  now: Date,
-  limit: number,
 ): ActiveRunCard[] {
-  if (limit <= 0) return [];
-  const [start, next] = moscowDayBounds(now);
-  return db.prepare<[string, string, number], { subject: Subject; topic_id: string }>(
-    `SELECT subject, topic_id FROM runs
+  return db.prepare<[], { id: number; subject: Subject; topic_id: string; started_at: string }>(
+    `SELECT id, subject, topic_id, started_at FROM runs
       WHERE kind = 'run' AND finished_at IS NULL
-        AND started_at >= ? AND started_at < ?
         AND EXISTS (
           SELECT 1 FROM topic_state
            WHERE topic_state.topic_id = runs.topic_id AND topic_state.closed_at IS NULL
         )
-      ORDER BY started_at DESC, id DESC LIMIT ?`,
-  ).all(start, next, limit).flatMap((row) => {
+      ORDER BY started_at DESC, id DESC`,
+  ).all().flatMap((row) => {
     const topic = graph.byId.get(row.topic_id);
     if (topic === undefined || topic.subject !== row.subject) return [];
     return [{
@@ -71,7 +69,11 @@ function activeRunCards(
       topic: { id: topic.id, title: topic.title },
       priority: 0,
       triagePassed: triaged.has(row.subject),
-      active: true as const,
+      active: {
+        runId: row.id,
+        startedAt: row.started_at,
+        progress: runProgress(db, row.id),
+      },
     }];
   });
 }
@@ -125,8 +127,13 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
     const at = now();
     const triaged = triagedSubjects(db);
     const gate = readDailyGate(db, at);
-    const active = activeRunCards(db, graph, triaged, at, gate.remaining);
-    const planned = planFromDatabase(db, graph, gate.remaining - active.length, at).map((item) => ({
+    const active = activeRunCards(db, graph, triaged);
+    const planned = planFromDatabase(
+      db,
+      graph,
+      Math.max(0, gate.remaining - active.length),
+      at,
+    ).map((item) => ({
       subject: item.subject,
       topic: { id: item.topic.id, title: item.topic.title },
       priority: item.priority,

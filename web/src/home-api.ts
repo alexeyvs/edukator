@@ -8,7 +8,11 @@ export interface PlannedRun {
   topic: { id: string; title: string };
   priority: number;
   triagePassed: boolean;
-  active?: true;
+  active?: {
+    runId: number;
+    startedAt: string;
+    progress: RunProgress;
+  };
 }
 
 export interface SubjectForecast {

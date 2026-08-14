@@ -377,7 +377,7 @@ export function topicsUsedToday(db: Database, now: Date = new Date()): Set<strin
 }
 
 /**
- * Темы незакрытых обычных забегов сегодняшнего дня, самый свежий первым.
+ * Темы всех незакрытых обычных забегов, самый свежий первым.
  * Триаж выбирает темы своей политикой, а boss-забег обслуживает только `boss.ts`.
  * Отдельный
  * запрос, а не `topicsUsedToday`: та отвечает на вопрос «что сегодня уже
@@ -387,18 +387,16 @@ export function topicsUsedToday(db: Database, now: Date = new Date()): Set<strin
  * той, по которой ученик занимается прямо сейчас.
  *
  * Порядок задан явно: `DISTINCT` без `ORDER BY` возвращает строки как придётся,
- * а брошенный утром забег остаётся незакрытым до конца суток и обошёл бы
- * начатый только что.
+ * а перенесённый забег не должен обойти начатый только что.
  */
-export function activeRunTopics(db: Database, now: Date = new Date()): string[] {
-  const [start, next] = moscowDayBounds(now);
+export function activeRunTopics(db: Database, _now: Date = new Date()): string[] {
   const rows = db
-    .prepare<[string, string], { topic_id: string }>(
+    .prepare<[], { topic_id: string }>(
       `SELECT topic_id FROM runs
-       WHERE started_at >= ? AND started_at < ? AND finished_at IS NULL AND kind = 'run'
+       WHERE finished_at IS NULL AND kind = 'run'
        ORDER BY started_at DESC, id DESC`,
     )
-    .all(start, next);
+    .all();
   return [...new Set(rows.map((row) => row.topic_id))];
 }
 
@@ -428,6 +426,8 @@ function selectionFromDatabase(
   );
   const used = topicsUsedToday(db, now);
   for (const topicId of closed) used.add(topicId);
+  const startedIds = activeRunTopics(db, now).filter((id) => !closed.has(id));
+  for (const topicId of startedIds) used.add(topicId);
 
   const plan = planRuns(graph, readTopicStates(db), count, {
     now,
@@ -436,8 +436,7 @@ function selectionFromDatabase(
     assigned: runsAssignedToday(db, now),
     used,
   });
-  const started = activeRunTopics(db, now)
-    .filter((id) => !closed.has(id))
+  const started = startedIds
     .map((id) => graph.byId.get(id))
     .filter((topic): topic is Topic => topic !== undefined);
 
@@ -466,10 +465,10 @@ export function planFromDatabase(
 }
 
 /**
- * Темы, по которым занятие идёт прямо сейчас: сначала темы незакрытых забегов
- * сегодняшнего дня, потом план ближайших. Тема идущего забега для `planRuns`
- * уже «использована сегодня» и в план не попадёт — а задания прямо сейчас
- * берутся именно из неё, так что выдача и долив обязаны видеть её первой.
+ * Темы, по которым занятие идёт прямо сейчас: сначала темы всех незакрытых
+ * забегов, потом план ближайших. Для сегодняшнего забега тема уже исключена из
+ * `planRuns`; перенесённый забег также ставится первым, чтобы выдача и долив
+ * готовили задания именно для него.
  *
  * Реализация одна на всех: и воркер, и выдача занятия спрашивают состав тем
  * здесь. Своя копия у любого из них означала бы, что греется одно, а
