@@ -16,7 +16,12 @@ from edukator_family_controller.config import (
     save_config,
     save_pending_login,
 )
-from edukator_family_controller.gate import GateState, LearningGateState, parse_gate
+from edukator_family_controller.gate import (
+    ComputerAccessOverride,
+    GateState,
+    LearningGateState,
+    parse_gate,
+)
 from edukator_family_controller.family import MicrosoftFamilyClient
 from edukator_family_controller.login import update_family_with_retry
 from edukator_family_controller.main import ReconcileState, reconcile, run_controller
@@ -28,6 +33,8 @@ LOCKED = GateState(
     completed=1,
     remaining=2,
     learning=LearningGateState(material_id=None, required=False, passed=False),
+    automatic_unlocked=False,
+    override=None,
     unlocked=False,
 )
 UNLOCKED = GateState(
@@ -36,6 +43,8 @@ UNLOCKED = GateState(
     completed=3,
     remaining=0,
     learning=LearningGateState(material_id=7, required=True, passed=True),
+    automatic_unlocked=True,
+    override=None,
     unlocked=True,
 )
 
@@ -63,7 +72,7 @@ class FakeFamily:
 
 
 class GateContractTests(unittest.TestCase):
-    def test_accepts_consistent_state(self) -> None:
+    def test_accepts_legacy_state_without_override_fields(self) -> None:
         self.assertEqual(
             parse_gate(
                 {
@@ -80,16 +89,18 @@ class GateContractTests(unittest.TestCase):
                 }
             ),
             GateState(
-                "2026-08-12",
-                3,
-                2,
-                1,
-                LearningGateState(7, True, True),
-                False,
+                day="2026-08-12",
+                required=3,
+                completed=2,
+                remaining=1,
+                learning=LearningGateState(7, True, True),
+                automatic_unlocked=False,
+                override=None,
+                unlocked=False,
             ),
         )
 
-    def test_accepts_unlocked_state_without_material(self) -> None:
+    def test_accepts_new_automatic_state_without_override(self) -> None:
         state = parse_gate(
             {
                 "day": "2026-08-12",
@@ -101,10 +112,96 @@ class GateContractTests(unittest.TestCase):
                     "required": False,
                     "passed": False,
                 },
+                "automaticUnlocked": True,
+                "override": None,
                 "unlocked": True,
             }
         )
+        self.assertTrue(state.automatic_unlocked)
+        self.assertIsNone(state.override)
         self.assertTrue(state.unlocked)
+
+    def test_accepts_forced_unlocked_state_before_plan_completion(self) -> None:
+        state = parse_gate(
+            {
+                "day": "2026-08-12",
+                "required": 3,
+                "completed": 1,
+                "remaining": 2,
+                "learning": {
+                    "materialId": None,
+                    "required": False,
+                    "passed": False,
+                },
+                "automaticUnlocked": False,
+                "override": {
+                    "mode": "unlocked",
+                    "changedAt": "2026-08-12T10:00:00.000Z",
+                    "expiresAt": "2026-08-12T21:00:00.000Z",
+                },
+                "unlocked": True,
+            }
+        )
+
+        self.assertEqual(
+            state.override,
+            ComputerAccessOverride(
+                mode="unlocked",
+                changed_at="2026-08-12T10:00:00.000Z",
+                expires_at="2026-08-12T21:00:00.000Z",
+            ),
+        )
+        self.assertFalse(state.automatic_unlocked)
+        self.assertTrue(state.unlocked)
+
+    def test_accepts_forced_blocked_state_after_plan_completion(self) -> None:
+        state = parse_gate(
+            {
+                "day": "2026-08-12",
+                "required": 3,
+                "completed": 3,
+                "remaining": 0,
+                "learning": {
+                    "materialId": 7,
+                    "required": True,
+                    "passed": True,
+                },
+                "automaticUnlocked": True,
+                "override": {
+                    "mode": "blocked",
+                    "changedAt": "2026-08-12T10:00:00.000Z",
+                    "expiresAt": "2026-08-12T21:00:00.000Z",
+                },
+                "unlocked": False,
+            }
+        )
+
+        self.assertEqual(state.override.mode, "blocked")
+        self.assertTrue(state.automatic_unlocked)
+        self.assertFalse(state.unlocked)
+
+    def test_rejects_effective_state_that_disagrees_with_override(self) -> None:
+        with self.assertRaisesRegex(ValueError, "противоречат"):
+            parse_gate(
+                {
+                    "day": "2026-08-12",
+                    "required": 3,
+                    "completed": 1,
+                    "remaining": 2,
+                    "learning": {
+                        "materialId": None,
+                        "required": False,
+                        "passed": False,
+                    },
+                    "automaticUnlocked": False,
+                    "override": {
+                        "mode": "unlocked",
+                        "changedAt": "2026-08-12T10:00:00.000Z",
+                        "expiresAt": "2026-08-12T21:00:00.000Z",
+                    },
+                    "unlocked": False,
+                }
+            )
 
     def test_rejects_unlocked_state_with_unpassed_required_material(self) -> None:
         with self.assertRaisesRegex(ValueError, "противоречат"):
@@ -333,6 +430,55 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(family.actions, [False])
         self.assertEqual(family.refreshes, 1)
+
+    async def test_applies_both_forced_states_through_effective_gate(self) -> None:
+        family = FakeFamily(blocked=True)
+        state = ReconcileState()
+        forced_unlocked = parse_gate(
+            {
+                "day": "2026-08-12",
+                "required": 3,
+                "completed": 0,
+                "remaining": 3,
+                "learning": {
+                    "materialId": None,
+                    "required": False,
+                    "passed": False,
+                },
+                "automaticUnlocked": False,
+                "override": {
+                    "mode": "unlocked",
+                    "changedAt": "2026-08-12T10:00:00.000Z",
+                    "expiresAt": "2026-08-12T21:00:00.000Z",
+                },
+                "unlocked": True,
+            }
+        )
+        forced_blocked = parse_gate(
+            {
+                "day": "2026-08-12",
+                "required": 3,
+                "completed": 3,
+                "remaining": 0,
+                "learning": {
+                    "materialId": None,
+                    "required": False,
+                    "passed": False,
+                },
+                "automaticUnlocked": True,
+                "override": {
+                    "mode": "blocked",
+                    "changedAt": "2026-08-12T10:01:00.000Z",
+                    "expiresAt": "2026-08-12T21:00:00.000Z",
+                },
+                "unlocked": False,
+            }
+        )
+
+        await reconcile(forced_unlocked, family, state, 10, 300, lambda _: None)
+        await reconcile(forced_blocked, family, state, 20, 300, lambda _: None)
+
+        self.assertEqual(family.actions, [False, True])
 
     async def test_periodic_verification_restores_manual_unblock(self) -> None:
         family = FakeFamily(blocked=True)
