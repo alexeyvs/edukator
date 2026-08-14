@@ -28,6 +28,7 @@ from edukator_family_controller.login import update_family_with_retry
 from edukator_family_controller.main import (
     BLOCK_RENEW_SECONDS,
     ReconcileState,
+    cap_delay_to_safety_wake,
     ensure_fail_closed,
     reconcile,
     run_controller,
@@ -809,6 +810,70 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(family.actions, [True, True])
         self.assertEqual(state.block_renewed_at, 10 + BLOCK_RENEW_SECONDS)
+
+    async def test_long_locked_poll_wakes_for_block_renewal(self) -> None:
+        family = FakeFamily(blocked=True)
+        monotonic = 100.0
+        delays: list[float] = []
+
+        async def sleep_through_one_renewal(delay: float) -> None:
+            nonlocal monotonic
+            delays.append(delay)
+            monotonic += delay
+            if len(delays) > 1:
+                raise asyncio.CancelledError
+
+        with self.assertRaises(asyncio.CancelledError):
+            await run_controller(
+                ControllerConfig(
+                    "refresh",
+                    "child",
+                    poll_seconds=2 * BLOCK_RENEW_SECONDS,
+                ),
+                family,
+                gate_reader=lambda _: self._gate(LOCKED),
+                sleep=sleep_through_one_renewal,
+                clock=lambda: monotonic,
+                log=lambda _: None,
+            )
+
+        self.assertEqual(delays, [BLOCK_RENEW_SECONDS, BLOCK_RENEW_SECONDS])
+        self.assertEqual(family.actions, [True, True])
+
+    async def test_small_locked_poll_is_not_extended(self) -> None:
+        family = FakeFamily(blocked=True)
+        delays: list[float] = []
+
+        async def record_then_stop(delay: float) -> None:
+            delays.append(delay)
+            raise asyncio.CancelledError
+
+        with self.assertRaises(asyncio.CancelledError):
+            await run_controller(
+                ControllerConfig("refresh", "child", poll_seconds=60),
+                family,
+                gate_reader=lambda _: self._gate(LOCKED),
+                sleep=record_then_stop,
+                clock=lambda: 100,
+                log=lambda _: None,
+            )
+
+        self.assertEqual(delays, [60])
+
+    def test_overdue_block_renewal_uses_minimum_wake_delay(self) -> None:
+        state = ReconcileState(
+            desired_blocked=True,
+            block_renewed_at=100,
+        )
+
+        delay = cap_delay_to_safety_wake(
+            90_000,
+            state,
+            datetime(2026, 8, 12, tzinfo=timezone.utc),
+            101 + BLOCK_RENEW_SECONDS,
+        )
+
+        self.assertEqual(delay, 1.0)
 
     async def test_fail_closed_refreshes_before_proactive_renewal(self) -> None:
         family = FakeFamily(blocked=True)

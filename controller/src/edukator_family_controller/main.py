@@ -59,16 +59,31 @@ def access_expiry(gate: GateState) -> datetime | None:
     ).astimezone(timezone.utc)
 
 
-def cap_delay_to_access_expiry(
+def cap_delay_to_safety_wake(
     delay: float,
     state: ReconcileState,
-    now: datetime,
+    wall_now: datetime,
+    monotonic_now: float,
 ) -> float:
+    """Не спит дольше ближайшего access expiry или продления блокировки."""
     expires_at = state.access_expires_at
-    if expires_at is None:
-        return delay
-    until_expiry = (expires_at - now).total_seconds()
-    return min(delay, max(MIN_POLL_SECONDS, until_expiry))
+    if expires_at is not None:
+        until_expiry = (expires_at - wall_now).total_seconds()
+        delay = min(delay, max(MIN_POLL_SECONDS, until_expiry))
+
+    authoritative_blocked = state.last_gate_desired_blocked
+    local_safety_blocked = (
+        authoritative_blocked is None and state.desired_blocked is True
+    )
+    if authoritative_blocked is True or local_safety_blocked:
+        renewed_at = state.block_renewed_at
+        until_renewal = (
+            0.0
+            if renewed_at is None
+            else renewed_at + BLOCK_RENEW_SECONDS - monotonic_now
+        )
+        delay = min(delay, max(MIN_POLL_SECONDS, until_renewal))
+    return delay
 
 
 def block_renewal_due(state: ReconcileState, now: float) -> bool:
@@ -199,10 +214,11 @@ async def run_controller(
                     config_saver(config)
                     saved_token = family.refresh_token
                 failures = 0
-                delay = cap_delay_to_access_expiry(
+                delay = cap_delay_to_safety_wake(
                     config.poll_seconds,
                     state,
                     wall_clock(),
+                    clock(),
                 )
                 await sleep(delay)
             except asyncio.CancelledError:
@@ -239,10 +255,11 @@ async def run_controller(
                 failures += 1
                 delay = min(300.0, config.poll_seconds * (2 ** min(failures - 1, 4)))
                 delay *= random.uniform(0.9, 1.1)
-                delay = cap_delay_to_access_expiry(
+                delay = cap_delay_to_safety_wake(
                     delay,
                     state,
                     wall_clock(),
+                    clock(),
                 )
                 log(f"Сверка не выполнена: {error}; повтор через {delay:.0f} с")
                 await sleep(delay)
