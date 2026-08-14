@@ -13,6 +13,7 @@ import { planFromDatabase } from '../scheduler.js';
 import { SessionError } from '../session-error.js';
 import { readStreak } from '../streak.js';
 import { bossTopicState } from '../boss.js';
+import { bossProgress } from '../boss-rules.js';
 import { learningMaterialCards } from '../learning.js';
 import { readDailyGate } from '../daily-gate.js';
 import { moscowDayBounds } from '../moscow-time.js';
@@ -142,12 +143,19 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
       passed: triaged.has(subject),
     }));
 
-    const topics = graph.order.map((topic) => ({
-      id: topic.id,
-      title: topic.title,
-      subject: topic.subject,
-      readiness: bossTopicState(db, topic.id),
-    }));
+    const topics = graph.order.map((topic) => {
+      const state = states.get(topic.id);
+      if (state === undefined) {
+        throw new Error(`План: тема «${topic.id}» не заведена в topic_state`);
+      }
+      return {
+        id: topic.id,
+        title: topic.title,
+        subject: topic.subject,
+        bossProgress: bossProgress(state.mastery),
+        readiness: bossTopicState(db, topic.id),
+      };
+    });
 
     const learning = learningMaterialCards(db).map((material) => {
       const topic = graph.byId.get(material.topicId);

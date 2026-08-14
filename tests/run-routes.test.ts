@@ -104,7 +104,10 @@ describe('маршруты забега', () => {
         learning: { materialId: number | null; required: boolean; passed: boolean };
         unlocked: boolean;
       };
-      topics: Array<{ id: string; title: string; subject: string; readiness: Record<string, unknown> }>;
+      topics: Array<{
+        id: string; title: string; subject: string; bossProgress: number;
+        readiness: Record<string, unknown>;
+      }>;
     };
     expect(plan.plan).toHaveLength(3);
     expect(new Set(plan.plan.map((item) => item.subject))).toEqual(new Set(SUBJECTS));
@@ -123,6 +126,7 @@ describe('маршруты забега', () => {
     expect(plan.topics[0]).toMatchObject({
       id: expect.stringMatching(/\.a$/), title: expect.stringContaining('Тема'),
       subject: expect.stringMatching(/math|russian|english/),
+      bossProgress: 0,
       readiness: { status: 'working', eligible: false },
     });
     expect(JSON.stringify(plan.topics)).not.toContain('mastery');

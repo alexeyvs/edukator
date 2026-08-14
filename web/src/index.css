@@ -456,28 +456,62 @@ button:focus-visible {
   border-top: 0;
 }
 
-.topic-map-subjects li > div {
+.topic-map-subjects li > .topic-details {
   display: grid;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
-.topic-map-subjects li span {
+.topic-map-subjects .topic-title {
   font-size: .84rem;
   line-height: 1.25;
 }
 
-.topic-map-subjects li small {
+.topic-map-subjects .topic-state {
   margin-top: .18rem;
   color: var(--leaf);
   font-size: .7rem;
   font-weight: 750;
 }
 
+.topic-progress {
+  display: grid;
+  gap: .24rem;
+  margin-top: .28rem;
+}
+
+.topic-progress-label {
+  display: flex;
+  justify-content: space-between;
+  gap: .5rem;
+  color: #607068;
+}
+
+.topic-progress-label small {
+  font-size: .64rem;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.topic-progress-track {
+  height: .3rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e3eae5;
+}
+
+.topic-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--leaf);
+}
+
 .topic-map-subjects .topic-closed {
   opacity: .48;
 }
 
-.topic-map-subjects .topic-closed small {
+.topic-map-subjects .topic-closed .topic-state {
   color: #66756f;
 }
 

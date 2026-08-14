@@ -136,6 +136,32 @@ function topicStatus(topic: HomeTopic): string {
   }
 }
 
+function showsBossProgress(topic: HomeTopic): boolean {
+  return !topic.readiness.eligible &&
+    (topic.readiness.status === 'working' || topic.readiness.status === 'ready');
+}
+
+function TopicBossProgress({ topic }: { topic: HomeTopic }) {
+  return (
+    <div className="topic-progress">
+      <div className="topic-progress-label">
+        <small>До босса</small>
+        <small>{topic.bossProgress}%</small>
+      </div>
+      <div
+        className="topic-progress-track"
+        role="progressbar"
+        aria-label={`Прогресс темы «${topic.title}» до босса`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={topic.bossProgress}
+      >
+        <span style={{ width: `${topic.bossProgress}%` }} />
+      </div>
+    </div>
+  );
+}
+
 export function HomeScreen({
   api = browserHomeApi,
   now = () => new Date(),
@@ -388,9 +414,11 @@ export function HomeScreen({
                         className={topic.readiness.status === 'closed' ? 'topic-closed' : undefined}
                         key={topic.id}
                       >
-                        <div>
-                          <span>{topic.title}</span>
-                          <small>{topicStatus(topic)}</small>
+                        <div className="topic-details">
+                          <span className="topic-title">{topic.title}</span>
+                          {showsBossProgress(topic)
+                            ? <TopicBossProgress topic={topic} />
+                            : <small className="topic-state">{topicStatus(topic)}</small>}
                         </div>
                         {canStart && (
                           <button

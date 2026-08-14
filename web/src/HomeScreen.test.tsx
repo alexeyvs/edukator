@@ -35,36 +35,42 @@ const PLAN: DayPlanResponse = {
       id: 'math.fractions',
       title: 'Обыкновенные дроби',
       subject: 'math',
+      bossProgress: 43,
       readiness: { status: 'working', eligible: false },
     },
     {
       id: 'math.percent',
       title: 'Проценты',
       subject: 'math',
+      bossProgress: 100,
       readiness: { status: 'working', eligible: true },
     },
     {
       id: 'russian.vowels',
       title: 'Безударные гласные',
       subject: 'russian',
+      bossProgress: 100,
       readiness: { status: 'preparing', eligible: true, batchId: 2 },
     },
     {
       id: 'russian.syntax',
       title: 'Синтаксис',
       subject: 'russian',
+      bossProgress: 100,
       readiness: { status: 'ready', eligible: true, batchId: 3 },
     },
     {
       id: 'english.articles',
       title: 'Артикли',
       subject: 'english',
+      bossProgress: 100,
       readiness: { status: 'active', eligible: true, batchId: 4, runId: 11 },
     },
     {
       id: 'english.reading',
       title: 'Чтение',
       subject: 'english',
+      bossProgress: 100,
       readiness: { status: 'closed', eligible: false },
     },
   ],
@@ -354,7 +360,7 @@ describe('главный экран', () => {
     expect(screen.queryByLabelText('Загрузка плана')).not.toBeInTheDocument();
   });
 
-  it('показывает все состояния карты по трём предметам без числового mastery и ссылки для родителей', async () => {
+  it('показывает прогресс до босса и остальные состояния карты без сырого mastery', async () => {
     const plan = {
       ...PLAN,
       topics: PLAN.topics.map((topic) => ({ ...topic, mastery: 0.82 })),
@@ -365,7 +371,12 @@ describe('главный экран', () => {
     for (const subject of ['Математика', 'Русский язык', 'Английский язык']) {
       expect(screen.getAllByRole('heading', { name: subject }).length).toBeGreaterThan(0);
     }
-    expect(screen.getByText('В работе')).toBeInTheDocument();
+    const progress = screen.getByRole('progressbar', {
+      name: 'Прогресс темы «Обыкновенные дроби» до босса',
+    });
+    expect(progress).toHaveAttribute('aria-valuenow', '43');
+    expect(screen.getByText('43%')).toBeInTheDocument();
+    expect(screen.queryByText('В работе')).not.toBeInTheDocument();
     expect(screen.getAllByText('Босс готовится')).toHaveLength(2);
     expect(screen.getByText('Можно вызвать босса')).toBeInTheDocument();
     expect(screen.getByText('Бой уже начат')).toBeInTheDocument();
@@ -390,7 +401,7 @@ describe('главный экран', () => {
     const api = apiWith({
       ...PLAN,
       topics: PLAN.topics.map((topic) => topic.id === 'russian.syntax'
-        ? { ...topic, readiness: { ...topic.readiness, eligible: false } }
+        ? { ...topic, bossProgress: 99, readiness: { ...topic.readiness, eligible: false } }
         : topic),
     });
     render(<HomeScreen api={api} />);
@@ -398,7 +409,8 @@ describe('главный экран', () => {
     const title = await screen.findByText('Синтаксис');
     const item = title.closest('li');
     expect(item).not.toBeNull();
-    expect(within(item!).getByText('В работе')).toBeInTheDocument();
+    expect(within(item!).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '99');
+    expect(within(item!).queryByText('В работе')).not.toBeInTheDocument();
     expect(within(item!).queryByRole('button')).not.toBeInTheDocument();
     expect(api.startBoss).not.toHaveBeenCalled();
   });

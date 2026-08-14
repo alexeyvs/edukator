@@ -21,6 +21,7 @@ import {
   startBoss,
   submitBossAnswer,
 } from '../server/boss.js';
+import { bossProgress } from '../server/boss-rules.js';
 
 const TOPIC = 'math.fractions';
 const NOW = new Date('2026-08-08T10:00:00.000Z');
@@ -74,6 +75,14 @@ describe('доменная модель босса', () => {
   it('держит буквальные пороги спеки', () => {
     expect(BOSS_MASTERY).toBe(0.75);
     expect(BOSS_TARGET).toBe(5);
+  });
+
+  it('переводит mastery в понятный прогресс до строгого порога босса', () => {
+    expect(bossProgress(0)).toBe(0);
+    expect(bossProgress(0.375)).toBe(50);
+    expect(bossProgress(0.75)).toBe(99);
+    expect(bossProgress(0.750001)).toBe(100);
+    expect(() => bossProgress(1.01)).toThrow(/mastery вне 0\.\.1/);
   });
 
   it('показывает все состояния темы и требует строго больше порога', () => {

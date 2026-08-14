@@ -48,6 +48,7 @@ export interface HomeTopic {
   id: string;
   title: string;
   subject: Subject;
+  bossProgress: number;
   readiness: BossReadiness;
 }
 
