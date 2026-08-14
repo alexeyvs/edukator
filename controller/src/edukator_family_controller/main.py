@@ -132,6 +132,9 @@ async def fail_closed_after_access_expiry(
         log,
         "срок разрешённого доступа истёк",
     )
+    # После дедлайна локальный blocked intent действует до следующего валидного
+    # gate. Это позволяет восстанавливать конечный Family Safety UNTIL при outage.
+    state.last_gate_desired_blocked = True
     state.access_expires_at = None
 
 

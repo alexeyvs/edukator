@@ -50,10 +50,15 @@ UNLOCKED = GateState(
 )
 
 
-def forced_unlocked_gate() -> GateState:
+def forced_unlocked_gate(
+    *,
+    day: str = "2026-08-12",
+    changed_at: str = "2026-08-12T20:59:00.000Z",
+    expires_at: str = "2026-08-12T21:00:00.000Z",
+) -> GateState:
     return parse_gate(
         {
-            "day": "2026-08-12",
+            "day": day,
             "required": 3,
             "completed": 0,
             "remaining": 3,
@@ -65,8 +70,8 @@ def forced_unlocked_gate() -> GateState:
             "automaticUnlocked": False,
             "override": {
                 "mode": "unlocked",
-                "changedAt": "2026-08-12T20:59:00.000Z",
-                "expiresAt": "2026-08-12T21:00:00.000Z",
+                "changedAt": changed_at,
+                "expiresAt": expires_at,
             },
             "unlocked": True,
         }
@@ -1066,6 +1071,105 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(delays[0], 1.0)
                 self.assertEqual(family.actions, [False, True])
                 self.assertTrue(family.blocked)
+
+    async def test_expired_access_block_is_maintained_during_outage(self) -> None:
+        family = FakeFamily(blocked=True)
+        current = datetime(2026, 8, 12, 20, 59, 59, tzinfo=timezone.utc)
+        reads = 0
+        action_counts: list[int] = []
+
+        async def reader(_: str) -> GateState:
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return UNLOCKED
+            raise RuntimeError("нет связи")
+
+        async def expire_remove_then_stop(delay: float) -> None:
+            nonlocal current
+            action_counts.append(len(family.actions))
+            if len(action_counts) == 1:
+                current += timedelta(seconds=delay)
+            elif len(action_counts) == 3:
+                # Имитирует окончание конечного Family Safety UNTIL.
+                family.blocked = False
+            elif len(action_counts) > 3:
+                raise asyncio.CancelledError
+
+        with self.assertRaises(asyncio.CancelledError):
+            await run_controller(
+                ControllerConfig("refresh", "child"),
+                family,
+                gate_reader=reader,
+                sleep=expire_remove_then_stop,
+                wall_clock=lambda: current,
+                log=lambda _: None,
+            )
+
+        self.assertEqual(action_counts, [1, 2, 2, 3])
+        self.assertEqual(family.actions, [False, True, True])
+        self.assertEqual(family.refreshes, 4)
+        self.assertTrue(family.blocked)
+
+    async def test_fresh_unlocked_gate_supersedes_local_expiry_block(self) -> None:
+        next_day_automatic = GateState(
+            day="2026-08-13",
+            required=3,
+            completed=3,
+            remaining=0,
+            learning=UNLOCKED.learning,
+            automatic_unlocked=True,
+            override=None,
+            unlocked=True,
+        )
+        next_day_forced = forced_unlocked_gate(
+            day="2026-08-13",
+            changed_at="2026-08-12T21:00:00.000Z",
+            expires_at="2026-08-13T21:00:00.000Z",
+        )
+
+        for name, recovered_gate in (
+            ("automatic", next_day_automatic),
+            ("forced", next_day_forced),
+        ):
+            with self.subTest(mode=name):
+                family = FakeFamily(blocked=True)
+                current = datetime(
+                    2026, 8, 12, 20, 59, 59, tzinfo=timezone.utc
+                )
+                reads = 0
+                blocked_during_sleeps: list[bool] = []
+
+                async def reader(_: str) -> GateState:
+                    nonlocal reads
+                    reads += 1
+                    if reads == 1:
+                        return UNLOCKED
+                    if reads == 2:
+                        raise RuntimeError("нет связи")
+                    return recovered_gate
+
+                async def recover_then_stop(delay: float) -> None:
+                    nonlocal current
+                    blocked_during_sleeps.append(family.blocked)
+                    if len(blocked_during_sleeps) == 1:
+                        current += timedelta(seconds=delay)
+                    elif len(blocked_during_sleeps) > 2:
+                        raise asyncio.CancelledError
+
+                with self.assertRaises(asyncio.CancelledError):
+                    await run_controller(
+                        ControllerConfig("refresh", "child"),
+                        family,
+                        gate_reader=reader,
+                        sleep=recover_then_stop,
+                        wall_clock=lambda: current,
+                        log=lambda _: None,
+                    )
+
+                self.assertEqual(blocked_during_sleeps, [False, True, False])
+                self.assertEqual(family.actions, [False, True, False])
+                self.assertFalse(family.blocked)
 
     async def test_forced_unlock_poll_is_capped_to_override_expiry(self) -> None:
         family = FakeFamily(blocked=True)
