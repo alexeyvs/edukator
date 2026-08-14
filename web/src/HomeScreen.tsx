@@ -5,6 +5,7 @@ import {
   type DayPlanResponse,
   type HomeTopic,
   type HomeApi,
+  type PlannedRun,
   type ProfileSummary,
   type Subject,
 } from './home-api';
@@ -25,6 +26,9 @@ function defaultNavigate(url: string): void {
 const moscowDateFormatter = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Europe/Moscow', year: 'numeric', month: '2-digit', day: '2-digit',
 });
+const moscowRunDateFormatter = new Intl.DateTimeFormat('ru-RU', {
+  timeZone: 'Europe/Moscow', day: 'numeric', month: 'long',
+});
 
 function dayNumber(date: string): number {
   const [year, month, day] = date.split('-').map(Number);
@@ -33,6 +37,20 @@ function dayNumber(date: string): number {
 
 function daysUntil(examDate: string, now: Date): number {
   return dayNumber(examDate) - dayNumber(moscowDateFormatter.format(now));
+}
+
+function runStartedText(startedAt: string, currentDay: string): string {
+  const started = new Date(startedAt);
+  const daysAgo = dayNumber(currentDay) - dayNumber(moscowDateFormatter.format(started));
+  if (daysAgo === 0) return 'начат сегодня';
+  if (daysAgo === 1) return 'начат вчера';
+  return `начат ${moscowRunDateFormatter.format(started)}`;
+}
+
+function runMeta(item: PlannedRun, currentDay: string): string {
+  if (item.active === undefined) return SUBJECT_NAMES[item.subject];
+  return `${SUBJECT_NAMES[item.subject]} · ${item.active.progress.total} из ` +
+    `${item.active.progress.target} · ${runStartedText(item.active.startedAt, currentDay)}`;
 }
 
 function ExamCountdown({ examDate, now }: { examDate: string | null; now: Date }) {
@@ -176,6 +194,7 @@ export function HomeScreen({
   const [problem, setProblem] = useState<string | null>(null);
   const [starting, setStarting] = useState<Subject | null>(null);
   const [startingBoss, setStartingBoss] = useState<string | null>(null);
+  const [finishingRunId, setFinishingRunId] = useState<number | null>(null);
   const [finish, setFinish] = useState<{
     result: FinishRunResponse;
     kind: 'run' | 'triage';
@@ -228,6 +247,22 @@ export function HomeScreen({
       setProblem(error instanceof Error ? error.message : 'Не получилось начать бой с боссом');
     } finally {
       setStartingBoss(null);
+    }
+  }
+
+  async function continueRun(active: NonNullable<PlannedRun['active']>): Promise<void> {
+    if (!active.progress.done) {
+      navigate(`/?runId=${active.runId}`);
+      return;
+    }
+    setFinishingRunId(active.runId);
+    setProblem(null);
+    try {
+      setFinish({ result: await api.finish(active.runId), kind: 'run' });
+    } catch (error) {
+      setProblem(error instanceof Error ? error.message : 'Не получилось завершить забег');
+    } finally {
+      setFinishingRunId(null);
     }
   }
 
@@ -377,22 +412,35 @@ export function HomeScreen({
               <div className="empty-day"><strong>На сегодня всё закрыто</strong><span>Можно отдыхать без чувства долга.</span></div>
             ) : (
               <div className="plan-cards">
-                {visiblePlan.map((item, index) => (
-                  <article key={`${item.subject}:${item.topic.id}`}>
-                    <span className="plan-number">{String(index + 1).padStart(2, '0')}</span>
-                    <div><small>{SUBJECT_NAMES[item.subject]}</small><h3>{item.topic.title}</h3></div>
-                    <button
-                      className="primary"
-                      type="button"
-                      disabled={starting !== null}
-                      onClick={() => void start(item.subject, 'run', item.topic.id)}
-                    >
-                      {starting === item.subject
-                        ? 'Начинаю…'
-                        : item.active === true ? 'Продолжить' : 'Начать'}
-                    </button>
-                  </article>
-                ))}
+                {visiblePlan.map((item, index) => {
+                  const active = item.active;
+                  return (
+                    <article key={active === undefined
+                      ? `${item.subject}:${item.topic.id}`
+                      : `run:${active.runId}`}>
+                      <span className="plan-number">{String(index + 1).padStart(2, '0')}</span>
+                      <div><small>{runMeta(item, plan.gate.day)}</small><h3>{item.topic.title}</h3></div>
+                      <button
+                        className="primary"
+                        type="button"
+                        disabled={starting !== null || finishingRunId !== null}
+                        onClick={() => void (active === undefined
+                          ? start(item.subject, 'run', item.topic.id)
+                          : continueRun(active))}
+                      >
+                        {active !== undefined && finishingRunId === active.runId
+                          ? 'Завершаю…'
+                          : active?.progress.done === true
+                            ? 'Завершить'
+                            : active !== undefined
+                              ? 'Продолжить'
+                              : starting === item.subject
+                                ? 'Начинаю…'
+                                : 'Начать'}
+                      </button>
+                    </article>
+                  );
+                })}
               </div>
             )}
           </section>

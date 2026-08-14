@@ -690,6 +690,19 @@ describe('планировщик', () => {
       expect(activeRunTopics(db, at(0))).not.toContain('math.t0');
     });
 
+    it('сохраняет тему незавершённого обычного забега активной после смены суток', () => {
+      db.prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)').run(
+        'math',
+        'math.t0',
+        at(-1).toISOString(),
+      );
+
+      expect(activeRunTopics(db, at(0))).toEqual(['math.t0']);
+      expect(activeTopics(db, graph, 1, at(0))[0]?.id).toBe('math.t0');
+      expect(planFromDatabase(db, graph, graph.byId.size, at(0)).map((run) => run.topic.id))
+        .not.toContain('math.t0');
+    });
+
     it('ранжирует остальные темы предмета и возвращает пустой полностью закрытый план', () => {
       db.prepare("UPDATE topic_state SET closed_at = '2026-08-07T12:00:00.000Z' WHERE topic_id = ?")
         .run('math.t0');

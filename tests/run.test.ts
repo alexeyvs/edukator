@@ -153,7 +153,7 @@ describe('жизненный цикл забега', () => {
     expect(db.prepare('SELECT COUNT(*) AS count FROM runs').get()).toEqual({ count: 0 });
   });
 
-  it('переключает сутки забега по московской полуночи при UTC-поясе процесса', () => {
+  it('не закрывает вчерашний обычный забег при старте нового дня', () => {
     const first = startRun(db, graph, 'math', {
       now: new Date('2026-08-07T20:50:00.000Z'), topicId: 'math.a',
     });
@@ -164,15 +164,15 @@ describe('жизненный цикл забега', () => {
     expect(second.resumed).toBe(false);
     expect(second.runId).not.toBe(first.runId);
     expect(db.prepare('SELECT finished_at FROM runs WHERE id = ?').get(first.runId))
-      .toEqual({ finished_at: '2026-08-07T20:50:00.000Z' });
+      .toEqual({ finished_at: null });
   });
 
-  it('закрывает вчерашние забеги по последней попытке, а пустые — по старту', () => {
+  it('автоматически закрывает только вчерашний триаж по последней попытке', () => {
     const withAttempt = Number(db
-      .prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+      .prepare("INSERT INTO runs (subject, kind, topic_id, started_at) VALUES (?, 'triage', ?, ?)")
       .run('math', 'math.a', at(-1, 9).toISOString()).lastInsertRowid);
     const empty = Number(db
-      .prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+      .prepare("INSERT INTO runs (subject, kind, topic_id, started_at) VALUES (?, 'triage', ?, ?)")
       .run('russian', 'russian.a', at(-1, 10).toISOString()).lastInsertRowid);
     const taskId = Number(db
       .prepare(

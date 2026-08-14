@@ -148,8 +148,8 @@ export function runProgress(db: Database, runId: number): RunProgress {
 
 /**
  * Начинает забег либо восстанавливает сегодняшний незакрытый забег того же вида
- * и предмета. Закрытие вчерашних строк входит в ту же запись: два одновременных
- * старта не смогут оба прочитать отсутствие забега и завести по своей строке.
+ * и предмета. Обычные забеги прошлых дней остаются доступными по своему id на
+ * главной; автоматически закрывается только устаревший диагностический триаж.
  */
 export function startRun(
   db: Database,
@@ -167,15 +167,15 @@ export function startRun(
       throw new Error(`Забег: предмет «${subject}» отсутствует в карте тем`);
     }
 
-    // Брошенный забег заканчивается последним фактическим действием ученика, а
-    // не временем следующего запуска. Без попыток точнее времени старта нет.
+    // Старый триаж не переносится на новый день: диагностика должна проходить
+    // одним срезом. Обычный забег, напротив, ученик может допройти позднее.
     db.prepare(
       `UPDATE runs
           SET finished_at = COALESCE(
             (SELECT MAX(attempts.created_at) FROM attempts WHERE attempts.run_id = runs.id),
             runs.started_at
           )
-        WHERE finished_at IS NULL AND kind IN ('run', 'triage') AND started_at < ?
+        WHERE finished_at IS NULL AND kind = 'triage' AND started_at < ?
           AND NOT EXISTS (
             SELECT 1 FROM attempts
             JOIN disputes ON disputes.attempt_id = attempts.id
