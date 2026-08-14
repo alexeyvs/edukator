@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import type { DailyGateState } from './home-api';
 import {
   browserParentsApi,
@@ -85,42 +85,80 @@ function ComputerAccessPanel({
   access,
   api,
   onChanged,
+  onExpired,
 }: {
   access: ParentsDashboard['computerAccess'];
   api: ParentsApi;
   onChanged: (next: DailyGateState) => void;
+  onExpired: () => Promise<void>;
 }) {
   const [pin, setPin] = useState('');
   const [selected, setSelected] = useState<ComputerAccessMode | null>(null);
   const [pending, setPending] = useState(false);
+  const [expiryPending, setExpiryPending] = useState(false);
+  const [expiryError, setExpiryError] = useState<string | null>(null);
   const [accessClock, setAccessClock] = useState(() => Date.now());
   const [feedback, setFeedback] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
-  const expiresAt = access.override === null ? null : Date.parse(access.override.expiresAt);
-  const overrideActive = expiresAt !== null && Number.isFinite(expiresAt) && expiresAt > accessClock;
-  const currentAccess = overrideActive
-    ? access
-    : { ...access, override: null, unlocked: access.automaticUnlocked };
-  const current = accessMode(currentAccess);
-  const status = accessStatus(currentAccess);
+  const refreshedExpiry = useRef<string | null>(null);
+  const refreshGeneration = useRef(0);
+  const expiresAt = access.override === null ? Number.NaN : Date.parse(access.override.expiresAt);
+  const overrideActive = Number.isFinite(expiresAt) && expiresAt > accessClock;
+  const overrideExpired = access.override !== null && !overrideActive;
+  const current = overrideExpired ? null : accessMode(access);
+  const status = overrideExpired
+    ? {
+      eyebrow: expiryPending ? 'Обновляю состояние' : 'Состояние не подтверждено',
+      title: expiryPending ? 'Проверяю доступ к компьютеру' : 'Состояние доступа неизвестно',
+      note: expiryPending
+        ? 'Получаю актуальный режим нового дня.'
+        : 'Не получилось получить актуальный режим. Старое состояние не используется.',
+    }
+    : accessStatus(access);
   const pinValid = /^\d{6,12}$/u.test(pin);
 
   useEffect(() => {
-    if (expiresAt === null || !Number.isFinite(expiresAt) || expiresAt <= accessClock) return;
+    if (access.override === null) {
+      refreshedExpiry.current = null;
+      return;
+    }
+    const expiryKey = access.override.expiresAt;
+    const remaining = Number.isFinite(expiresAt) ? expiresAt - Date.now() : 0;
     const timer = window.setTimeout(
-      () => setAccessClock(Date.now()),
-      Math.min(2_147_483_647, Math.max(0, expiresAt - Date.now())),
+      () => {
+        const now = Date.now();
+        setAccessClock(now);
+        if (Number.isFinite(expiresAt) && now < expiresAt) return;
+        if (refreshedExpiry.current === expiryKey) return;
+        refreshedExpiry.current = expiryKey;
+        const generation = ++refreshGeneration.current;
+        setSelected(null);
+        setExpiryPending(true);
+        setExpiryError(null);
+        void onExpired()
+          .catch((error: unknown) => {
+            if (refreshGeneration.current !== generation) return;
+            setExpiryError(error instanceof Error
+              ? error.message
+              : 'Не получилось обновить состояние доступа');
+          })
+          .finally(() => {
+            if (refreshGeneration.current === generation) setExpiryPending(false);
+          });
+      },
+      Math.min(2_147_483_647, Math.max(0, remaining)),
     );
     return () => window.clearTimeout(timer);
-  }, [accessClock, expiresAt]);
+  }, [access.override, accessClock, expiresAt, onExpired]);
 
   async function confirm(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (selected === null || !pinValid || pending) return;
+    if (selected === null || !pinValid || pending || expiryPending) return;
     setPending(true);
     setFeedback(null);
     try {
       const next = await api.changeComputerAccess(selected, pin);
       onChanged(next);
+      setExpiryError(null);
       setSelected(null);
       setFeedback({ kind: 'success', text: 'Режим доступа обновлён.' });
     } catch (error: unknown) {
@@ -167,7 +205,7 @@ function ComputerAccessPanel({
           {ACCESS_MODES.map(({ mode, label }) => (
             <button
               aria-pressed={current === mode}
-              disabled={!access.configured || pending}
+              disabled={!access.configured || pending || expiryPending}
               key={mode}
               type="button"
               onClick={() => { if (mode !== current) setSelected(mode); }}
@@ -178,6 +216,8 @@ function ComputerAccessPanel({
         </div>
         <p className="parents-access-help">Временная команда действует до московской полуночи.</p>
         {pending && <p className="parents-access-feedback" role="status">Изменяю режим доступа…</p>}
+        {expiryPending && <p className="parents-access-feedback" role="status">Обновляю состояние доступа…</p>}
+        {expiryError !== null && <p className="parents-access-feedback error" role="alert">{expiryError}</p>}
         {feedback !== null && <p
           className={`parents-access-feedback ${feedback.kind}`}
           role={feedback.kind === 'error' ? 'alert' : 'status'}
@@ -253,15 +293,31 @@ function Flags({ dashboard }: { dashboard: ParentsDashboard }) {
 export function ParentsScreen({ api = browserParentsApi }: { api?: ParentsApi }) {
   const [dashboard, setDashboard] = useState<ParentsDashboard | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const readGeneration = useRef(0);
 
   useEffect(() => {
     let active = true;
+    const generation = ++readGeneration.current;
     api.read()
-      .then((loaded) => { if (active) setDashboard(loaded); })
+      .then((loaded) => {
+        if (active && readGeneration.current === generation) setDashboard(loaded);
+      })
       .catch((error: unknown) => {
         if (active) setProblem(error instanceof Error ? error.message : 'Не получилось загрузить сводку');
       });
-    return () => { active = false; };
+    return () => {
+      active = false;
+      if (readGeneration.current === generation) readGeneration.current += 1;
+    };
+  }, [api]);
+
+  const refreshAfterExpiry = useCallback(async (): Promise<void> => {
+    const generation = ++readGeneration.current;
+    const loaded = await api.read();
+    if (readGeneration.current === generation) {
+      setDashboard(loaded);
+      setProblem(null);
+    }
   }, [api]);
 
   if (problem !== null) {
@@ -291,10 +347,17 @@ export function ParentsScreen({ api = browserParentsApi }: { api?: ParentsApi })
       <ComputerAccessPanel
         access={dashboard.computerAccess}
         api={api}
-        onChanged={(next) => setDashboard({
-          ...dashboard,
-          computerAccess: { ...next, configured: dashboard.computerAccess.configured },
-        })}
+        onChanged={(next) => {
+          readGeneration.current += 1;
+          setDashboard((currentDashboard) => currentDashboard === null ? null : {
+            ...currentDashboard,
+            computerAccess: {
+              ...next,
+              configured: currentDashboard.computerAccess.configured,
+            },
+          });
+        }}
+        onExpired={refreshAfterExpiry}
       />
 
       <section className="parents-panel" aria-labelledby="parents-forecast-title">

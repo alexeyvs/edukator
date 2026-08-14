@@ -136,13 +136,14 @@ describe('родительский дашборд', () => {
     expect(within(panel).getByRole('button', { name: buttonName })).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('по expiresAt возвращает автоматику и позволяет повторно выбрать прежний режим', async () => {
+  it('по expiresAt перечитывает новый день вместо вчерашнего automaticUnlocked', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-08T20:59:59.000Z'));
-    const api = parentsApi({
+    const expiredDashboard: ParentsDashboard = {
       ...DASHBOARD,
       computerAccess: {
         ...DASHBOARD.computerAccess,
+        automaticUnlocked: true,
         override: {
           mode: 'unlocked',
           changedAt: '2026-08-08T20:50:00.000Z',
@@ -150,13 +151,32 @@ describe('родительский дашборд', () => {
         },
         unlocked: true,
       },
-    });
+    };
+    const freshDashboard: ParentsDashboard = {
+      ...DASHBOARD,
+      generatedAt: '2026-08-08T21:00:00.000Z',
+      computerAccess: {
+        ...DASHBOARD.computerAccess,
+        day: '2026-08-09',
+        automaticUnlocked: false,
+        override: null,
+        unlocked: false,
+      },
+    };
+    const api = parentsApi(expiredDashboard);
+    vi.mocked(api.read)
+      .mockResolvedValueOnce(expiredDashboard)
+      .mockResolvedValueOnce(freshDashboard);
     await act(async () => { render(<ParentsScreen api={api} />); });
 
     expect(screen.getByRole('region', { name: 'Компьютер разблокирован' }))
       .toHaveTextContent('Временный режим');
-    await act(async () => { vi.advanceTimersByTime(1_000); });
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+    });
 
+    expect(api.read).toHaveBeenCalledTimes(2);
     const panel = screen.getByRole('region', { name: 'Компьютер заблокирован' });
     expect(panel).toHaveTextContent('Режим по плану');
     expect(panel).not.toHaveClass('parents-access-temporary');
@@ -164,6 +184,49 @@ describe('родительский дашборд', () => {
     fireEvent.click(within(panel).getByRole('button', { name: 'Разблокировать' }));
     expect(screen.getByRole('dialog', { name: 'Временно разблокировать компьютер?' }))
       .toBeInTheDocument();
+  });
+
+  it('на время expiry-refresh не показывает stale automatic и блокирует гонку команд', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-08T20:59:59.000Z'));
+    const expiredDashboard: ParentsDashboard = {
+      ...DASHBOARD,
+      computerAccess: {
+        ...DASHBOARD.computerAccess,
+        automaticUnlocked: true,
+        override: {
+          mode: 'unlocked',
+          changedAt: '2026-08-08T20:50:00.000Z',
+          expiresAt: '2026-08-08T21:00:00.000Z',
+        },
+        unlocked: true,
+      },
+    };
+    let resolveRefresh!: (value: ParentsDashboard) => void;
+    const api = parentsApi(expiredDashboard);
+    vi.mocked(api.read)
+      .mockResolvedValueOnce(expiredDashboard)
+      .mockReturnValueOnce(new Promise((resolve) => { resolveRefresh = resolve; }));
+    await act(async () => { render(<ParentsScreen api={api} />); });
+
+    await act(async () => { vi.advanceTimersByTime(1_000); });
+
+    const panel = screen.getByRole('region', { name: 'Проверяю доступ к компьютеру' });
+    expect(panel).not.toHaveTextContent('Компьютер разблокирован');
+    expect(within(panel).getAllByRole('button')
+      .every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
+    fireEvent.click(within(panel).getByRole('button', { name: 'Заблокировать' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveRefresh({
+        ...DASHBOARD,
+        computerAccess: { ...DASHBOARD.computerAccess, day: '2026-08-09' },
+      });
+      await Promise.resolve();
+    });
+    expect(screen.getByRole('region', { name: 'Компьютер заблокирован' }))
+      .toHaveTextContent('Режим по плану');
   });
 
   it('подтверждает каждую смену отдельно и переиспользует PIN этой вкладки', async () => {
