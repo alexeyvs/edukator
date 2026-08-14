@@ -485,6 +485,7 @@ describe('главный экран', () => {
     });
     expect(progress).toHaveAttribute('aria-valuenow', '43');
     expect(screen.getByText('43%')).toBeInTheDocument();
+    expect(screen.queryByText('До босса')).not.toBeInTheDocument();
     expect(screen.queryByText('В работе')).not.toBeInTheDocument();
     expect(screen.getAllByText('Босс готовится')).toHaveLength(2);
     expect(screen.getByText('Можно вызвать босса')).toBeInTheDocument();

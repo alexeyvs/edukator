@@ -483,7 +483,7 @@ input:focus-visible {
 
 .topic-progress-label {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: .5rem;
   color: #607068;
 }
@@ -624,8 +624,10 @@ input:focus-visible {
 .plan-cards button {
   min-width: 6.5rem;
   min-height: 2.8rem;
+  padding: .65rem 1rem;
   border-radius: .8rem;
   font-weight: 800;
+  white-space: nowrap;
 }
 
 .empty-day {

@@ -167,7 +167,6 @@ function TopicBossProgress({ topic }: { topic: HomeTopic }) {
   return (
     <div className="topic-progress">
       <div className="topic-progress-label">
-        <small>До босса</small>
         <small>{topic.bossProgress}%</small>
       </div>
       <div
