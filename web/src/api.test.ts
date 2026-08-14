@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { browserHomeApi } from './home-api';
 import { browserBossApi } from './boss-api';
 import { browserProfileApi } from './profile-api';
-import { browserParentsApi } from './parents-api';
+import { browserParentsApi, type ComputerAccessError } from './parents-api';
 import { browserRunApi, RunApiError } from './run-api';
 import { browserLearningApi } from './learning-api';
 
@@ -31,6 +31,7 @@ describe('браузерные API-адаптеры', () => {
     await browserHomeApi.finish(7);
     await browserProfileApi.read();
     await browserParentsApi.read();
+    await browserParentsApi.changeComputerAccess('blocked', '123456');
     await browserProfileApi.save({
       name: 'Тимофей',
       interests: ['скейт'],
@@ -52,6 +53,11 @@ describe('браузерные API-адаптеры', () => {
       ['/api/run/7/finish', { method: 'POST' }],
       ['/api/profile'],
       ['/api/parents'],
+      ['/api/parents/computer-access', expect.objectContaining({
+        method: 'PUT',
+        headers: { authorization: 'Bearer 123456', 'content-type': 'application/json' },
+        body: '{"mode":"blocked"}',
+      })],
       ['/api/profile', expect.objectContaining({ method: 'PUT', body: expect.stringContaining('Тимофей') })],
     ]);
   });
@@ -192,6 +198,18 @@ describe('браузерные API-адаптеры', () => {
     ));
     await expect(browserProfileApi.read()).rejects.toThrow('Профиль заблокирован');
     await expect(browserParentsApi.read()).rejects.toThrow('Профиль заблокирован');
+  });
+
+  it('сохраняет HTTP-статус ошибки управления родительским доступом', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      response({ error: 'Неверный PIN родителя' }, { ok: false, status: 401 }),
+    ));
+
+    await expect(browserParentsApi.changeComputerAccess('unlocked', '000000')).rejects.toMatchObject({
+      name: 'ComputerAccessError',
+      message: 'Неверный PIN родителя',
+      status: 401,
+    } satisfies Partial<ComputerAccessError>);
   });
 
   it('не маскирует не-JSON ответ как успешный контракт', async () => {

@@ -38,7 +38,8 @@ button:disabled {
 }
 
 a:focus-visible,
-button:focus-visible {
+button:focus-visible,
+input:focus-visible {
   outline: 3px solid rgb(11 124 93 / 32%);
   outline-offset: 3px;
 }
@@ -1453,6 +1454,205 @@ button:focus-visible {
   line-height: 1.65;
 }
 
+.parents-access {
+  display: grid;
+  grid-template-columns: minmax(16rem, .8fr) minmax(25rem, 1.2fr);
+  align-items: center;
+  gap: 2rem;
+  margin-bottom: 2rem;
+  padding: clamp(1.3rem, 4vw, 2rem);
+  border: 1px solid #dbe4de;
+  border-radius: 1.5rem;
+  background: rgb(255 255 255 / 78%);
+  box-shadow: 0 18px 50px rgb(23 35 31 / 7%);
+}
+
+.parents-access-summary > p:first-child {
+  margin: 0 0 .4rem;
+  color: var(--leaf);
+  font-size: .72rem;
+  font-weight: 850;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.parents-access-temporary .parents-access-summary > p:first-child {
+  color: #8a620b;
+}
+
+.parents-access-summary h2 {
+  margin: 0;
+  font-size: clamp(1.4rem, 3vw, 2rem);
+  letter-spacing: -.03em;
+}
+
+.parents-access-summary > span {
+  display: block;
+  margin-top: .35rem;
+  color: #52625c;
+  line-height: 1.5;
+}
+
+.parents-pin {
+  display: grid;
+  grid-template-columns: minmax(7rem, 9rem) 1fr;
+  align-items: center;
+  gap: .25rem .75rem;
+  max-width: 20rem;
+  margin-top: 1rem;
+  color: #34453e;
+  font-size: .82rem;
+  font-weight: 750;
+}
+
+.parents-pin input {
+  min-width: 0;
+  height: 2.4rem;
+  box-sizing: border-box;
+  border: 1px solid #b8c8bf;
+  border-radius: .65rem;
+  color: var(--ink);
+  background: #fff;
+  padding: .45rem .7rem;
+  letter-spacing: .18em;
+}
+
+.parents-pin small {
+  grid-column: 2;
+  color: #66756f;
+  font-size: .7rem;
+  font-weight: 500;
+}
+
+.parents-access-unavailable {
+  margin: 1rem 0 0 !important;
+  color: #87351f !important;
+  font-size: .82rem !important;
+  font-weight: 650 !important;
+  letter-spacing: 0 !important;
+  line-height: 1.45;
+  text-transform: none !important;
+}
+
+.parents-access-actions {
+  min-width: 0;
+}
+
+.access-mode-control {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  overflow: hidden;
+  padding: .25rem;
+  border: 1px solid #b8c8bf;
+  border-radius: 1rem;
+  background: #e8ede9;
+}
+
+.access-mode-control button {
+  min-height: 3.15rem;
+  padding: .65rem .55rem;
+  border: 0;
+  border-radius: .74rem;
+  color: #52625c;
+  background: transparent;
+  font-size: clamp(.72rem, 1.5vw, .88rem);
+  font-weight: 800;
+  transition: color .16s ease, background-color .16s ease, box-shadow .16s ease;
+}
+
+.access-mode-control button[aria-pressed="true"] {
+  color: white;
+  background: var(--evergreen);
+  box-shadow: 0 5px 14px rgb(7 91 69 / 18%);
+}
+
+.parents-access-temporary .access-mode-control button[aria-pressed="true"] {
+  color: #302406;
+  background: var(--amber);
+  box-shadow: 0 5px 14px rgb(227 163 27 / 24%);
+}
+
+.parents-access-help,
+.parents-access-feedback {
+  margin: .55rem .25rem 0;
+  color: #66756f;
+  font-size: .75rem;
+  line-height: 1.45;
+}
+
+.parents-access-feedback.success {
+  color: var(--leaf);
+  font-weight: 750;
+}
+
+.parents-access-feedback.error {
+  color: #87351f;
+  font-weight: 750;
+}
+
+.parents-confirm {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgb(23 35 31 / 48%);
+  backdrop-filter: blur(3px);
+}
+
+.parents-confirm form {
+  width: min(100%, 29rem);
+  box-sizing: border-box;
+  padding: 1.6rem;
+  border: 1px solid #dbe4de;
+  border-radius: 1.3rem;
+  background: var(--paper);
+  box-shadow: 0 24px 70px rgb(23 35 31 / 28%);
+}
+
+.parents-confirm form > p {
+  margin: 0 0 .35rem;
+  color: var(--leaf);
+  font-size: .7rem;
+  font-weight: 850;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.parents-confirm h3 {
+  margin: 0;
+  font-size: 1.35rem;
+  letter-spacing: -.02em;
+}
+
+.parents-confirm form > span,
+.parents-confirm form > small {
+  display: block;
+  margin-top: .55rem;
+  color: #52625c;
+  line-height: 1.5;
+}
+
+.parents-confirm form > small {
+  color: #87351f;
+  font-weight: 700;
+}
+
+.parents-confirm form > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: .65rem;
+  margin-top: 1.25rem;
+}
+
+.parents-confirm button {
+  min-height: 2.8rem;
+  padding: .65rem 1rem;
+  border-radius: .75rem;
+  font-weight: 800;
+}
+
 .parents-panel {
   margin-top: 1rem;
   padding: clamp(1.3rem, 4vw, 2rem);
@@ -2124,8 +2324,32 @@ button:focus-visible {
   }
 
   .parents-forecasts,
-  .parents-columns {
+  .parents-columns,
+  .parents-access {
     grid-template-columns: 1fr;
+  }
+
+  .parents-access {
+    gap: 1.35rem;
+    border-radius: 1.25rem;
+  }
+
+  .parents-pin {
+    grid-template-columns: 1fr;
+  }
+
+  .parents-pin small {
+    grid-column: auto;
+  }
+
+  .access-mode-control button {
+    min-height: 3.4rem;
+    padding-inline: .3rem;
+  }
+
+  .parents-confirm form > div {
+    align-items: stretch;
+    flex-direction: column-reverse;
   }
 
   .parents-bars {

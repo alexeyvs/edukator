@@ -106,6 +106,11 @@ describe('App', () => {
       ok: true,
       json: () => Promise.resolve({
         generatedAt: '2026-08-08T12:00:00.000Z',
+        computerAccess: {
+          day: '2026-08-08', required: 3, completed: 0, remaining: 3,
+          learning: { materialId: null, required: false, passed: false },
+          automaticUnlocked: false, override: null, unlocked: false, configured: false,
+        },
         window: { since: '2026-08-01T12:00:00.000Z', until: '2026-08-08T12:00:00.000Z' },
         forecasts: [],
         time: { plannedMinutes: 630, actualMinutes: 0, daily: [] },

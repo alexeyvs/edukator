@@ -1,5 +1,12 @@
-import { useEffect, useState } from 'react';
-import { browserParentsApi, type ParentsApi, type ParentsDashboard } from './parents-api';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import type { DailyGateState } from './home-api';
+import {
+  browserParentsApi,
+  ComputerAccessError,
+  type ComputerAccessMode,
+  type ParentsApi,
+  type ParentsDashboard,
+} from './parents-api';
 import { SUBJECT_NAMES, SUBJECTS } from './subject-meta';
 
 const KIND_NAMES = {
@@ -18,6 +25,266 @@ const shortDayFormatter = new Intl.DateTimeFormat('ru-RU', {
 const activityDateFormatter = new Intl.DateTimeFormat('ru-RU', {
   timeZone: 'Europe/Moscow', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
 });
+const accessExpiryFormatter = new Intl.DateTimeFormat('ru-RU', {
+  timeZone: 'Europe/Moscow', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit',
+});
+
+const ACCESS_MODES: Array<{ mode: ComputerAccessMode; label: string }> = [
+  { mode: 'automatic', label: 'По плану' },
+  { mode: 'blocked', label: 'Заблокировать' },
+  { mode: 'unlocked', label: 'Разблокировать' },
+];
+
+const CONFIRMATIONS: Record<ComputerAccessMode, { title: string; text: string; action: string }> = {
+  automatic: {
+    title: 'Вернуть режим «По плану»?',
+    text: 'Доступ снова будет зависеть от дневного плана.',
+    action: 'Вернуть режим «По плану»',
+  },
+  blocked: {
+    title: 'Временно заблокировать компьютер?',
+    text: 'Команда действует до следующей московской полуночи.',
+    action: 'Заблокировать',
+  },
+  unlocked: {
+    title: 'Временно разблокировать компьютер?',
+    text: 'Учебный план при этом не меняется.',
+    action: 'Разблокировать',
+  },
+};
+
+const ACCESS_REFRESH_BACKOFF_MS = [1_000, 5_000, 15_000, 30_000] as const;
+
+function accessMode(access: DailyGateState): ComputerAccessMode {
+  return access.override?.mode ?? 'automatic';
+}
+
+function accessStatus(access: DailyGateState): { eyebrow: string; title: string; note: string } {
+  if (access.override?.mode === 'blocked') {
+    return {
+      eyebrow: 'Временный режим',
+      title: 'Компьютер заблокирован',
+      note: `До ${accessExpiryFormatter.format(new Date(access.override.expiresAt))}`,
+    };
+  }
+  if (access.override?.mode === 'unlocked') {
+    return {
+      eyebrow: 'Временный режим',
+      title: 'Компьютер разблокирован',
+      note: `До ${accessExpiryFormatter.format(new Date(access.override.expiresAt))}`,
+    };
+  }
+  return {
+    eyebrow: 'Режим по плану',
+    title: access.automaticUnlocked ? 'Компьютер разблокирован' : 'Компьютер заблокирован',
+    note: access.automaticUnlocked
+      ? 'Условия дневного плана выполнены.'
+      : 'Доступ откроется после выполнения условий дневного плана.',
+  };
+}
+
+function ComputerAccessPanel({
+  access,
+  api,
+  onChanged,
+  onExpired,
+}: {
+  access: ParentsDashboard['computerAccess'];
+  api: ParentsApi;
+  onChanged: (next: DailyGateState) => void;
+  onExpired: () => Promise<ParentsDashboard['computerAccess']>;
+}) {
+  const [pin, setPin] = useState('');
+  const [selected, setSelected] = useState<ComputerAccessMode | null>(null);
+  const [pending, setPending] = useState(false);
+  const [expiryRefresh, setExpiryRefresh] = useState<{
+    key: string;
+    pending: boolean;
+    error: string | null;
+    retrying: boolean;
+  } | null>(null);
+  const [refreshCycle, setRefreshCycle] = useState(0);
+  const [accessClock, setAccessClock] = useState(() => Date.now());
+  const [feedback, setFeedback] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+  const refreshGeneration = useRef(0);
+  const refreshAttempt = useRef<{ key: string; count: number }>({ key: '', count: 0 });
+  const inFlightRefresh = useRef<{ key: string; generation: number } | null>(null);
+  const expiresAt = access.override === null ? Number.NaN : Date.parse(access.override.expiresAt);
+  const expiryKey = access.override?.expiresAt ?? null;
+  const currentExpiryRefresh = expiryRefresh?.key === expiryKey ? expiryRefresh : null;
+  const expiryPending = currentExpiryRefresh?.pending === true;
+  const expiryError = currentExpiryRefresh?.error ?? null;
+  const overrideActive = Number.isFinite(expiresAt) && expiresAt > accessClock;
+  const overrideExpired = access.override !== null && !overrideActive;
+  const current = overrideExpired ? null : accessMode(access);
+  const status = overrideExpired
+    ? {
+      eyebrow: expiryPending ? 'Обновляю состояние' : 'Состояние не подтверждено',
+      title: expiryPending ? 'Проверяю доступ к компьютеру' : 'Состояние доступа неизвестно',
+      note: expiryPending
+        ? 'Получаю актуальный режим нового дня.'
+        : currentExpiryRefresh?.retrying === true
+          ? 'Сервер ещё подтверждает прежний режим. Повторяю проверку.'
+          : 'Не получилось получить актуальный режим. Старое состояние не используется.',
+    }
+    : accessStatus(access);
+  const pinValid = /^\d{6,12}$/u.test(pin);
+
+  useEffect(() => {
+    if (expiryKey === null || pending) return;
+    if (refreshAttempt.current.key !== expiryKey) {
+      refreshAttempt.current = { key: expiryKey, count: 0 };
+    }
+    if (inFlightRefresh.current?.key === expiryKey) return;
+    const remaining = Number.isFinite(expiresAt) ? expiresAt - Date.now() : 0;
+    const attempt = refreshAttempt.current.count;
+    const retryDelay = attempt === 0
+      ? 0
+      : ACCESS_REFRESH_BACKOFF_MS[
+        Math.min(attempt - 1, ACCESS_REFRESH_BACKOFF_MS.length - 1)
+      ] ?? 30_000;
+    const delay = remaining > 0 ? remaining : retryDelay;
+    const timer = window.setTimeout(
+      () => {
+        const now = Date.now();
+        setAccessClock(now);
+        if (Number.isFinite(expiresAt) && now < expiresAt) {
+          setRefreshCycle((cycle) => cycle + 1);
+          return;
+        }
+        const generation = ++refreshGeneration.current;
+        inFlightRefresh.current = { key: expiryKey, generation };
+        setSelected(null);
+        setExpiryRefresh({ key: expiryKey, pending: true, error: null, retrying: false });
+        void onExpired()
+          .then((freshAccess) => {
+            if (inFlightRefresh.current?.generation !== generation) return;
+            inFlightRefresh.current = null;
+            const freshExpiresAt = freshAccess.override === null
+              ? Number.NaN
+              : Date.parse(freshAccess.override.expiresAt);
+            const freshStillExpired = freshAccess.override !== null && (
+              !Number.isFinite(freshExpiresAt) || freshExpiresAt <= Date.now()
+            );
+            if (!freshStillExpired) {
+              refreshAttempt.current = { key: '', count: 0 };
+              setExpiryRefresh(null);
+              return;
+            }
+            refreshAttempt.current.count += 1;
+            setExpiryRefresh({ key: expiryKey, pending: false, error: null, retrying: true });
+            setRefreshCycle((cycle) => cycle + 1);
+          }, (error: unknown) => {
+            if (inFlightRefresh.current?.generation !== generation) return;
+            inFlightRefresh.current = null;
+            refreshAttempt.current.count += 1;
+            setExpiryRefresh({
+              key: expiryKey,
+              pending: false,
+              error: error instanceof Error
+                ? error.message
+                : 'Не получилось обновить состояние доступа',
+              retrying: false,
+            });
+            setRefreshCycle((cycle) => cycle + 1);
+          });
+      },
+      Math.min(2_147_483_647, Math.max(0, delay)),
+    );
+    return () => window.clearTimeout(timer);
+  }, [expiryKey, expiresAt, onExpired, pending, refreshCycle]);
+
+  async function confirm(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (selected === null || !pinValid || pending || expiryPending) return;
+    setPending(true);
+    setFeedback(null);
+    try {
+      const next = await api.changeComputerAccess(selected, pin);
+      onChanged(next);
+      setExpiryRefresh(null);
+      setSelected(null);
+      setFeedback({ kind: 'success', text: 'Режим доступа обновлён.' });
+    } catch (error: unknown) {
+      if (error instanceof ComputerAccessError && error.status === 401) setPin('');
+      setSelected(null);
+      setFeedback({
+        kind: 'error',
+        text: error instanceof Error ? error.message : 'Не получилось изменить режим доступа',
+      });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <section
+      className={`parents-access${overrideActive ? ' parents-access-temporary' : ''}`}
+      aria-labelledby="parents-access-title"
+    >
+      <div className="parents-access-summary">
+        <p>{status.eyebrow}</p>
+        <h2 id="parents-access-title">{status.title}</h2>
+        <span>{status.note}</span>
+        {access.configured
+          ? <label className="parents-pin">
+            <span>PIN родителя</span>
+            <input
+              aria-describedby="parents-pin-note"
+              autoComplete="off"
+              inputMode="numeric"
+              maxLength={12}
+              pattern="[0-9]{6,12}"
+              type="password"
+              value={pin}
+              onChange={(event) => setPin(event.target.value)}
+            />
+            <small id="parents-pin-note">Остаётся только в этой вкладке.</small>
+          </label>
+          : <p className="parents-access-unavailable">PIN родителя не настроен. Управление доступом отключено.</p>}
+      </div>
+
+      <div className="parents-access-actions">
+        <div className="access-mode-control" role="group" aria-label="Режим доступа к компьютеру">
+          {ACCESS_MODES.map(({ mode, label }) => (
+            <button
+              aria-pressed={current === mode}
+              disabled={!access.configured || pending || expiryPending}
+              key={mode}
+              type="button"
+              onClick={() => { if (mode !== current) setSelected(mode); }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <p className="parents-access-help">Временная команда действует до московской полуночи.</p>
+        {pending && <p className="parents-access-feedback" role="status">Изменяю режим доступа…</p>}
+        {expiryPending && <p className="parents-access-feedback" role="status">Обновляю состояние доступа…</p>}
+        {expiryError !== null && <p className="parents-access-feedback error" role="alert">{expiryError}</p>}
+        {feedback !== null && <p
+          className={`parents-access-feedback ${feedback.kind}`}
+          role={feedback.kind === 'error' ? 'alert' : 'status'}
+        >{feedback.text}</p>}
+      </div>
+
+      {selected !== null && <div className="parents-confirm" role="dialog" aria-modal="true" aria-labelledby="access-confirm-title">
+        <form onSubmit={(event) => { void confirm(event); }}>
+          <p>Подтверждение</p>
+          <h3 id="access-confirm-title">{CONFIRMATIONS[selected].title}</h3>
+          <span>{CONFIRMATIONS[selected].text}</span>
+          {!pinValid && <small>Введите PIN родителя из 6–12 цифр.</small>}
+          <div>
+            <button className="secondary" disabled={pending} type="button" onClick={() => setSelected(null)}>Отмена</button>
+            <button className="primary" disabled={!pinValid || pending} type="submit">
+              {pending ? 'Сохраняю…' : CONFIRMATIONS[selected].action}
+            </button>
+          </div>
+        </form>
+      </div>}
+    </section>
+  );
+}
 
 function previousDay(day: string, count: number): string {
   const [year, month, date] = day.split('-').map(Number);
@@ -70,15 +337,32 @@ function Flags({ dashboard }: { dashboard: ParentsDashboard }) {
 export function ParentsScreen({ api = browserParentsApi }: { api?: ParentsApi }) {
   const [dashboard, setDashboard] = useState<ParentsDashboard | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const readGeneration = useRef(0);
 
   useEffect(() => {
     let active = true;
+    const generation = ++readGeneration.current;
     api.read()
-      .then((loaded) => { if (active) setDashboard(loaded); })
+      .then((loaded) => {
+        if (active && readGeneration.current === generation) setDashboard(loaded);
+      })
       .catch((error: unknown) => {
         if (active) setProblem(error instanceof Error ? error.message : 'Не получилось загрузить сводку');
       });
-    return () => { active = false; };
+    return () => {
+      active = false;
+      if (readGeneration.current === generation) readGeneration.current += 1;
+    };
+  }, [api]);
+
+  const refreshAfterExpiry = useCallback(async (): Promise<ParentsDashboard['computerAccess']> => {
+    const generation = ++readGeneration.current;
+    const loaded = await api.read();
+    if (readGeneration.current === generation) {
+      setDashboard(loaded);
+      setProblem(null);
+    }
+    return loaded.computerAccess;
   }, [api]);
 
   if (problem !== null) {
@@ -102,8 +386,24 @@ export function ParentsScreen({ api = browserParentsApi }: { api?: ParentsApi })
       <section className="parents-intro">
         <p className="home-kicker">Последние семь дней</p>
         <h1>Картина подготовки без приукрашивания</h1>
-        <p>Те же данные видит ученик. Здесь нет настроек и способов управлять его учебным планом.</p>
+        <p>Те же данные видит ученик. Режим доступа к компьютеру не меняет его учебный план.</p>
       </section>
+
+      <ComputerAccessPanel
+        access={dashboard.computerAccess}
+        api={api}
+        onChanged={(next) => {
+          readGeneration.current += 1;
+          setDashboard((currentDashboard) => currentDashboard === null ? null : {
+            ...currentDashboard,
+            computerAccess: {
+              ...next,
+              configured: currentDashboard.computerAccess.configured,
+            },
+          });
+        }}
+        onExpired={refreshAfterExpiry}
+      />
 
       <section className="parents-panel" aria-labelledby="parents-forecast-title">
         <div className="section-heading"><p>Прогноз, не оценка</p><h2 id="parents-forecast-title">По предметам</h2></div>

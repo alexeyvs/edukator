@@ -12,7 +12,8 @@ afterEach(cleanup);
 const PLAN: DayPlanResponse = {
   gate: {
     day: '2026-08-08', required: 3, completed: 1, remaining: 2,
-    learning: { materialId: null, required: false, passed: false }, unlocked: false,
+    learning: { materialId: null, required: false, passed: false },
+    automaticUnlocked: false, override: null, unlocked: false,
   },
   learning: [],
   plan: [
@@ -143,6 +144,49 @@ describe('главный экран', () => {
     expect(card).toHaveTextContent('Обычные забеги: 3/3');
     expect(card).toHaveTextContent('Разбор темы: зачтён');
     expect(within(card!).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '3');
+  });
+
+  it('при ручной разблокировке не утверждает, что учебный план выполнен', async () => {
+    render(<HomeScreen api={apiWith({
+      ...PLAN,
+      gate: {
+        ...PLAN.gate,
+        override: {
+          mode: 'unlocked',
+          changedAt: '2026-08-08T12:00:00.000Z',
+          expiresAt: '2026-08-08T21:00:00.000Z',
+        },
+        unlocked: true,
+      },
+    })} />);
+
+    const card = await screen.findByRole('heading', { name: 'Компьютер разблокирован' })
+      .then((heading) => heading.closest('section'));
+    expect(card).toHaveTextContent('Доступ временно открыт родителем. Учебный план продолжается.');
+    expect(card).not.toHaveTextContent('План выполнен');
+  });
+
+  it('при ручной блокировке показывает родительскую команду отдельно от плана', async () => {
+    render(<HomeScreen api={apiWith({
+      ...PLAN,
+      gate: {
+        ...PLAN.gate,
+        completed: 3,
+        remaining: 0,
+        automaticUnlocked: true,
+        override: {
+          mode: 'blocked',
+          changedAt: '2026-08-08T12:00:00.000Z',
+          expiresAt: '2026-08-08T21:00:00.000Z',
+        },
+        unlocked: false,
+      },
+    })} />);
+
+    const card = await screen.findByRole('heading', { name: 'Компьютер заблокирован' })
+      .then((heading) => heading.closest('section'));
+    expect(card).toHaveTextContent('Доступ временно закрыт родителем до следующего дня.');
+    expect(card).not.toHaveTextContent(/остал(ся|ось).*забег/iu);
   });
 
   it('показывает обязательный персональный разбор первым и явно отмечает его', async () => {

@@ -35,6 +35,12 @@ export interface DailyGateState {
     required: boolean;
     passed: boolean;
   };
+  automaticUnlocked: boolean;
+  override: {
+    mode: 'blocked' | 'unlocked';
+    changedAt: string;
+    expiresAt: string;
+  } | null;
   unlocked: boolean;
 }
 

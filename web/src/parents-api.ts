@@ -1,5 +1,14 @@
-import type { Subject } from './home-api';
+import type { DailyGateState, Subject } from './home-api';
 import { requestJson } from './http';
+
+export type ComputerAccessMode = 'automatic' | 'blocked' | 'unlocked';
+
+export class ComputerAccessError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'ComputerAccessError';
+  }
+}
 
 export type ParentsRunKind = 'run' | 'triage' | 'boss' | 'lesson';
 
@@ -16,6 +25,7 @@ export interface ParentsForecast {
 
 export interface ParentsDashboard {
   generatedAt: string;
+  computerAccess: DailyGateState & { configured: boolean };
   window: { since: string; until: string };
   forecasts: ParentsForecast[];
   time: {
@@ -43,8 +53,19 @@ export interface ParentsDashboard {
 
 export interface ParentsApi {
   read(): Promise<ParentsDashboard>;
+  changeComputerAccess(mode: ComputerAccessMode, pin: string): Promise<DailyGateState>;
 }
 
 export const browserParentsApi: ParentsApi = {
   read: () => requestJson<ParentsDashboard>('/api/parents', undefined, 'Не получилось загрузить сводку'),
+  changeComputerAccess: (mode, pin) => requestJson<DailyGateState>(
+    '/api/parents/computer-access',
+    {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${pin}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    },
+    'Не получилось изменить режим доступа',
+    ({ status, message }) => new ComputerAccessError(message, status),
+  ),
 };

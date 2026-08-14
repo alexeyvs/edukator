@@ -79,8 +79,10 @@ npm run prefetch                  # ручной прогрев/экспорт �
   прогнозы, активное время из `attempts.duration_ms`, пробелы, ленту и флаги.
   Округлять миллисекунды можно только в read model; дневные значения и итог
   должны происходить из одной выборки.
-- `server/daily-gate.ts` — единственный расчёт дневного доступа: три завершённых
-  обычных забега и зачёт первого обязательного персонального разбора. Материал
+- `server/daily-gate.ts` — единственный расчёт дневного доступа: `automaticUnlocked`
+  требует три завершённых обычных забега и зачёт первого обязательного
+  персонального разбора, активный `blocked | unlocked` override действует до
+  следующей московской полуночи, а `unlocked` содержит эффективный итог. Материал
   выбирается по `ready_at`, затем `id`, но публикация после третьего забега
   переносится на следующие московские сутки. Триаж, boss и lesson не считаются;
   автоматически `retired` кандидат остаётся выбранным с `required=false` до
@@ -147,9 +149,11 @@ npm run prefetch                  # ручной прогрев/экспорт �
   файл, `fsync`, `rename`. Такой файл пишется только через `writeFileAtomic` —
   оборванная запись оставила бы вместо снимка битый JSON. Уборка в `catch`
   обёрнута своими `try`: отказ закрытия не имеет права заслонить причину.
-- Схема версии 15 содержит двенадцать таблиц: `profile`, `topic_state`, `task_bank`,
+- Схема версии 16 содержит тринадцать таблиц: `profile`, `topic_state`, `task_bank`,
   `runs`, `attempts`, `disputes`, `forecast_snapshots`, `boss_batches` и
-  `boss_tasks`, `learning_materials`, `learning_runs`, `learning_tasks`. `topic_state.closed_at`
+  `boss_tasks`, `learning_materials`, `learning_runs`, `learning_tasks`,
+  `computer_access_override`. Последняя хранит не больше одной ручной команды
+  `blocked | unlocked` до следующей московской полуночи. `topic_state.closed_at`
   закрывает тему постоянно;
   `task_bank.status = 'boss_reserved'` не виден обычной выдаче, а порядок боя
   задаётся только `boss_tasks.position`, не `task_bank.id` и не временем.

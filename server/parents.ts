@@ -4,6 +4,7 @@ import type { TopicGraph } from './curriculum.js';
 import { computeForecast, MIN_SCORE, MAX_SCORE } from './forecast.js';
 import { confidenceAt, readTopicStates } from './mastery.js';
 import { isRunKind, type RunKind } from './run.js';
+import { readDailyGate, type DailyGateState } from './daily-gate.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WINDOW_DAYS = 7;
@@ -43,6 +44,7 @@ interface ParentsActivity {
 /** Единый публичный контракт, который целиком возвращает `GET /api/parents`. */
 export interface ParentsDashboard {
   generatedAt: string;
+  computerAccess: DailyGateState;
   window: { since: string; until: string };
   forecasts: ParentsForecast[];
   time: {
@@ -361,6 +363,7 @@ export function readParentsDashboard(
   );
   return {
     generatedAt: until,
+    computerAccess: readDailyGate(db, now),
     window: { since, until },
     forecasts: forecast.forecasts,
     time: buildTime(attempts),

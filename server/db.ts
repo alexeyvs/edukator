@@ -10,7 +10,7 @@ const projectRoot = resolve(here, '..');
  * Версия схемы. Хранится в `PRAGMA user_version`; миграция сравнивает её со
  * своей и пропускает работу, если база уже актуальна.
  */
-export const SCHEMA_VERSION = 15;
+export const SCHEMA_VERSION = 16;
 
 /** Таблицы приложения. Тесты сверяют состав базы именно с этим списком. */
 export const TABLES = [
@@ -26,6 +26,7 @@ export const TABLES = [
   'learning_materials',
   'learning_runs',
   'learning_tasks',
+  'computer_access_override',
 ] as const;
 
 /** Предметы подготовки. Ограничение уровня схемы, чтобы опечатка не дошла до отчётов. */
@@ -378,6 +379,16 @@ const LEARNING_SCHEMA = `
   END;
 `;
 
+/** Ручная команда доступа хранится одной строкой и живёт не дольше суток. */
+const COMPUTER_ACCESS_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS computer_access_override (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    mode       TEXT    NOT NULL CHECK (mode IN ('blocked', 'unlocked')),
+    changed_at TEXT    NOT NULL,
+    expires_at TEXT    NOT NULL CHECK (expires_at > changed_at)
+  );
+`;
+
 /**
  * Путь к базе: переопределяется через EDUKATOR_DB, чтобы тесты и dev-запуск
  * не дрались за один файл.
@@ -442,6 +453,7 @@ export function migrate(db: Database.Database): void {
       }
       db.exec(CORE_SCHEMA);
       db.exec(LEARNING_SCHEMA);
+      db.exec(COMPUTER_ACCESS_SCHEMA);
       db.pragma(`user_version = ${SCHEMA_VERSION}`);
       return;
     }
@@ -900,6 +912,7 @@ export function migrate(db: Database.Database): void {
       DROP TRIGGER IF EXISTS learning_tasks_complete_delete;
     `);
     db.exec(LEARNING_SCHEMA);
+    db.exec(COMPUTER_ACCESS_SCHEMA);
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   }).immediate();
 }
@@ -917,6 +930,7 @@ const REQUIRED_COLUMNS: Readonly<Record<(typeof TABLES)[number], readonly string
   learning_materials: ['id', 'subject', 'topic_id', 'status', 'content', 'recommendation_reason', 'estimated_minutes', 'mastery_before', 'created_at', 'updated_at', 'ready_at', 'opened_at', 'finished_at'],
   learning_runs: ['material_id', 'run_id', 'attempt_number'],
   learning_tasks: ['material_id', 'task_id', 'position'],
+  computer_access_override: ['id', 'mode', 'changed_at', 'expires_at'],
 };
 
 const REQUIRED_AUXILIARY_OBJECTS = [
@@ -951,6 +965,7 @@ const REQUIRED_SCHEMA_FRAGMENTS = {
   learning_materials: ["'preparing', 'ready', 'active', 'passed', 'failed', 'rejected', 'retired'", 'estimated_minutes BETWEEN 10 AND 15'],
   learning_runs: ['attempt_number >= 1', 'UNIQUE'],
   learning_tasks: [`position BETWEEN 1 AND ${LEARNING_TASK_COUNT}`, 'UNIQUE (task_id)'],
+  computer_access_override: ["id = 1", "'blocked', 'unlocked'", 'expires_at > changed_at'],
 } as const;
 
 /** Не даёт базе с актуальным номером версии скрыть удалённую или чужую схему. */
