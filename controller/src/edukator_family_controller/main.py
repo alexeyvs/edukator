@@ -33,7 +33,8 @@ class ReconcileState:
     verified_at: float = 0.0
     block_renewed_at: float | None = None
     unlocked_override_expires_at: datetime | None = None
-    gate_received: bool = False
+    last_gate_desired_blocked: bool | None = None
+    last_gate_forced_unlock: bool = False
 
 
 BLOCK_RENEW_SECONDS = 24 * 60 * 60
@@ -45,6 +46,11 @@ def cap_delay_to_override_expiry(
     state: ReconcileState,
     now: datetime,
 ) -> float:
+    if (
+        state.last_gate_desired_blocked is False
+        and not state.last_gate_forced_unlock
+    ):
+        return delay
     expires_at = state.unlocked_override_expires_at
     if expires_at is None:
         return delay
@@ -156,7 +162,11 @@ async def run_controller(
         while True:
             try:
                 gate = await gate_reader(config.edukator_url)
-                state.gate_received = True
+                state.last_gate_desired_blocked = not gate.unlocked
+                state.last_gate_forced_unlock = (
+                    gate.override is not None
+                    and gate.override.mode == "unlocked"
+                )
                 await reconcile(
                     gate,
                     family,
@@ -183,16 +193,24 @@ async def run_controller(
                 raise
             except Exception as error:  # сеть и закрытый API должны восстанавливаться
                 try:
-                    if state.gate_received:
-                        await fail_closed_after_override_expiry(
-                            family, state, wall_clock(), log
-                        )
-                    else:
+                    if state.last_gate_desired_blocked is None:
                         await ensure_fail_closed(
                             family,
                             state,
                             log,
                             "Edukator ещё не подтвердил состояние после запуска",
+                        )
+                    elif state.last_gate_desired_blocked:
+                        await ensure_fail_closed(
+                            family,
+                            state,
+                            log,
+                            "Edukator подтвердил требование блокировки",
+                        )
+                        state.unlocked_override_expires_at = None
+                    elif state.last_gate_forced_unlock:
+                        await fail_closed_after_override_expiry(
+                            family, state, wall_clock(), log
                         )
                 except asyncio.CancelledError:
                     raise

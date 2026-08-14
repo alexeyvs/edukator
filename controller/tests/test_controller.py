@@ -96,14 +96,15 @@ class FakeFamily:
 
 
 class FailFirstBlockFamily(FakeFamily):
-    def __init__(self, blocked: bool) -> None:
+    def __init__(self, blocked: bool, *, failures: int = 1) -> None:
         super().__init__(blocked)
+        self.block_failures = failures
         self.block_attempts = 0
 
     async def set_desktop_blocked(self, blocked: bool) -> None:
         if blocked:
             self.block_attempts += 1
-            if self.block_attempts == 1:
+            if self.block_attempts <= self.block_failures:
                 raise RuntimeError("Family Safety apply failed")
         await super().set_desktop_blocked(blocked)
 
@@ -800,6 +801,90 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(family.actions, [True])
         self.assertIn("ещё не подтвердил состояние после запуска", "\n".join(logs))
 
+    async def test_first_locked_gate_fails_closed_after_refresh_error(self) -> None:
+        family = FailFirstRefreshFamily(blocked=False)
+        logs: list[str] = []
+
+        async def stop_after_backoff(_: float) -> None:
+            raise asyncio.CancelledError
+
+        with self.assertRaises(asyncio.CancelledError):
+            await run_controller(
+                ControllerConfig("refresh", "child"),
+                family,
+                gate_reader=lambda _: self._gate(LOCKED),
+                sleep=stop_after_backoff,
+                log=logs.append,
+            )
+
+        self.assertEqual(family.refreshes, 2)
+        self.assertEqual(family.actions, [True])
+        self.assertTrue(family.blocked)
+        self.assertIn("подтвердил требование блокировки", "\n".join(logs))
+
+    async def test_locked_gate_retries_safety_during_edukator_outage(self) -> None:
+        family = FailFirstBlockFamily(blocked=False, failures=2)
+        reads = 0
+        sleeps = 0
+
+        async def reader(_: str) -> GateState:
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return LOCKED
+            raise RuntimeError("нет связи")
+
+        async def recover_then_stop(_: float) -> None:
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps > 1:
+                raise asyncio.CancelledError
+
+        with self.assertRaises(asyncio.CancelledError):
+            await run_controller(
+                ControllerConfig("refresh", "child"),
+                family,
+                gate_reader=reader,
+                sleep=recover_then_stop,
+                log=lambda _: None,
+            )
+
+        self.assertEqual(family.block_attempts, 3)
+        self.assertEqual(family.actions, [True])
+        self.assertTrue(family.blocked)
+
+    async def test_automatic_unlock_is_not_cancelled_after_ambiguous_apply(
+        self,
+    ) -> None:
+        family = FailFirstUnlockFamily(blocked=True, apply_before_failure=True)
+        reads = 0
+        blocked_during_sleeps: list[bool] = []
+
+        async def reader(_: str) -> GateState:
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return UNLOCKED
+            raise RuntimeError("нет связи")
+
+        async def outage_then_stop(_: float) -> None:
+            blocked_during_sleeps.append(family.blocked)
+            if len(blocked_during_sleeps) > 1:
+                raise asyncio.CancelledError
+
+        with self.assertRaises(asyncio.CancelledError):
+            await run_controller(
+                ControllerConfig("refresh", "child"),
+                family,
+                gate_reader=reader,
+                sleep=outage_then_stop,
+                log=lambda _: None,
+            )
+
+        self.assertEqual(family.actions, [False])
+        self.assertEqual(blocked_during_sleeps, [False, False])
+        self.assertFalse(family.blocked)
+
     async def test_normal_startup_uses_gate_without_intermediate_safe_block(self) -> None:
         family = FakeFamily(blocked=True)
 
@@ -939,7 +1024,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(family.actions, [False, True])
         self.assertTrue(family.blocked)
 
-    async def test_failed_locked_apply_keeps_expiry_watchdog_armed(self) -> None:
+    async def test_failed_locked_apply_fails_closed_immediately(self) -> None:
         family = FailFirstBlockFamily(blocked=True)
         forced_unlocked = parse_gate(
             {
@@ -997,7 +1082,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(family.block_attempts, 2)
         self.assertEqual(family.actions, [False, True])
         self.assertTrue(family.blocked)
-        self.assertIn("срок временной разблокировки истёк", "\n".join(logs))
+        self.assertIn("подтвердил требование блокировки", "\n".join(logs))
 
     async def test_ambiguous_unlock_is_blocked_after_expiry_during_api_outage(
         self,
