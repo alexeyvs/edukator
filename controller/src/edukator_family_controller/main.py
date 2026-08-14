@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import random
 import sys
 import time
@@ -32,26 +32,37 @@ class ReconcileState:
     desired_blocked: bool | None = None
     verified_at: float = 0.0
     block_renewed_at: float | None = None
-    unlocked_override_expires_at: datetime | None = None
+    access_expires_at: datetime | None = None
     last_gate_desired_blocked: bool | None = None
-    last_gate_forced_unlock: bool = False
 
 
 BLOCK_RENEW_SECONDS = 24 * 60 * 60
 MIN_POLL_SECONDS = 1.0
+# Совпадает с серверным moscow-time.ts: Москва постоянно UTC+03:00 с 2014 года.
+MOSCOW_TIMEZONE = timezone(timedelta(hours=3))
 
 
-def cap_delay_to_override_expiry(
+def access_expiry(gate: GateState) -> datetime | None:
+    if not gate.unlocked:
+        return None
+    if gate.override is not None and gate.override.mode == "unlocked":
+        return gate.override.expires_at
+    gate_day = date.fromisoformat(gate.day)
+    next_day = gate_day + timedelta(days=1)
+    return datetime(
+        next_day.year,
+        next_day.month,
+        next_day.day,
+        tzinfo=MOSCOW_TIMEZONE,
+    ).astimezone(timezone.utc)
+
+
+def cap_delay_to_access_expiry(
     delay: float,
     state: ReconcileState,
     now: datetime,
 ) -> float:
-    if (
-        state.last_gate_desired_blocked is False
-        and not state.last_gate_forced_unlock
-    ):
-        return delay
-    expires_at = state.unlocked_override_expires_at
+    expires_at = state.access_expires_at
     if expires_at is None:
         return delay
     until_expiry = (expires_at - now).total_seconds()
@@ -66,15 +77,11 @@ async def reconcile(
     verify_seconds: float,
     log: Callable[[str], None],
 ) -> None:
-    forced_unlock_expires_at = (
-        gate.override.expires_at
-        if gate.override is not None and gate.override.mode == "unlocked"
-        else None
-    )
-    if forced_unlock_expires_at is not None:
+    next_access_expires_at = access_expiry(gate)
+    if next_access_expires_at is not None:
         # Family Safety may apply an unlock even when its response is lost. Arm
         # the local fail-closed deadline before any external call can do that.
-        state.unlocked_override_expires_at = forced_unlock_expires_at
+        state.access_expires_at = next_access_expires_at
     desired = not gate.unlocked
     must_verify = (
         state.actual_blocked is None
@@ -105,27 +112,27 @@ async def reconcile(
             f"завершено {gate.completed} из {gate.required}"
         )
     state.desired_blocked = desired
-    if forced_unlock_expires_at is None:
-        state.unlocked_override_expires_at = None
+    if next_access_expires_at is None:
+        state.access_expires_at = None
 
 
-async def fail_closed_after_override_expiry(
+async def fail_closed_after_access_expiry(
     family: FamilyClient,
     state: ReconcileState,
     now: datetime,
     log: Callable[[str], None],
 ) -> None:
-    """Закрывает доступ по локальному дедлайну, пока сервер не подтвердит автоматику."""
-    expires_at = state.unlocked_override_expires_at
+    """Закрывает доступ по локальному дедлайну, пока сервер не подтвердит новый день."""
+    expires_at = state.access_expires_at
     if expires_at is None or now < expires_at:
         return
     await ensure_fail_closed(
         family,
         state,
         log,
-        "срок временной разблокировки истёк",
+        "срок разрешённого доступа истёк",
     )
-    state.unlocked_override_expires_at = None
+    state.access_expires_at = None
 
 
 async def ensure_fail_closed(
@@ -163,10 +170,6 @@ async def run_controller(
             try:
                 gate = await gate_reader(config.edukator_url)
                 state.last_gate_desired_blocked = not gate.unlocked
-                state.last_gate_forced_unlock = (
-                    gate.override is not None
-                    and gate.override.mode == "unlocked"
-                )
                 await reconcile(
                     gate,
                     family,
@@ -175,7 +178,7 @@ async def run_controller(
                     config.verify_seconds,
                     log,
                 )
-                await fail_closed_after_override_expiry(
+                await fail_closed_after_access_expiry(
                     family, state, wall_clock(), log
                 )
                 if family.refresh_token != saved_token:
@@ -183,7 +186,7 @@ async def run_controller(
                     config_saver(config)
                     saved_token = family.refresh_token
                 failures = 0
-                delay = cap_delay_to_override_expiry(
+                delay = cap_delay_to_access_expiry(
                     config.poll_seconds,
                     state,
                     wall_clock(),
@@ -207,9 +210,9 @@ async def run_controller(
                             log,
                             "Edukator подтвердил требование блокировки",
                         )
-                        state.unlocked_override_expires_at = None
-                    elif state.last_gate_forced_unlock:
-                        await fail_closed_after_override_expiry(
+                        state.access_expires_at = None
+                    else:
+                        await fail_closed_after_access_expiry(
                             family, state, wall_clock(), log
                         )
                 except asyncio.CancelledError:
@@ -221,7 +224,7 @@ async def run_controller(
                 failures += 1
                 delay = min(300.0, config.poll_seconds * (2 ** min(failures - 1, 4)))
                 delay *= random.uniform(0.9, 1.1)
-                delay = cap_delay_to_override_expiry(
+                delay = cap_delay_to_access_expiry(
                     delay,
                     state,
                     wall_clock(),

@@ -73,6 +73,23 @@ def forced_unlocked_gate() -> GateState:
     )
 
 
+def legacy_unlocked_gate() -> GateState:
+    return parse_gate(
+        {
+            "day": "2026-08-12",
+            "required": 3,
+            "completed": 3,
+            "remaining": 0,
+            "learning": {
+                "materialId": None,
+                "required": False,
+                "passed": False,
+            },
+            "unlocked": True,
+        }
+    )
+
+
 class FakeFamily:
     def __init__(self, blocked: bool) -> None:
         self.blocked = blocked
@@ -386,6 +403,12 @@ class GateContractTests(unittest.TestCase):
         missing_day.pop("day")
         cases.append(("нет обязательного поля", missing_day, "нет поля day"))
 
+        for invalid_day in ("", "20260812", "2026-8-12", "2026-02-30"):
+            malformed_day = dict(valid, day=invalid_day)
+            cases.append(
+                (f"неверный day {invalid_day}", malformed_day, "YYYY-MM-DD")
+            )
+
         for name, payload, message in cases:
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, message):
                 parse_gate(payload)
@@ -573,6 +596,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(family.actions, [True])
         self.assertIn("заблокирован", logs[0])
+        self.assertIsNone(state.access_expires_at)
 
     async def test_unlocks_after_third_run_and_is_idempotent(self) -> None:
         family = FakeFamily(blocked=True)
@@ -632,7 +656,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         await reconcile(forced_blocked, family, state, 20, 300, lambda _: None)
 
         self.assertEqual(family.actions, [False, True])
-        self.assertIsNone(state.unlocked_override_expires_at)
+        self.assertIsNone(state.access_expires_at)
 
     async def test_failed_authoritative_apply_retains_unlocked_override_deadline(
         self,
@@ -643,17 +667,17 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
             actual_blocked=False,
             desired_blocked=False,
             verified_at=10,
-            unlocked_override_expires_at=deadline,
+            access_expires_at=deadline,
         )
 
         with self.assertRaisesRegex(RuntimeError, "apply failed"):
             await reconcile(LOCKED, family, state, 20, 300, lambda _: None)
 
-        self.assertEqual(state.unlocked_override_expires_at, deadline)
+        self.assertEqual(state.access_expires_at, deadline)
 
         await reconcile(LOCKED, family, state, 30, 300, lambda _: None)
 
-        self.assertIsNone(state.unlocked_override_expires_at)
+        self.assertIsNone(state.access_expires_at)
         self.assertTrue(family.blocked)
 
     async def test_forced_unlock_arms_deadline_before_pure_failure_and_retry(
@@ -667,7 +691,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
             await reconcile(gate, family, state, 10, 300, lambda _: None)
 
         self.assertEqual(
-            state.unlocked_override_expires_at,
+            state.access_expires_at,
             gate.override.expires_at,
         )
         self.assertTrue(family.blocked)
@@ -677,7 +701,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(family.unlock_attempts, 2)
         self.assertEqual(family.actions, [False])
         self.assertEqual(
-            state.unlocked_override_expires_at,
+            state.access_expires_at,
             gate.override.expires_at,
         )
 
@@ -699,7 +723,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(
-            failed_state.unlocked_override_expires_at,
+            failed_state.access_expires_at,
             gate.override.expires_at,
         )
 
@@ -714,11 +738,11 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(noop_family.refreshes, 0)
         self.assertEqual(noop_family.actions, [])
         self.assertEqual(
-            noop_state.unlocked_override_expires_at,
+            noop_state.access_expires_at,
             gate.override.expires_at,
         )
 
-    async def test_successful_automatic_unlocked_noop_clears_previous_deadline(
+    async def test_successful_automatic_unlocked_noop_sets_day_deadline(
         self,
     ) -> None:
         family = FakeFamily(blocked=False)
@@ -726,7 +750,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
             actual_blocked=False,
             desired_blocked=False,
             verified_at=10,
-            unlocked_override_expires_at=datetime(
+            access_expires_at=datetime(
                 2026, 8, 12, 21, tzinfo=timezone.utc
             ),
         )
@@ -734,7 +758,10 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         await reconcile(UNLOCKED, family, state, 20, 300, lambda _: None)
 
         self.assertEqual(family.actions, [])
-        self.assertIsNone(state.unlocked_override_expires_at)
+        self.assertEqual(
+            state.access_expires_at,
+            datetime(2026, 8, 12, 21, tzinfo=timezone.utc),
+        )
 
     async def test_periodic_verification_restores_manual_unblock(self) -> None:
         family = FakeFamily(blocked=True)
@@ -857,6 +884,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         family = FailFirstUnlockFamily(blocked=True, apply_before_failure=True)
+        current = datetime(2026, 8, 12, 20, tzinfo=timezone.utc)
         reads = 0
         blocked_during_sleeps: list[bool] = []
 
@@ -878,6 +906,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
                 family,
                 gate_reader=reader,
                 sleep=outage_then_stop,
+                wall_clock=lambda: current,
                 log=lambda _: None,
             )
 
@@ -897,6 +926,9 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
                 family,
                 gate_reader=lambda _: self._gate(UNLOCKED),
                 sleep=stop_after_poll,
+                wall_clock=lambda: datetime(
+                    2026, 8, 12, 20, tzinfo=timezone.utc
+                ),
                 log=lambda _: None,
             )
 
@@ -927,6 +959,9 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
                 family,
                 gate_reader=recovering_reader,
                 sleep=retry_then_stop,
+                wall_clock=lambda: datetime(
+                    2026, 8, 12, 20, tzinfo=timezone.utc
+                ),
                 log=lambda _: None,
             )
 
@@ -986,10 +1021,53 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(family.actions, [False, True])
-        self.assertIn("срок временной разблокировки истёк", "\n".join(logs))
+        self.assertIn("срок разрешённого доступа истёк", "\n".join(logs))
         self.assertTrue(family.closed)
 
-    async def test_successful_unlock_poll_is_capped_to_expiry(self) -> None:
+    async def test_automatic_and_legacy_access_expire_at_moscow_midnight(
+        self,
+    ) -> None:
+        for name, gate in (
+            ("new", UNLOCKED),
+            ("legacy", legacy_unlocked_gate()),
+        ):
+            with self.subTest(contract=name):
+                family = FakeFamily(blocked=True)
+                current = datetime(
+                    2026, 8, 12, 20, 59, 59, tzinfo=timezone.utc
+                )
+                reads = 0
+                delays: list[float] = []
+
+                async def reader(_: str) -> GateState:
+                    nonlocal reads
+                    reads += 1
+                    if reads == 1:
+                        return gate
+                    raise RuntimeError("нет связи")
+
+                async def reach_midnight_then_stop(delay: float) -> None:
+                    nonlocal current
+                    delays.append(delay)
+                    current += timedelta(seconds=delay)
+                    if len(delays) > 1:
+                        raise asyncio.CancelledError
+
+                with self.assertRaises(asyncio.CancelledError):
+                    await run_controller(
+                        ControllerConfig("refresh", "child"),
+                        family,
+                        gate_reader=reader,
+                        sleep=reach_midnight_then_stop,
+                        wall_clock=lambda: current,
+                        log=lambda _: None,
+                    )
+
+                self.assertEqual(delays[0], 1.0)
+                self.assertEqual(family.actions, [False, True])
+                self.assertTrue(family.blocked)
+
+    async def test_forced_unlock_poll_is_capped_to_override_expiry(self) -> None:
         family = FakeFamily(blocked=True)
         forced_unlocked = forced_unlocked_gate()
         current = datetime(2026, 8, 12, 20, 59, 59, tzinfo=timezone.utc)
@@ -1124,7 +1202,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(family.actions, [True, False, True])
         self.assertTrue(family.blocked)
-        self.assertIn("срок временной разблокировки истёк", "\n".join(logs))
+        self.assertIn("срок разрешённого доступа истёк", "\n".join(logs))
 
     async def test_initial_ambiguous_unlock_honors_valid_gate_until_expiry(
         self,
@@ -1168,7 +1246,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delays[0], 60.0)
         self.assertEqual(blocked_during_sleeps, [False, True])
         self.assertEqual(family.actions, [False, True])
-        self.assertIn("срок временной разблокировки истёк", "\n".join(logs))
+        self.assertIn("срок разрешённого доступа истёк", "\n".join(logs))
 
     async def test_restart_after_forced_unlock_fails_closed_across_expiry(self) -> None:
         family = FakeFamily(blocked=True)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 import json
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -76,8 +76,14 @@ def parse_gate(raw: Any) -> GateState:
     for key in ("day", "required", "completed", "remaining", "learning", "unlocked"):
         if key not in raw:
             raise ValueError(f"В ответе gate/status нет поля {key}")
-    if not isinstance(raw["day"], str) or not raw["day"]:
-        raise ValueError("Поле day должно быть непустой строкой")
+    if not isinstance(raw["day"], str):
+        raise ValueError("Поле day должно быть датой в формате YYYY-MM-DD")
+    try:
+        parsed_day = date.fromisoformat(raw["day"])
+    except ValueError as error:
+        raise ValueError("Поле day должно быть датой в формате YYYY-MM-DD") from error
+    if parsed_day.isoformat() != raw["day"]:
+        raise ValueError("Поле day должно быть датой в формате YYYY-MM-DD")
     integer_values = (raw["required"], raw["completed"], raw["remaining"])
     if any(isinstance(value, bool) or not isinstance(value, int) for value in integer_values):
         raise ValueError("required, completed и remaining должны быть целыми числами")
