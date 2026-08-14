@@ -229,6 +229,99 @@ describe('родительский дашборд', () => {
       .toHaveTextContent('Режим по плану');
   });
 
+  it('после transient expiry-refresh error повторяет запрос с backoff без busy loop', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-08T20:59:59.000Z'));
+    const expiredDashboard: ParentsDashboard = {
+      ...DASHBOARD,
+      computerAccess: {
+        ...DASHBOARD.computerAccess,
+        automaticUnlocked: true,
+        override: {
+          mode: 'unlocked',
+          changedAt: '2026-08-08T20:50:00.000Z',
+          expiresAt: '2026-08-08T21:00:00.000Z',
+        },
+        unlocked: true,
+      },
+    };
+    const freshDashboard: ParentsDashboard = {
+      ...DASHBOARD,
+      computerAccess: { ...DASHBOARD.computerAccess, day: '2026-08-09' },
+    };
+    const api = parentsApi(expiredDashboard);
+    vi.mocked(api.read)
+      .mockResolvedValueOnce(expiredDashboard)
+      .mockRejectedValueOnce(new Error('Временная ошибка сети'))
+      .mockResolvedValueOnce(freshDashboard);
+    await act(async () => { render(<ParentsScreen api={api} />); });
+
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+    });
+    expect(api.read).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('alert')).toHaveTextContent('Временная ошибка сети');
+    expect(screen.getByRole('region', { name: 'Состояние доступа неизвестно' }))
+      .not.toHaveTextContent('Компьютер разблокирован');
+
+    await act(async () => { vi.advanceTimersByTime(999); });
+    expect(api.read).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+      await Promise.resolve();
+    });
+    expect(api.read).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole('region', { name: 'Компьютер заблокирован' }))
+      .toHaveTextContent('Режим по плану');
+  });
+
+  it('при clock skew повторяет same expired override с backoff, а не setTimeout zero loop', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-08T20:59:59.000Z'));
+    const expiredDashboard: ParentsDashboard = {
+      ...DASHBOARD,
+      computerAccess: {
+        ...DASHBOARD.computerAccess,
+        automaticUnlocked: true,
+        override: {
+          mode: 'unlocked',
+          changedAt: '2026-08-08T20:50:00.000Z',
+          expiresAt: '2026-08-08T21:00:00.000Z',
+        },
+        unlocked: true,
+      },
+    };
+    const freshDashboard: ParentsDashboard = {
+      ...DASHBOARD,
+      computerAccess: { ...DASHBOARD.computerAccess, day: '2026-08-09' },
+    };
+    const api = parentsApi(expiredDashboard);
+    vi.mocked(api.read)
+      .mockResolvedValueOnce(expiredDashboard)
+      .mockResolvedValueOnce(expiredDashboard)
+      .mockResolvedValueOnce(freshDashboard);
+    await act(async () => { render(<ParentsScreen api={api} />); });
+
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+    });
+    expect(api.read).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('region', { name: 'Состояние доступа неизвестно' }))
+      .toHaveTextContent('Сервер ещё подтверждает прежний режим');
+
+    await act(async () => { vi.advanceTimersByTime(999); });
+    expect(api.read).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+      await Promise.resolve();
+    });
+    expect(api.read).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole('region', { name: 'Компьютер заблокирован' }))
+      .toHaveTextContent('Режим по плану');
+  });
+
   it('подтверждает каждую смену отдельно и переиспользует PIN этой вкладки', async () => {
     const api = parentsApi();
     const storage = vi.spyOn(Storage.prototype, 'setItem');

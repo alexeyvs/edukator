@@ -53,6 +53,8 @@ const CONFIRMATIONS: Record<ComputerAccessMode, { title: string; text: string; a
   },
 };
 
+const ACCESS_REFRESH_BACKOFF_MS = [1_000, 5_000, 15_000, 30_000] as const;
+
 function accessMode(access: DailyGateState): ComputerAccessMode {
   return access.override?.mode ?? 'automatic';
 }
@@ -90,18 +92,28 @@ function ComputerAccessPanel({
   access: ParentsDashboard['computerAccess'];
   api: ParentsApi;
   onChanged: (next: DailyGateState) => void;
-  onExpired: () => Promise<void>;
+  onExpired: () => Promise<ParentsDashboard['computerAccess']>;
 }) {
   const [pin, setPin] = useState('');
   const [selected, setSelected] = useState<ComputerAccessMode | null>(null);
   const [pending, setPending] = useState(false);
-  const [expiryPending, setExpiryPending] = useState(false);
-  const [expiryError, setExpiryError] = useState<string | null>(null);
+  const [expiryRefresh, setExpiryRefresh] = useState<{
+    key: string;
+    pending: boolean;
+    error: string | null;
+    retrying: boolean;
+  } | null>(null);
+  const [refreshCycle, setRefreshCycle] = useState(0);
   const [accessClock, setAccessClock] = useState(() => Date.now());
   const [feedback, setFeedback] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
-  const refreshedExpiry = useRef<string | null>(null);
   const refreshGeneration = useRef(0);
+  const refreshAttempt = useRef<{ key: string; count: number }>({ key: '', count: 0 });
+  const inFlightRefresh = useRef<{ key: string; generation: number } | null>(null);
   const expiresAt = access.override === null ? Number.NaN : Date.parse(access.override.expiresAt);
+  const expiryKey = access.override?.expiresAt ?? null;
+  const currentExpiryRefresh = expiryRefresh?.key === expiryKey ? expiryRefresh : null;
+  const expiryPending = currentExpiryRefresh?.pending === true;
+  const expiryError = currentExpiryRefresh?.error ?? null;
   const overrideActive = Number.isFinite(expiresAt) && expiresAt > accessClock;
   const overrideExpired = access.override !== null && !overrideActive;
   const current = overrideExpired ? null : accessMode(access);
@@ -111,44 +123,76 @@ function ComputerAccessPanel({
       title: expiryPending ? 'Проверяю доступ к компьютеру' : 'Состояние доступа неизвестно',
       note: expiryPending
         ? 'Получаю актуальный режим нового дня.'
-        : 'Не получилось получить актуальный режим. Старое состояние не используется.',
+        : currentExpiryRefresh?.retrying === true
+          ? 'Сервер ещё подтверждает прежний режим. Повторяю проверку.'
+          : 'Не получилось получить актуальный режим. Старое состояние не используется.',
     }
     : accessStatus(access);
   const pinValid = /^\d{6,12}$/u.test(pin);
 
   useEffect(() => {
-    if (access.override === null) {
-      refreshedExpiry.current = null;
-      return;
+    if (expiryKey === null || pending) return;
+    if (refreshAttempt.current.key !== expiryKey) {
+      refreshAttempt.current = { key: expiryKey, count: 0 };
     }
-    const expiryKey = access.override.expiresAt;
+    if (inFlightRefresh.current?.key === expiryKey) return;
     const remaining = Number.isFinite(expiresAt) ? expiresAt - Date.now() : 0;
+    const attempt = refreshAttempt.current.count;
+    const retryDelay = attempt === 0
+      ? 0
+      : ACCESS_REFRESH_BACKOFF_MS[
+        Math.min(attempt - 1, ACCESS_REFRESH_BACKOFF_MS.length - 1)
+      ] ?? 30_000;
+    const delay = remaining > 0 ? remaining : retryDelay;
     const timer = window.setTimeout(
       () => {
         const now = Date.now();
         setAccessClock(now);
-        if (Number.isFinite(expiresAt) && now < expiresAt) return;
-        if (refreshedExpiry.current === expiryKey) return;
-        refreshedExpiry.current = expiryKey;
+        if (Number.isFinite(expiresAt) && now < expiresAt) {
+          setRefreshCycle((cycle) => cycle + 1);
+          return;
+        }
         const generation = ++refreshGeneration.current;
+        inFlightRefresh.current = { key: expiryKey, generation };
         setSelected(null);
-        setExpiryPending(true);
-        setExpiryError(null);
+        setExpiryRefresh({ key: expiryKey, pending: true, error: null, retrying: false });
         void onExpired()
-          .catch((error: unknown) => {
-            if (refreshGeneration.current !== generation) return;
-            setExpiryError(error instanceof Error
-              ? error.message
-              : 'Не получилось обновить состояние доступа');
-          })
-          .finally(() => {
-            if (refreshGeneration.current === generation) setExpiryPending(false);
+          .then((freshAccess) => {
+            if (inFlightRefresh.current?.generation !== generation) return;
+            inFlightRefresh.current = null;
+            const freshExpiresAt = freshAccess.override === null
+              ? Number.NaN
+              : Date.parse(freshAccess.override.expiresAt);
+            const freshStillExpired = freshAccess.override !== null && (
+              !Number.isFinite(freshExpiresAt) || freshExpiresAt <= Date.now()
+            );
+            if (!freshStillExpired) {
+              refreshAttempt.current = { key: '', count: 0 };
+              setExpiryRefresh(null);
+              return;
+            }
+            refreshAttempt.current.count += 1;
+            setExpiryRefresh({ key: expiryKey, pending: false, error: null, retrying: true });
+            setRefreshCycle((cycle) => cycle + 1);
+          }, (error: unknown) => {
+            if (inFlightRefresh.current?.generation !== generation) return;
+            inFlightRefresh.current = null;
+            refreshAttempt.current.count += 1;
+            setExpiryRefresh({
+              key: expiryKey,
+              pending: false,
+              error: error instanceof Error
+                ? error.message
+                : 'Не получилось обновить состояние доступа',
+              retrying: false,
+            });
+            setRefreshCycle((cycle) => cycle + 1);
           });
       },
-      Math.min(2_147_483_647, Math.max(0, remaining)),
+      Math.min(2_147_483_647, Math.max(0, delay)),
     );
     return () => window.clearTimeout(timer);
-  }, [access.override, accessClock, expiresAt, onExpired]);
+  }, [expiryKey, expiresAt, onExpired, pending, refreshCycle]);
 
   async function confirm(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -158,7 +202,7 @@ function ComputerAccessPanel({
     try {
       const next = await api.changeComputerAccess(selected, pin);
       onChanged(next);
-      setExpiryError(null);
+      setExpiryRefresh(null);
       setSelected(null);
       setFeedback({ kind: 'success', text: 'Режим доступа обновлён.' });
     } catch (error: unknown) {
@@ -311,13 +355,14 @@ export function ParentsScreen({ api = browserParentsApi }: { api?: ParentsApi })
     };
   }, [api]);
 
-  const refreshAfterExpiry = useCallback(async (): Promise<void> => {
+  const refreshAfterExpiry = useCallback(async (): Promise<ParentsDashboard['computerAccess']> => {
     const generation = ++readGeneration.current;
     const loaded = await api.read();
     if (readGeneration.current === generation) {
       setDashboard(loaded);
       setProblem(null);
     }
+    return loaded.computerAccess;
   }, [api]);
 
   if (problem !== null) {
