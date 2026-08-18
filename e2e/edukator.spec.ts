@@ -69,6 +69,11 @@ test('полный забег из двенадцати заданий прив�
     const mathRun = page.locator('.plan-cards article').filter({ hasText: 'Математика' });
     await mathRun.getByRole('button', { name: 'Начать' }).click();
 
+    // Формула посреди инструкции обязана дойти нарисованной: fallback исходника
+    // выглядит как рабочий экран, и без явной проверки регресс не виден.
+    await expect(page.locator('.task-instruction .task-math-inline .katex')).toBeVisible();
+    await expect(page.locator('.task-instruction .task-math-source-inline')).toHaveCount(0);
+
     for (let answered = 1; answered <= 12; answered += 1) {
       await expect(page.getByRole('heading', { name: /вычисли значение/ })).toBeVisible();
       await page.getByLabel('Число').fill('45');

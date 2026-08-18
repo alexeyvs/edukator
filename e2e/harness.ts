@@ -90,7 +90,9 @@ function task(subject: Subject, topic: number, index: number): GeneratedTask {
     };
   }
   return {
-    instruction: `Задание ${subject}.${topic} номер ${index}: вычисли значение.`,
+    // Инлайн-формула в инструкции — не украшение: до `SafeRichText` в условии
+    // ученик читал бы «\(40+5\)» исходником, и сценарий это ловит.
+    instruction: String.raw`Задание ${subject}.${topic} номер ${index}: вычисли значение \(40+5\).`,
     material: '40 + 5',
     material_format: 'math',
     choices: [],

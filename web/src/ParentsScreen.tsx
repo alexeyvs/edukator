@@ -336,7 +336,7 @@ function AttemptMaterial({ attempt }: { attempt: ParentsRunAttempt }) {
     <section className="parents-attempt-material" aria-label="Материал задания">
       {attempt.materialFormat === 'math'
         ? <SafeFormula source={attempt.material} />
-        : <p>{attempt.material}</p>}
+        : <SafeRichText as="p" source={attempt.material} />}
     </section>
   );
 }

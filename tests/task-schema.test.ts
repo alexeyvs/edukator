@@ -167,26 +167,47 @@ describe('parseTaskBatch: нарушения инвариантов', () => {
       .toThrow(/LaTeX.*без разделителей/s);
   });
 
-  // KaTeX зовётся только для material_format=math и на весь материал целиком,
-  // поэтому формула, вписанная внутрь предложения, доезжает до экрана исходником:
-  // ученик читает «использовали \(\frac{13}{40}\) деталей» вместо дроби.
-  it('не пускает LaTeX в текстовый материал и в инструкцию', () => {
+  // Формулу посреди фразы display-материал не выражает: он занимает материал
+  // целиком. Инлайн-разделители рендерит SafeRichText, поэтому они разрешены
+  // везде, где текст доезжает до экрана через неё.
+  it('пропускает инлайн-формулу в прозе', () => {
     expect(() =>
       parseTaskBatch(
-        batch(task({ material: 'Использовали \\(\\frac{13}{40}\\) деталей.', material_format: 'text' })),
+        batch(task({
+          material: String.raw`Использовали \(\frac{13}{40}\) деталей.`,
+          instruction: String.raw`Найди \(x\)`,
+          explain: String.raw`Получается \(\frac{13}{40}=0{,}325\).`,
+        })),
         'number',
       ),
-    ).toThrow(/LaTeX.*material_format=math/s);
-
-    expect(() =>
-      parseTaskBatch(batch(task({ instruction: 'Найди $x$.' })), 'number'),
-    ).toThrow(/LaTeX.*material_format=math/s);
-
-    // Обычная косая черта — не LaTeX: «13/40» в предложении и есть та запись,
-    // которой формулу положено писать вместо разметки.
-    expect(() =>
-      parseTaskBatch(batch(task({ material: 'Использовали 13/40 деталей.' })), 'number'),
     ).not.toThrow();
+  });
+
+  // Всё, что мимо разделителей, экран показывает исходником: «\frac{13}{40}»
+  // вместо дроби. Пара `$…$` и `\[…\]` в прозе не рендерится вовсе.
+  it('не пускает LaTeX мимо инлайн-разделителей', () => {
+    expect(() =>
+      parseTaskBatch(batch(task({ material: String.raw`Получилось \frac{13}{40} деталей.` })), 'number'),
+    ).toThrow(/LaTeX.*\\\(…\\\)/su);
+
+    expect(() => parseTaskBatch(batch(task({ instruction: 'Найди $x$.' })), 'number'))
+      .toThrow(/LaTeX/su);
+
+    expect(() => parseTaskBatch(batch(task({ explain: String.raw`Ответ \[x=4\].` })), 'number'))
+      .toThrow(/LaTeX/su);
+
+    // Незакрытый разделитель не должен считаться инлайном: до экрана он доедет
+    // исходником ровно так же.
+    expect(() => parseTaskBatch(batch(task({ material: String.raw`Осталось \(\frac12 деталей.` })), 'number'))
+      .toThrow(/LaTeX/su);
+
+    // Обычная косая черта — не разметка, и запрещать её нечего.
+    expect(() => parseTaskBatch(batch(task({ material: 'Использовали 13/40 деталей.' })), 'number'))
+      .not.toThrow();
+
+    // Одиночный доллар — цена, а не формула: из-за него терялся бы весь батч.
+    expect(() => parseTaskBatch(batch(task({ material: 'Скин стоит $5 в магазине.' })), 'number'))
+      .not.toThrow();
   });
 
   it('требует варианты только для choice и буквальное совпадение answer', () => {

@@ -47,6 +47,41 @@ describe('структурированное задание', () => {
     expect(container.querySelector('.task-math .katex-display')).not.toBeNull();
   });
 
+  // Формулу посреди фразы (display-материал её не выражает: он занимает
+  // материал целиком) модель пишет инлайном, и до этого её рендерил только
+  // разбор — в условии, материале и подсказке ученик читал исходник
+  // «\(\frac{13}{40}\)».
+  it('рендерит инлайн-формулу в инструкции, текстовом материале и подсказке', () => {
+    render(
+      <TaskPrompt
+        task={task({
+          instruction: String.raw`Найди \(x\) по условию`,
+          material: String.raw`Использовали \(\frac{13}{40}\) деталей.`,
+        })}
+        answer=""
+        onAnswerChange={vi.fn()}
+        answerId="answer"
+        headingId="question"
+        hint={String.raw`Переведи \(\frac{13}{40}\) в десятичную дробь. Затем проверь ответ.`}
+        hintVisible
+      />,
+    );
+
+    const heading = screen.getByRole('heading');
+    const sheet = screen.getByRole('region', { name: 'Материал задания' });
+    const hint = screen.getByText(/Переведи/u);
+
+    for (const node of [heading, sheet, hint]) {
+      expect(node.querySelector('.task-math-inline .katex')).not.toBeNull();
+      // Исходник в разметке остаётся — MathML держит его в annotation, — но
+      // ученику он показывается только через fallback неразобранной формулы.
+      expect(node.querySelector('.task-math-source-inline')).toBeNull();
+    }
+    // Инлайн остаётся инлайном: display-обёртка разорвала бы фразу и в
+    // заголовке дала бы недопустимый div внутри h1.
+    expect(sheet.querySelector('.katex-display')).toBeNull();
+  });
+
   it('не запирает числовой ответ в десятичной клавиатуре', () => {
     prompt();
 

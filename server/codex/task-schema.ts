@@ -57,8 +57,18 @@ interface TaskBatchJson {
 }
 
 /**
+ * Формула посреди фразы: единственная разметка, которую проза доносит до
+ * экрана. Её разбирает `SafeRichText` и рендерит инлайновым KaTeX.
+ *
+ * Только парные разделители: незакрытый `\(` формулой не становится и обязан
+ * дойти до `LATEX_MARKUP`, иначе он уедет ученику исходником.
+ */
+const INLINE_FORMULA = /\\\([\s\S]*?\\\)/gu;
+
+/**
  * Разметка LaTeX там, где её никто не рендерит: разделители `\(`, `\[`, команда
- * вроде `\frac` и пара `$…$`.
+ * вроде `\frac` и пара `$…$`. Проверяется по тексту, из которого уже вырезаны
+ * инлайн-формулы, — то есть ловит ровно то, что осталось снаружи.
  *
  * Одиночный `$` сюда намеренно не входит: «скин стоит $5» — обычный текст, а не
  * формула, и заворачивать из-за него весь батч значило бы терять четыре годных
@@ -208,13 +218,22 @@ function taskProblems(task: GeneratedTask, format: AnswerFormat): string[] {
   if (task.material_format === 'math' && task.material?.includes('$')) {
     problems.push('математический материал должен быть display-LaTeX без разделителей $');
   }
-  // Разметку рендерит только ветвь `math`, и только на весь материал целиком:
-  // формула, вписанная внутрь предложения или в инструкцию, доезжает до экрана
-  // исходником — ученик видит «\(\frac{13}{40}\)» вместо дроби. Дробь в тексте
-  // пишется обычной косой чертой, поэтому ветвь ничего не отнимает.
-  const plain = [task.instruction ?? '', task.material_format === 'math' ? '' : (task.material ?? '')];
-  if (plain.some((text) => LATEX_MARKUP.test(text))) {
-    problems.push('LaTeX допустим только в material при material_format=math: в тексте пиши 13/40');
+  // Проза доносит до экрана только парный инлайн: всё остальное — `\[…\]`,
+  // `$…$`, голая команда — доезжает исходником, и ученик читает «\frac{13}{40}»
+  // вместо дроби. Поля перечислены те, что рендерятся через `SafeRichText`;
+  // display-материал разбирает `SafeFormula` и проверяется отдельно выше.
+  const prose = [
+    task.instruction ?? '',
+    task.hint ?? '',
+    task.explain ?? '',
+    task.joke ?? '',
+    task.material_format === 'math' ? '' : (task.material ?? ''),
+  ];
+  if (prose.some((text) => LATEX_MARKUP.test(text.replace(INLINE_FORMULA, ' ')))) {
+    problems.push(
+      'LaTeX в тексте допустим только парным инлайном \\(…\\); для формулы во весь ' +
+        'материал бери material_format=math',
+    );
   }
   const choiceKeys = (task.choices ?? []).map(normalizeText);
   if (choiceKeys.some((choice) => choice === '') || new Set(choiceKeys).size !== choiceKeys.length) {

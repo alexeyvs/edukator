@@ -110,11 +110,12 @@ describe('buildGenerationPrompt: состав промпта', () => {
 
   // Экран рендерит KaTeX только при material_format=math и только на весь
   // материал: формула внутри предложения уезжает ученику исходником.
-  it('запрещает LaTeX везде, кроме математического материала', () => {
+  it('разрешает формулу в прозе только парным инлайном', () => {
     const prompt = buildGenerationPrompt({ topic: topic(), difficulty: 1, persona: PERSONA });
 
-    expect(prompt).toContain('LaTeX допустим только в material при material_format=math');
-    expect(prompt).toContain('13/40');
+    expect(prompt).toContain('\\(…\\)');
+    // Именно то, что рендерится: пары $…$ и \[…\] в прозе нет.
+    expect(prompt).toContain('ни $…$, ни \\[…\\]');
   });
 
   // Пунктуацию текстовая сверка не снимает: «Where, when» и «Where; when» —

@@ -44,8 +44,19 @@ export const SafeFormula = memo(function SafeFormula({
 
 const FORMULA_DELIMITERS = /\\\(([\s\S]*?)\\\)|\\\[([\s\S]*?)\\\]/gu;
 
-/** Безопасно смешивает обычный текст с LaTeX в \(...\) и \[...\]. */
-export function SafeRichText({ source }: { source: string }) {
+/**
+ * Безопасно смешивает обычный текст с LaTeX в \(...\) и \[...\].
+ *
+ * Обёртка выбирается вызывающим: внутри `h1` и на месте абзаца `div` дал бы
+ * недопустимую вложенность, и браузер закрыл бы внешний элемент раньше формулы.
+ */
+export function SafeRichText({
+  source,
+  as: Tag = 'div',
+}: {
+  source: string;
+  as?: 'div' | 'p' | 'span';
+}) {
   const parts: ReactNode[] = [];
   let start = 0;
   for (const match of source.matchAll(FORMULA_DELIMITERS)) {
@@ -62,7 +73,7 @@ export function SafeRichText({ source }: { source: string }) {
     start = index + match[0].length;
   }
   if (start < source.length) parts.push(source.slice(start));
-  return <div className="safe-rich-text">{parts}</div>;
+  return <Tag className="safe-rich-text">{parts}</Tag>;
 }
 
 function ChoiceAnswer({ task, answer, onAnswerChange, readOnly }: Pick<TaskPromptProps, 'task' | 'answer' | 'onAnswerChange' | 'readOnly'>) {
@@ -101,10 +112,14 @@ export function TaskPrompt({ task, answer, onAnswerChange, answerId, headingId, 
 
   return (
     <>
-      <h1 id={headingId} className="task-instruction">{instruction}</h1>
+      <h1 id={headingId} className="task-instruction">
+        <SafeRichText as="span" source={instruction} />
+      </h1>
       {materialFormat !== 'none' && (
         <section className={`material-sheet ${materialFormat === 'math' ? 'math' : 'text'}`} aria-label="Материал задания">
-          {materialFormat === 'math' ? <SafeFormula source={material} /> : <p>{material}</p>}
+          {materialFormat === 'math'
+            ? <SafeFormula source={material} />
+            : <SafeRichText as="p" source={material} />}
         </section>
       )}
       {task.answer_format === 'choice' && (task.choices?.length ?? 0) > 0 ? (
@@ -124,7 +139,7 @@ export function TaskPrompt({ task, answer, onAnswerChange, answerId, headingId, 
         </div>
       )}
       {hintVisible && hint !== undefined && (
-        <aside className="hint"><span>Подсказка</span><p>{hint}</p></aside>
+        <aside className="hint"><span>Подсказка</span><SafeRichText as="p" source={hint} /></aside>
       )}
     </>
   );
