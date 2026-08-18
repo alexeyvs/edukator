@@ -562,13 +562,13 @@ function IntegrityReviewItem({
     >
       <span className="parents-activity-summary">
         <span><strong>{KIND_NAMES[item.kind]}</strong><small>{SUBJECT_NAMES[item.subject]}</small></span>
-        <span>{item.flagged} отмечено · {item.retryRequired > 0 ? `${String(item.retryRequired)} нужно повторить` : 'идёт проверка'}</span>
+        <span>{item.flagged} вопросов · {item.retryRequired > 0 ? `${String(item.retryRequired)} нужно повторить` : 'идёт проверка'}</span>
       </span>
       <time dateTime={item.startedAt}>{activityDateFormatter.format(new Date(item.startedAt))}</time>
       <span className="parents-activity-chevron" aria-hidden="true">⌄</span>
     </button>
     {open && <div className="parents-activity-detail" id={panelId}>
-      {loading && <p role="status">Загружаю отмеченные ответы…</p>}
+      {loading && <p role="status">Загружаю проверку ответов…</p>}
       {problem !== null && <div className="parents-run-detail-problem" role="alert"><p>{problem}</p><button type="button" onClick={() => void load()}>Повторить</button></div>}
       {detail !== null && <RunDetail
         detail={detail}
@@ -686,7 +686,7 @@ export function ParentsScreen({ api = browserParentsApi }: { api?: ParentsApi })
 
       {(dashboard.integrityReviews ?? []).length > 0 && <section className="parents-panel parents-integrity" aria-labelledby="parents-integrity-title">
         <div className="section-heading"><p>До зачёта занятия</p><h2 id="parents-integrity-title">Проверка ответов</h2></div>
-        <p className="parents-integrity-intro">Эти занятия пока не открывают доступ к компьютеру. Можно посмотреть отметки Codex или подтвердить осмысленный ответ вручную.</p>
+        <p className="parents-integrity-intro">Эти занятия пока не открывают доступ к компьютеру. Можно посмотреть решения Codex или подтвердить осмысленный ответ вручную.</p>
         <ol className="parents-activity">{(dashboard.integrityReviews ?? []).map((item) => (
           <IntegrityReviewItem
             api={api}

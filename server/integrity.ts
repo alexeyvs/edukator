@@ -90,7 +90,7 @@ function choicesOf(raw: string | null, taskId: number): string[] {
   return parsed;
 }
 
-function candidatesForRun(
+function questionsForRun(
   db: Database,
   graph: TopicGraph,
   runId: number,
@@ -121,7 +121,13 @@ function candidatesForRun(
       });
       return signal === null ? [] : [signal];
     });
-    if (signals.length > 0) result.push({ taskId, attemptId: current.id, signal: signals.join(' ') });
+    result.push({
+      taskId,
+      attemptId: current.id,
+      signal: signals.length > 0
+        ? signals.join(' ')
+        : 'Предварительная эвристика не нашла отдельного сигнала.',
+    });
   }
   return result;
 }
@@ -204,11 +210,6 @@ function parseAccept(raw: string, taskId: number): string[] {
   return parsed;
 }
 
-interface RetryResult {
-  schedule: boolean;
-  complete: boolean;
-}
-
 function replaceIntegrityAttempt(
   db: Database,
   graph: TopicGraph,
@@ -217,8 +218,8 @@ function replaceIntegrityAttempt(
   answer: string,
   durationMs: number,
   now: Date,
-): RetryResult {
-  return db.transaction((): RetryResult => {
+): void {
+  db.transaction((): void => {
     const item = db.prepare<[number, number], ItemRow>(
       `SELECT id, run_id, task_id, attempt_id, status, decision, confidence, reason, reviewed_by
          FROM integrity_items WHERE id = ? AND run_id = ?`,
@@ -271,31 +272,18 @@ function replaceIntegrityAttempt(
       correct: checked.correct,
       durationMs,
     });
-    if (signal === null) {
-      db.prepare(
-        `UPDATE integrity_items SET attempt_id = ?, status = 'approved',
-                decision = 'meaningful', confidence = 1,
-                reason = 'Повторный ответ прошёл предварительную проверку.',
-                reviewed_by = 'heuristic', updated_at = ? WHERE id = ?`,
-      ).run(attemptId, at, itemId);
-    } else {
-      db.prepare(
-        `UPDATE integrity_items SET attempt_id = ?, status = 'pending', decision = NULL,
-                confidence = NULL, reason = ?, reviewed_by = NULL, updated_at = ? WHERE id = ?`,
-      ).run(attemptId, signal, at, itemId);
-    }
-    const pending = db.prepare<[number], { count: number }>(
-      "SELECT COUNT(*) AS count FROM integrity_items WHERE run_id = ? AND status = 'pending'",
-    ).get(runId)?.count ?? 0;
-    const retries = db.prepare<[number], { count: number }>(
-      "SELECT COUNT(*) AS count FROM integrity_items WHERE run_id = ? AND status = 'retry_required'",
-    ).get(runId)?.count ?? 0;
-    const status: IntegrityReviewStatus = pending > 0
-      ? 'screening'
-      : retries > 0 ? 'needs_retry' : 'passed';
-    db.prepare('UPDATE integrity_reviews SET status = ?, last_error = NULL, updated_at = ? WHERE run_id = ?')
-      .run(status, at, runId);
-    return { schedule: pending > 0, complete: status === 'passed' };
+    db.prepare(
+      `UPDATE integrity_items SET attempt_id = ?, status = 'pending', decision = NULL,
+              confidence = NULL, reason = ?, reviewed_by = NULL, updated_at = ? WHERE id = ?`,
+    ).run(
+      attemptId,
+      signal ?? 'Повторный ответ ожидает обязательной проверки Codex.',
+      at,
+      itemId,
+    );
+    db.prepare(
+      "UPDATE integrity_reviews SET status = 'screening', last_error = NULL, updated_at = ? WHERE run_id = ?",
+    ).run(at, runId);
   }).immediate();
 }
 
@@ -481,8 +469,8 @@ export function createIntegrityCoordinator(options: IntegrityCoordinatorOptions)
     if (run === undefined || run.finished_at !== null || (run.kind !== 'run' && run.kind !== 'lesson')) {
       throw new Error('Проверка доступна только для незавершённого забега или разбора');
     }
-    const candidates = candidatesForRun(db, graph, runId);
-    if (candidates.length === 0) {
+    const questions = questionsForRun(db, graph, runId);
+    if (questions.length === 0) {
       const result = options.complete(runId, now());
       return { status: 'completed', result };
     }
@@ -495,8 +483,8 @@ export function createIntegrityCoordinator(options: IntegrityCoordinatorOptions)
           (run_id, task_id, attempt_id, status, reason, created_at, updated_at)
          VALUES (?, ?, ?, 'pending', ?, ?, ?)`,
       );
-      for (const candidate of candidates) {
-        insert.run(runId, candidate.taskId, candidate.attemptId, candidate.signal, at, at);
+      for (const question of questions) {
+        insert.run(runId, question.taskId, question.attemptId, question.signal, at, at);
       }
     }).immediate();
     schedule(runId);
@@ -504,9 +492,8 @@ export function createIntegrityCoordinator(options: IntegrityCoordinatorOptions)
   }
 
   function retry(runId: number, itemId: number, answer: string, durationMs: number): IntegrityPublicStatus {
-    const result = replaceIntegrityAttempt(db, graph, runId, itemId, answer, durationMs, now());
-    if (result.complete) finish(runId);
-    else if (result.schedule) schedule(runId);
+    replaceIntegrityAttempt(db, graph, runId, itemId, answer, durationMs, now());
+    schedule(runId);
     return current(runId);
   }
 

@@ -75,12 +75,17 @@ describe('Learning API', () => {
       },
       background: (job): void => void job(),
       log: (): void => undefined,
-      integrityReview: async (items) => items.map((item) => ({
-        id: item.id,
-        decision: integrityDecision,
-        confidence: 0.99,
-        reason: integrityDecision === 'junk' ? 'Случайные буквы вместо числа.' : 'Видна попытка решения.',
-      })),
+      integrityReview: async (items) => items.map((item) => {
+        const decision = integrityDecision === 'junk'
+          && item.attempts.some((attempt) => attempt.answer === 'Ff')
+          ? 'junk' : 'meaningful';
+        return {
+          id: item.id,
+          decision,
+          confidence: 0.99,
+          reason: decision === 'junk' ? 'Случайные буквы вместо числа.' : 'Видна попытка решения.',
+        };
+      }),
     });
     await app.ready();
     db = openDatabase(process.env.EDUKATOR_DB);
@@ -158,6 +163,20 @@ describe('Learning API', () => {
       if (body['status'] !== 'checking') return body;
     }
     throw new Error('Проверка осмысленности не завершилась');
+  }
+
+  async function finishLearningChecked(runId: number): Promise<Record<string, unknown>> {
+    const response = await app.inject({
+      method: 'POST', url: `/api/learning/run/${runId}/finish`,
+    });
+    if (response.statusCode !== 200) {
+      throw new Error(`Lesson-run ${runId} не принят к проверке: ${response.body}`);
+    }
+    let body = response.json() as Record<string, unknown>;
+    if (body['status'] === 'checking') body = await settleIntegrity(runId);
+    if (body['status'] === 'completed') return body['result'] as Record<string, unknown>;
+    if (body['status'] !== undefined) throw new Error(`Lesson-run ${runId} не прошёл проверку`);
+    return body;
   }
 
   it('показывает только готовую карточку и безопасно открывает материал', async () => {
@@ -301,7 +320,10 @@ describe('Learning API', () => {
       payload: { answer: '4', duration_ms: 15_000 },
     });
 
-    expect(retried.json()).toMatchObject({ status: 'completed', result: { outcome: 'passed', correct: 5 } });
+    expect(retried.json()).toMatchObject({ status: 'checking', flagged: 5 });
+    expect(await settleIntegrity(runId)).toMatchObject({
+      status: 'completed', result: { outcome: 'passed', correct: 5 },
+    });
     expect(db.prepare('SELECT COUNT(*) AS count FROM attempts WHERE run_id = ?').get(runId))
       .toEqual({ count: 6 });
   });
@@ -377,11 +399,8 @@ describe('Learning API', () => {
       })).statusCode).toBe(200);
     }
 
-    const finish = await app.inject({
-      method: 'POST', url: `/api/learning/run/${lessonRunId}/finish`,
-    });
-    expect(finish.statusCode).toBe(200);
-    expect(finish.json()).toMatchObject({ materialId, outcome: 'passed', total: 5, correct: 5 });
+    const finish = await finishLearningChecked(lessonRunId);
+    expect(finish).toMatchObject({ materialId, outcome: 'passed', total: 5, correct: 5 });
     expect(readStreak(db, NOW)).toEqual({ current: 0, best: 0, completedToday: false });
     expect((await app.inject({ method: 'GET', url: '/api/run/plan' })).json())
       .toMatchObject({ plan: planAfterBoss.plan, learning: [] });
@@ -408,11 +427,8 @@ describe('Learning API', () => {
     const beforeSnapshots = db.prepare(
       "SELECT COUNT(*) AS count FROM forecast_snapshots WHERE subject = 'math'",
     ).get();
-    const finish = await app.inject({
-      method: 'POST', url: `/api/learning/run/${runId}/finish`,
-    });
-    expect(finish.statusCode).toBe(200);
-    expect(finish.json()).toMatchObject({
+    const finish = await finishLearningChecked(runId);
+    expect(finish).toMatchObject({
       materialId, runId, total: 5, correct, xp, outcome,
       passScore: 4, required: true,
       masteryBefore: beforeMastery, masteryAfter: afterAnswers,
@@ -434,10 +450,8 @@ describe('Learning API', () => {
       expect(restart.json()).toMatchObject({ materialId, resumed: false, progress: { total: 0 } });
     }
 
-    const repeated = await app.inject({
-      method: 'POST', url: `/api/learning/run/${runId}/finish`,
-    });
-    expect(repeated.json()).toEqual(finish.json());
+    const repeated = await finishLearningChecked(runId);
+    expect(repeated).toEqual(finish);
     expect(db.prepare(
       "SELECT COUNT(*) AS count FROM forecast_snapshots WHERE subject = 'math'",
     ).get()).toEqual({ count: (beforeSnapshots as { count: number }).count + 1 });
@@ -461,10 +475,8 @@ describe('Learning API', () => {
     const masteryAfterFirst = db.prepare<[], { mastery: number; attempts: number }>(
       "SELECT mastery, attempts FROM topic_state WHERE topic_id = 'math.a'",
     ).get();
-    const firstFinish = await app.inject({
-      method: 'POST', url: `/api/learning/run/${firstRunId}/finish`,
-    });
-    expect(firstFinish.json()).toMatchObject({ outcome: 'failed', xp: 75 });
+    const firstFinish = await finishLearningChecked(firstRunId);
+    expect(firstFinish).toMatchObject({ outcome: 'failed', xp: 75 });
     expect((await app.inject({ method: 'GET', url: '/api/gate/status' })).json())
       .toMatchObject({ learning: { materialId, required: true, passed: false }, unlocked: false });
 
@@ -521,10 +533,8 @@ describe('Learning API', () => {
     const snapshotsBeforeRetryFinish = db.prepare(
       "SELECT COUNT(*) AS count FROM forecast_snapshots WHERE subject = 'math'",
     ).get();
-    const retryFinish = await app.inject({
-      method: 'POST', url: `/api/learning/run/${retryRunId}/finish`,
-    });
-    expect(retryFinish.json()).toMatchObject({
+    const retryFinish = await finishLearningChecked(retryRunId);
+    expect(retryFinish).toMatchObject({
       outcome: 'passed', xp: 0,
       masteryBefore: masteryAfterFirst?.mastery, masteryAfter: masteryAfterFirst?.mastery,
       touchedTopics: [],
@@ -533,9 +543,7 @@ describe('Learning API', () => {
       .toEqual(snapshotsBeforeRetryFinish);
     expect((await app.inject({ method: 'GET', url: '/api/gate/status' })).json())
       .toMatchObject({ learning: { materialId, required: true, passed: true }, unlocked: true });
-    expect((await app.inject({
-      method: 'POST', url: `/api/learning/run/${firstRunId}/finish`,
-    })).json()).toEqual(firstFinish.json());
+    expect(await finishLearningChecked(firstRunId)).toEqual(firstFinish);
   });
 
   it.each([
@@ -558,7 +566,7 @@ describe('Learning API', () => {
       }
       const firstRunId = await openAndStart(materialId);
       await answerFive(firstRunId, 3);
-      await app.inject({ method: 'POST', url: `/api/learning/run/${firstRunId}/finish` });
+      await finishLearningChecked(firstRunId);
       const stableMastery = db.prepare<[], { mastery: number; attempts: number }>(
         "SELECT mastery, attempts FROM topic_state WHERE topic_id = 'math.a'",
       ).get();
@@ -598,10 +606,8 @@ describe('Learning API', () => {
       expect(db.prepare("SELECT mastery, attempts FROM topic_state WHERE topic_id = 'math.a'").get())
         .toEqual(stableMastery);
 
-      const finish = await app.inject({
-        method: 'POST', url: `/api/learning/run/${retryRunId}/finish`,
-      });
-      expect(finish.json()).toMatchObject({
+      const finish = await finishLearningChecked(retryRunId);
+      expect(finish).toMatchObject({
         materialId, correct: expectedCorrect, outcome, xp: 0, touchedTopics: [], required: true,
       });
       expect(db.prepare(
@@ -632,10 +638,8 @@ describe('Learning API', () => {
     const runId = await openAndStart(materialId);
     await answerFive(runId, 3);
 
-    const finish = await app.inject({
-      method: 'POST', url: `/api/learning/run/${runId}/finish`,
-    });
-    expect(finish.json()).toMatchObject({ materialId, outcome: 'failed', required: false });
+    const finish = await finishLearningChecked(runId);
+    expect(finish).toMatchObject({ materialId, outcome: 'failed', required: false });
   });
 
   it('не завершает неполный тест и lesson-run с открытым спором', async () => {
@@ -694,10 +698,8 @@ describe('Learning API', () => {
       studentCorrect: false,
       note: 'Ответ остаётся ошибочным',
     }));
-    const finished = await app.inject({
-      method: 'POST', url: `/api/learning/run/${runId}/finish`,
-    });
-    expect(finished.json()).toMatchObject({ outcome: 'passed', correct: 4 });
+    const finished = await finishLearningChecked(runId);
+    expect(finished).toMatchObject({ outcome: 'passed', correct: 4 });
     expect((await app.inject({ method: 'GET', url: '/api/gate/status' })).json())
       .toMatchObject({ learning: { materialId, required: true, passed: true }, unlocked: true });
   });
@@ -732,11 +734,8 @@ describe('Learning API', () => {
     if (studentCorrect) expect(masteryAfterResolution).not.toBe(masteryBeforeResolution);
     else expect(masteryAfterResolution).toBe(masteryBeforeResolution);
 
-    const finish = await app.inject({
-      method: 'POST', url: `/api/learning/run/${runId}/finish`,
-    });
-    expect(finish.statusCode).toBe(200);
-    expect(finish.json()).toMatchObject({ materialId, runId, correct, outcome });
+    const finish = await finishLearningChecked(runId);
+    expect(finish).toMatchObject({ materialId, runId, correct, outcome });
   });
 
   it('валидирует идентификаторы, состояния и полное безопасное содержимое', async () => {

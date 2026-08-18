@@ -35,6 +35,7 @@ import { createIntegrityCoordinator } from './integrity.js';
 import type { IntegrityReviewer } from './codex/integrity.js';
 import { finishRun } from './run.js';
 import { finishLearningMaterial } from './learning.js';
+import { readDailyGate } from './daily-gate.js';
 
 export { databasePath };
 
@@ -358,7 +359,17 @@ export function buildServer(
       complete: (runId, at) => {
         const kind = sessionDb.prepare<[number], { kind: string }>('SELECT kind FROM runs WHERE id = ?')
           .get(runId)?.kind;
-        if (kind === 'lesson') return { ...finishLearningMaterial(sessionDb, graph, runId, { now: at }) };
+        if (kind === 'lesson') {
+          const result = finishLearningMaterial(sessionDb, graph, runId, { now: at });
+          const learningGate = readDailyGate(sessionDb, at).learning;
+          const completed = {
+            ...result,
+            required: learningGate.required && learningGate.materialId === result.materialId,
+          };
+          sessionDb.prepare('UPDATE runs SET summary = ? WHERE id = ?')
+            .run(JSON.stringify(completed), runId);
+          return completed;
+        }
         if (kind === 'run') return { ...finishRun(sessionDb, graph, runId, { now: at }) };
         throw new Error(`Проверка осмысленности не завершает занятие вида «${String(kind)}»`);
       },

@@ -477,6 +477,42 @@ export interface FinishLearningMaterialResult extends FinishRunResult {
   passScore: number;
 }
 
+/** Проверяет готовность lesson-run до запуска обязательного Codex-review. */
+export function assertLearningReadyForIntegrity(db: Database, runId: number): void {
+  const joined = db.prepare<[number], {
+    id: number; status: LearningMaterialStatus; run_kind: string;
+    finished_at: string | null; total: number;
+  }>(
+    `SELECT learning_materials.id, learning_materials.status, runs.kind AS run_kind,
+            runs.finished_at, runs.total
+       FROM learning_runs
+       JOIN learning_materials ON learning_materials.id = learning_runs.material_id
+       JOIN runs ON runs.id = learning_runs.run_id
+      WHERE runs.id = ?`,
+  ).get(runId);
+  if (joined === undefined) throw new LearningError('learning-not-found', `Lesson-run ${runId} не найден`);
+  if (joined.run_kind !== 'lesson') {
+    throw new LearningError('learning-inconsistent', `Забег ${runId} не является lesson-run`);
+  }
+  if (joined.finished_at !== null) return;
+  if (joined.status !== 'active') {
+    throw new LearningError('learning-not-ready', `Материал ${joined.id} не проходит тест`);
+  }
+  if (joined.total !== LEARNING_TASK_COUNT) {
+    throw new LearningError(
+      'learning-incomplete',
+      `Lesson-run ${runId} содержит ${joined.total} из ${LEARNING_TASK_COUNT} ответов`,
+    );
+  }
+  const openDispute = db.prepare<[number], { found: number }>(
+    `SELECT 1 AS found FROM attempts JOIN disputes ON disputes.attempt_id = attempts.id
+      WHERE attempts.run_id = ? AND disputes.status = 'open' LIMIT 1`,
+  ).get(runId);
+  if (openDispute !== undefined) {
+    throw new LearningError('learning-dispute-open', `Lesson-run ${runId} приостановлен открытым спором`);
+  }
+}
+
 /** Закрывает одну попытку теста; незачёт оставляет тот же материал для повтора. */
 export function finishLearningMaterial(
   db: Database,

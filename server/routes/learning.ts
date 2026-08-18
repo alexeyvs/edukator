@@ -3,6 +3,7 @@ import type { Database } from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { TopicGraph } from '../curriculum.js';
 import {
+  assertLearningReadyForIntegrity,
   finishLearningMaterial,
   LearningError,
   openLearningMaterial,
@@ -122,6 +123,7 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
       const at = now();
       const runId = readPathId(request.params.runId, 'Идентификатор lesson-run');
       if (options.integrity !== undefined) {
+        assertLearningReadyForIntegrity(db, runId);
         const state = options.integrity.begin(runId);
         if (state.status !== 'completed') return reply.send(state);
         const result = state.result as unknown as ReturnType<typeof finishLearningMaterial>;

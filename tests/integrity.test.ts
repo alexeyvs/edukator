@@ -119,21 +119,63 @@ describe('очередь проверки занятия', () => {
     expect(readDailyGate(db, NOW).completed).toBe(1);
   });
 
-  it('заменяет только отмеченный ответ и завершает после осмысленного повтора', async () => {
+  it('отправляет одним батчем все вопросы, даже если эвристика не нашла сигнал', async () => {
+    const secondTask = Number(db.prepare(
+      `INSERT INTO task_bank
+        (topic_id, question, instruction, material, material_format, answer, accept, difficulty, status, issued_run_id)
+       VALUES ('math.ratio', 'Сложи числа', 'Вычисли сумму.', '8 + 9', 'math', '17', '["17"]', 2, 'used', ?)`,
+    ).run(runId).lastInsertRowid);
+    db.prepare(
+      `INSERT INTO attempts
+        (task_id, topic_id, run_id, answer, is_correct, duration_ms, created_at)
+       VALUES (?, 'math.ratio', ?, '17', 1, 200, ?)`,
+    ).run(secondTask, runId, NOW.toISOString());
+    db.prepare('UPDATE runs SET total = 2, correct = 1 WHERE id = ?').run(runId);
+    let reviewedSignals: string[] = [];
     coordinator = createIntegrityCoordinator({
       db, graph, now: () => NOW, complete,
-      review: async (items) => items.map((item) => ({
-        id: item.id, decision: 'junk', confidence: 0.99, reason: 'Ответ не связан с вопросом.',
-      })),
+      review: async (items) => {
+        reviewedSignals = items.map((item) => item.signal);
+        return items.map((item) => ({
+          id: item.id, decision: 'meaningful', confidence: 0.99, reason: 'Ответ осмысленный.',
+        }));
+      },
+    });
+
+    expect(coordinator.begin(runId)).toMatchObject({ status: 'checking', flagged: 2 });
+    await settle();
+
+    expect(reviewedSignals).toHaveLength(2);
+    expect(reviewedSignals).toContain('Предварительная эвристика не нашла отдельного сигнала.');
+    expect(coordinator.status(runId)).toMatchObject({ status: 'completed' });
+  });
+
+  it('заменяет только отмеченный ответ и повторно проверяет его через Codex', async () => {
+    const reviewedAnswers: string[] = [];
+    coordinator = createIntegrityCoordinator({
+      db, graph, now: () => NOW, complete,
+      review: async (items) => items.map((item) => {
+        const answer = item.attempts.at(-1)?.answer ?? '';
+        reviewedAnswers.push(answer);
+        return {
+          id: item.id,
+          decision: answer === 'Ff' ? 'junk' : 'meaningful',
+          confidence: 0.99,
+          reason: answer === 'Ff' ? 'Ответ не связан с вопросом.' : 'Видно решение.',
+        };
+      }),
     });
     coordinator.begin(runId);
     await settle();
     const state = coordinator.status(runId);
     if (state?.status !== 'retry_required') throw new Error('Ожидался повтор вопроса');
 
-    const completed = coordinator.retry(runId, state.retry.itemId, '18', 15_000);
+    const checking = coordinator.retry(runId, state.retry.itemId, '18', 15_000);
+    expect(checking.status).toBe('checking');
+    await settle();
 
-    expect(completed.status).toBe('completed');
+    expect(coordinator.status(runId)?.status).toBe('completed');
+    expect(reviewedAnswers).toEqual(['Ff', '18']);
     expect(db.prepare(
       'SELECT answer, is_current FROM attempts WHERE run_id = ? ORDER BY id',
     ).all(runId)).toEqual([

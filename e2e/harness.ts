@@ -238,6 +238,12 @@ export async function startE2eHarness(
       : false,
     seedDir,
     review,
+    integrityReview: async (items) => items.map((item) => ({
+      id: item.id,
+      decision: 'meaningful',
+      confidence: 0.99,
+      reason: 'Ответ в браузерном сценарии осмысленный.',
+    })),
     now: () => NOW,
     ...(options.parentPin === undefined ? {} : { parentPin: options.parentPin }),
   });

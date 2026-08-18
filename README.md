@@ -44,7 +44,7 @@
 | `server/codex/worker.ts` | фоновое пополнение очереди по активным темам с отступом при недоступном codex |
 | `server/codex/seed-bank.ts` | посевной банк `content/seed-bank/*.json`: загрузка, откат, выгрузка |
 | `server/codex/dispute.ts` | разбор спорного ответа моделью |
-| `server/codex/integrity.ts`, `server/integrity.ts` | отдельная проверка осмысленности быстрых подозрительных ответов и повтор только отмеченных вопросов |
+| `server/codex/integrity.ts`, `server/integrity.ts` | один Codex-батч для проверки всех ответов завершённого занятия и повтор только признанных халтурными вопросов |
 | `server/session.ts`, `server/routes/session.ts` | занятие: выдача задания, приём ответа, спор |
 | `scripts/prefetch.ts` | ручное опережающее наполнение банка и сборка посева |
 
@@ -305,8 +305,9 @@ Family Safety-контроллером и задаёт родительский 
   запуска, оставляя сам материал `active` для нового запуска. До завершения
   integrity-проверки вместо итога возвращается её состояние;
 - `POST /api/run/:id/finish` → `{ runId, total, correct, xp, touchedTopics,
-  closedTopics, declinedTopics, forecast, forecastDelta? }`; обычный забег с
-  подозрительными ответами сначала возвращает состояние integrity-проверки;
+  closedTopics, declinedTopics, forecast, forecastDelta? }`; каждый обычный
+  забег сначала возвращает состояние integrity-проверки: все ответы передаются
+  Codex одним батчем, а занятие не засчитывается до завершения проверки;
 - `GET /api/profile` → `{ name, interests, examDate, partnerName,
   introduction }`; `PUT /api/profile` принимает частичный patch этих полей
   (кроме `introduction`) и отвергает неизвестные поля.
@@ -627,7 +628,7 @@ npm run build-curriculum -- --subject math
 | `EDUKATOR_MODEL_GENERATE` | генератор заданий | `gpt-5.6-sol` |
 | `EDUKATOR_MODEL_VALIDATE` | проверяющий | `gpt-5.6-sol` |
 | `EDUKATOR_MODEL_DISPUTE` | разбор спора | `gpt-5.6-sol` |
-| `EDUKATOR_MODEL_INTEGRITY` | осмысленность отмеченных ответов | `gpt-5.6-sol` |
+| `EDUKATOR_MODEL_INTEGRITY` | осмысленность всех ответов одного занятия | `gpt-5.6-sol` |
 | `EDUKATOR_MODEL_CURRICULUM` | сборка карты тем | `gpt-5.6-sol` |
 
 Пустая переменная считается незаданной. Запасная модель — `gpt-5.6-terra`,

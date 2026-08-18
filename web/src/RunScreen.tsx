@@ -368,8 +368,8 @@ export function RunScreen({
     return <main className="run-shell"><section className="run-card integrity-wait" role="status">
       <span className="integrity-mark" aria-hidden="true">⌁</span>
       <p className="finish-kicker">Проверка завершения</p>
-      <h1>Смотрю отмеченные ответы</h1>
-      <p>Проверяю {integrity.flagged} {integrity.flagged === 1 ? 'ответ' : 'ответа'}. Забег зачтётся автоматически, если всё в порядке.</p>
+      <h1>Проверяю все ответы</h1>
+      <p>Вопросов в проверке: {integrity.flagged}. Забег зачтётся автоматически, если всё в порядке.</p>
     </section></main>;
   }
   if (integrity?.status === 'retry_required') {

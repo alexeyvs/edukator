@@ -8,7 +8,13 @@ import type { TopicGraph } from '../curriculum.js';
 import { SUBJECTS, type Subject } from '../db.js';
 import { forecastFor } from '../forecast.js';
 import { readTopicStates } from '../mastery.js';
-import { finishRun, runProgress, startRun, type RunProgress } from '../run.js';
+import {
+  assertRunReadyForIntegrity,
+  finishRun,
+  runProgress,
+  startRun,
+  type RunProgress,
+} from '../run.js';
 import { planFromDatabase } from '../scheduler.js';
 import { SessionError } from '../session-error.js';
 import { readStreak } from '../streak.js';
@@ -211,6 +217,7 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
       if (options.integrity === undefined || row?.kind !== 'run' || row.finished_at !== null) {
         return reply.send(finishRun(db, graph, runId, { now: now() }));
       }
+      assertRunReadyForIntegrity(db, runId);
       const state = options.integrity.begin(runId);
       return reply.send(state.status === 'completed' ? state.result : state);
     } catch (error) {

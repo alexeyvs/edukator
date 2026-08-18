@@ -82,6 +82,32 @@ export interface FinishRunResult {
   forecastDelta?: number;
 }
 
+/** Проверяет готовность обычного забега до запуска обязательного Codex-review. */
+export function assertRunReadyForIntegrity(db: Database, runId: number): void {
+  const run = db.prepare<[number], {
+    kind: string; finished_at: string | null; retry_task_id: number | null;
+  }>('SELECT kind, finished_at, retry_task_id FROM runs WHERE id = ?').get(runId);
+  if (run === undefined) throw new SessionError('run-not-found', `Забег ${runId} не найден`);
+  if (run.finished_at !== null) throw new SessionError('run-finished', `Забег ${runId} уже завершён`);
+  if (run.kind !== 'run') throw new SessionError('run-not-ready', `Забег ${runId} не является обычным`);
+  const total = db.prepare<[number], { count: number }>(
+    'SELECT COUNT(*) AS count FROM attempts WHERE run_id = ? AND is_current = 1',
+  ).get(runId)?.count ?? 0;
+  if (total < RUN_TARGET) {
+    throw new SessionError('run-not-ready', `Забег ${runId} нельзя завершить раньше ${RUN_TARGET} ответов`);
+  }
+  if (run.retry_task_id !== null) {
+    throw new SessionError('run-not-ready', `Забег ${runId} нельзя завершить, пока доступно исправление ответа`);
+  }
+  const openDispute = db.prepare<[number], { found: number }>(
+    `SELECT 1 AS found FROM attempts JOIN disputes ON disputes.attempt_id = attempts.id
+      WHERE attempts.run_id = ? AND disputes.status = 'open' LIMIT 1`,
+  ).get(runId);
+  if (openDispute !== undefined) {
+    throw new SessionError('run-not-ready', `Забег ${runId} нельзя завершить, пока разбирается спор`);
+  }
+}
+
 interface RunCounters {
   total: number;
   correct: number;

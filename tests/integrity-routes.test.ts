@@ -42,6 +42,7 @@ describe('HTTP-поток проверки осмысленности', () => {
   let dir: string;
   let app: FastifyInstance;
   let db: Database;
+  let reviewBatches: number[];
 
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'edukator-integrity-routes-'));
@@ -51,16 +52,25 @@ describe('HTTP-поток проверки осмысленности', () => {
     mkdirSync(seed);
     writeCurriculum(curriculum);
     process.env.EDUKATOR_DB = join(dir, 'test.db');
+    reviewBatches = [];
     app = buildServer(curriculum, {
       seedDir: seed,
       worker: false,
       parentPin: PIN,
       now: () => NOW,
       background: (job): void => void job(),
-      integrityReview: async (items) => items.map((item) => ({
-        id: item.id, decision: 'junk', confidence: 0.99,
-        reason: 'Ответ не связан с числовым заданием.',
-      })),
+      integrityReview: async (items) => {
+        reviewBatches.push(items.length);
+        return items.map((item) => {
+          const junk = item.attempts.some((attempt) => attempt.answer === 'Ff');
+          return {
+            id: item.id,
+            decision: junk ? 'junk' : 'meaningful',
+            confidence: 0.99,
+            reason: junk ? 'Ответ не связан с числовым заданием.' : 'Ответ осмысленный.',
+          };
+        });
+      },
       log: (): void => undefined,
     });
     await app.ready();
@@ -113,7 +123,8 @@ describe('HTTP-поток проверки осмысленности', () => {
 
     await app.inject({ method: 'POST', url: `/api/run/${runId}/finish` });
     const review = await reviewState(runId);
-    expect(review).toMatchObject({ status: 'retry_required', remaining: 1 });
+    expect(review).toMatchObject({ status: 'retry_required', flagged: 12, remaining: 1 });
+    expect(reviewBatches).toEqual([12]);
     expect((await app.inject({ method: 'GET', url: '/api/gate/status' })).json())
       .toMatchObject({ completed: 0, unlocked: false });
 
@@ -122,11 +133,13 @@ describe('HTTP-поток проверки осмысленности', () => {
     };
     expect(dashboard.integrityReviews).toEqual([{ 
       runId, kind: 'run', subject: 'math', startedAt: NOW.toISOString(),
-      status: 'needs_retry', flagged: 1, retryRequired: 1,
+      status: 'needs_retry', flagged: 12, retryRequired: 1,
     }]);
     const detail: { attempts: Array<{ integrity?: { itemId: number; status: string } }> } =
       (await app.inject({ method: 'GET', url: `/api/parents/runs/${runId}` })).json();
-    const item = detail.attempts.find((attempt) => attempt.integrity !== undefined)?.integrity;
+    const item = detail.attempts.find(
+      (attempt) => attempt.integrity?.status === 'retry_required',
+    )?.integrity;
     if (item === undefined) throw new Error('В родительской детализации нет отметки проверки');
 
     const denied = await app.inject({
