@@ -124,6 +124,7 @@ export interface RunApi {
     itemId: number;
     answer: string;
     durationMs: number;
+    hintUsed: boolean;
   }): Promise<IntegrityStatusResponse>;
   triageNext(runId: number): Promise<NextTriageResponse>;
 }
@@ -166,7 +167,11 @@ export const browserRunApi: RunApi = {
   integrity: (runId) => request<IntegrityStatusResponse>(`/api/integrity/${runId}`),
   retryIntegrity: (input) => request<IntegrityStatusResponse>(
     `/api/integrity/${input.runId}/retry/${input.itemId}`,
-    jsonRequest('POST', { answer: input.answer, duration_ms: input.durationMs }),
+    jsonRequest('POST', {
+      answer: input.answer,
+      duration_ms: input.durationMs,
+      hint_used: input.hintUsed,
+    }),
   ),
   triageNext: (runId) => request<NextTriageResponse>(`/api/triage/${runId}/next`),
 };

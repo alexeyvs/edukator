@@ -309,9 +309,10 @@ describe('Learning API', () => {
     const finish = await app.inject({ method: 'POST', url: `/api/learning/run/${runId}/finish` });
     expect(finish.json()).toMatchObject({ status: expect.stringMatching(/checking|retry_required/u) });
     const review = await settleIntegrity(runId) as {
-      status: string; retry: { item_id: number; task: { id: number } };
+      status: string; retry: { item_id: number; task: { id: number; hint?: string } };
     };
     expect(review).toMatchObject({ status: 'retry_required', remaining: 1 });
+    expect(review.retry.task).not.toHaveProperty('hint');
     integrityDecision = 'meaningful';
 
     const retried = await app.inject({

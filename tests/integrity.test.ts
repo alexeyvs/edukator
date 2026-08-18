@@ -61,8 +61,9 @@ describe('очередь проверки занятия', () => {
     ).run(NOW.toISOString()).lastInsertRowid);
     const taskId = Number(db.prepare(
       `INSERT INTO task_bank
-        (topic_id, question, instruction, material, material_format, answer, accept, difficulty, status, issued_run_id)
-       VALUES ('math.ratio', 'Найди x', 'Найди значение переменной.', '12/x = 18/27', 'math', '18', '["18"]', 2, 'used', ?)`,
+        (topic_id, question, instruction, material, material_format, answer, accept, hint, difficulty, status, issued_run_id)
+       VALUES ('math.ratio', 'Найди x', 'Найди значение переменной.', '12/x = 18/27', 'math', '18', '["18"]',
+               'Перемножь крест-накрест и найди неизвестный множитель.', 2, 'used', ?)`,
     ).run(runId).lastInsertRowid);
     db.prepare(
       `INSERT INTO attempts
@@ -150,37 +151,55 @@ describe('очередь проверки занятия', () => {
     expect(coordinator.status(runId)).toMatchObject({ status: 'completed' });
   });
 
-  it('заменяет только отмеченный ответ и повторно проверяет его через Codex', async () => {
-    const reviewedAnswers: string[] = [];
+  it('собирает все повторы перед одним Codex-батчем и учитывает подсказку', async () => {
+    const secondTask = Number(db.prepare(
+      `INSERT INTO task_bank
+        (topic_id, question, instruction, material, material_format, answer, accept, hint, difficulty, status, issued_run_id)
+       VALUES ('math.ratio', 'Реши ещё одну пропорцию', 'Найди значение переменной.', '9/x = 3/6', 'math',
+               '18', '["18"]', 'Составь равенство произведений по диагоналям.', 2, 'used', ?)`,
+    ).run(runId).lastInsertRowid);
+    db.prepare(
+      `INSERT INTO attempts
+        (task_id, topic_id, run_id, answer, is_correct, duration_ms, created_at)
+       VALUES (?, 'math.ratio', ?, 'Ff', 0, 1000, ?)`,
+    ).run(secondTask, runId, NOW.toISOString());
+    db.prepare('UPDATE runs SET total = 2 WHERE id = ?').run(runId);
+    const reviewedBatches: string[][] = [];
     coordinator = createIntegrityCoordinator({
       db, graph, now: () => NOW, complete,
-      review: async (items) => items.map((item) => {
-        const answer = item.attempts.at(-1)?.answer ?? '';
-        reviewedAnswers.push(answer);
-        return {
+      review: async (items) => {
+        const answers = items.map((item) => item.attempts.at(-1)?.answer ?? '');
+        reviewedBatches.push(answers);
+        return items.map((item, index) => ({
           id: item.id,
-          decision: answer === 'Ff' ? 'junk' : 'meaningful',
+          decision: answers[index] === 'Ff' ? 'junk' : 'meaningful',
           confidence: 0.99,
-          reason: answer === 'Ff' ? 'Ответ не связан с вопросом.' : 'Видно решение.',
-        };
-      }),
+          reason: answers[index] === 'Ff' ? 'Ответ не связан с вопросом.' : 'Видно решение.',
+        }));
+      },
     });
     coordinator.begin(runId);
     await settle();
-    const state = coordinator.status(runId);
-    if (state?.status !== 'retry_required') throw new Error('Ожидался повтор вопроса');
+    const first = coordinator.status(runId);
+    if (first?.status !== 'retry_required') throw new Error('Ожидался повтор первого вопроса');
+    expect(first).toMatchObject({ remaining: 2, retry: { task: { hint: expect.any(String) } } });
 
-    const checking = coordinator.retry(runId, state.retry.itemId, '18', 15_000);
+    const second = coordinator.retry(runId, first.retry.itemId, '18', 15_000, true);
+    expect(second).toMatchObject({ status: 'retry_required', remaining: 1 });
+    expect(reviewedBatches).toEqual([['Ff', 'Ff']]);
+    if (second.status !== 'retry_required') throw new Error('Ожидался повтор второго вопроса');
+
+    const checking = coordinator.retry(runId, second.retry.itemId, '18', 15_000, false);
     expect(checking.status).toBe('checking');
     await settle();
 
     expect(coordinator.status(runId)?.status).toBe('completed');
-    expect(reviewedAnswers).toEqual(['Ff', '18']);
+    expect(reviewedBatches).toEqual([['Ff', 'Ff'], ['18', '18']]);
     expect(db.prepare(
-      'SELECT answer, is_current FROM attempts WHERE run_id = ? ORDER BY id',
+      'SELECT answer, hint_used FROM attempts WHERE run_id = ? AND is_current = 1 ORDER BY task_id',
     ).all(runId)).toEqual([
-      { answer: 'Ff', is_current: 0 },
-      { answer: '18', is_current: 1 },
+      { answer: '18', hint_used: 1 },
+      { answer: '18', hint_used: 0 },
     ]);
   });
 

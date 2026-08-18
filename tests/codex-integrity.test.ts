@@ -17,7 +17,7 @@ const ITEM: IntegrityPromptItem = {
   material: '1/2 + 1/4',
   choices: [],
   expected: '0,75',
-  attempts: [{ answer: 'Gg', durationMs: 1_000 }],
+  attempts: [{ answer: 'Gg', durationMs: 1_000, hintUsed: false }],
   signal: 'В числовом ответе нет числа.',
 };
 

@@ -500,12 +500,17 @@ describe('экран забега', () => {
     expect(screen.queryByText('Эталон')).not.toBeInTheDocument();
   });
 
-  it('после фоновой проверки повторяет отмеченный вопрос и завершает забег', async () => {
+  it('показывает подсказку и переходит между отмеченными вопросами до общей проверки', async () => {
     const retryTask = task(7, 'Найди значение переменной').task;
-    const retryIntegrity = vi.fn(() => Promise.resolve({
-      status: 'completed' as const,
-      result: finishSummary(),
-    }));
+    const secondRetryTask = task(8, 'Вычисли второе значение').task;
+    const retryIntegrity = vi.fn()
+      .mockResolvedValueOnce({
+        status: 'retry_required' as const,
+        flagged: 2,
+        remaining: 1,
+        retry: { item_id: 14, task: secondRetryTask },
+      })
+      .mockResolvedValueOnce({ status: 'completed' as const, result: finishSummary() });
     const api = apiWith({
       next: vi.fn(() => Promise.reject(
         new RunApiError('забег готов к завершению', 409, 'run-complete'),
@@ -513,8 +518,8 @@ describe('экран забега', () => {
       finish: vi.fn(() => Promise.resolve({ status: 'checking' as const, flagged: 1 })),
       integrity: vi.fn(() => Promise.resolve({
         status: 'retry_required' as const,
-        flagged: 1,
-        remaining: 1,
+        flagged: 2,
+        remaining: 2,
         retry: { item_id: 12, task: retryTask },
       })),
       retryIntegrity,
@@ -522,13 +527,23 @@ describe('экран забега', () => {
     render(<RunScreen runId={9} api={api} wait={() => Promise.resolve()} />);
 
     expect(await screen.findByRole('heading', { name: 'Реши этот вопрос ещё раз' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Нужна подсказка' }));
+    expect(screen.getByText('Сложи одинаковые числа.')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Число'), { target: { value: '18' } });
     fireEvent.click(screen.getByRole('button', { name: 'Отправить повторный ответ' }));
 
+    expect(await screen.findByRole('heading', { name: 'Вычисли второе значение' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Нужна подсказка' })).toBeEnabled();
+    fireEvent.change(screen.getByLabelText('Число'), { target: { value: '24' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить повторный ответ' }));
+
     expect(await screen.findByRole('heading', { name: 'Вот что получилось' })).toBeInTheDocument();
-    expect(retryIntegrity).toHaveBeenCalledWith(expect.objectContaining({
-      runId: 9, itemId: 12, answer: '18',
-    }));
+    expect(retryIntegrity).toHaveBeenNthCalledWith(1, {
+      runId: 9, itemId: 12, answer: '18', hintUsed: true, durationMs: expect.any(Number),
+    });
+    expect(retryIntegrity).toHaveBeenNthCalledWith(2, {
+      runId: 9, itemId: 14, answer: '24', hintUsed: false, durationMs: expect.any(Number),
+    });
   });
 
   it('опрашивает спор до первого закрытого статуса с нарастающей паузой', async () => {

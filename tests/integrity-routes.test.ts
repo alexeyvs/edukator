@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -123,7 +123,10 @@ describe('HTTP-поток проверки осмысленности', () => {
 
     await app.inject({ method: 'POST', url: `/api/run/${runId}/finish` });
     const review = await reviewState(runId);
-    expect(review).toMatchObject({ status: 'retry_required', flagged: 12, remaining: 1 });
+    expect(review).toMatchObject({
+      status: 'retry_required', flagged: 12, remaining: 1,
+      retry: { task: { hint: 'Сложи десятки и единицы, затем проверь обратным действием.' } },
+    });
     expect(reviewBatches).toEqual([12]);
     expect((await app.inject({ method: 'GET', url: '/api/gate/status' })).json())
       .toMatchObject({ completed: 0, unlocked: false });
@@ -200,6 +203,7 @@ describe('валидация HTTP-маршрутов проверки осмыс
         { answer: '45', duration_ms: -1 },
         { answer: '45', duration_ms: 1.5 },
         { answer: '45', duration_ms: '1000' },
+        { answer: '45', duration_ms: 1_000, hint_used: 'да' },
       ]) {
         expect((await app.inject({
           method: 'POST', url: '/api/integrity/1/retry/1', payload,
@@ -212,9 +216,10 @@ describe('валидация HTTP-маршрутов проверки осмыс
 
   it('отдаёт результат повтора и превращает предметную ошибку в 409', async () => {
     const completed = { status: 'completed', result: { runId: 1, correct: 12 } } as const;
+    const retry = vi.fn(() => completed);
     const success = Fastify();
     registerIntegrityRoutes(success, {
-      coordinator: coordinatorStub({ status: 'checking', flagged: 1 }, () => completed),
+      coordinator: coordinatorStub({ status: 'checking', flagged: 1 }, retry),
     });
     await success.ready();
     const conflict = Fastify();
@@ -223,10 +228,11 @@ describe('валидация HTTP-маршрутов проверки осмыс
     try {
       const response = await success.inject({
         method: 'POST', url: '/api/integrity/1/retry/2',
-        payload: { answer: '45', duration_ms: 8_000 },
+        payload: { answer: '45', duration_ms: 8_000, hint_used: true },
       });
       expect(response.statusCode).toBe(200);
       expect(response.json()).toEqual(completed);
+      expect(retry).toHaveBeenCalledWith(1, 2, '45', 8_000, true);
 
       const rejected = await conflict.inject({
         method: 'POST', url: '/api/integrity/1/retry/2',

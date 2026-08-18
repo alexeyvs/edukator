@@ -49,7 +49,7 @@ function looksLikeWrittenNumber(answer: string): boolean {
     && words.every((word) => WRITTEN_NUMBER_WORDS.has(word));
 }
 
-/** Быстрая проверка лишь отбирает кандидатов; решение о халтуре принимает Codex. */
+/** Быстрая проверка лишь добавляет сигнал; решение о халтуре принимает Codex. */
 export function integritySignal(input: ScreeningInput): string | null {
   if (input.correct) return null;
   const answer = input.answer.trim();
@@ -192,11 +192,16 @@ export function readIntegrityStatus(
     }
     const topic = graph.byId.get(bankTask.topicId);
     if (topic === undefined) throw new Error(`Проверка осмысленности: темы «${bankTask.topicId}» нет`);
+    const run = db.prepare<[number], { kind: string }>('SELECT kind FROM runs WHERE id = ?').get(runId);
+    if (run === undefined) throw new Error(`Проверка осмысленности: занятие ${runId} исчезло`);
     return {
       status: 'retry_required',
       flagged: items.length,
       remaining: retries.length,
-      retry: { itemId: next.id, task: projectIssuedTask(topic, bankTask, { exposeHint: false }) },
+      retry: {
+        itemId: next.id,
+        task: projectIssuedTask(topic, bankTask, { exposeHint: run.kind === 'run' }),
+      },
     };
   }
   return { status: 'checking', flagged: items.length };
@@ -217,9 +222,10 @@ function replaceIntegrityAttempt(
   itemId: number,
   answer: string,
   durationMs: number,
+  hintUsed: boolean,
   now: Date,
-): void {
-  db.transaction((): void => {
+): boolean {
+  return db.transaction((): boolean => {
     const item = db.prepare<[number, number], ItemRow>(
       `SELECT id, run_id, task_id, attempt_id, status, decision, confidence, reason, reviewed_by
          FROM integrity_items WHERE id = ? AND run_id = ?`,
@@ -237,8 +243,8 @@ function replaceIntegrityAttempt(
       id: number; topic_id: string; answer: string; accept: string; choices: string | null;
     }>('SELECT id, topic_id, answer, accept, choices FROM task_bank WHERE id = ?').get(item.task_id);
     const previous = db.prepare<[number], {
-      id: number; is_correct: number; hint_used: number; affects_progress: number;
-    }>('SELECT id, is_correct, hint_used, affects_progress FROM attempts WHERE id = ? AND is_current = 1')
+      id: number; is_correct: number; affects_progress: number;
+    }>('SELECT id, is_correct, affects_progress FROM attempts WHERE id = ? AND is_current = 1')
       .get(item.attempt_id);
     if (task === undefined || previous === undefined) {
       throw new Error('Проверяемый ответ изменился до повторной попытки');
@@ -258,7 +264,7 @@ function replaceIntegrityAttempt(
        VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
     ).run(
       task.id, task.topic_id, runId, answer.trim(), checked.correct ? 1 : 0,
-      previous.hint_used, durationMs, previous.affects_progress, at,
+      hintUsed ? 1 : 0, durationMs, previous.affects_progress, at,
     );
     const attemptId = Number(inserted.lastInsertRowid);
     db.prepare('UPDATE runs SET correct = correct + ? - ? WHERE id = ?')
@@ -281,9 +287,12 @@ function replaceIntegrityAttempt(
       at,
       itemId,
     );
-    db.prepare(
-      "UPDATE integrity_reviews SET status = 'screening', last_error = NULL, updated_at = ? WHERE run_id = ?",
-    ).run(at, runId);
+    const retries = db.prepare<[number], { count: number }>(
+      "SELECT COUNT(*) AS count FROM integrity_items WHERE run_id = ? AND status = 'retry_required'",
+    ).get(runId)?.count ?? 0;
+    db.prepare('UPDATE integrity_reviews SET status = ?, last_error = NULL, updated_at = ? WHERE run_id = ?')
+      .run(retries > 0 ? 'needs_retry' : 'screening', at, runId);
+    return retries === 0;
   }).immediate();
 }
 
@@ -303,11 +312,12 @@ function contextForPending(db: Database, graph: TopicGraph, runId: number): Inte
     if (task === undefined) throw new Error(`Проверка осмысленности: задания ${item.task_id} нет`);
     const topic = graph.byId.get(task.topic_id);
     if (topic === undefined) throw new Error(`Проверка осмысленности: темы «${task.topic_id}» нет`);
-    const attempts = db.prepare<[number, number], { answer: string; duration_ms: number }>(
-      'SELECT answer, duration_ms FROM attempts WHERE run_id = ? AND task_id = ? ORDER BY id',
+    const attempts = db.prepare<[number, number], { answer: string; duration_ms: number; hint_used: number }>(
+      'SELECT answer, duration_ms, hint_used FROM attempts WHERE run_id = ? AND task_id = ? ORDER BY id',
     ).all(runId, item.task_id).map((attempt) => ({
       answer: attempt.answer,
       durationMs: attempt.duration_ms,
+      hintUsed: attempt.hint_used === 1,
     }));
     return {
       id: item.id,
@@ -367,7 +377,7 @@ export interface IntegrityCoordinatorOptions {
 export interface IntegrityCoordinator {
   begin(runId: number): IntegrityPublicStatus;
   status(runId: number): IntegrityPublicStatus | null;
-  retry(runId: number, itemId: number, answer: string, durationMs: number): IntegrityPublicStatus;
+  retry(runId: number, itemId: number, answer: string, durationMs: number, hintUsed: boolean): IntegrityPublicStatus;
   approve(runId: number, itemId: number): IntegrityPublicStatus;
   stop(): Promise<void>;
 }
@@ -491,9 +501,15 @@ export function createIntegrityCoordinator(options: IntegrityCoordinatorOptions)
     return current(runId);
   }
 
-  function retry(runId: number, itemId: number, answer: string, durationMs: number): IntegrityPublicStatus {
-    replaceIntegrityAttempt(db, graph, runId, itemId, answer, durationMs, now());
-    schedule(runId);
+  function retry(
+    runId: number,
+    itemId: number,
+    answer: string,
+    durationMs: number,
+    hintUsed: boolean,
+  ): IntegrityPublicStatus {
+    const ready = replaceIntegrityAttempt(db, graph, runId, itemId, answer, durationMs, hintUsed, now());
+    if (ready) schedule(runId);
     return current(runId);
   }
 
@@ -512,8 +528,11 @@ export function createIntegrityCoordinator(options: IntegrityCoordinatorOptions)
       const pendingCount = db.prepare<[number], { count: number }>(
         "SELECT COUNT(*) AS count FROM integrity_items WHERE run_id = ? AND status = 'pending'",
       ).get(runId)?.count ?? 0;
+      const retryCount = db.prepare<[number], { count: number }>(
+        "SELECT COUNT(*) AS count FROM integrity_items WHERE run_id = ? AND status = 'retry_required'",
+      ).get(runId)?.count ?? 0;
       const status: IntegrityReviewStatus = open === 0
-        ? 'passed' : pendingCount > 0 ? 'screening' : 'needs_retry';
+        ? 'passed' : retryCount > 0 ? 'needs_retry' : pendingCount > 0 ? 'screening' : 'needs_retry';
       db.prepare('UPDATE integrity_reviews SET status = ?, last_error = NULL, updated_at = ? WHERE run_id = ?')
         .run(status, at, runId);
       return status === 'passed';

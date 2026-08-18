@@ -16,7 +16,7 @@ function publicJson(state: IntegrityPublicStatus): Record<string, unknown> {
     remaining: state.remaining,
     retry: {
       item_id: state.retry.itemId,
-      task: issuedTaskJson(state.retry.task, false),
+      task: issuedTaskJson(state.retry.task),
     },
   };
 }
@@ -52,17 +52,21 @@ export function registerIntegrityRoutes(app: FastifyInstance, options: Integrity
     if (runId === null || itemId === null) {
       return reply.code(400).send({ error: 'Некорректный идентификатор занятия или вопроса' });
     }
-    const body = request.body as { answer?: unknown; duration_ms?: unknown } | null;
+    const body = request.body as { answer?: unknown; duration_ms?: unknown; hint_used?: unknown } | null;
     const answer = body?.answer;
     const duration = body?.duration_ms;
+    const hintUsed = body?.hint_used;
     if (typeof answer !== 'string' || answer.trim() === '' || answer.length > MAX_ANSWER_LENGTH) {
       return reply.code(400).send({ error: 'Ответ должен быть непустой строкой допустимой длины' });
     }
     if (typeof duration !== 'number' || !Number.isSafeInteger(duration) || duration < 0) {
       return reply.code(400).send({ error: 'Время ответа должно быть целым числом миллисекунд' });
     }
+    if (hintUsed !== undefined && typeof hintUsed !== 'boolean') {
+      return reply.code(400).send({ error: 'Поле hint_used должно быть логическим' });
+    }
     try {
-      return reply.send(publicJson(options.coordinator.retry(runId, itemId, answer, duration)));
+      return reply.send(publicJson(options.coordinator.retry(runId, itemId, answer, duration, hintUsed ?? false)));
     } catch (error) {
       return reply.code(409).send({ error: (error as Error).message });
     }

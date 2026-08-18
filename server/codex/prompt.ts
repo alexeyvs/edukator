@@ -419,7 +419,7 @@ export interface IntegrityPromptItem {
   material?: string;
   choices: readonly string[];
   expected: string;
-  attempts: Array<{ answer: string; durationMs: number }>;
+  attempts: Array<{ answer: string; durationMs: number; hintUsed: boolean }>;
   signal: string;
 }
 
@@ -449,6 +449,7 @@ export function buildIntegrityPrompt(items: readonly IntegrityPromptItem[]): str
         попытки: item.attempts.map((attempt) => ({
           ответ: attempt.answer.slice(0, MAX_ANSWER_LENGTH),
           время_мс: attempt.durationMs,
+          подсказка_использована: attempt.hintUsed,
         })),
         сигнал_эвристики: item.signal,
       }))),

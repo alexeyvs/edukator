@@ -98,6 +98,7 @@ export function RunScreen({
     setIntegrity(state);
     if (state.status === 'retry_required') {
       setAnswer('');
+      setHintUsed(false);
       shownAt.current = Date.now();
     }
   }, [kind]);
@@ -320,6 +321,7 @@ export function RunScreen({
         itemId: integrity.retry.item_id,
         answer,
         durationMs: Math.max(0, Date.now() - shownAt.current),
+        hintUsed,
       });
       if (generation.current === token) acceptIntegrity(state);
     } catch (error) {
@@ -389,8 +391,15 @@ export function RunScreen({
             onAnswerChange={setAnswer}
             answerId="integrity-answer"
             headingId="integrity-question"
+            hintVisible={hintUsed}
+            {...(integrity.retry.task.hint === undefined ? {} : { hint: integrity.retry.task.hint })}
           />
           <div className="task-actions">
+            {integrity.retry.task.hint !== undefined && (
+              <button className="secondary" type="button" onClick={() => setHintUsed(true)} disabled={hintUsed}>
+                {hintUsed ? 'Подсказка открыта' : 'Нужна подсказка'}
+              </button>
+            )}
             <button className="primary" type="submit" disabled={submitting || answer.trim() === ''}>
               {submitting ? 'Проверяю…' : 'Отправить повторный ответ'}
             </button>

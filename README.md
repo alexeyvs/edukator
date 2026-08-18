@@ -252,7 +252,7 @@ Family Safety-контроллером и задаёт родительский 
 | `POST /api/session/retry/skip` | `{ runId, task_id }` → отказаться от доступного исправления без списания жизни |
 | `POST /api/session/dispute` | `{ attempt_id }` → спор в очередь фоновой перепроверки: 202 при заведении, 200 с текущим `status` при повторном нажатии; нецелый или неположительный `attempt_id` — 400, неизвестный — 404 (`attempt-not-found`), уже засчитанная попытка — 400 (`attempt-correct`: спорить не о чем) |
 | `GET /api/integrity/:runId` | состояние проверки занятия: `checking`, `retry_required` с одним отмеченным вопросом или `completed` |
-| `POST /api/integrity/:runId/retry/:itemId` | `{ answer, duration_ms }` → заменить ответ только на отмеченный вопрос и продолжить проверку |
+| `POST /api/integrity/:runId/retry/:itemId` | `{ answer, duration_ms, hint_used? }` → заменить ответ на отмеченный вопрос; после последнего повтора проверить все новые ответы одним батчем |
 | `GET /api/profile`, `PUT /api/profile` | прочитать или изменить профиль и текст знакомства |
 | `GET /api/parents` | единый снимок родительского дашборда за семь суток с обязательным `computerAccess` и признаком `configured` |
 | `GET /api/parents/runs/:runId` | вопросы, ответы ученика, эталоны, объяснения, время и integrity-решения каждой попытки завершённого или проверяемого занятия из текущей недельной сводки |
