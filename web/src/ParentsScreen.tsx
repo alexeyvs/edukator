@@ -89,15 +89,18 @@ function accessStatus(access: DailyGateState): { eyebrow: string; title: string;
 function ComputerAccessPanel({
   access,
   api,
+  pin,
+  onPinChange,
   onChanged,
   onExpired,
 }: {
   access: ParentsDashboard['computerAccess'];
   api: ParentsApi;
+  pin: string;
+  onPinChange: (pin: string) => void;
   onChanged: (next: DailyGateState) => void;
   onExpired: () => Promise<ParentsDashboard['computerAccess']>;
 }) {
-  const [pin, setPin] = useState('');
   const [selected, setSelected] = useState<ComputerAccessMode | null>(null);
   const [pending, setPending] = useState(false);
   const [expiryRefresh, setExpiryRefresh] = useState<{
@@ -209,7 +212,7 @@ function ComputerAccessPanel({
       setSelected(null);
       setFeedback({ kind: 'success', text: 'Режим доступа обновлён.' });
     } catch (error: unknown) {
-      if (error instanceof ComputerAccessError && error.status === 401) setPin('');
+      if (error instanceof ComputerAccessError && error.status === 401) onPinChange('');
       setSelected(null);
       setFeedback({
         kind: 'error',
@@ -240,7 +243,7 @@ function ComputerAccessPanel({
               pattern="[0-9]{6,12}"
               type="password"
               value={pin}
-              onChange={(event) => setPin(event.target.value)}
+              onChange={(event) => onPinChange(event.target.value)}
             />
             <small id="parents-pin-note">Остаётся только в этой вкладке.</small>
           </label>
@@ -338,8 +341,38 @@ function AttemptMaterial({ attempt }: { attempt: ParentsRunAttempt }) {
   );
 }
 
-function RunAttempt({ attempt }: { attempt: ParentsRunAttempt }) {
+function RunAttempt({
+  attempt,
+  pin,
+  api,
+  runId,
+  onApproved,
+}: {
+  attempt: ParentsRunAttempt;
+  pin: string;
+  api: ParentsApi;
+  runId: number;
+  onApproved: () => Promise<void>;
+}) {
+  const [approving, setApproving] = useState(false);
+  const [approvalProblem, setApprovalProblem] = useState<string | null>(null);
   const prompt = attempt.instruction ?? attempt.question;
+  const integrity = attempt.integrity;
+  const pinValid = /^\d{6,12}$/u.test(pin);
+
+  async function approve(): Promise<void> {
+    if (integrity === undefined || api.approveIntegrity === undefined || !pinValid || approving) return;
+    setApproving(true);
+    setApprovalProblem(null);
+    try {
+      await api.approveIntegrity(runId, integrity.itemId, pin);
+      await onApproved();
+    } catch (error) {
+      setApprovalProblem(error instanceof Error ? error.message : 'Не получилось подтвердить ответ');
+    } finally {
+      setApproving(false);
+    }
+  }
   return (
     <article className={`parents-attempt ${attempt.correct ? 'correct' : 'incorrect'}`}>
       <header>
@@ -372,6 +405,24 @@ function RunAttempt({ attempt }: { attempt: ParentsRunAttempt }) {
           <strong>{attempt.correctAnswer}</strong>
         </div>
       </div>
+      {integrity !== undefined && <aside className={`parents-integrity-decision status-${integrity.status}`}>
+        <header>
+          <span>{integrity.status === 'approved' ? 'Проверка пройдена' : integrity.status === 'retry_required' ? 'Нужен повтор' : 'Идёт проверка'}</span>
+          {integrity.confidence !== undefined && <strong>{Math.round(integrity.confidence * 100)}% уверенности</strong>}
+        </header>
+        {integrity.reason !== undefined && <p>{integrity.reason}</p>}
+        {integrity.decision !== undefined && <small>
+          Решение: {integrity.decision === 'junk' ? 'похоже на халтуру' : integrity.decision === 'doubtful' ? 'сомнительно' : 'осмысленный ответ'}
+          {integrity.reviewedBy === 'parent' ? ' · подтверждено родителем' : integrity.reviewedBy === 'codex' ? ' · Codex' : ''}
+        </small>}
+        {integrity.status !== 'approved' && <div>
+          <button className="secondary" type="button" disabled={!pinValid || approving || api.approveIntegrity === undefined} onClick={() => void approve()}>
+            {approving ? 'Подтверждаю…' : 'Ответ осмысленный'}
+          </button>
+          {!pinValid && <small>Введите PIN родителя в блоке доступа выше.</small>}
+        </div>}
+        {approvalProblem !== null && <p className="parents-access-feedback error" role="alert">{approvalProblem}</p>}
+      </aside>}
       {attempt.hint !== undefined && <aside className="parents-attempt-hint"><span>Использована подсказка</span><p>{attempt.hint}</p></aside>}
       {attempt.explanation !== '' && <details className="parents-attempt-explanation">
         <summary>Показать объяснение</summary>
@@ -381,7 +432,17 @@ function RunAttempt({ attempt }: { attempt: ParentsRunAttempt }) {
   );
 }
 
-function RunDetail({ detail }: { detail: ParentsRunDetail }) {
+function RunDetail({
+  detail,
+  pin,
+  api,
+  onApproved,
+}: {
+  detail: ParentsRunDetail;
+  pin: string;
+  api: ParentsApi;
+  onApproved: () => Promise<void>;
+}) {
   return (
     <div className="parents-run-detail">
       <header>
@@ -392,7 +453,7 @@ function RunDetail({ detail }: { detail: ParentsRunDetail }) {
       {detail.attempts.length === 0
         ? <p className="parents-run-detail-empty">В этом занятии не сохранено ответов.</p>
         : <div className="parents-attempts">{detail.attempts.map((attempt) => (
-          <RunAttempt attempt={attempt} key={attempt.number} />
+          <RunAttempt attempt={attempt} pin={pin} api={api} runId={detail.runId} onApproved={onApproved} key={attempt.number} />
         ))}</div>}
     </div>
   );
@@ -401,9 +462,13 @@ function RunDetail({ detail }: { detail: ParentsRunDetail }) {
 function ActivityItem({
   item,
   api,
+  pin,
+  onDashboardChanged,
 }: {
   item: ParentsDashboard['activity'][number];
   api: ParentsApi;
+  pin: string;
+  onDashboardChanged: () => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<ParentsRunDetail | null>(null);
@@ -452,10 +517,67 @@ function ActivityItem({
           <p>{problem}</p>
           <button type="button" onClick={() => void load()}>Повторить</button>
         </div>}
-        {detail !== null && <RunDetail detail={detail} />}
+        {detail !== null && <RunDetail
+          detail={detail}
+          pin={pin}
+          api={api}
+          onApproved={async () => { await load(); await onDashboardChanged(); }}
+        />}
       </div>}
     </li>
   );
+}
+
+function IntegrityReviewItem({
+  item,
+  api,
+  pin,
+  onDashboardChanged,
+}: {
+  item: NonNullable<ParentsDashboard['integrityReviews']>[number];
+  api: ParentsApi;
+  pin: string;
+  onDashboardChanged: () => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [detail, setDetail] = useState<ParentsRunDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const panelId = `parents-integrity-${String(item.runId)}`;
+  const load = useCallback(async (): Promise<void> => {
+    setLoading(true);
+    setProblem(null);
+    try { setDetail(await api.readRun(item.runId)); }
+    catch (error) { setProblem(error instanceof Error ? error.message : 'Не получилось загрузить проверку'); }
+    finally { setLoading(false); }
+  }, [api, item.runId]);
+
+  return <li className={`parents-integrity-review${open ? ' open' : ''}`}>
+    <button
+      aria-controls={panelId}
+      aria-expanded={open}
+      className="parents-activity-toggle"
+      type="button"
+      onClick={() => { const next = !open; setOpen(next); if (next && detail === null) void load(); }}
+    >
+      <span className="parents-activity-summary">
+        <span><strong>{KIND_NAMES[item.kind]}</strong><small>{SUBJECT_NAMES[item.subject]}</small></span>
+        <span>{item.flagged} отмечено · {item.retryRequired > 0 ? `${String(item.retryRequired)} нужно повторить` : 'идёт проверка'}</span>
+      </span>
+      <time dateTime={item.startedAt}>{activityDateFormatter.format(new Date(item.startedAt))}</time>
+      <span className="parents-activity-chevron" aria-hidden="true">⌄</span>
+    </button>
+    {open && <div className="parents-activity-detail" id={panelId}>
+      {loading && <p role="status">Загружаю отмеченные ответы…</p>}
+      {problem !== null && <div className="parents-run-detail-problem" role="alert"><p>{problem}</p><button type="button" onClick={() => void load()}>Повторить</button></div>}
+      {detail !== null && <RunDetail
+        detail={detail}
+        pin={pin}
+        api={api}
+        onApproved={async () => { await load(); await onDashboardChanged(); }}
+      />}
+    </div>}
+  </li>;
 }
 
 function Flags({ dashboard }: { dashboard: ParentsDashboard }) {
@@ -482,7 +604,17 @@ function Flags({ dashboard }: { dashboard: ParentsDashboard }) {
 export function ParentsScreen({ api = browserParentsApi }: { api?: ParentsApi }) {
   const [dashboard, setDashboard] = useState<ParentsDashboard | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const [pin, setPin] = useState('');
   const readGeneration = useRef(0);
+
+  const reloadDashboard = useCallback(async (): Promise<void> => {
+    const generation = ++readGeneration.current;
+    const loaded = await api.read();
+    if (readGeneration.current === generation) {
+      setDashboard(loaded);
+      setProblem(null);
+    }
+  }, [api]);
 
   useEffect(() => {
     let active = true;
@@ -537,6 +669,8 @@ export function ParentsScreen({ api = browserParentsApi }: { api?: ParentsApi })
       <ComputerAccessPanel
         access={dashboard.computerAccess}
         api={api}
+        pin={pin}
+        onPinChange={setPin}
         onChanged={(next) => {
           readGeneration.current += 1;
           setDashboard((currentDashboard) => currentDashboard === null ? null : {
@@ -549,6 +683,20 @@ export function ParentsScreen({ api = browserParentsApi }: { api?: ParentsApi })
         }}
         onExpired={refreshAfterExpiry}
       />
+
+      {(dashboard.integrityReviews ?? []).length > 0 && <section className="parents-panel parents-integrity" aria-labelledby="parents-integrity-title">
+        <div className="section-heading"><p>До зачёта занятия</p><h2 id="parents-integrity-title">Проверка ответов</h2></div>
+        <p className="parents-integrity-intro">Эти занятия пока не открывают доступ к компьютеру. Можно посмотреть отметки Codex или подтвердить осмысленный ответ вручную.</p>
+        <ol className="parents-activity">{(dashboard.integrityReviews ?? []).map((item) => (
+          <IntegrityReviewItem
+            api={api}
+            item={item}
+            pin={pin}
+            onDashboardChanged={reloadDashboard}
+            key={item.runId}
+          />
+        ))}</ol>
+      </section>}
 
       <section className="parents-panel" aria-labelledby="parents-forecast-title">
         <div className="section-heading"><p>Прогноз, не оценка</p><h2 id="parents-forecast-title">По предметам</h2></div>
@@ -602,7 +750,7 @@ export function ParentsScreen({ api = browserParentsApi }: { api?: ParentsApi })
           {dashboard.activity.length === 0
             ? <p className="parents-empty">За эту неделю завершённых забегов пока нет.</p>
             : <ol className="parents-activity">{dashboard.activity.map((item) => (
-              <ActivityItem api={api} item={item} key={item.runId} />
+              <ActivityItem api={api} item={item} pin={pin} onDashboardChanged={reloadDashboard} key={item.runId} />
             ))}</ol>}
         </section>
       </div>

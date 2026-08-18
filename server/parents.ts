@@ -42,6 +42,16 @@ interface ParentsActivity {
   bossOutcome?: BossOutcome;
 }
 
+export interface ParentsIntegrityReview {
+  runId: number;
+  kind: 'run' | 'lesson';
+  subject: Subject;
+  startedAt: string;
+  status: 'screening' | 'reviewing' | 'needs_retry' | 'passed';
+  flagged: number;
+  retryRequired: number;
+}
+
 export interface ParentsRunAttempt {
   number: number;
   topicTitle: string;
@@ -59,6 +69,15 @@ export interface ParentsRunAttempt {
   correction: boolean;
   durationMilliseconds: number;
   answeredAt: string;
+  current: boolean;
+  integrity?: {
+    itemId: number;
+    status: 'pending' | 'retry_required' | 'approved';
+    decision?: 'meaningful' | 'doubtful' | 'junk';
+    confidence?: number;
+    reason?: string;
+    reviewedBy?: 'codex' | 'parent' | 'heuristic';
+  };
 }
 
 export interface ParentsRunDetail {
@@ -66,11 +85,12 @@ export interface ParentsRunDetail {
   kind: RunKind;
   subject: Subject;
   startedAt: string;
-  finishedAt: string;
+  finishedAt?: string;
   total: number;
   correct: number;
   activeMilliseconds: number;
   attempts: ParentsRunAttempt[];
+  integrityStatus?: 'screening' | 'reviewing' | 'needs_retry' | 'passed';
 }
 
 /** Единый публичный контракт, который целиком возвращает `GET /api/parents`. */
@@ -86,6 +106,7 @@ export interface ParentsDashboard {
   };
   gaps: ParentsGap[];
   activity: ParentsActivity[];
+  integrityReviews: ParentsIntegrityReview[];
   flags: {
     threeFullDaysWithoutRun: boolean;
     forecastNotGrowing: Subject[];
@@ -125,6 +146,22 @@ interface AttemptDetailRow extends AttemptRow {
   correct_answer: string;
   hint: string | null;
   explain: string | null;
+  is_current: number;
+}
+
+interface IntegrityDetailRow {
+  id: number;
+  attempt_id: number;
+  status: 'pending' | 'retry_required' | 'approved';
+  decision: 'meaningful' | 'doubtful' | 'junk' | null;
+  confidence: number | null;
+  reason: string | null;
+  reviewed_by: 'codex' | 'parent' | 'heuristic' | null;
+}
+
+interface RunDetailRow extends Omit<RunRow, 'finished_at'> {
+  finished_at: string | null;
+  integrity_status: 'screening' | 'reviewing' | 'needs_retry' | 'passed' | null;
 }
 
 interface SnapshotRow {
@@ -381,6 +418,47 @@ function readActivity(
     });
 }
 
+function readIntegrityReviews(
+  db: Database,
+  since: string,
+  until: string,
+): ParentsIntegrityReview[] {
+  const rows = db.prepare<[string, string], {
+    run_id: number;
+    kind: string;
+    subject: string;
+    started_at: string;
+    status: ParentsIntegrityReview['status'];
+    flagged: number;
+    retry_required: number;
+  }>(
+    `SELECT integrity_reviews.run_id, runs.kind, runs.subject, runs.started_at,
+            integrity_reviews.status, COUNT(integrity_items.id) AS flagged,
+            SUM(CASE WHEN integrity_items.status = 'retry_required' THEN 1 ELSE 0 END) AS retry_required
+       FROM integrity_reviews JOIN runs ON runs.id = integrity_reviews.run_id
+       JOIN integrity_items ON integrity_items.run_id = integrity_reviews.run_id
+      WHERE runs.finished_at IS NULL AND runs.started_at >= ? AND runs.started_at <= ?
+      GROUP BY integrity_reviews.run_id
+      ORDER BY runs.started_at DESC, integrity_reviews.run_id DESC`,
+  ).all(since, until);
+  return rows.map((row) => {
+    const subject = subjectOf(row.subject, `integrity_reviews.run_id=${row.run_id}`);
+    if (row.kind !== 'run' && row.kind !== 'lesson') {
+      throw new Error(`Дашборд родителей: проверка привязана к занятию вида «${row.kind}»`);
+    }
+    requireDate(row.started_at, `runs.started_at id=${row.run_id}`);
+    return {
+      runId: row.run_id,
+      kind: row.kind,
+      subject,
+      startedAt: row.started_at,
+      status: row.status,
+      flagged: row.flagged,
+      retryRequired: row.retry_required,
+    };
+  });
+}
+
 function parseChoices(value: string | null, taskId: number): string[] {
   if (value === null) return [];
   let parsed: unknown;
@@ -412,26 +490,32 @@ export function readParentsRunDetail(
   }
   const until = now.toISOString();
   const since = new Date(now.getTime() - WINDOW_DAYS * DAY_MS).toISOString();
-  const row = db.prepare<[number, string, string], RunRow>(
-    `SELECT id, subject, kind, started_at, finished_at, summary, total, correct
-       FROM runs WHERE id = ? AND finished_at IS NOT NULL
-         AND finished_at >= ? AND finished_at <= ?
-         AND (kind = 'boss' OR summary IS NOT NULL)`,
-  ).get(runId, since, until);
+  const row = db.prepare<[number, string, string, string, string], RunDetailRow>(
+    `SELECT runs.id, runs.subject, runs.kind, runs.started_at, runs.finished_at,
+            runs.summary, runs.total, runs.correct, integrity_reviews.status AS integrity_status
+       FROM runs LEFT JOIN integrity_reviews ON integrity_reviews.run_id = runs.id
+      WHERE runs.id = ? AND (
+        (runs.finished_at IS NOT NULL AND runs.finished_at >= ? AND runs.finished_at <= ?
+          AND (runs.kind = 'boss' OR runs.summary IS NOT NULL))
+        OR (integrity_reviews.run_id IS NOT NULL AND runs.started_at >= ? AND runs.started_at <= ?)
+      )`,
+  ).get(runId, since, until, since, until);
   if (row === undefined) return null;
 
   const subject = subjectOf(row.subject, `runs.id=${row.id}`);
   const kind = kindOf(row.kind);
   const startedAt = requireDate(row.started_at, `runs.started_at id=${row.id}`);
-  const finishedAt = requireDate(row.finished_at, `runs.finished_at id=${row.id}`);
-  if (finishedAt < startedAt || row.total < 0 || row.correct < 0 || row.correct > row.total) {
+  const finishedAt = row.finished_at === null
+    ? null
+    : requireDate(row.finished_at, `runs.finished_at id=${row.id}`);
+  if ((finishedAt !== null && finishedAt < startedAt) || row.total < 0 || row.correct < 0 || row.correct > row.total) {
     throw new Error(`Дашборд родителей: повреждённый завершённый run ${row.id}`);
   }
 
   const rows = db.prepare<[number], AttemptDetailRow>(
     `SELECT attempts.id, attempts.task_id, attempts.run_id, attempts.topic_id,
             attempts.answer, attempts.is_correct, attempts.hint_used,
-            attempts.duration_ms, attempts.created_at,
+            attempts.duration_ms, attempts.created_at, attempts.is_current,
             task_bank.question, task_bank.instruction, task_bank.material,
             task_bank.material_format, task_bank.choices,
             task_bank.answer AS correct_answer, task_bank.hint, task_bank.explain
@@ -439,6 +523,11 @@ export function readParentsRunDetail(
       WHERE attempts.run_id = ? ORDER BY attempts.created_at, attempts.id`,
   ).all(runId);
   validateAttempts(rows, graph);
+
+  const integrityByAttempt = new Map(db.prepare<[number], IntegrityDetailRow>(
+    `SELECT id, attempt_id, status, decision, confidence, reason, reviewed_by
+       FROM integrity_items WHERE run_id = ? ORDER BY id`,
+  ).all(runId).map((item) => [item.attempt_id, item]));
 
   const seenTasks = new Set<number>();
   let activeMilliseconds = 0;
@@ -481,6 +570,20 @@ export function readParentsRunDetail(
       correction,
       durationMilliseconds: attempt.duration_ms,
       answeredAt: attempt.created_at,
+      current: attempt.is_current === 1,
+      ...(integrityByAttempt.get(attempt.id) === undefined ? {} : {
+        integrity: (() => {
+          const item = integrityByAttempt.get(attempt.id) as IntegrityDetailRow;
+          return {
+            itemId: item.id,
+            status: item.status,
+            ...(item.decision === null ? {} : { decision: item.decision }),
+            ...(item.confidence === null ? {} : { confidence: item.confidence }),
+            ...(item.reason === null ? {} : { reason: item.reason }),
+            ...(item.reviewed_by === null ? {} : { reviewedBy: item.reviewed_by }),
+          };
+        })(),
+      }),
     };
   });
 
@@ -489,11 +592,12 @@ export function readParentsRunDetail(
     kind,
     subject,
     startedAt: row.started_at,
-    finishedAt: row.finished_at,
+    ...(row.finished_at === null ? {} : { finishedAt: row.finished_at }),
     total: row.total,
     correct: row.correct,
     activeMilliseconds,
     attempts,
+    ...(row.integrity_status === null ? {} : { integrityStatus: row.integrity_status }),
   };
 }
 
@@ -533,6 +637,7 @@ export function readParentsDashboard(
     time: buildTime(attempts),
     gaps: buildGaps(graph, states, now),
     activity: readActivity(db, graph, runById, since, until),
+    integrityReviews: readIntegrityReviews(db, since, until),
     flags: {
       threeFullDaysWithoutRun: missedThreeFullDays(runs, now),
       forecastNotGrowing: forecast.forecastNotGrowing,

@@ -55,6 +55,7 @@ describe('Learning API', () => {
   let app: FastifyInstance;
   let db: Database;
   let serial: number;
+  let integrityDecision: 'meaningful' | 'junk';
 
   beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), 'edukator-learning-routes-'));
@@ -65,6 +66,7 @@ describe('Learning API', () => {
     writeCurriculum(curriculumDir);
     process.env.EDUKATOR_DB = join(tempDir, 'learning.db');
     serial = 0;
+    integrityDecision = 'meaningful';
     app = buildServer(curriculumDir, {
       seedDir,
       now: () => NOW,
@@ -73,6 +75,12 @@ describe('Learning API', () => {
       },
       background: (job): void => void job(),
       log: (): void => undefined,
+      integrityReview: async (items) => items.map((item) => ({
+        id: item.id,
+        decision: integrityDecision,
+        confidence: 0.99,
+        reason: integrityDecision === 'junk' ? 'Случайные буквы вместо числа.' : 'Видна попытка решения.',
+      })),
     });
     await app.ready();
     db = openDatabase(process.env.EDUKATOR_DB);
@@ -140,6 +148,16 @@ describe('Learning API', () => {
       attempts.push((response.json() as { attempt_id: number }).attempt_id);
     }
     return attempts;
+  }
+
+  async function settleIntegrity(runId: number): Promise<Record<string, unknown>> {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const response = await app.inject({ method: 'GET', url: `/api/integrity/${runId}` });
+      const body = response.json() as Record<string, unknown>;
+      if (body['status'] !== 'checking') return body;
+    }
+    throw new Error('Проверка осмысленности не завершилась');
   }
 
   it('показывает только готовую карточку и безопасно открывает материал', async () => {
@@ -247,6 +265,45 @@ describe('Learning API', () => {
     const resumed = await app.inject({ method: 'POST', url: `/api/learning/${materialId}/test` });
     expect(resumed.statusCode).toBe(200);
     expect(resumed.json()).toMatchObject({ runId, resumed: true, progress: { total: 1 } });
+  });
+
+  it('не засчитывает lesson-run с халтурным ответом и повторяет только этот вопрос', async () => {
+    integrityDecision = 'junk';
+    const { materialId } = readyMaterial();
+    const runId = await openAndStart(materialId);
+    for (let index = 0; index < 5; index += 1) {
+      const next = (await app.inject({ method: 'GET', url: `/api/session/next?runId=${runId}` }))
+        .json() as { task: { id: number } };
+      const response = await app.inject({
+        method: 'POST', url: '/api/session/answer',
+        payload: {
+          task_id: next.task.id, runId, answer: index === 4 ? 'Ff' : '4',
+          hint_used: false, duration_ms: index === 4 ? 1_000 : 15_000,
+        },
+      });
+      if (index === 4) {
+        expect(response.json()).toMatchObject({ integrity_check: true });
+        expect(response.json()).not.toHaveProperty('answer');
+      }
+    }
+
+    const finish = await app.inject({ method: 'POST', url: `/api/learning/run/${runId}/finish` });
+    expect(finish.json()).toMatchObject({ status: expect.stringMatching(/checking|retry_required/u) });
+    const review = await settleIntegrity(runId) as {
+      status: string; retry: { item_id: number; task: { id: number } };
+    };
+    expect(review).toMatchObject({ status: 'retry_required', remaining: 1 });
+    integrityDecision = 'meaningful';
+
+    const retried = await app.inject({
+      method: 'POST',
+      url: `/api/integrity/${runId}/retry/${review.retry.item_id}`,
+      payload: { answer: '4', duration_ms: 15_000 },
+    });
+
+    expect(retried.json()).toMatchObject({ status: 'completed', result: { outcome: 'passed', correct: 5 } });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM attempts WHERE run_id = ?').get(runId))
+      .toEqual({ count: 6 });
   });
 
   it('продолжает lesson-run после победы над боссом, сохраняя запрет обычному забегу', async () => {

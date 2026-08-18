@@ -1058,6 +1058,69 @@ input:focus-visible {
   line-height: 1.55;
 }
 
+.answer-result.integrity-held {
+  border-color: #e2bd68;
+  color: #4f421f;
+  background: #fff8e8;
+}
+
+.answer-result.integrity-held > p:not(.verdict) {
+  margin: .65rem 0 0;
+  line-height: 1.55;
+}
+
+.integrity-wait,
+.integrity-retry {
+  position: relative;
+  overflow: hidden;
+  border-top: .42rem solid #b87918;
+}
+
+.integrity-wait {
+  min-height: 21rem;
+  display: grid;
+  align-content: center;
+}
+
+.integrity-wait h1,
+.integrity-retry h1 {
+  margin-bottom: .8rem;
+}
+
+.integrity-wait > p:last-child,
+.integrity-copy {
+  max-width: 38rem;
+  margin: 0 0 1.8rem;
+  color: #52625c;
+  line-height: 1.6;
+}
+
+.integrity-mark {
+  display: grid;
+  width: 3.4rem;
+  height: 3.4rem;
+  place-items: center;
+  margin-bottom: 1.3rem;
+  border-radius: 50%;
+  color: #614309;
+  background: #f6d992;
+  font-size: 2rem;
+  animation: integrity-pulse 1.6s ease-in-out infinite;
+}
+
+.integrity-header > div {
+  display: grid;
+  color: #52625c;
+}
+
+.integrity-header strong {
+  color: var(--evergreen);
+}
+
+@keyframes integrity-pulse {
+  50% { transform: scale(1.08); box-shadow: 0 0 0 .7rem rgb(227 163 27 / 10%); }
+}
+
 .dispute-note {
   margin: 1rem 0 0;
   padding: .8rem 1rem;
@@ -1678,6 +1741,76 @@ input:focus-visible {
   border: 1px solid #dbe4de;
   border-radius: 1.5rem;
   background: rgb(255 255 255 / 72%);
+}
+
+.parents-integrity {
+  border-top: .38rem solid #b87918;
+}
+
+.parents-integrity-intro {
+  max-width: 48rem;
+  margin: -.4rem 0 1.4rem;
+  color: #52625c;
+  line-height: 1.6;
+}
+
+.parents-integrity-review {
+  border-left: .3rem solid #d6a33c;
+  background: #fffaf0;
+}
+
+.parents-integrity-decision {
+  display: grid;
+  gap: .55rem;
+  margin-top: 1rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid #e2bd68;
+  border-radius: .85rem;
+  background: #fff8e8;
+}
+
+.parents-integrity-decision.status-approved {
+  border-color: #a8cbbc;
+  background: #edf7f2;
+}
+
+.parents-integrity-decision > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  color: #6a4a0c;
+  font-size: .78rem;
+  font-weight: 850;
+  letter-spacing: .045em;
+  text-transform: uppercase;
+}
+
+.parents-integrity-decision.status-approved > header {
+  color: var(--evergreen);
+}
+
+.parents-integrity-decision p,
+.parents-integrity-decision small {
+  margin: 0;
+  color: #52625c;
+  line-height: 1.5;
+}
+
+.parents-integrity-decision > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .7rem;
+}
+
+.parents-integrity-decision button {
+  padding: .65rem .85rem;
+  border-radius: .7rem;
+  font-weight: 800;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .integrity-mark { animation: none; }
 }
 
 .parents-forecasts {

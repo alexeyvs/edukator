@@ -5,6 +5,7 @@ import {
   type AnswerResponse,
   type DisputeStatus,
   type FinishRunResponse,
+  type IntegrityStatusResponse,
   type NextTaskResponse,
   type RunApi,
   type RunProgress,
@@ -81,10 +82,40 @@ export function RunScreen({
   const [disputing, setDisputing] = useState(false);
   const [finish, setFinish] = useState<FinishRunResponse | null>(null);
   const [learningFinish, setLearningFinish] = useState<FinishLearningResponse | null>(null);
+  const [integrity, setIntegrity] = useState<Exclude<IntegrityStatusResponse, { status: 'completed' }> | null>(null);
   const shownAt = useRef(Date.now());
   const prefetched = useRef<NextTaskResponse | null>(null);
   const prefetching = useRef<Promise<void> | null>(null);
   const generation = useRef(0);
+
+  const acceptIntegrity = useCallback((state: IntegrityStatusResponse): void => {
+    if (state.status === 'completed') {
+      setIntegrity(null);
+      if (kind === 'lesson') setLearningFinish(state.result as unknown as FinishLearningResponse);
+      else setFinish(state.result as unknown as FinishRunResponse);
+      return;
+    }
+    setIntegrity(state);
+    if (state.status === 'retry_required') {
+      setAnswer('');
+      shownAt.current = Date.now();
+    }
+  }, [kind]);
+
+  useEffect(() => {
+    if (integrity?.status !== 'checking') return;
+    let active = true;
+    const token = generation.current;
+    void wait(1_000).then(() => {
+      if (api.integrity === undefined) throw new Error('Проверка ответов недоступна');
+      return api.integrity(runId);
+    }).then((state) => {
+      if (active && generation.current === token) acceptIntegrity(state);
+    }).catch((error: unknown) => {
+      if (active && generation.current === token) setProblem(problemOf(error));
+    });
+    return () => { active = false; };
+  }, [acceptIntegrity, api, integrity, runId, wait]);
 
   const pollDispute = useCallback(async (attemptId: number): Promise<void> => {
     const token = generation.current;
@@ -166,10 +197,16 @@ export function RunScreen({
         try {
           if (kind === 'lesson') {
             const summary = await learningApi.finish(runId);
-            if (generation.current === token) setLearningFinish(summary);
+            if (generation.current === token) {
+              if ('status' in summary) acceptIntegrity(summary);
+              else setLearningFinish(summary);
+            }
           } else {
             const summary = await api.finish(runId);
-            if (generation.current === token) setFinish(summary);
+            if (generation.current === token) {
+              if ('status' in summary) acceptIntegrity(summary);
+              else setFinish(summary);
+            }
           }
         } catch (finishError) {
           if (generation.current === token) setProblem(problemOf(finishError));
@@ -183,7 +220,7 @@ export function RunScreen({
         if (generation.current === token) void load(token);
       }
     }
-  }, [api, kind, learningApi, runId, showTask, wait]);
+  }, [acceptIntegrity, api, kind, learningApi, runId, showTask, wait]);
 
   useEffect(() => {
     generation.current += 1;
@@ -194,6 +231,7 @@ export function RunScreen({
     setProgress(null);
     setFinish(null);
     setLearningFinish(null);
+    setIntegrity(null);
     setProblem(null);
     void load(token);
     return () => {
@@ -252,11 +290,38 @@ export function RunScreen({
     try {
       if (kind === 'lesson') {
         const summary = await learningApi.finish(runId);
-        if (generation.current === token) setLearningFinish(summary);
+        if (generation.current === token) {
+          if ('status' in summary) acceptIntegrity(summary);
+          else setLearningFinish(summary);
+        }
       } else {
         const summary = await api.finish(runId);
-        if (generation.current === token) setFinish(summary);
+        if (generation.current === token) {
+          if ('status' in summary) acceptIntegrity(summary);
+          else setFinish(summary);
+        }
       }
+    } catch (error) {
+      if (generation.current === token) setProblem(problemOf(error));
+    } finally {
+      if (generation.current === token) setSubmitting(false);
+    }
+  }
+
+  async function submitIntegrity(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (integrity?.status !== 'retry_required' || answer.trim() === '') return;
+    const token = generation.current;
+    setSubmitting(true);
+    try {
+      if (api.retryIntegrity === undefined) throw new Error('Повторная проверка недоступна');
+      const state = await api.retryIntegrity({
+        runId,
+        itemId: integrity.retry.item_id,
+        answer,
+        durationMs: Math.max(0, Date.now() - shownAt.current),
+      });
+      if (generation.current === token) acceptIntegrity(state);
     } catch (error) {
       if (generation.current === token) setProblem(problemOf(error));
     } finally {
@@ -299,6 +364,41 @@ export function RunScreen({
   if (learningFinish !== null) return <LearningFinishScreen result={learningFinish} />;
   if (finish !== null) return <FinishScreen result={finish} />;
   if (problem !== null) return <Problem problem={problem} />;
+  if (integrity?.status === 'checking') {
+    return <main className="run-shell"><section className="run-card integrity-wait" role="status">
+      <span className="integrity-mark" aria-hidden="true">⌁</span>
+      <p className="finish-kicker">Проверка завершения</p>
+      <h1>Смотрю отмеченные ответы</h1>
+      <p>Проверяю {integrity.flagged} {integrity.flagged === 1 ? 'ответ' : 'ответа'}. Забег зачтётся автоматически, если всё в порядке.</p>
+    </section></main>;
+  }
+  if (integrity?.status === 'retry_required') {
+    return <main className="run-shell">
+      <header className="run-header integrity-header">
+        <a className="brand" href="/" aria-label="На главный экран">Э</a>
+        <div><span>Подтверждение решения</span><strong>Осталось вопросов: {integrity.remaining}</strong></div>
+      </header>
+      <section className="run-card integrity-retry" aria-labelledby="integrity-question">
+        <p className="finish-kicker">Ответ выглядел случайным</p>
+        <h1>Реши этот вопрос ещё раз</h1>
+        <p className="integrity-copy">Правильный ответ пока скрыт. Спокойно реши задачу — учитывается новая попытка.</p>
+        <form onSubmit={(event) => void submitIntegrity(event)}>
+          <TaskPrompt
+            task={integrity.retry.task}
+            answer={answer}
+            onAnswerChange={setAnswer}
+            answerId="integrity-answer"
+            headingId="integrity-question"
+          />
+          <div className="task-actions">
+            <button className="primary" type="submit" disabled={submitting || answer.trim() === ''}>
+              {submitting ? 'Проверяю…' : 'Отправить повторный ответ'}
+            </button>
+          </div>
+        </form>
+      </section>
+    </main>;
+  }
   if (current === null || progress === null) {
     return <section className="run-card run-state" aria-label="Загрузка задания">Подбираю задание…</section>;
   }
@@ -372,11 +472,32 @@ export function RunScreen({
             readOnly
             {...(kind === 'lesson' ? {} : { hint: current.task.hint, hintVisible: hintUsed })}
           />
-          <div className={`answer-result ${result.correct ? 'correct' : 'wrong'}`}>
+          {result.integrity_check === true ? (
+            <div className="answer-result integrity-held">
+              <p className="verdict">Ответ принят</p>
+              <p>Пока не показываю эталон: этот ответ будет отдельно проверен при завершении занятия.</p>
+              <div className="task-actions">
+                <button
+                  className="primary"
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => void (
+                    kind === 'run' && result.progress.lives?.retryAvailable === true
+                      ? skipRetry()
+                      : result.progress.done ? finishRun() : nextTask()
+                  )}
+                >
+                  {result.progress.done
+                    ? kind === 'lesson' ? 'Завершить тест' : 'Завершить забег'
+                    : 'Следующее задание'}
+                </button>
+              </div>
+            </div>
+          ) : <div className={`answer-result ${result.correct ? 'correct' : 'wrong'}`}>
             <p className="verdict">{result.correct ? 'Верно' : 'Пока не сошлось'} <strong>+{result.xp} XP</strong></p>
             <dl>
               <div><dt>Эталон</dt><dd>{result.answer}</dd></div>
-              <div><dt>Разбор</dt><dd><SafeRichText source={result.explain} /></dd></div>
+              <div><dt>Разбор</dt><dd><SafeRichText source={result.explain ?? ''} /></dd></div>
               <div><dt>Напарник</dt><dd>{result.joke}</dd></div>
             </dl>
             {disputeStatus === 'open' && <p className="dispute-note">Разбираюсь. Это может занять пару минут…</p>}
@@ -415,7 +536,7 @@ export function RunScreen({
                   : 'Следующее задание'}
               </button>
             </div>
-          </div>
+          </div>}
           </>
         )}
       </section>

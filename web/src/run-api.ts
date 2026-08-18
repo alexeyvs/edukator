@@ -42,15 +42,28 @@ export interface NextTaskResponse {
 
 export interface AnswerResponse {
   attempt_id: number;
+  integrity_check?: boolean;
   correct: boolean;
   normalized: string;
   reason?: string;
-  answer: string;
-  explain: string;
-  joke: string;
+  answer?: string;
+  explain?: string;
+  joke?: string;
   xp: number;
   progress: RunProgress;
 }
+
+export type IntegrityStatusResponse =
+  | { status: 'checking'; flagged: number }
+  | {
+      status: 'retry_required';
+      flagged: number;
+      remaining: number;
+      retry: { item_id: number; task: RunTask };
+    }
+  | { status: 'completed'; result: FinishRunResponse | Record<string, unknown> };
+
+export type FinishRunApiResponse = FinishRunResponse | Exclude<IntegrityStatusResponse, { status: 'completed' }>;
 
 export interface RunTopicChange {
   topicId: string;
@@ -104,7 +117,14 @@ export interface RunApi {
   }): Promise<AnswerResponse>;
   skipRetry(runId: number, taskId: number): Promise<{ progress: RunProgress }>;
   dispute(attemptId: number): Promise<DisputeResponse>;
-  finish(runId: number): Promise<FinishRunResponse>;
+  finish(runId: number): Promise<FinishRunApiResponse>;
+  integrity?(runId: number): Promise<IntegrityStatusResponse>;
+  retryIntegrity?(input: {
+    runId: number;
+    itemId: number;
+    answer: string;
+    durationMs: number;
+  }): Promise<IntegrityStatusResponse>;
   triageNext(runId: number): Promise<NextTriageResponse>;
 }
 
@@ -142,7 +162,12 @@ export const browserRunApi: RunApi = {
     jsonRequest('POST', { runId, task_id: taskId }),
   ),
   dispute: (attemptId) => request<DisputeResponse>('/api/session/dispute', jsonRequest('POST', { attempt_id: attemptId })),
-  finish: (runId) => request<FinishRunResponse>(`/api/run/${runId}/finish`, jsonRequest('POST')),
+  finish: (runId) => request<FinishRunApiResponse>(`/api/run/${runId}/finish`, jsonRequest('POST')),
+  integrity: (runId) => request<IntegrityStatusResponse>(`/api/integrity/${runId}`),
+  retryIntegrity: (input) => request<IntegrityStatusResponse>(
+    `/api/integrity/${input.runId}/retry/${input.itemId}`,
+    jsonRequest('POST', { answer: input.answer, duration_ms: input.durationMs }),
+  ),
   triageNext: (runId) => request<NextTriageResponse>(`/api/triage/${runId}/next`),
 };
 import { jsonRequest, requestJson } from './http';

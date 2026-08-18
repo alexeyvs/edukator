@@ -10,7 +10,7 @@ const projectRoot = resolve(here, '..');
  * Версия схемы. Хранится в `PRAGMA user_version`; миграция сравнивает её со
  * своей и пропускает работу, если база уже актуальна.
  */
-export const SCHEMA_VERSION = 16;
+export const SCHEMA_VERSION = 17;
 
 /** Таблицы приложения. Тесты сверяют состав базы именно с этим списком. */
 export const TABLES = [
@@ -27,6 +27,8 @@ export const TABLES = [
   'learning_runs',
   'learning_tasks',
   'computer_access_override',
+  'integrity_reviews',
+  'integrity_items',
 ] as const;
 
 /** Предметы подготовки. Ограничение уровня схемы, чтобы опечатка не дошла до отчётов. */
@@ -389,6 +391,36 @@ const COMPUTER_ACCESS_SCHEMA = `
   );
 `;
 
+/** Проверка осмысленности живёт дольше процесса Codex и перезапуска сервера. */
+const INTEGRITY_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS integrity_reviews (
+    run_id      INTEGER PRIMARY KEY REFERENCES runs (id) ON DELETE CASCADE,
+    status      TEXT    NOT NULL CHECK (status IN ('screening', 'reviewing', 'needs_retry', 'passed')),
+    last_error  TEXT,
+    created_at  TEXT    NOT NULL DEFAULT (${NOW_ISO}),
+    updated_at  TEXT    NOT NULL DEFAULT (${NOW_ISO})
+  );
+
+  CREATE TABLE IF NOT EXISTS integrity_items (
+    id          INTEGER PRIMARY KEY,
+    run_id      INTEGER NOT NULL REFERENCES integrity_reviews (run_id) ON DELETE CASCADE,
+    task_id     INTEGER NOT NULL REFERENCES task_bank (id) ON DELETE CASCADE,
+    attempt_id  INTEGER NOT NULL REFERENCES attempts (id) ON DELETE CASCADE,
+    status      TEXT    NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'retry_required', 'approved')),
+    decision    TEXT    CHECK (decision IN ('meaningful', 'doubtful', 'junk')),
+    confidence  REAL    CHECK (confidence BETWEEN 0 AND 1),
+    reason      TEXT,
+    reviewed_by TEXT    CHECK (reviewed_by IN ('codex', 'parent', 'heuristic')),
+    created_at  TEXT    NOT NULL DEFAULT (${NOW_ISO}),
+    updated_at  TEXT    NOT NULL DEFAULT (${NOW_ISO}),
+    UNIQUE (run_id, task_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS integrity_items_by_run
+    ON integrity_items (run_id, status, id);
+`;
+
 /**
  * Путь к базе: переопределяется через EDUKATOR_DB, чтобы тесты и dev-запуск
  * не дрались за один файл.
@@ -454,8 +486,16 @@ export function migrate(db: Database.Database): void {
       db.exec(CORE_SCHEMA);
       db.exec(LEARNING_SCHEMA);
       db.exec(COMPUTER_ACCESS_SCHEMA);
+      db.exec(INTEGRITY_SCHEMA);
       db.pragma(`user_version = ${SCHEMA_VERSION}`);
       return;
+    }
+
+    // Таблицы появились только в v17. Тестовые снимки старых версий строятся
+    // из актуальной схемы и затем понижают user_version; убрать новые ссылки
+    // нужно до переименования runs/attempts в старых ступенях миграции.
+    if (version <= 16) {
+      db.exec('DROP TABLE IF EXISTS integrity_items; DROP TABLE IF EXISTS integrity_reviews;');
     }
 
     // Колонка отпечатка добавляется раньше любых `db.exec(CORE_SCHEMA)` ниже: схема
@@ -913,6 +953,7 @@ export function migrate(db: Database.Database): void {
     `);
     db.exec(LEARNING_SCHEMA);
     db.exec(COMPUTER_ACCESS_SCHEMA);
+    db.exec(INTEGRITY_SCHEMA);
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   }).immediate();
 }
@@ -931,6 +972,8 @@ const REQUIRED_COLUMNS: Readonly<Record<(typeof TABLES)[number], readonly string
   learning_runs: ['material_id', 'run_id', 'attempt_number'],
   learning_tasks: ['material_id', 'task_id', 'position'],
   computer_access_override: ['id', 'mode', 'changed_at', 'expires_at'],
+  integrity_reviews: ['run_id', 'status', 'last_error', 'created_at', 'updated_at'],
+  integrity_items: ['id', 'run_id', 'task_id', 'attempt_id', 'status', 'decision', 'confidence', 'reason', 'reviewed_by', 'created_at', 'updated_at'],
 };
 
 const REQUIRED_AUXILIARY_OBJECTS = [
@@ -955,6 +998,7 @@ const REQUIRED_AUXILIARY_OBJECTS = [
   'learning_material_runs_consistency_update',
   'learning_material_ready_complete',
   'learning_tasks_complete_delete',
+  'integrity_items_by_run',
 ] as const;
 
 const REQUIRED_SCHEMA_FRAGMENTS = {
@@ -966,6 +1010,8 @@ const REQUIRED_SCHEMA_FRAGMENTS = {
   learning_runs: ['attempt_number >= 1', 'UNIQUE'],
   learning_tasks: [`position BETWEEN 1 AND ${LEARNING_TASK_COUNT}`, 'UNIQUE (task_id)'],
   computer_access_override: ["id = 1", "'blocked', 'unlocked'", 'expires_at > changed_at'],
+  integrity_reviews: ["'screening', 'reviewing', 'needs_retry', 'passed'"],
+  integrity_items: ["'pending', 'retry_required', 'approved'", "'meaningful', 'doubtful', 'junk'", "'codex', 'parent', 'heuristic'", 'UNIQUE'],
 } as const;
 
 /** Не даёт базе с актуальным номером версии скрыть удалённую или чужую схему. */

@@ -11,12 +11,14 @@ import {
 } from '../learning.js';
 import { runProgress } from '../run.js';
 import { readDailyGate } from '../daily-gate.js';
+import type { IntegrityCoordinator } from '../integrity.js';
 
 export interface LearningRoutesOptions {
   db: Database;
   graph: TopicGraph;
   now?: () => Date;
   available?: () => boolean;
+  integrity?: IntegrityCoordinator;
 }
 
 class BadRequest extends Error {}
@@ -118,12 +120,18 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
     if (stopped !== undefined) return stopped;
     try {
       const at = now();
-      const result = finishLearningMaterial(
-        db,
-        graph,
-        readPathId(request.params.runId, 'Идентификатор lesson-run'),
-        { now: at },
-      );
+      const runId = readPathId(request.params.runId, 'Идентификатор lesson-run');
+      if (options.integrity !== undefined) {
+        const state = options.integrity.begin(runId);
+        if (state.status !== 'completed') return reply.send(state);
+        const result = state.result as unknown as ReturnType<typeof finishLearningMaterial>;
+        const learningGate = readDailyGate(db, at).learning;
+        return reply.send({
+          ...result,
+          required: learningGate.required && learningGate.materialId === result.materialId,
+        });
+      }
+      const result = finishLearningMaterial(db, graph, runId, { now: at });
       const learningGate = readDailyGate(db, at).learning;
       return reply.send({
         ...result,

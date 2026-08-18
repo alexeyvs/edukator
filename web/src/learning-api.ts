@@ -1,5 +1,5 @@
 import type { Subject } from './home-api';
-import type { FinishRunResponse, RunProgress } from './run-api';
+import type { FinishRunResponse, IntegrityStatusResponse, RunProgress } from './run-api';
 import { jsonRequest, requestJson } from './http';
 
 export type LearningBlockType = 'paragraph' | 'formula' | 'example' | 'warning';
@@ -55,7 +55,7 @@ export interface LearningApi {
   read(materialId: number): Promise<LearningMaterialView>;
   open(materialId: number): Promise<OpenLearningResponse>;
   startTest(materialId: number): Promise<StartLearningTestResponse>;
-  finish(runId: number): Promise<FinishLearningResponse>;
+  finish(runId: number): Promise<FinishLearningResponse | Exclude<IntegrityStatusResponse, { status: 'completed' }>>;
 }
 
 const request = <T>(url: string, init?: RequestInit): Promise<T> =>
@@ -71,7 +71,7 @@ export const browserLearningApi: LearningApi = {
     `/api/learning/${materialId}/test`,
     jsonRequest('POST'),
   ),
-  finish: (runId) => request<FinishLearningResponse>(
+  finish: (runId) => request<FinishLearningResponse | Exclude<IntegrityStatusResponse, { status: 'completed' }>>(
     `/api/learning/run/${runId}/finish`,
     jsonRequest('POST'),
   ),

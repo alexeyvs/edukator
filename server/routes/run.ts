@@ -17,6 +17,7 @@ import { bossProgress } from '../boss-rules.js';
 import { learningMaterialCards } from '../learning.js';
 import { readDailyGate } from '../daily-gate.js';
 import { readSubjectCalibrations } from '../subject-calibration.js';
+import type { IntegrityCoordinator } from '../integrity.js';
 
 export interface RunRoutesOptions {
   db: Database;
@@ -24,6 +25,7 @@ export interface RunRoutesOptions {
   now?: () => Date;
   /** Соединение всё ещё привязано к текущему файлу базы. */
   available?: () => boolean;
+  integrity?: IntegrityCoordinator;
 }
 
 class BadRequest extends Error {}
@@ -202,7 +204,15 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
     const stopped = unavailable(options, reply);
     if (stopped !== undefined) return stopped;
     try {
-      return reply.send(finishRun(db, graph, readPathId(request.params.id), { now: now() }));
+      const runId = readPathId(request.params.id);
+      const row = db.prepare<[number], { kind: string; finished_at: string | null }>(
+        'SELECT kind, finished_at FROM runs WHERE id = ?',
+      ).get(runId);
+      if (options.integrity === undefined || row?.kind !== 'run' || row.finished_at !== null) {
+        return reply.send(finishRun(db, graph, runId, { now: now() }));
+      }
+      const state = options.integrity.begin(runId);
+      return reply.send(state.status === 'completed' ? state.result : state);
     } catch (error) {
       return fail(reply, error);
     }

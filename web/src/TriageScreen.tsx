@@ -40,7 +40,7 @@ export function TriageScreen({ runId, api = browserRunApi, wait = defaultWait }:
     setBusy(true);
     try {
       const summary = await api.finish(runId);
-      if (generation.current === token) setFinish(summary);
+      if (generation.current === token) setFinish(summary as FinishRunResponse);
     } catch {
       if (generation.current === token) setProblem('Не получилось собрать итог триажа. Попробуй ещё раз.');
     } finally {
@@ -183,7 +183,7 @@ export function TriageScreen({ runId, api = browserRunApi, wait = defaultWait }:
             <p className="verdict"><span>{result.correct ? 'Верно' : 'Пока не сошлось'}</span> <strong>+{result.xp} XP</strong></p>
             <dl>
               <div><dt>Эталон</dt><dd>{result.answer}</dd></div>
-              <div><dt>Разбор</dt><dd><SafeRichText source={result.explain} /></dd></div>
+              <div><dt>Разбор</dt><dd><SafeRichText source={result.explain ?? ''} /></dd></div>
               <div><dt>Напарник</dt><dd>{result.joke}</dd></div>
             </dl>
             {disputeStatus === 'open' && <p className="dispute-note">Разбираюсь. Это может занять пару минут…</p>}

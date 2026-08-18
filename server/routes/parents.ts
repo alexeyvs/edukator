@@ -10,6 +10,7 @@ import {
 import { readDailyGate } from '../daily-gate.js';
 import { verifyParentPin } from '../parent-pin.js';
 import { readParentsDashboard, readParentsRunDetail } from '../parents.js';
+import type { IntegrityCoordinator } from '../integrity.js';
 
 export const PARENT_AUTH_FAILURE_LIMIT = 5;
 export const PARENT_AUTH_WINDOW_MS = 5 * 60 * 1000;
@@ -26,6 +27,7 @@ export interface ParentsRoutesOptions {
   parentPin?: string;
   now?: () => Date;
   available?: () => boolean;
+  integrity?: IntegrityCoordinator;
 }
 
 function unavailable(options: ParentsRoutesOptions, reply: FastifyReply): FastifyReply | undefined {
@@ -63,6 +65,29 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
     return recent;
   }
 
+  function requireParent(request: FastifyRequest, reply: FastifyReply): FastifyReply | undefined {
+    if (options.parentPin === undefined) {
+      return reply.code(503).send({ error: 'Управление доступом недоступно: PIN родителя не настроен' });
+    }
+    const at = now().getTime();
+    const recent = recentFailures(request.ip, at);
+    if (recent.length >= PARENT_AUTH_FAILURE_LIMIT) {
+      const retryAfter = Math.max(
+        1,
+        Math.ceil(((recent[0]?.at ?? at) + PARENT_AUTH_WINDOW_MS - at) / 1000),
+      );
+      return reply.header('retry-after', retryAfter).code(429).send({
+        error: 'Слишком много неверных попыток PIN, повторите позже',
+      });
+    }
+    if (!verifyParentPin(options.parentPin, bearerPin(request))) {
+      failures.set(request.ip, [...recent, { at }]);
+      return reply.code(401).send({ error: 'Неверный PIN родителя' });
+    }
+    failures.delete(request.ip);
+    return undefined;
+  }
+
   app.get('/api/parents', (_request, reply) => {
     const stopped = unavailable(options, reply);
     if (stopped !== undefined) return stopped;
@@ -97,28 +122,9 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
   app.put('/api/parents/computer-access', (request, reply) => {
     const stopped = unavailable(options, reply);
     if (stopped !== undefined) return stopped;
-    if (options.parentPin === undefined) {
-      return reply.code(503).send({ error: 'Управление доступом недоступно: PIN родителя не настроен' });
-    }
-
+    const denied = requireParent(request, reply);
+    if (denied !== undefined) return denied;
     const current = now();
-    const at = current.getTime();
-    const recent = recentFailures(request.ip, at);
-    if (recent.length >= PARENT_AUTH_FAILURE_LIMIT) {
-      const retryAfter = Math.max(
-        1,
-        Math.ceil(((recent[0]?.at ?? at) + PARENT_AUTH_WINDOW_MS - at) / 1000),
-      );
-      return reply.header('retry-after', retryAfter).code(429).send({
-        error: 'Слишком много неверных попыток PIN, повторите позже',
-      });
-    }
-
-    if (!verifyParentPin(options.parentPin, bearerPin(request))) {
-      failures.set(request.ip, [...recent, { at }]);
-      return reply.code(401).send({ error: 'Неверный PIN родителя' });
-    }
-    failures.delete(request.ip);
 
     const mode = readMode(request.body);
     if (mode === undefined) {
@@ -130,6 +136,30 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
     else setComputerAccessOverride(options.db, mode, current);
     return reply.send(readDailyGate(options.db, current));
   });
+
+  app.put('/api/parents/runs/:runId/integrity/:itemId/approve', (request, reply) => {
+    const stopped = unavailable(options, reply);
+    if (stopped !== undefined) return stopped;
+    if (options.integrity === undefined) {
+      return reply.code(503).send({ error: 'Проверка ответов недоступна' });
+    }
+    const denied = requireParent(request, reply);
+    if (denied !== undefined) return denied;
+    const params = request.params as { runId?: string; itemId?: string };
+    if (!/^\d+$/u.test(params.runId ?? '') || !/^\d+$/u.test(params.itemId ?? '')) {
+      return reply.code(400).send({ error: 'Некорректный идентификатор занятия или вопроса' });
+    }
+    const runId = Number(params.runId);
+    const itemId = Number(params.itemId);
+    if (!Number.isSafeInteger(runId) || runId <= 0 || !Number.isSafeInteger(itemId) || itemId <= 0) {
+      return reply.code(400).send({ error: 'Некорректный идентификатор занятия или вопроса' });
+    }
+    try {
+      return reply.send(options.integrity.approve(runId, itemId));
+    } catch (error) {
+      return reply.code(409).send({ error: (error as Error).message });
+    }
+  });
 }
 
 export function registerUnavailableParents(app: FastifyInstance, reason: string): void {
@@ -138,4 +168,5 @@ export function registerUnavailableParents(app: FastifyInstance, reason: string)
   app.get('/api/parents', send);
   app.get('/api/parents/runs/:runId', send);
   app.put('/api/parents/computer-access', send);
+  app.put('/api/parents/runs/:runId/integrity/:itemId/approve', send);
 }

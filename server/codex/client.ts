@@ -37,7 +37,7 @@ export const CODEX_FALLBACK_MODEL = 'gpt-5.6-terra';
  * браковать верные задания — расхождение ответов он трактует как ошибку
  * генератора, а не свою.
  */
-export const CODEX_ROLES = ['generate', 'validate', 'dispute', 'curriculum'] as const;
+export const CODEX_ROLES = ['generate', 'validate', 'dispute', 'integrity', 'curriculum'] as const;
 
 export type CodexRole = (typeof CODEX_ROLES)[number];
 
@@ -46,6 +46,7 @@ export const CODEX_ROLE_ENV: Record<CodexRole, string> = {
   generate: 'EDUKATOR_MODEL_GENERATE',
   validate: 'EDUKATOR_MODEL_VALIDATE',
   dispute: 'EDUKATOR_MODEL_DISPUTE',
+  integrity: 'EDUKATOR_MODEL_INTEGRITY',
   curriculum: 'EDUKATOR_MODEL_CURRICULUM',
 };
 

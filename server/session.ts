@@ -38,6 +38,7 @@ import { BOSS_TARGET } from './boss-rules.js';
 import { finishBossLoss } from './boss-loss.js';
 import { bossFightConsistent, finishBossWin, readBossFight } from './boss-fight.js';
 import { LEARNING_TASK_COUNT } from './learning-constants.js';
+import { integritySignal } from './integrity.js';
 
 export type { IssuedTask } from './issued-task.js';
 
@@ -355,6 +356,8 @@ export interface AnswerResult {
   progress: RunProgress | null;
   /** Есть только у boss: обычный HTTP-путь ответа сохраняет доменный исход боя. */
   bossOutcome?: 'active' | 'mistake' | 'won';
+  /** Подозрительный ответ принят, но эталон скрыт до отдельной проверки. */
+  integrityHeld?: boolean;
 }
 
 interface SessionRun {
@@ -399,6 +402,7 @@ interface TaskRow {
   accept: string;
   explain: string | null;
   joke: string | null;
+  choices: string | null;
   difficulty: number;
   status: string;
   issued_run_id: number | null;
@@ -420,7 +424,7 @@ function parseAccept(raw: string, id: number): string[] {
 function readTask(db: Database, taskId: number): TaskRow {
   const row = db
     .prepare<[number], TaskRow>(
-      `SELECT id, topic_id, answer, accept, explain, joke, difficulty, status, issued_run_id
+      `SELECT id, topic_id, answer, accept, explain, joke, choices, difficulty, status, issued_run_id
          FROM task_bank WHERE id = ?`,
     )
     .get(taskId);
@@ -797,6 +801,13 @@ export function submitAnswer(
       state,
       xp,
       progress,
+      ...((run?.kind === 'run' || run?.kind === 'lesson') && integritySignal({
+        answerFormat: topic.answerFormat,
+        answer: request.answer,
+        choices: row.choices === null ? [] : JSON.parse(row.choices) as string[],
+        correct: check.correct,
+        durationMs,
+      }) !== null ? { integrityHeld: true } : {}),
       ...(bossOutcome === undefined ? {} : { bossOutcome }),
     };
   }).immediate();

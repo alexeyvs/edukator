@@ -516,6 +516,44 @@ describe('родительский дашборд', () => {
     expect(screen.getByText('За неделю нет наблюдений, требующих внимания.')).toBeInTheDocument();
   });
 
+  it('показывает активную проверку и подтверждает вопрос общим PIN родителя', async () => {
+    const dashboard: ParentsDashboard = {
+      ...DASHBOARD,
+      integrityReviews: [{
+        runId: 9, kind: 'run', subject: 'math', startedAt: '2026-08-08T11:00:00.000Z',
+        status: 'needs_retry', flagged: 1, retryRequired: 1,
+      }],
+    };
+    const detail: ParentsRunDetail = {
+      ...RUN_DETAIL,
+      runId: 9,
+      kind: 'run',
+      integrityStatus: 'needs_retry',
+      attempts: [{
+        ...RUN_DETAIL.attempts[0] as ParentsRunDetail['attempts'][number],
+        studentAnswer: 'Ff',
+        durationMilliseconds: 1_000,
+        current: true,
+        integrity: {
+          itemId: 17, status: 'retry_required', decision: 'junk', confidence: .97,
+          reason: 'Случайные буквы вместо числа.', reviewedBy: 'codex',
+        },
+      }],
+    };
+    delete detail.finishedAt;
+    const api = parentsApi(dashboard, detail);
+    api.approveIntegrity = vi.fn().mockResolvedValue({ status: 'completed', result: {} });
+    render(<ParentsScreen api={api} />);
+
+    const review = await screen.findByRole('region', { name: 'Проверка ответов' });
+    fireEvent.change(screen.getByLabelText(/PIN родителя/u), { target: { value: '123456' } });
+    fireEvent.click(within(review).getByRole('button', { name: /Обычный забег/u }));
+    expect(await screen.findByText('Случайные буквы вместо числа.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Ответ осмысленный' }));
+
+    await waitFor(() => expect(api.approveIntegrity).toHaveBeenCalledWith(9, 17, '123456'));
+  });
+
   it('показывает отказ загрузки и использует read-only API', async () => {
     const api = parentsApi();
     vi.mocked(api.read).mockRejectedValue(new Error('Дашборд временно недоступен'));

@@ -1,5 +1,6 @@
 import type { DailyGateState, Subject } from './home-api';
 import { requestJson } from './http';
+import type { IntegrityStatusResponse } from './run-api';
 
 export type ComputerAccessMode = 'automatic' | 'blocked' | 'unlocked';
 
@@ -45,6 +46,15 @@ export interface ParentsDashboard {
     activeMinutes: number;
     bossOutcome?: 'won' | 'lost';
   }>;
+  integrityReviews?: Array<{
+    runId: number;
+    kind: 'run' | 'lesson';
+    subject: Subject;
+    startedAt: string;
+    status: 'screening' | 'reviewing' | 'needs_retry' | 'passed';
+    flagged: number;
+    retryRequired: number;
+  }>;
   flags: {
     threeFullDaysWithoutRun: boolean;
     forecastNotGrowing: Subject[];
@@ -69,6 +79,15 @@ export interface ParentsRunAttempt {
   correction: boolean;
   durationMilliseconds: number;
   answeredAt: string;
+  current?: boolean;
+  integrity?: {
+    itemId: number;
+    status: 'pending' | 'retry_required' | 'approved';
+    decision?: 'meaningful' | 'doubtful' | 'junk';
+    confidence?: number;
+    reason?: string;
+    reviewedBy?: 'codex' | 'parent' | 'heuristic';
+  };
 }
 
 export interface ParentsRunDetail {
@@ -76,17 +95,19 @@ export interface ParentsRunDetail {
   kind: ParentsRunKind;
   subject: Subject;
   startedAt: string;
-  finishedAt: string;
+  finishedAt?: string;
   total: number;
   correct: number;
   activeMilliseconds: number;
   attempts: ParentsRunAttempt[];
+  integrityStatus?: 'screening' | 'reviewing' | 'needs_retry' | 'passed';
 }
 
 export interface ParentsApi {
   read(): Promise<ParentsDashboard>;
   readRun(runId: number): Promise<ParentsRunDetail>;
   changeComputerAccess(mode: ComputerAccessMode, pin: string): Promise<DailyGateState>;
+  approveIntegrity?(runId: number, itemId: number, pin: string): Promise<IntegrityStatusResponse>;
 }
 
 export const browserParentsApi: ParentsApi = {
@@ -104,6 +125,12 @@ export const browserParentsApi: ParentsApi = {
       body: JSON.stringify({ mode }),
     },
     'Не получилось изменить режим доступа',
+    ({ status, message }) => new ComputerAccessError(message, status),
+  ),
+  approveIntegrity: (runId, itemId, pin) => requestJson<IntegrityStatusResponse>(
+    `/api/parents/runs/${String(runId)}/integrity/${String(itemId)}/approve`,
+    { method: 'PUT', headers: { authorization: `Bearer ${pin}` } },
+    'Не получилось подтвердить ответ',
     ({ status, message }) => new ComputerAccessError(message, status),
   ),
 };

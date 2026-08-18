@@ -332,12 +332,15 @@ export function registerSessionRoutes(
 
       return reply.send({
         attempt_id: result.attemptId,
+        ...(result.integrityHeld === true ? { integrity_check: true } : {}),
         correct: result.correct,
         normalized: result.normalized,
         ...(result.reason === undefined ? {} : { reason: result.reason }),
-        answer: result.answer,
-        explain: result.explain,
-        joke: result.joke,
+        ...(result.integrityHeld === true ? {} : {
+          answer: result.answer,
+          explain: result.explain,
+          joke: result.joke,
+        }),
         xp: result.xp,
         progress: result.progress,
         topic: {

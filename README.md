@@ -44,6 +44,7 @@
 | `server/codex/worker.ts` | фоновое пополнение очереди по активным темам с отступом при недоступном codex |
 | `server/codex/seed-bank.ts` | посевной банк `content/seed-bank/*.json`: загрузка, откат, выгрузка |
 | `server/codex/dispute.ts` | разбор спорного ответа моделью |
+| `server/codex/integrity.ts`, `server/integrity.ts` | отдельная проверка осмысленности быстрых подозрительных ответов и повтор только отмеченных вопросов |
 | `server/session.ts`, `server/routes/session.ts` | занятие: выдача задания, приём ответа, спор |
 | `scripts/prefetch.ts` | ручное опережающее наполнение банка и сборка посева |
 
@@ -245,15 +246,18 @@ Family Safety-контроллером и задаёт родительский 
 | `GET /api/learning/:id` | опубликованное структурированное содержимое и прогресс теста |
 | `POST /api/learning/:id/open` | идемпотентно открыть или продолжить чтение |
 | `POST /api/learning/:id/test` | возобновить незавершённый или создать следующий пронумерованный `lesson`-забег с теми же пятью заданиями |
-| `POST /api/learning/run/:runId/finish` | атомарно завершить попытку; незачёт оставляет материал `active`, зачёт переводит его в `passed` |
+| `POST /api/learning/run/:runId/finish` | начать проверку осмысленности и атомарно завершить попытку после её прохождения; незачёт оставляет материал `active`, зачёт переводит его в `passed` |
 | `GET /api/session/next` | задание по выбору планировщика; в забеге — `?runId=<id>`. Обычно эталон и разбор скрыты; при ожидающем исправлении `retry` восстанавливает ошибочный ответ и его разбор |
 | `POST /api/session/answer` | `{ task_id, answer, runId?, hint_used?, duration_ms?, retry_attempt_id? }` → вердикт, XP, прогресс, разбор, шутка и новое состояние темы; `answer` длиннее 500 символов — 400 |
 | `POST /api/session/retry/skip` | `{ runId, task_id }` → отказаться от доступного исправления без списания жизни |
 | `POST /api/session/dispute` | `{ attempt_id }` → спор в очередь фоновой перепроверки: 202 при заведении, 200 с текущим `status` при повторном нажатии; нецелый или неположительный `attempt_id` — 400, неизвестный — 404 (`attempt-not-found`), уже засчитанная попытка — 400 (`attempt-correct`: спорить не о чем) |
+| `GET /api/integrity/:runId` | состояние проверки занятия: `checking`, `retry_required` с одним отмеченным вопросом или `completed` |
+| `POST /api/integrity/:runId/retry/:itemId` | `{ answer, duration_ms }` → заменить ответ только на отмеченный вопрос и продолжить проверку |
 | `GET /api/profile`, `PUT /api/profile` | прочитать или изменить профиль и текст знакомства |
 | `GET /api/parents` | единый снимок родительского дашборда за семь суток с обязательным `computerAccess` и признаком `configured` |
-| `GET /api/parents/runs/:runId` | вопросы, ответы ученика, эталоны, объяснения и время каждой попытки завершённого занятия из текущей недельной сводки |
+| `GET /api/parents/runs/:runId` | вопросы, ответы ученика, эталоны, объяснения, время и integrity-решения каждой попытки завершённого или проверяемого занятия из текущей недельной сводки |
 | `PUT /api/parents/computer-access` | PIN-защищённая смена режима `{ mode: "automatic" | "blocked" | "unlocked" }` |
+| `PUT /api/parents/runs/:runId/integrity/:itemId/approve` | PIN-защищённое ручное подтверждение конкретного ответа как осмысленного |
 
 Формы успешных ответов:
 
@@ -270,7 +274,9 @@ Family Safety-контроллером и задаёт родительский 
 - `POST /api/session/answer` → `{ attempt_id, correct, normalized, reason?,
   answer, explain, joke, xp, progress, topic: { id, mastery, attempts,
   next_review } }`, где `progress` равен `null` вне забега, а
-  `reason` — `mismatch`, `empty`, `no-number` или `ambiguous-number`;
+  `reason` — `mismatch`, `empty`, `no-number` или `ambiguous-number`. Для локально
+  подозрительного ответа возвращается `integrity_check: true`, а эталон,
+  объяснение и шутка не раскрываются;
 - `POST /api/session/dispute` → `{ dispute_id, status, progress?, xp? }`, где
   `status` — `open`, `upheld` или `rejected`; подтверждённый спор обычного
   забега возвращает обновлённые progress и XP;
@@ -296,9 +302,11 @@ Family Safety-контроллером и задаёт родительский 
 - `POST /api/learning/run/:runId/finish` → обычный итог забега плюс
   `{ materialId, required, outcome, masteryBefore, masteryAfter }`; зачёт
   `passed` начинается с 4/5, меньший счёт даёт `failed` только как исход
-  запуска, оставляя сам материал `active` для нового запуска;
+  запуска, оставляя сам материал `active` для нового запуска. До завершения
+  integrity-проверки вместо итога возвращается её состояние;
 - `POST /api/run/:id/finish` → `{ runId, total, correct, xp, touchedTopics,
-  closedTopics, declinedTopics, forecast, forecastDelta? }`;
+  closedTopics, declinedTopics, forecast, forecastDelta? }`; обычный забег с
+  подозрительными ответами сначала возвращает состояние integrity-проверки;
 - `GET /api/profile` → `{ name, interests, examDate, partnerName,
   introduction }`; `PUT /api/profile` принимает частичный patch этих полей
   (кроме `introduction`) и отвергает неизвестные поля.
@@ -307,12 +315,13 @@ Family Safety-контроллером и задаёт родительский 
   `{ mode: "blocked" | "unlocked", changedAt, expiresAt }`;
 - `GET /api/parents` → прогнозы по предметам, план и факт активного времени,
   семь дневных значений, до пяти проблемных тем, ленту завершённых забегов,
-  флаги наблюдений и обязательный `computerAccess` в форме gate плюс
+  активные integrity-проверки, флаги наблюдений и обязательный `computerAccess` в форме gate плюс
   `configured` — настроен ли родительский PIN. В ответе нет внутренних `topic_id`;
 - `GET /api/parents/runs/:runId` → лениво загружаемая история выбранного
-  завершённого занятия из текущего семисуточного окна: все версии ответов в
-  исходном порядке, эталон, объяснение, использованная подсказка и время;
-- `PUT /api/parents/computer-access` требует `Authorization: Bearer <PIN>` и
+  завершённого или проверяемого занятия из текущего семисуточного окна: все
+  версии ответов в исходном порядке, эталон, объяснение, использованная
+  подсказка, время и решение проверки;
+- `PUT /api/parents/computer-access` и ручное подтверждение integrity требуют `Authorization: Bearer <PIN>`; первая операция принимает
   ровно `{ mode: "automatic" | "blocked" | "unlocked" }`; успех возвращает
   актуальный gate. Некорректный body даёт 400, неверный PIN — 401, превышение
   пяти ошибок за пять минут с одного IP — 429, отсутствующий PIN или
@@ -389,8 +398,8 @@ codex на минуты. У споров есть **один отдельный 
 фоновый воркер занять не может. Поэтому спор стартует сразу, даже если заняты оба
 места прогрева. Второй одновременный спор остаётся открытым и повторяется автоматически.
 
-Общей авторизации нет; только `PUT /api/parents/computer-access` защищён
-родительским PIN и rate limit. Привязка к сетевому адресу сама по себе не ограничивает приложение
+Общей авторизации нет; изменение компьютерного доступа и ручное подтверждение
+integrity защищены родительским PIN и общим rate limit. Привязка к сетевому адресу сама по себе не ограничивает приложение
 домашней сетью: не публикуйте порт 3000 в интернет, не настраивайте port
 forwarding и разрешайте доступ только из доверенной LAN/VPN через firewall.
 
@@ -416,10 +425,12 @@ EDUKATOR_DB=/absolute/path/edukator.db npm start
 запускаться. Поэтому `:memory:` и файловые системы, на которых WAL недоступен,
 для `EDUKATOR_DB` не подходят.
 
-Текущая схема — **v16**, тринадцать таблиц: `profile`, `topic_state`,
+Текущая схема — **v17**, пятнадцать таблиц: `profile`, `topic_state`,
 `task_bank`, `runs`, `attempts`, `disputes`, `forecast_snapshots`,
 `boss_batches`, `boss_tasks`, `learning_materials`, `learning_runs`, `learning_tasks`,
-`computer_access_override`. Последняя хранит singleton-команду `blocked | unlocked`
+`computer_access_override`, `integrity_reviews`, `integrity_items`. Последние две
+хранят переживающую перезапуск проверку занятия и решения по отдельным ответам;
+`computer_access_override` хранит singleton-команду `blocked | unlocked`
 с временем изменения и сроком до следующей московской полуночи; после срока
 дневной доступ снова определяется автоматически.
 `runs.kind` допускает `run | triage | boss | lesson`, а `task_bank.status` — в
@@ -604,7 +615,7 @@ npm run build-curriculum -- --subject math
 
 ### Модель по ролям
 
-Используются четыре роли codex, и модель задаётся на каждую отдельно. Роли
+Используются пять ролей codex, и модель задаётся на каждую отдельно. Роли
 `generate` и `validate` обслуживают не только обычный банк, но и подготовку
 персональной теории и самостоятельных вопросов к ней. Разводить
 роли приходится потому, что проверяющий решает задания независимо от генератора:
@@ -616,6 +627,7 @@ npm run build-curriculum -- --subject math
 | `EDUKATOR_MODEL_GENERATE` | генератор заданий | `gpt-5.6-sol` |
 | `EDUKATOR_MODEL_VALIDATE` | проверяющий | `gpt-5.6-sol` |
 | `EDUKATOR_MODEL_DISPUTE` | разбор спора | `gpt-5.6-sol` |
+| `EDUKATOR_MODEL_INTEGRITY` | осмысленность отмеченных ответов | `gpt-5.6-sol` |
 | `EDUKATOR_MODEL_CURRICULUM` | сборка карты тем | `gpt-5.6-sol` |
 
 Пустая переменная считается незаданной. Запасная модель — `gpt-5.6-terra`,
@@ -837,8 +849,9 @@ codex exec --ephemeral --ignore-user-config --ignore-rules \
 `pattern`, `minLength`, `minimum`/`maximum` и родственных ключевых словах.
 Поэтому в рабочий каталог кладётся очищенная копия схемы, а ограничения не
 теряются: их проверяет разбор ответа, диапазоны продублированы словами в
-`description` и в промпте. Чистка (`codexOutputSchema`) общая для всех четырёх
-схем — `curriculum.json`, `tasks.json`, `verdicts.json`, `dispute.json`, — и
+`description` и в промпте. Чистка (`codexOutputSchema`) общая для всех
+схем, включая `curriculum.json`, `tasks.json`, `verdicts.json`, `dispute.json`
+и `integrity-review.json`, — и
 рукописной копии ни одной из них в коде нет. Режет она только ключевые слова:
 ключи под `properties` — это имена полей данных, и поле, названное `pattern` или
 `minimum`, осталось бы в `required`, сделав схему невыполнимой.

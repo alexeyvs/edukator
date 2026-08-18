@@ -481,6 +481,56 @@ describe('экран забега', () => {
     expect(api.finish).toHaveBeenCalledWith(9);
   });
 
+  it('скрывает эталон у предварительно отмеченного ответа', async () => {
+    const held = answer(false);
+    held.integrity_check = true;
+    delete held.answer;
+    delete held.explain;
+    delete held.joke;
+    const api = apiWith({
+      next: vi.fn().mockResolvedValueOnce(task(1)).mockReturnValue(deferred<NextTaskResponse>()),
+      answer: vi.fn(() => Promise.resolve(held)),
+    });
+    render(<RunScreen runId={9} api={api} />);
+    await screen.findByRole('heading', { name: 'Сколько будет 1 + 1?' });
+    fireEvent.change(screen.getByLabelText('Число'), { target: { value: 'Ff' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+
+    expect(await screen.findByText('Ответ принят')).toBeInTheDocument();
+    expect(screen.queryByText('Эталон')).not.toBeInTheDocument();
+  });
+
+  it('после фоновой проверки повторяет отмеченный вопрос и завершает забег', async () => {
+    const retryTask = task(7, 'Найди значение переменной').task;
+    const retryIntegrity = vi.fn(() => Promise.resolve({
+      status: 'completed' as const,
+      result: finishSummary(),
+    }));
+    const api = apiWith({
+      next: vi.fn(() => Promise.reject(
+        new RunApiError('забег готов к завершению', 409, 'run-complete'),
+      )),
+      finish: vi.fn(() => Promise.resolve({ status: 'checking' as const, flagged: 1 })),
+      integrity: vi.fn(() => Promise.resolve({
+        status: 'retry_required' as const,
+        flagged: 1,
+        remaining: 1,
+        retry: { item_id: 12, task: retryTask },
+      })),
+      retryIntegrity,
+    });
+    render(<RunScreen runId={9} api={api} wait={() => Promise.resolve()} />);
+
+    expect(await screen.findByRole('heading', { name: 'Реши этот вопрос ещё раз' })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Число'), { target: { value: '18' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить повторный ответ' }));
+
+    expect(await screen.findByRole('heading', { name: 'Вот что получилось' })).toBeInTheDocument();
+    expect(retryIntegrity).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 9, itemId: 12, answer: '18',
+    }));
+  });
+
   it('опрашивает спор до первого закрытого статуса с нарастающей паузой', async () => {
     const delays: number[] = [];
     const dispute = vi.fn()

@@ -202,6 +202,8 @@ function createVersionEightDatabase(path: string): Database {
 function createVersionElevenDatabase(path: string): Database {
   const legacy = openDatabase(path);
   legacy.exec(`
+    DROP TABLE integrity_items;
+    DROP TABLE integrity_reviews;
     DROP TABLE learning_tasks;
     DROP TABLE learning_runs;
     DROP TABLE learning_materials;
@@ -369,7 +371,7 @@ describe('база данных', () => {
     // рабочую базу, поэтому число прибито буквально и меняется только вместе с
     // новой ступенью и её тестом обновления.
     it('держит номер версии схемы', () => {
-      expect(SCHEMA_VERSION).toBe(16);
+      expect(SCHEMA_VERSION).toBe(17);
     });
 
     it('создаёт все тринадцать таблиц на пустой базе', () => {
@@ -1170,10 +1172,29 @@ describe('база данных', () => {
       const migrated = openDatabase(path);
       try {
         expect((migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version)
-          .toBe(16);
+          .toBe(17);
         expect(migrated.prepare('SELECT * FROM computer_access_override').all()).toEqual([]);
         expect(migrated.prepare('SELECT topic_id FROM topic_state').get())
           .toEqual({ topic_id: 'math.saved' });
+      } finally {
+        migrated.close();
+      }
+    });
+
+    it('мигрирует v16→v17 и добавляет сохранённую очередь проверки ответов', () => {
+      const path = join(tempDir, 'v16.db');
+      const legacy = openDatabase(path);
+      legacy.exec('DROP TABLE integrity_items; DROP TABLE integrity_reviews;');
+      legacy.pragma('user_version = 16');
+      legacy.close();
+
+      const migrated = openDatabase(path);
+      try {
+        expect((migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version)
+          .toBe(17);
+        expect(tableNames(migrated)).toEqual(expect.arrayContaining([
+          'integrity_reviews', 'integrity_items',
+        ]));
       } finally {
         migrated.close();
       }
