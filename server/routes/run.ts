@@ -24,6 +24,7 @@ import { learningMaterialCards } from '../learning.js';
 import { readDailyGate } from '../daily-gate.js';
 import { readSubjectCalibrations } from '../subject-calibration.js';
 import type { IntegrityCoordinator } from '../integrity.js';
+import { integrityPublicJson } from './integrity.js';
 
 export interface RunRoutesOptions {
   db: Database;
@@ -219,7 +220,7 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
       }
       assertRunReadyForIntegrity(db, runId);
       const state = options.integrity.begin(runId);
-      return reply.send(state.status === 'completed' ? state.result : state);
+      return reply.send(state.status === 'completed' ? state.result : integrityPublicJson(state));
     } catch (error) {
       return fail(reply, error);
     }

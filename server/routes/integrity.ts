@@ -8,7 +8,8 @@ export interface IntegrityRoutesOptions {
   available?: () => boolean;
 }
 
-function publicJson(state: IntegrityPublicStatus): Record<string, unknown> {
+/** Единая HTTP-форма integrity-состояния для всех маршрутов, которые могут его вернуть. */
+export function integrityPublicJson(state: IntegrityPublicStatus): Record<string, unknown> {
   if (state.status !== 'retry_required') return state;
   return {
     status: state.status,
@@ -40,7 +41,7 @@ export function registerIntegrityRoutes(app: FastifyInstance, options: Integrity
     if (runId === null) return reply.code(400).send({ error: 'Некорректный идентификатор занятия' });
     const state = options.coordinator.status(runId);
     if (state === null) return reply.code(404).send({ error: 'Проверка занятия не найдена' });
-    return reply.send(publicJson(state));
+    return reply.send(integrityPublicJson(state));
   });
 
   app.post('/api/integrity/:runId/retry/:itemId', (request, reply) => {
@@ -66,7 +67,9 @@ export function registerIntegrityRoutes(app: FastifyInstance, options: Integrity
       return reply.code(400).send({ error: 'Поле hint_used должно быть логическим' });
     }
     try {
-      return reply.send(publicJson(options.coordinator.retry(runId, itemId, answer, duration, hintUsed ?? false)));
+      return reply.send(integrityPublicJson(
+        options.coordinator.retry(runId, itemId, answer, duration, hintUsed ?? false),
+      ));
     } catch (error) {
       return reply.code(409).send({ error: (error as Error).message });
     }

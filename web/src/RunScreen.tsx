@@ -9,6 +9,7 @@ import {
   type NextTaskResponse,
   type RunApi,
   type RunProgress,
+  type RunTask,
 } from './run-api';
 import { FinishScreen } from './FinishScreen';
 import { LearningFinishScreen } from './LearningFinishScreen';
@@ -63,6 +64,24 @@ function Problem({ problem }: { problem: ScreenProblem }) {
   );
 }
 
+/**
+ * Старый процесс сервера мог вернуть внутренний IssuedTask из finish-маршрута.
+ * Нормализуем его на клиенте, чтобы уже открытый забег пережил обновление кода.
+ */
+function normalizeIntegrityTask(task: RunTask): RunTask {
+  const legacy = task as unknown as Record<string, unknown>;
+  const materialFormat = task.material_format ?? legacy['materialFormat'];
+  return {
+    ...task,
+    topic_id: task.topic_id ?? String(legacy['topicId'] ?? ''),
+    topic_title: task.topic_title ?? String(legacy['topicTitle'] ?? ''),
+    ...(materialFormat === undefined ? {} : {
+      material_format: materialFormat as NonNullable<RunTask['material_format']>,
+    }),
+    answer_format: (task.answer_format ?? legacy['answerFormat'] ?? 'text') as RunTask['answer_format'],
+  };
+}
+
 export function RunScreen({
   runId,
   api = browserRunApi,
@@ -95,8 +114,11 @@ export function RunScreen({
       else setFinish(state.result as unknown as FinishRunResponse);
       return;
     }
-    setIntegrity(state);
-    if (state.status === 'retry_required') {
+    const normalized = state.status === 'retry_required'
+      ? { ...state, retry: { ...state.retry, task: normalizeIntegrityTask(state.retry.task) } }
+      : state;
+    setIntegrity(normalized);
+    if (normalized.status === 'retry_required') {
       setAnswer('');
       setHintUsed(false);
       shownAt.current = Date.now();

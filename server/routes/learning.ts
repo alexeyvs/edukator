@@ -13,6 +13,7 @@ import {
 import { runProgress } from '../run.js';
 import { readDailyGate } from '../daily-gate.js';
 import type { IntegrityCoordinator } from '../integrity.js';
+import { integrityPublicJson } from './integrity.js';
 
 export interface LearningRoutesOptions {
   db: Database;
@@ -125,7 +126,7 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
       if (options.integrity !== undefined) {
         assertLearningReadyForIntegrity(db, runId);
         const state = options.integrity.begin(runId);
-        if (state.status !== 'completed') return reply.send(state);
+        if (state.status !== 'completed') return reply.send(integrityPublicJson(state));
         const result = state.result as unknown as ReturnType<typeof finishLearningMaterial>;
         const learningGate = readDailyGate(db, at).learning;
         return reply.send({

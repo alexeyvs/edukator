@@ -11,6 +11,7 @@ import { readDailyGate } from '../daily-gate.js';
 import { verifyParentPin } from '../parent-pin.js';
 import { readParentsDashboard, readParentsRunDetail } from '../parents.js';
 import type { IntegrityCoordinator } from '../integrity.js';
+import { integrityPublicJson } from './integrity.js';
 
 export const PARENT_AUTH_FAILURE_LIMIT = 5;
 export const PARENT_AUTH_WINDOW_MS = 5 * 60 * 1000;
@@ -155,7 +156,7 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
       return reply.code(400).send({ error: 'Некорректный идентификатор занятия или вопроса' });
     }
     try {
-      return reply.send(options.integrity.approve(runId, itemId));
+      return reply.send(integrityPublicJson(options.integrity.approve(runId, itemId)));
     } catch (error) {
       return reply.code(409).send({ error: (error as Error).message });
     }

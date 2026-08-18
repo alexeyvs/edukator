@@ -128,6 +128,13 @@ describe('HTTP-поток проверки осмысленности', () => {
       retry: { task: { hint: 'Сложи десятки и единицы, затем проверь обратным действием.' } },
     });
     expect(reviewBatches).toEqual([12]);
+
+    const resumed = (await app.inject({ method: 'POST', url: `/api/run/${runId}/finish` })).json();
+    expect(resumed).toMatchObject({
+      status: 'retry_required',
+      retry: { task: { material: '40 + 5', material_format: 'math', answer_format: 'number' } },
+    });
+    expect(resumed.retry.task).not.toHaveProperty('materialFormat');
     expect((await app.inject({ method: 'GET', url: '/api/gate/status' })).json())
       .toMatchObject({ completed: 0, unlocked: false });
 

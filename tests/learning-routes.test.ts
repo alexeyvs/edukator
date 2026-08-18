@@ -313,6 +313,14 @@ describe('Learning API', () => {
     };
     expect(review).toMatchObject({ status: 'retry_required', remaining: 1 });
     expect(review.retry.task).not.toHaveProperty('hint');
+    const resumed = (await app.inject({
+      method: 'POST', url: `/api/learning/run/${runId}/finish`,
+    })).json();
+    expect(resumed).toMatchObject({
+      status: 'retry_required',
+      retry: { task: { material: '', material_format: 'none', answer_format: 'number' } },
+    });
+    expect(resumed.retry.task).not.toHaveProperty('materialFormat');
     integrityDecision = 'meaningful';
 
     const retried = await app.inject({

@@ -501,7 +501,14 @@ describe('экран забега', () => {
   });
 
   it('показывает подсказку и переходит между отмеченными вопросами до общей проверки', async () => {
-    const retryTask = task(7, 'Найди значение переменной').task;
+    const retryTask = {
+      ...task(7, 'Найди значение переменной').task,
+      material: '12/x = 18/27',
+      material_format: undefined,
+      answer_format: undefined,
+      materialFormat: 'math',
+      answerFormat: 'number',
+    } as unknown as NextTaskResponse['task'];
     const secondRetryTask = task(8, 'Вычисли второе значение').task;
     const retryIntegrity = vi.fn()
       .mockResolvedValueOnce({
@@ -527,6 +534,7 @@ describe('экран забега', () => {
     render(<RunScreen runId={9} api={api} wait={() => Promise.resolve()} />);
 
     expect(await screen.findByRole('heading', { name: 'Реши этот вопрос ещё раз' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Материал задания' })).toHaveTextContent('12');
     fireEvent.click(screen.getByRole('button', { name: 'Нужна подсказка' }));
     expect(screen.getByText('Сложи одинаковые числа.')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Число'), { target: { value: '18' } });
