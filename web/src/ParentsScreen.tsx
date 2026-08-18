@@ -6,8 +6,11 @@ import {
   type ComputerAccessMode,
   type ParentsApi,
   type ParentsDashboard,
+  type ParentsRunAttempt,
+  type ParentsRunDetail,
 } from './parents-api';
 import { SUBJECT_NAMES, SUBJECTS } from './subject-meta';
+import { SafeFormula, SafeRichText } from './TaskPrompt';
 
 const KIND_NAMES = {
   run: 'Обычный забег',
@@ -313,6 +316,148 @@ function signed(value: number): string {
   return `${value > 0 ? '+' : ''}${value.toFixed(1)}`;
 }
 
+function readableDuration(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1_000));
+  if (totalSeconds < 60) return `${String(totalSeconds)} сек`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds === 0
+    ? `${String(minutes)} мин`
+    : `${String(minutes)} мин ${String(seconds)} сек`;
+}
+
+function AttemptMaterial({ attempt }: { attempt: ParentsRunAttempt }) {
+  if (attempt.material === undefined || attempt.materialFormat === undefined ||
+      attempt.materialFormat === 'none') return null;
+  return (
+    <section className="parents-attempt-material" aria-label="Материал задания">
+      {attempt.materialFormat === 'math'
+        ? <SafeFormula source={attempt.material} />
+        : <p>{attempt.material}</p>}
+    </section>
+  );
+}
+
+function RunAttempt({ attempt }: { attempt: ParentsRunAttempt }) {
+  const prompt = attempt.instruction ?? attempt.question;
+  return (
+    <article className={`parents-attempt ${attempt.correct ? 'correct' : 'incorrect'}`}>
+      <header>
+        <div>
+          <span>Вопрос {attempt.number}</span>
+          {attempt.correction && <em>Исправление</em>}
+        </div>
+        <time dateTime={`PT${String(attempt.durationMilliseconds / 1_000)}S`}>
+          {readableDuration(attempt.durationMilliseconds)}
+        </time>
+      </header>
+      <small>{attempt.topicTitle}</small>
+      <h3>{prompt}</h3>
+      <AttemptMaterial attempt={attempt} />
+      {attempt.choices.length > 0 && <ol className="parents-attempt-choices" type="A">
+        {attempt.choices.map((choice) => (
+          <li
+            className={`${choice === attempt.correctAnswer ? 'expected' : ''}${choice === attempt.studentAnswer ? ' selected' : ''}`}
+            key={choice}
+          >{choice}</li>
+        ))}
+      </ol>}
+      <div className="parents-answer-comparison">
+        <div className={attempt.correct ? 'correct' : 'incorrect'}>
+          <span>Ответ ученика</span>
+          <strong>{attempt.studentAnswer}</strong>
+        </div>
+        <div>
+          <span>Правильный ответ</span>
+          <strong>{attempt.correctAnswer}</strong>
+        </div>
+      </div>
+      {attempt.hint !== undefined && <aside className="parents-attempt-hint"><span>Использована подсказка</span><p>{attempt.hint}</p></aside>}
+      {attempt.explanation !== '' && <details className="parents-attempt-explanation">
+        <summary>Показать объяснение</summary>
+        <SafeRichText source={attempt.explanation} />
+      </details>}
+    </article>
+  );
+}
+
+function RunDetail({ detail }: { detail: ParentsRunDetail }) {
+  return (
+    <div className="parents-run-detail">
+      <header>
+        <div><span>Всего ответов</span><strong>{detail.attempts.length}</strong></div>
+        <div><span>Верных в итоге</span><strong>{detail.correct} из {detail.total}</strong></div>
+        <div><span>Время на ответы</span><strong>{readableDuration(detail.activeMilliseconds)}</strong></div>
+      </header>
+      {detail.attempts.length === 0
+        ? <p className="parents-run-detail-empty">В этом занятии не сохранено ответов.</p>
+        : <div className="parents-attempts">{detail.attempts.map((attempt) => (
+          <RunAttempt attempt={attempt} key={attempt.number} />
+        ))}</div>}
+    </div>
+  );
+}
+
+function ActivityItem({
+  item,
+  api,
+}: {
+  item: ParentsDashboard['activity'][number];
+  api: ParentsApi;
+}) {
+  const [open, setOpen] = useState(false);
+  const [detail, setDetail] = useState<ParentsRunDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const panelId = `parents-run-${String(item.runId)}`;
+
+  const load = useCallback(async (): Promise<void> => {
+    setLoading(true);
+    setProblem(null);
+    try {
+      setDetail(await api.readRun(item.runId));
+    } catch (error) {
+      setProblem(error instanceof Error ? error.message : 'Не получилось загрузить занятие');
+    } finally {
+      setLoading(false);
+    }
+  }, [api, item.runId]);
+
+  function toggle(): void {
+    const next = !open;
+    setOpen(next);
+    if (next && detail === null && !loading && problem === null) void load();
+  }
+
+  return (
+    <li className={`activity-${item.kind}${open ? ' open' : ''}`}>
+      <button
+        aria-controls={panelId}
+        aria-expanded={open}
+        className="parents-activity-toggle"
+        type="button"
+        onClick={toggle}
+      >
+        <span className="parents-activity-summary">
+          <span><strong>{KIND_NAMES[item.kind]}</strong><small>{SUBJECT_NAMES[item.subject]}</small></span>
+          <span>{item.correct} из {item.total} · {item.activeMinutes} мин
+            {item.kind === 'boss' && ` · ${item.bossOutcome === 'won' ? 'победа' : 'попытка'}`}</span>
+        </span>
+        <time dateTime={item.finishedAt}>{activityDateFormatter.format(new Date(item.finishedAt))}</time>
+        <span className="parents-activity-chevron" aria-hidden="true">⌄</span>
+      </button>
+      {open && <div className="parents-activity-detail" id={panelId}>
+        {loading && <p role="status">Загружаю вопросы и ответы…</p>}
+        {problem !== null && <div className="parents-run-detail-problem" role="alert">
+          <p>{problem}</p>
+          <button type="button" onClick={() => void load()}>Повторить</button>
+        </div>}
+        {detail !== null && <RunDetail detail={detail} />}
+      </div>}
+    </li>
+  );
+}
+
 function Flags({ dashboard }: { dashboard: ParentsDashboard }) {
   const observations = [
     ...(dashboard.flags.threeFullDaysWithoutRun ? ['Три полных дня без обычных забегов.'] : []),
@@ -456,13 +601,8 @@ export function ParentsScreen({ api = browserParentsApi }: { api?: ParentsApi })
           <div className="section-heading"><p>История занятий</p><h2 id="parents-activity-title">Лента забегов</h2></div>
           {dashboard.activity.length === 0
             ? <p className="parents-empty">За эту неделю завершённых забегов пока нет.</p>
-            : <ol className="parents-activity">{dashboard.activity.map((item, index) => (
-              <li className={`activity-${item.kind}`} key={`${item.finishedAt}:${String(index)}`}>
-                <div><strong>{KIND_NAMES[item.kind]}</strong><small>{SUBJECT_NAMES[item.subject]}</small></div>
-                <p>{item.correct} из {item.total} · {item.activeMinutes} мин
-                  {item.kind === 'boss' && ` · ${item.bossOutcome === 'won' ? 'победа' : 'попытка'}`}</p>
-                <time dateTime={item.finishedAt}>{activityDateFormatter.format(new Date(item.finishedAt))}</time>
-              </li>
+            : <ol className="parents-activity">{dashboard.activity.map((item) => (
+              <ActivityItem api={api} item={item} key={item.runId} />
             ))}</ol>}
         </section>
       </div>

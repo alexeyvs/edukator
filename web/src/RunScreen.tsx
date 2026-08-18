@@ -16,7 +16,7 @@ import {
   type FinishLearningResponse,
   type LearningApi,
 } from './learning-api';
-import { TaskPrompt } from './TaskPrompt';
+import { SafeRichText, TaskPrompt } from './TaskPrompt';
 
 const NO_TASK_RETRY_MS = 2_000;
 const DISPUTE_FIRST_DELAY_MS = 1_000;
@@ -376,7 +376,7 @@ export function RunScreen({
             <p className="verdict">{result.correct ? 'Верно' : 'Пока не сошлось'} <strong>+{result.xp} XP</strong></p>
             <dl>
               <div><dt>Эталон</dt><dd>{result.answer}</dd></div>
-              <div><dt>Разбор</dt><dd>{result.explain}</dd></div>
+              <div><dt>Разбор</dt><dd><SafeRichText source={result.explain} /></dd></div>
               <div><dt>Напарник</dt><dd>{result.joke}</dd></div>
             </dl>
             {disputeStatus === 'open' && <p className="dispute-note">Разбираюсь. Это может занять пару минут…</p>}

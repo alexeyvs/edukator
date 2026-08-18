@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { FinishScreen } from './FinishScreen';
-import { TaskPrompt } from './TaskPrompt';
+import { SafeRichText, TaskPrompt } from './TaskPrompt';
 import {
   browserRunApi,
   RunApiError,
@@ -183,7 +183,7 @@ export function TriageScreen({ runId, api = browserRunApi, wait = defaultWait }:
             <p className="verdict"><span>{result.correct ? 'Верно' : 'Пока не сошлось'}</span> <strong>+{result.xp} XP</strong></p>
             <dl>
               <div><dt>Эталон</dt><dd>{result.answer}</dd></div>
-              <div><dt>Разбор</dt><dd>{result.explain}</dd></div>
+              <div><dt>Разбор</dt><dd><SafeRichText source={result.explain} /></dd></div>
               <div><dt>Напарник</dt><dd>{result.joke}</dd></div>
             </dl>
             {disputeStatus === 'open' && <p className="dispute-note">Разбираюсь. Это может занять пару минут…</p>}

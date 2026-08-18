@@ -31,6 +31,7 @@ interface ParentsGap {
 }
 
 interface ParentsActivity {
+  runId: number;
   kind: RunKind;
   subject: Subject;
   startedAt: string;
@@ -39,6 +40,37 @@ interface ParentsActivity {
   correct: number;
   activeMinutes: number;
   bossOutcome?: BossOutcome;
+}
+
+export interface ParentsRunAttempt {
+  number: number;
+  topicTitle: string;
+  answerFormat: 'number' | 'text' | 'choice';
+  question: string;
+  instruction?: string;
+  material?: string;
+  materialFormat?: 'none' | 'text' | 'math';
+  choices: string[];
+  studentAnswer: string;
+  correctAnswer: string;
+  explanation: string;
+  hint?: string;
+  correct: boolean;
+  correction: boolean;
+  durationMilliseconds: number;
+  answeredAt: string;
+}
+
+export interface ParentsRunDetail {
+  runId: number;
+  kind: RunKind;
+  subject: Subject;
+  startedAt: string;
+  finishedAt: string;
+  total: number;
+  correct: number;
+  activeMilliseconds: number;
+  attempts: ParentsRunAttempt[];
 }
 
 /** Единый публичный контракт, который целиком возвращает `GET /api/parents`. */
@@ -77,6 +109,22 @@ interface AttemptRow {
   topic_id: string;
   duration_ms: number;
   created_at: string;
+}
+
+interface AttemptDetailRow extends AttemptRow {
+  id: number;
+  task_id: number;
+  answer: string;
+  is_correct: number;
+  hint_used: number;
+  question: string;
+  instruction: string | null;
+  material: string | null;
+  material_format: string | null;
+  choices: string | null;
+  correct_answer: string;
+  hint: string | null;
+  explain: string | null;
 }
 
 interface SnapshotRow {
@@ -325,12 +373,128 @@ function readActivity(
         throw new Error(`Дашборд родителей: завершённый boss run ${id} без исхода`);
       }
       return {
-        kind: item.kind, subject: item.subject, startedAt: item.row.started_at,
+        runId: id, kind: item.kind, subject: item.subject, startedAt: item.row.started_at,
         finishedAt: item.row.finished_at, total: item.row.total, correct: item.row.correct,
         activeMinutes: roundMinutes(milliseconds.get(id) ?? 0),
         ...(bossOutcome === undefined ? {} : { bossOutcome }),
       };
     });
+}
+
+function parseChoices(value: string | null, taskId: number): string[] {
+  if (value === null) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(`Дашборд родителей: choices задания ${taskId} не является JSON`);
+  }
+  if (!Array.isArray(parsed) || parsed.some((choice) => typeof choice !== 'string')) {
+    throw new Error(`Дашборд родителей: choices задания ${taskId} не является массивом строк`);
+  }
+  return parsed as string[];
+}
+
+/**
+ * Возвращает полную последовательность ответов одного занятия из текущего
+ * семисуточного окна. Повторные ответы остаются отдельными строками: только так
+ * родитель видит не итоговую маску, а реальный ход исправления.
+ */
+export function readParentsRunDetail(
+  db: Database,
+  graph: TopicGraph,
+  runId: number,
+  now: Date,
+): ParentsRunDetail | null {
+  if (!Number.isSafeInteger(runId) || runId <= 0) return null;
+  if (!Number.isFinite(now.getTime())) {
+    throw new Error(`Дашборд родителей: некорректное now (${String(now)})`);
+  }
+  const until = now.toISOString();
+  const since = new Date(now.getTime() - WINDOW_DAYS * DAY_MS).toISOString();
+  const row = db.prepare<[number, string, string], RunRow>(
+    `SELECT id, subject, kind, started_at, finished_at, summary, total, correct
+       FROM runs WHERE id = ? AND finished_at IS NOT NULL
+         AND finished_at >= ? AND finished_at <= ?
+         AND (kind = 'boss' OR summary IS NOT NULL)`,
+  ).get(runId, since, until);
+  if (row === undefined) return null;
+
+  const subject = subjectOf(row.subject, `runs.id=${row.id}`);
+  const kind = kindOf(row.kind);
+  const startedAt = requireDate(row.started_at, `runs.started_at id=${row.id}`);
+  const finishedAt = requireDate(row.finished_at, `runs.finished_at id=${row.id}`);
+  if (finishedAt < startedAt || row.total < 0 || row.correct < 0 || row.correct > row.total) {
+    throw new Error(`Дашборд родителей: повреждённый завершённый run ${row.id}`);
+  }
+
+  const rows = db.prepare<[number], AttemptDetailRow>(
+    `SELECT attempts.id, attempts.task_id, attempts.run_id, attempts.topic_id,
+            attempts.answer, attempts.is_correct, attempts.hint_used,
+            attempts.duration_ms, attempts.created_at,
+            task_bank.question, task_bank.instruction, task_bank.material,
+            task_bank.material_format, task_bank.choices,
+            task_bank.answer AS correct_answer, task_bank.hint, task_bank.explain
+       FROM attempts JOIN task_bank ON task_bank.id = attempts.task_id
+      WHERE attempts.run_id = ? ORDER BY attempts.created_at, attempts.id`,
+  ).all(runId);
+  validateAttempts(rows, graph);
+
+  const seenTasks = new Set<number>();
+  let activeMilliseconds = 0;
+  const attempts = rows.map((attempt, index): ParentsRunAttempt => {
+    const topic = graph.byId.get(attempt.topic_id);
+    if (topic === undefined) {
+      throw new Error(`Дашборд родителей: попытка с неизвестной темой (${attempt.topic_id})`);
+    }
+    if (attempt.is_correct !== 0 && attempt.is_correct !== 1) {
+      throw new Error(`Дашборд родителей: повреждён результат попытки ${attempt.id}`);
+    }
+    if (attempt.hint_used !== 0 && attempt.hint_used !== 1) {
+      throw new Error(`Дашборд родителей: повреждена подсказка попытки ${attempt.id}`);
+    }
+    if (attempt.material_format !== null &&
+        attempt.material_format !== 'none' &&
+        attempt.material_format !== 'text' &&
+        attempt.material_format !== 'math') {
+      throw new Error(`Дашборд родителей: повреждён формат материала задания ${attempt.task_id}`);
+    }
+    activeMilliseconds += attempt.duration_ms;
+    const correction = seenTasks.has(attempt.task_id);
+    seenTasks.add(attempt.task_id);
+    return {
+      number: index + 1,
+      topicTitle: topic.title,
+      answerFormat: topic.answerFormat,
+      question: attempt.question,
+      ...(attempt.instruction === null ? {} : { instruction: attempt.instruction }),
+      ...(attempt.material === null ? {} : { material: attempt.material }),
+      ...(attempt.material_format === null
+        ? {}
+        : { materialFormat: attempt.material_format }),
+      choices: parseChoices(attempt.choices, attempt.task_id),
+      studentAnswer: attempt.answer,
+      correctAnswer: attempt.correct_answer,
+      explanation: attempt.explain ?? '',
+      ...(attempt.hint_used === 1 && attempt.hint !== null ? { hint: attempt.hint } : {}),
+      correct: attempt.is_correct === 1,
+      correction,
+      durationMilliseconds: attempt.duration_ms,
+      answeredAt: attempt.created_at,
+    };
+  });
+
+  return {
+    runId: row.id,
+    kind,
+    subject,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    total: row.total,
+    correct: row.correct,
+    activeMilliseconds,
+    attempts,
+  };
 }
 
 function missedThreeFullDays(runs: RunRow[], now: Date): boolean {

@@ -2,7 +2,7 @@
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { TaskPrompt } from './TaskPrompt';
+import { SafeRichText, TaskPrompt } from './TaskPrompt';
 import type { RunTask } from './run-api';
 import './test-setup';
 
@@ -39,6 +39,14 @@ function prompt(value = '', onChange = vi.fn(), overrides: Partial<RunTask> = {}
 }
 
 describe('структурированное задание', () => {
+  it('рендерит inline и display LaTeX внутри обычного текста', () => {
+    const { container } = render(<SafeRichText source={String.raw`Дробь \(\frac{2}{3}\), затем \[x=4\].`} />);
+
+    expect(container).toHaveTextContent('Дробь');
+    expect(container.querySelector('.task-math-inline .katex')).not.toBeNull();
+    expect(container.querySelector('.task-math .katex-display')).not.toBeNull();
+  });
+
   it('не запирает числовой ответ в десятичной клавиатуре', () => {
     prompt();
 

@@ -106,6 +106,53 @@ describe('маршрут родителей', () => {
     expect(response.body).not.toContain('СКРЫТАЯ ПОДСКАЗКА');
   });
 
+  it('по запросу раскрывает вопросы, ответы, эталон и время завершённого занятия', async () => {
+    const runId = Number(db.prepare(
+      `INSERT INTO runs
+        (subject, kind, topic_id, started_at, finished_at, summary, total, correct)
+       VALUES ('math', 'run', 'math.internal-secret', ?, ?, '{}', 1, 0)`,
+    ).run('2026-08-08T10:00:00.000Z', '2026-08-08T10:10:00.000Z').lastInsertRowid);
+    const taskId = Number(db.prepare(
+      `INSERT INTO task_bank
+        (topic_id, question, answer, hint, explain, difficulty, status)
+       VALUES ('math.internal-secret', 'Сколько будет 2 + 2?', '4', 'Сложи числа',
+               'Два плюс два равно четырём.', 1, 'used')`,
+    ).run().lastInsertRowid);
+    db.prepare(
+      `INSERT INTO attempts
+        (task_id, topic_id, run_id, answer, is_correct, hint_used, duration_ms, created_at)
+       VALUES (?, 'math.internal-secret', ?, '5', 0, 1, 12500, ?)`,
+    ).run(taskId, runId, '2026-08-08T10:05:00.000Z');
+
+    const response = await app.inject({ method: 'GET', url: `/api/parents/runs/${String(runId)}` });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      runId,
+      kind: 'run',
+      subject: 'math',
+      activeMilliseconds: 12_500,
+      attempts: [{
+        number: 1,
+        topicTitle: 'Публичная тема math',
+        question: 'Сколько будет 2 + 2?',
+        studentAnswer: '5',
+        correctAnswer: '4',
+        explanation: 'Два плюс два равно четырём.',
+        hint: 'Сложи числа',
+        correct: false,
+        durationMilliseconds: 12_500,
+      }],
+    });
+    expect(response.body).not.toContain('internal-secret');
+  });
+
+  it('проверяет id и не раскрывает занятие вне недельной сводки', async () => {
+    expect((await app.inject({ method: 'GET', url: '/api/parents/runs/nope' })).statusCode).toBe(400);
+    const missing = await app.inject({ method: 'GET', url: '/api/parents/runs/999' });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toEqual({ error: 'Занятие не найдено в текущей недельной сводке' });
+  });
+
   it('устанавливает оба ручных режима и возвращает управление автоматике', async () => {
     const change = async (mode: string) => app.inject({
       method: 'PUT',
@@ -291,6 +338,8 @@ describe('маршрут родителей', () => {
     try {
       expect((await detached.inject({ method: 'GET', url: '/api/parents' })).statusCode).toBe(503);
       expect((await unavailable.inject({ method: 'GET', url: '/api/parents' })).statusCode).toBe(503);
+      expect((await detached.inject({ method: 'GET', url: '/api/parents/runs/1' })).statusCode).toBe(503);
+      expect((await unavailable.inject({ method: 'GET', url: '/api/parents/runs/1' })).statusCode).toBe(503);
       expect((await detached.inject({
         method: 'PUT', url: '/api/parents/computer-access', payload: { mode: 'blocked' },
       })).statusCode).toBe(503);

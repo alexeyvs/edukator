@@ -9,7 +9,7 @@ import {
 } from '../computer-access.js';
 import { readDailyGate } from '../daily-gate.js';
 import { verifyParentPin } from '../parent-pin.js';
-import { readParentsDashboard } from '../parents.js';
+import { readParentsDashboard, readParentsRunDetail } from '../parents.js';
 
 export const PARENT_AUTH_FAILURE_LIMIT = 5;
 export const PARENT_AUTH_WINDOW_MS = 5 * 60 * 1000;
@@ -76,6 +76,24 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
     });
   });
 
+  app.get('/api/parents/runs/:runId', (request, reply) => {
+    const stopped = unavailable(options, reply);
+    if (stopped !== undefined) return stopped;
+    const raw = (request.params as { runId?: string }).runId ?? '';
+    if (!/^\d+$/u.test(raw)) {
+      return reply.code(400).send({ error: 'Идентификатор занятия должен быть положительным целым числом' });
+    }
+    const runId = Number(raw);
+    if (!Number.isSafeInteger(runId) || runId <= 0) {
+      return reply.code(400).send({ error: 'Идентификатор занятия должен быть положительным целым числом' });
+    }
+    const detail = readParentsRunDetail(options.db, options.graph, runId, now());
+    if (detail === null) {
+      return reply.code(404).send({ error: 'Занятие не найдено в текущей недельной сводке' });
+    }
+    return reply.send(detail);
+  });
+
   app.put('/api/parents/computer-access', (request, reply) => {
     const stopped = unavailable(options, reply);
     if (stopped !== undefined) return stopped;
@@ -118,5 +136,6 @@ export function registerUnavailableParents(app: FastifyInstance, reason: string)
   const send = (_request: unknown, reply: FastifyReply): FastifyReply =>
     reply.code(503).send({ error: `Дашборд родителей недоступен: ${reason}` });
   app.get('/api/parents', send);
+  app.get('/api/parents/runs/:runId', send);
   app.put('/api/parents/computer-access', send);
 }

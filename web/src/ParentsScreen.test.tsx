@@ -3,7 +3,12 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ParentsScreen } from './ParentsScreen';
-import { ComputerAccessError, type ParentsApi, type ParentsDashboard } from './parents-api';
+import {
+  ComputerAccessError,
+  type ParentsApi,
+  type ParentsDashboard,
+  type ParentsRunDetail,
+} from './parents-api';
 import './test-setup';
 
 afterEach(() => {
@@ -38,17 +43,66 @@ const DASHBOARD: ParentsDashboard = {
     { title: 'Обыкновенные дроби', subject: 'math' },
   ],
   activity: [
-    { kind: 'lesson', subject: 'math', startedAt: '2026-08-08T10:00:00.000Z', finishedAt: '2026-08-08T10:08:00.000Z', total: 5, correct: 4, activeMinutes: 6 },
-    { kind: 'run', subject: 'math', startedAt: '2026-08-08T09:00:00.000Z', finishedAt: '2026-08-08T09:15:00.000Z', total: 5, correct: 4, activeMinutes: 12 },
-    { kind: 'triage', subject: 'english', startedAt: '2026-08-07T09:00:00.000Z', finishedAt: '2026-08-07T09:10:00.000Z', total: 4, correct: 2, activeMinutes: 8 },
-    { kind: 'boss', subject: 'russian', startedAt: '2026-08-06T09:00:00.000Z', finishedAt: '2026-08-06T09:10:00.000Z', total: 5, correct: 5, activeMinutes: 9, bossOutcome: 'won' },
+    { runId: 4, kind: 'lesson', subject: 'math', startedAt: '2026-08-08T10:00:00.000Z', finishedAt: '2026-08-08T10:08:00.000Z', total: 5, correct: 4, activeMinutes: 6 },
+    { runId: 3, kind: 'run', subject: 'math', startedAt: '2026-08-08T09:00:00.000Z', finishedAt: '2026-08-08T09:15:00.000Z', total: 5, correct: 4, activeMinutes: 12 },
+    { runId: 2, kind: 'triage', subject: 'english', startedAt: '2026-08-07T09:00:00.000Z', finishedAt: '2026-08-07T09:10:00.000Z', total: 4, correct: 2, activeMinutes: 8 },
+    { runId: 1, kind: 'boss', subject: 'russian', startedAt: '2026-08-06T09:00:00.000Z', finishedAt: '2026-08-06T09:10:00.000Z', total: 5, correct: 5, activeMinutes: 9, bossOutcome: 'won' },
   ],
   flags: { threeFullDaysWithoutRun: true, forecastNotGrowing: ['russian'], reduceLoad: ['math'] },
 };
 
-function parentsApi(value: ParentsDashboard = DASHBOARD): ParentsApi {
+const RUN_DETAIL: ParentsRunDetail = {
+  runId: 4,
+  kind: 'lesson',
+  subject: 'math',
+  startedAt: '2026-08-08T10:00:00.000Z',
+  finishedAt: '2026-08-08T10:08:00.000Z',
+  total: 5,
+  correct: 4,
+  activeMilliseconds: 96_000,
+  attempts: [
+    {
+      number: 1,
+      topicTitle: 'Обыкновенные дроби',
+      answerFormat: 'choice',
+      question: 'Какая дробь больше?',
+      instruction: 'Выбери большую дробь',
+      material: '\\frac{2}{3} \\quad \\frac{3}{5}',
+      materialFormat: 'math',
+      choices: ['2/3', '3/5'],
+      studentAnswer: '3/5',
+      correctAnswer: '2/3',
+      explanation: String.raw`Приведи дроби к общему знаменателю: \(\frac{2}{3}>\frac{3}{5}\).`,
+      hint: 'Сравни через общий знаменатель.',
+      correct: false,
+      correction: false,
+      durationMilliseconds: 61_000,
+      answeredAt: '2026-08-08T10:02:00.000Z',
+    },
+    {
+      number: 2,
+      topicTitle: 'Обыкновенные дроби',
+      answerFormat: 'choice',
+      question: 'Какая дробь больше?',
+      instruction: 'Выбери большую дробь',
+      material: '\\frac{2}{3} \\quad \\frac{3}{5}',
+      materialFormat: 'math',
+      choices: ['2/3', '3/5'],
+      studentAnswer: '2/3',
+      correctAnswer: '2/3',
+      explanation: String.raw`Приведи дроби к общему знаменателю: \(\frac{2}{3}>\frac{3}{5}\).`,
+      correct: true,
+      correction: true,
+      durationMilliseconds: 35_000,
+      answeredAt: '2026-08-08T10:03:00.000Z',
+    },
+  ],
+};
+
+function parentsApi(value: ParentsDashboard = DASHBOARD, detail: ParentsRunDetail = RUN_DETAIL): ParentsApi {
   return {
     read: vi.fn().mockResolvedValue(value),
+    readRun: vi.fn().mockResolvedValue(detail),
     changeComputerAccess: vi.fn().mockImplementation(async (mode) => ({
       ...value.computerAccess,
       override: mode === 'automatic' ? null : {
@@ -95,6 +149,34 @@ describe('родительский дашборд', () => {
       .toHaveTextContent('Три полных дня без обычных забегов');
     expect(container.querySelectorAll('.access-mode-control button')).toHaveLength(3);
     expect(container).not.toHaveTextContent('internal-secret');
+  });
+
+  it('лениво раскрывает вопросы, ответы, исправления, объяснения и время занятия', async () => {
+    const api = parentsApi();
+    const { container } = render(<ParentsScreen api={api} />);
+
+    const toggle = await screen.findByRole('button', { name: /Тест по разбору/u });
+    expect(api.readRun).not.toHaveBeenCalled();
+    fireEvent.click(toggle);
+
+    expect(await screen.findByText('1 мин 36 сек')).toBeInTheDocument();
+    expect(api.readRun).toHaveBeenCalledWith(4);
+    expect(screen.getAllByText('Выбери большую дробь')).toHaveLength(2);
+    expect(screen.getByText('3/5', { selector: '.parents-answer-comparison strong' })).toBeInTheDocument();
+    expect(screen.getAllByText('2/3', { selector: '.parents-answer-comparison strong' })).toHaveLength(3);
+    expect(screen.getByText('Исправление')).toBeInTheDocument();
+    expect(screen.getByText('1 мин 1 сек')).toBeInTheDocument();
+    expect(screen.getByText('35 сек')).toBeInTheDocument();
+    expect(screen.getByText('Использована подсказка')).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByText('Показать объяснение')[0] as HTMLElement);
+    expect(container.querySelectorAll('.parents-attempt-explanation .katex')).toHaveLength(2);
+    expect(container.querySelector('.parents-attempt-explanation .safe-rich-text'))
+      .toHaveTextContent('Приведи дроби к общему знаменателю');
+
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
+    expect(api.readRun).toHaveBeenCalledTimes(1);
   });
 
   it('ставит непрерывный переключатель сразу после intro и показывает автоматический режим', async () => {

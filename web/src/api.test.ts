@@ -31,6 +31,7 @@ describe('браузерные API-адаптеры', () => {
     await browserHomeApi.finish(7);
     await browserProfileApi.read();
     await browserParentsApi.read();
+    await browserParentsApi.readRun(42);
     await browserParentsApi.changeComputerAccess('blocked', '123456');
     await browserProfileApi.save({
       name: 'Тимофей',
@@ -53,6 +54,7 @@ describe('браузерные API-адаптеры', () => {
       ['/api/run/7/finish', { method: 'POST' }],
       ['/api/profile'],
       ['/api/parents'],
+      ['/api/parents/runs/42'],
       ['/api/parents/computer-access', expect.objectContaining({
         method: 'PUT',
         headers: { authorization: 'Bearer 123456', 'content-type': 'application/json' },

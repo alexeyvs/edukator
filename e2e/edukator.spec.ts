@@ -466,6 +466,10 @@ test('/parents напрямую и после reload показывает про
     await expect(page.locator('.parents-activity')).toContainText('Триаж');
     await expect(page.locator('.parents-activity')).toContainText('Босс');
     await expect(page.locator('.parents-flags')).toContainText('не растёт пять дней');
+    await page.locator('.parents-activity-toggle').first().click();
+    await expect(page.locator('.parents-run-detail')).toContainText('Ответ ученика');
+    await expect(page.locator('.parents-run-detail')).toContainText('Правильный ответ');
+    await expect(page.locator('.parents-run-detail')).toContainText('3 мин');
 
     await page.reload();
     await expect(page).toHaveURL(`${harness.url}/parents`);

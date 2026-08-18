@@ -1,6 +1,6 @@
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
-import { memo, type ChangeEvent } from 'react';
+import { memo, type ChangeEvent, type ReactNode } from 'react';
 import type { RunTask } from './run-api';
 
 export interface TaskPromptProps {
@@ -15,10 +15,16 @@ export interface TaskPromptProps {
   readOnly?: boolean;
 }
 
-export const SafeFormula = memo(function SafeFormula({ source }: { source: string }) {
+export const SafeFormula = memo(function SafeFormula({
+  source,
+  inline = false,
+}: {
+  source: string;
+  inline?: boolean;
+}) {
   try {
     const html = katex.renderToString(source, {
-      displayMode: true,
+      displayMode: !inline,
       output: 'htmlAndMathml',
       trust: false,
       throwOnError: true,
@@ -26,11 +32,38 @@ export const SafeFormula = memo(function SafeFormula({ source }: { source: strin
       maxSize: 12,
       maxExpand: 1_000,
     });
-    return <div className="task-math" dangerouslySetInnerHTML={{ __html: html }} />;
+    return inline
+      ? <span className="task-math-inline" dangerouslySetInnerHTML={{ __html: html }} />
+      : <div className="task-math" dangerouslySetInnerHTML={{ __html: html }} />;
   } catch {
-    return <pre className="task-math-source" aria-label="Формула в исходной записи">{source}</pre>;
+    return inline
+      ? <code className="task-math-source-inline" aria-label="Формула в исходной записи">{source}</code>
+      : <pre className="task-math-source" aria-label="Формула в исходной записи">{source}</pre>;
   }
 });
+
+const FORMULA_DELIMITERS = /\\\(([\s\S]*?)\\\)|\\\[([\s\S]*?)\\\]/gu;
+
+/** Безопасно смешивает обычный текст с LaTeX в \(...\) и \[...\]. */
+export function SafeRichText({ source }: { source: string }) {
+  const parts: ReactNode[] = [];
+  let start = 0;
+  for (const match of source.matchAll(FORMULA_DELIMITERS)) {
+    const index = match.index;
+    if (index > start) parts.push(source.slice(start, index));
+    const inline = match[1] !== undefined;
+    parts.push(
+      <SafeFormula
+        inline={inline}
+        key={`${String(index)}:${match[0]}`}
+        source={(match[1] ?? match[2]) as string}
+      />,
+    );
+    start = index + match[0].length;
+  }
+  if (start < source.length) parts.push(source.slice(start));
+  return <div className="safe-rich-text">{parts}</div>;
+}
 
 function ChoiceAnswer({ task, answer, onAnswerChange, readOnly }: Pick<TaskPromptProps, 'task' | 'answer' | 'onAnswerChange' | 'readOnly'>) {
   return (

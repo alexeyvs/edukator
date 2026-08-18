@@ -35,6 +35,7 @@ export interface ParentsDashboard {
   };
   gaps: Array<{ title: string; subject: Subject }>;
   activity: Array<{
+    runId: number;
     kind: ParentsRunKind;
     subject: Subject;
     startedAt: string;
@@ -51,13 +52,50 @@ export interface ParentsDashboard {
   };
 }
 
+export interface ParentsRunAttempt {
+  number: number;
+  topicTitle: string;
+  answerFormat: 'number' | 'text' | 'choice';
+  question: string;
+  instruction?: string;
+  material?: string;
+  materialFormat?: 'none' | 'text' | 'math';
+  choices: string[];
+  studentAnswer: string;
+  correctAnswer: string;
+  explanation: string;
+  hint?: string;
+  correct: boolean;
+  correction: boolean;
+  durationMilliseconds: number;
+  answeredAt: string;
+}
+
+export interface ParentsRunDetail {
+  runId: number;
+  kind: ParentsRunKind;
+  subject: Subject;
+  startedAt: string;
+  finishedAt: string;
+  total: number;
+  correct: number;
+  activeMilliseconds: number;
+  attempts: ParentsRunAttempt[];
+}
+
 export interface ParentsApi {
   read(): Promise<ParentsDashboard>;
+  readRun(runId: number): Promise<ParentsRunDetail>;
   changeComputerAccess(mode: ComputerAccessMode, pin: string): Promise<DailyGateState>;
 }
 
 export const browserParentsApi: ParentsApi = {
   read: () => requestJson<ParentsDashboard>('/api/parents', undefined, 'Не получилось загрузить сводку'),
+  readRun: (runId) => requestJson<ParentsRunDetail>(
+    `/api/parents/runs/${String(runId)}`,
+    undefined,
+    'Не получилось загрузить занятие',
+  ),
   changeComputerAccess: (mode, pin) => requestJson<DailyGateState>(
     '/api/parents/computer-access',
     {

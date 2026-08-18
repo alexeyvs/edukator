@@ -5,7 +5,11 @@ import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import { openDatabase } from '../server/db.js';
 import { buildTopicGraph, syncTopicState, type Topic, type TopicGraph } from '../server/curriculum.js';
-import { readParentsDashboard, PARENTS_PLANNED_MINUTES } from '../server/parents.js';
+import {
+  readParentsDashboard,
+  readParentsRunDetail,
+  PARENTS_PLANNED_MINUTES,
+} from '../server/parents.js';
 
 const NOW = new Date('2026-08-08T12:00:00.000Z');
 const databases: Database[] = [];
@@ -210,6 +214,82 @@ describe('readParentsDashboard', () => {
     expect(dashboard.activity).toEqual([
       expect.objectContaining({ kind: 'lesson', activeMinutes: 1.5 }),
     ]);
+  });
+
+  it('возвращает полную историю занятия с заданиями, исправлениями и суммарным временем', () => {
+    const { db, graph } = setup();
+    const lesson = run(
+      db, 'math', 'math.fractions', 'lesson',
+      '2026-08-08T09:00:00.000Z', '2026-08-08T09:20:00.000Z', 1, 1,
+    );
+    const taskId = Number(db.prepare(
+      `INSERT INTO task_bank
+        (topic_id, question, instruction, material, material_format, choices,
+         answer, hint, explain, difficulty, status)
+       VALUES ('math.fractions', 'Полная формулировка', 'Выбери дробь', '\\frac{2}{3}',
+               'math', '["2/3","3/5"]', '2/3', 'Сравни знаменатели',
+               'Приведи к общему знаменателю', 2, 'used')`,
+    ).run().lastInsertRowid);
+    db.prepare(
+      `INSERT INTO attempts
+        (task_id, topic_id, run_id, answer, is_correct, hint_used, duration_ms, is_current, created_at)
+       VALUES (?, 'math.fractions', ?, '3/5', 0, 1, 61000, 0, '2026-08-08T09:05:00.000Z'),
+              (?, 'math.fractions', ?, '2/3', 1, 0, 35000, 1, '2026-08-08T09:06:00.000Z')`,
+    ).run(taskId, lesson, taskId, lesson);
+
+    expect(readParentsRunDetail(db, graph, lesson, NOW)).toEqual({
+      runId: lesson,
+      kind: 'lesson',
+      subject: 'math',
+      startedAt: '2026-08-08T09:00:00.000Z',
+      finishedAt: '2026-08-08T09:20:00.000Z',
+      total: 1,
+      correct: 1,
+      activeMilliseconds: 96_000,
+      attempts: [
+        expect.objectContaining({
+          number: 1,
+          topicTitle: 'Дроби',
+          answerFormat: 'text',
+          question: 'Полная формулировка',
+          instruction: 'Выбери дробь',
+          material: '\\frac{2}{3}',
+          materialFormat: 'math',
+          choices: ['2/3', '3/5'],
+          studentAnswer: '3/5',
+          correctAnswer: '2/3',
+          explanation: 'Приведи к общему знаменателю',
+          hint: 'Сравни знаменатели',
+          correct: false,
+          correction: false,
+          durationMilliseconds: 61_000,
+        }),
+        expect.objectContaining({
+          number: 2,
+          studentAnswer: '2/3',
+          correct: true,
+          correction: true,
+          durationMilliseconds: 35_000,
+        }),
+      ],
+    });
+  });
+
+  it('не раскрывает незавершённые и вышедшие из недельного окна занятия', () => {
+    const { db, graph } = setup();
+    const old = run(
+      db, 'math', 'math.fractions', 'run',
+      '2026-07-31T09:00:00.000Z', '2026-07-31T09:20:00.000Z',
+    );
+    const unfinished = run(
+      db, 'math', 'math.fractions', 'run',
+      '2026-08-08T09:00:00.000Z', '2026-08-08T09:20:00.000Z',
+    );
+    db.prepare('UPDATE runs SET finished_at = NULL, summary = NULL WHERE id = ?').run(unfinished);
+
+    expect(readParentsRunDetail(db, graph, old, NOW)).toBeNull();
+    expect(readParentsRunDetail(db, graph, unfinished, NOW)).toBeNull();
+    expect(readParentsRunDetail(db, graph, 999, NOW)).toBeNull();
   });
 
   it('показывает полное активное время завершённого в окне забега', () => {
