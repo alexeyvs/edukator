@@ -26,9 +26,9 @@ const PLAN: DayPlanResponse = {
     { subject: 'english', score: 2.5, band: .5, low: 2, high: 3 },
   ],
   triage: [
-    { subject: 'math', passed: true },
-    { subject: 'russian', passed: false },
-    { subject: 'english', passed: false },
+    { subject: 'math', passed: true, needed: false },
+    { subject: 'russian', passed: false, needed: true },
+    { subject: 'english', passed: false, needed: true },
   ],
   streak: { current: 3, best: 5, completedToday: false },
   topics: [
@@ -249,7 +249,7 @@ describe('главный экран', () => {
   it('до первого триажа показывает только его, после — план дня', async () => {
     const before = apiWith({
       ...PLAN,
-      triage: PLAN.triage.map((item) => ({ ...item, passed: false })),
+      triage: PLAN.triage.map((item) => ({ ...item, passed: false, needed: true })),
     });
     const view = render(<HomeScreen api={before} now={() => new Date('2026-08-08T12:00:00Z')} />);
 
@@ -265,6 +265,21 @@ describe('главный экран', () => {
     expect(screen.getByRole('button', { name: 'Пройти триаж · Русский язык' })).toBeInTheDocument();
     expect(screen.getByText('3.5')).toBeInTheDocument();
     expect(screen.getByText('4.0')).toBeInTheDocument();
+  });
+
+  it('не предлагает триаж предмета, откалиброванного обычными забегами', async () => {
+    render(<HomeScreen api={apiWith({
+      ...PLAN,
+      triage: [
+        { subject: 'math', passed: false, needed: false },
+        { subject: 'russian', passed: false, needed: true },
+        { subject: 'english', passed: false, needed: true },
+      ],
+    })} />);
+
+    expect(await screen.findByRole('heading', { name: 'Забеги на сегодня' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Пройти триаж · Русский язык' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Математика/u })).not.toBeInTheDocument();
   });
 
   it('пустой план дня даёт явное завершённое состояние', async () => {
@@ -418,7 +433,7 @@ describe('главный экран', () => {
   it('показывает рейтинг на финале подхваченного триажа', async () => {
     const api = apiWith({
       ...PLAN,
-      triage: PLAN.triage.map((item) => ({ ...item, passed: false })),
+      triage: PLAN.triage.map((item) => ({ ...item, passed: false, needed: true })),
     });
     vi.mocked(api.startTriage).mockResolvedValue({
       runId: 8,

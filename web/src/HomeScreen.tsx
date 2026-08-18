@@ -267,8 +267,8 @@ export function HomeScreen({
 
   if (finish !== null) return <FinishScreen result={finish.result} kind={finish.kind} />;
 
-  const anyTriagePassed = plan?.triage.some((item) => item.passed) ?? false;
-  const nextTriage = plan?.triage.find((item) => !item.passed)?.subject ?? 'math';
+  const anySubjectCalibrated = plan?.triage.some((item) => !item.needed) ?? false;
+  const nextTriage = plan?.triage.find((item) => item.needed)?.subject ?? 'math';
   const closedTopicIds = new Set(
     plan?.topics.filter((topic) => topic.readiness.status === 'closed').map((topic) => topic.id) ?? [],
   );
@@ -294,8 +294,8 @@ export function HomeScreen({
       <section className="home-intro">
         <div>
           <p className="home-kicker">План на сегодня</p>
-          <h1>{anyTriagePassed ? 'Выбирай первый забег' : 'Сначала сверим карту знаний'}</h1>
-          <p>{anyTriagePassed
+          <h1>{anySubjectCalibrated ? 'Выбирай первый забег' : 'Сначала сверим карту знаний'}</h1>
+          <p>{anySubjectCalibrated
             ? 'Короткие забеги держат темп и показывают, что уже стало увереннее.'
             : 'Триаж расставит темы по приоритету — после него появится план дня.'}</p>
         </div>
@@ -309,7 +309,7 @@ export function HomeScreen({
 
       {plan === null && problem === null ? (
         <section className="home-loading" aria-label="Загрузка плана">Собираю план дня…</section>
-      ) : plan === null ? null : !anyTriagePassed ? (
+      ) : plan === null ? null : !anySubjectCalibrated ? (
         <section className="triage-offer" aria-labelledby="triage-title">
           <span aria-hidden="true">01</span>
           <div>
@@ -396,7 +396,7 @@ export function HomeScreen({
                 <p>{plan.gate.completed} из {plan.gate.required} завершено</p>
                 <h2 id="day-plan-title">Забеги на сегодня</h2>
               </div>
-              {plan.triage.some((item) => !item.passed) && (
+              {plan.triage.some((item) => item.needed) && (
                 <button
                   className="secondary compact-triage"
                   type="button"

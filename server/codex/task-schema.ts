@@ -57,6 +57,16 @@ interface TaskBatchJson {
 }
 
 /**
+ * Разметка LaTeX там, где её никто не рендерит: разделители `\(`, `\[`, команда
+ * вроде `\frac` и пара `$…$`.
+ *
+ * Одиночный `$` сюда намеренно не входит: «скин стоит $5» — обычный текст, а не
+ * формула, и заворачивать из-за него весь батч значило бы терять четыре годных
+ * задания из пяти. Пары же в русском тексте не бывает.
+ */
+const LATEX_MARKUP = /\\[()[\]]|\\[a-zA-Z]{2,}|\$[^$\n]{1,60}\$/u;
+
+/**
  * Ключ для поиска повторов внутри `accept[]`. Берётся нормализация того же
  * формата, которым потом сверяется ответ ученика: две записи, неотличимые для
  * нормализатора, — мусор, а не варианты.
@@ -197,6 +207,14 @@ function taskProblems(task: GeneratedTask, format: AnswerFormat): string[] {
   }
   if (task.material_format === 'math' && task.material?.includes('$')) {
     problems.push('математический материал должен быть display-LaTeX без разделителей $');
+  }
+  // Разметку рендерит только ветвь `math`, и только на весь материал целиком:
+  // формула, вписанная внутрь предложения или в инструкцию, доезжает до экрана
+  // исходником — ученик видит «\(\frac{13}{40}\)» вместо дроби. Дробь в тексте
+  // пишется обычной косой чертой, поэтому ветвь ничего не отнимает.
+  const plain = [task.instruction ?? '', task.material_format === 'math' ? '' : (task.material ?? '')];
+  if (plain.some((text) => LATEX_MARKUP.test(text))) {
+    problems.push('LaTeX допустим только в material при material_format=math: в тексте пиши 13/40');
   }
   const choiceKeys = (task.choices ?? []).map(normalizeText);
   if (choiceKeys.some((choice) => choice === '') || new Set(choiceKeys).size !== choiceKeys.length) {

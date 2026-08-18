@@ -16,6 +16,7 @@ import { bossTopicState } from '../boss.js';
 import { bossProgress } from '../boss-rules.js';
 import { learningMaterialCards } from '../learning.js';
 import { readDailyGate } from '../daily-gate.js';
+import { readSubjectCalibrations } from '../subject-calibration.js';
 
 export interface RunRoutesOptions {
   db: Database;
@@ -23,15 +24,6 @@ export interface RunRoutesOptions {
   now?: () => Date;
   /** Соединение всё ещё привязано к текущему файлу базы. */
   available?: () => boolean;
-}
-
-function triagedSubjects(db: Database): Set<Subject> {
-  return new Set(
-    db.prepare<[], { subject: Subject }>(
-      `SELECT DISTINCT subject FROM runs
-        WHERE kind = 'triage' AND finished_at IS NOT NULL AND summary IS NOT NULL`,
-    ).all().map((row) => row.subject),
-  );
 }
 
 class BadRequest extends Error {}
@@ -125,7 +117,8 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
     if (stopped !== undefined) return stopped;
 
     const at = now();
-    const triaged = triagedSubjects(db);
+    const calibrations = readSubjectCalibrations(db, graph);
+    const triaged = new Set(SUBJECTS.filter((subject) => calibrations.get(subject)?.triagePassed));
     const gate = readDailyGate(db, at);
     const active = activeRunCards(db, graph, triaged);
     const planned = planFromDatabase(
@@ -148,6 +141,7 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
     const triage = SUBJECTS.map((subject) => ({
       subject,
       passed: triaged.has(subject),
+      needed: calibrations.get(subject)?.calibrated !== true,
     }));
 
     const topics = graph.order.map((topic) => {

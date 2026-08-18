@@ -75,7 +75,7 @@ export interface DayPlanResponse {
   plan: PlannedRun[];
   learning: LearningMaterialCard[];
   forecasts: SubjectForecast[];
-  triage: Array<{ subject: Subject; passed: boolean }>;
+  triage: Array<{ subject: Subject; passed: boolean; needed: boolean }>;
   streak: Streak;
   topics: HomeTopic[];
   gate: DailyGateState;

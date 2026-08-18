@@ -77,6 +77,22 @@ function triage(db: Database, subject: Topic['subject'], topicId: string): void 
   ).run(subject, topicId, NOW.toISOString(), NOW.toISOString());
 }
 
+function completedRunCoverage(db: Database, subject: Topic['subject'], topicIds: string[]): void {
+  const runId = Number(db.prepare(
+    `INSERT INTO runs (subject, kind, topic_id, started_at, finished_at, summary)
+     VALUES (?, 'run', ?, ?, ?, '{}')`,
+  ).run(subject, topicIds[0], NOW.toISOString(), NOW.toISOString()).lastInsertRowid);
+  const insertAttempt = db.prepare(
+    `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct)
+     VALUES (?, ?, ?, '4', 1)`,
+  );
+  for (const topicId of topicIds) {
+    const stored = storeTasks(db, topicId, [task(`coverage-${topicId}`)]).stored[0];
+    if (stored === undefined) throw new Error(`Не удалось сохранить задание покрытия ${topicId}`);
+    insertAttempt.run(stored.id, topicId, runId);
+  }
+}
+
 describe('отбор и подготовка учебных материалов', () => {
   let tempDir: string;
   let db: Database;
@@ -110,6 +126,13 @@ describe('отбор и подготовка учебных материалов
     triage(db, 'english', 'english.best');
     expect(selectLearningTopics(db, graph, NOW).map(({ topic: item }) => item.id).sort())
       .toEqual(['english.best', 'math.best', 'russian.best']);
+  });
+
+  it('готовит разбор без триажа после достаточного покрытия обычными забегами', () => {
+    completedRunCoverage(db, 'math', ['math.best', 'math.other']);
+
+    expect(selectLearningTopics(db, graph, NOW).map(({ topic: item }) => item.id))
+      .toEqual(['math.best']);
   });
 
   it('исключает закрытые и переставшие быть пробелами темы', () => {

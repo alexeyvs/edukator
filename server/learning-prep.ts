@@ -27,6 +27,7 @@ import {
 import type { LearningMaterialContent } from './codex/learning-material-schema.js';
 import { taskPromptText, type GeneratedTask } from './codex/task-schema.js';
 import { validateTaskBatch } from './codex/validate.js';
+import { calibratedSubjects } from './subject-calibration.js';
 
 export const MAX_READY_LEARNING_MATERIALS = 3;
 export const MAX_LEARNING_TASK_BATCHES = 4;
@@ -72,34 +73,27 @@ export interface LearningPreparationReport {
   codexUnavailable: boolean;
 }
 
-function completedTriageSubjects(db: Database): Set<Subject> {
-  return new Set(db.prepare<[], { subject: Subject }>(
-    `SELECT DISTINCT subject FROM runs
-      WHERE kind = 'triage' AND finished_at IS NOT NULL AND summary IS NOT NULL`,
-  ).all().map((row) => row.subject));
-}
-
 function closedTopics(db: Database): Set<string> {
   return new Set(db.prepare<[], { topic_id: string }>(
     'SELECT topic_id FROM topic_state WHERE closed_at IS NOT NULL',
   ).all().map((row) => row.topic_id));
 }
 
-/** Лучшая подтверждённая пробельная тема каждого уже прошедшего триаж предмета. */
+/** Лучшая подтверждённая пробельная тема каждого уже откалиброванного предмета. */
 export function selectLearningTopics(
   db: Database,
   graph: TopicGraph,
   now: Date = new Date(),
 ): LearningTopicCandidate[] {
-  const triaged = completedTriageSubjects(db);
-  if (triaged.size === 0) return [];
+  const calibrated = calibratedSubjects(db, graph);
+  if (calibrated.size === 0) return [];
   const states = readTopicStates(db);
   const closed = closedTopics(db);
   const profile = readProfile(db);
   const candidates: LearningTopicCandidate[] = [];
 
   for (const subject of SUBJECTS) {
-    if (!triaged.has(subject)) continue;
+    if (!calibrated.has(subject)) continue;
     const ranked = rankTopics(graph, states, { now, examDate: profile.examDate }, subject).find(({ topic, state }) =>
       !closed.has(topic.id) && isGap(topic, state, now));
     if (ranked === undefined) continue;

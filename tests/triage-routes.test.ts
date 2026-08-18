@@ -100,10 +100,11 @@ describe('маршруты триажа', () => {
   it('выдаёт задания лесенкой без подсказки и отмечает закрытый триаж в плане', async () => {
     const before = (await app.inject({ method: 'GET', url: '/api/run/plan' })).json() as {
       plan: Array<{ subject: Subject; triagePassed: boolean }>;
-      triage: Array<{ subject: Subject; passed: boolean }>;
+      triage: Array<{ subject: Subject; passed: boolean; needed: boolean }>;
     };
     expect(before.plan.every((item) => item.triagePassed === false)).toBe(true);
     expect(before.triage.every((item) => item.passed === false)).toBe(true);
+    expect(before.triage.every((item) => item.needed)).toBe(true);
 
     const runId = await startTriage();
     const firstResponse = await app.inject({
@@ -164,11 +165,12 @@ describe('маршруты триажа', () => {
     expect(finish.statusCode).toBe(200);
     const after = (await app.inject({ method: 'GET', url: '/api/run/plan' })).json() as {
       plan: Array<{ subject: Subject; triagePassed: boolean }>;
-      triage: Array<{ subject: Subject; passed: boolean }>;
+      triage: Array<{ subject: Subject; passed: boolean; needed: boolean }>;
     };
     expect(after.triage.find((item) => item.subject === 'math')?.passed).toBe(true);
+    expect(after.triage.find((item) => item.subject === 'math')?.needed).toBe(false);
     expect(after.triage.filter((item) => item.subject !== 'math').every(
-      (item) => item.passed === false,
+      (item) => item.passed === false && item.needed,
     )).toBe(true);
   });
 
@@ -184,10 +186,11 @@ describe('маршруты триажа', () => {
       .toEqual({ finished_at: '2026-08-07T12:00:00.000Z', summary: null });
     const plan = (await app.inject({ method: 'GET', url: '/api/run/plan' })).json() as {
       plan: Array<{ subject: Subject; triagePassed: boolean }>;
-      triage: Array<{ subject: Subject; passed: boolean }>;
+      triage: Array<{ subject: Subject; passed: boolean; needed: boolean }>;
     };
     expect(plan.plan.find((item) => item.subject === 'math')?.triagePassed).toBe(false);
     expect(plan.triage.find((item) => item.subject === 'math')?.passed).toBe(false);
+    expect(plan.triage.find((item) => item.subject === 'math')?.needed).toBe(true);
   });
 
   it('возвращает завершение, когда диагностические темы исчерпаны', async () => {

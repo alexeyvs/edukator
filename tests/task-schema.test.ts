@@ -167,6 +167,28 @@ describe('parseTaskBatch: нарушения инвариантов', () => {
       .toThrow(/LaTeX.*без разделителей/s);
   });
 
+  // KaTeX зовётся только для material_format=math и на весь материал целиком,
+  // поэтому формула, вписанная внутрь предложения, доезжает до экрана исходником:
+  // ученик читает «использовали \(\frac{13}{40}\) деталей» вместо дроби.
+  it('не пускает LaTeX в текстовый материал и в инструкцию', () => {
+    expect(() =>
+      parseTaskBatch(
+        batch(task({ material: 'Использовали \\(\\frac{13}{40}\\) деталей.', material_format: 'text' })),
+        'number',
+      ),
+    ).toThrow(/LaTeX.*material_format=math/s);
+
+    expect(() =>
+      parseTaskBatch(batch(task({ instruction: 'Найди $x$.' })), 'number'),
+    ).toThrow(/LaTeX.*material_format=math/s);
+
+    // Обычная косая черта — не LaTeX: «13/40» в предложении и есть та запись,
+    // которой формулу положено писать вместо разметки.
+    expect(() =>
+      parseTaskBatch(batch(task({ material: 'Использовали 13/40 деталей.' })), 'number'),
+    ).not.toThrow();
+  });
+
   it('требует варианты только для choice и буквальное совпадение answer', () => {
     expect(() => parseTaskBatch(batch(task({ choices: ['4', '5'] })), 'number')).toThrow(/пустым массивом/s);
     expect(() => parseTaskBatch(batch(task({ answer: '4', accept: ['4'], choices: ['четыре', '5'] })), 'choice'))
