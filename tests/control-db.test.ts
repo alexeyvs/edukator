@@ -39,12 +39,15 @@ import {
   openControlDatabase,
   readChild,
   readCodexQuota,
+  readDevice,
   readParentInvite,
+  readParentPinHash,
   recordLoginFailure,
   redeemDeviceInvite,
   redeemParentInvite,
   reserveCodexCall,
   resolveChildDevice,
+  setParentPin,
   resolveParentSession,
   retireChild,
   revokeDevice,
@@ -569,6 +572,59 @@ describe('родители, приглашения и сессии', () => {
   });
 });
 
+describe('PIN родителя', () => {
+  const NOW = new Date('2026-08-19T10:00:00.000Z');
+  const PASSWORD = 'пароль-подлиннее';
+  const PIN_HASH = 'scrypt$16384$8$1$соль$хеш';
+
+  function parentWithSession(db: Database): { parentId: string; token: string } {
+    const parentId = createParent(db, 'mama@example.com', NOW);
+    const invite = issueParentInvite(db, parentId, NOW);
+    const redeemed = redeemParentInvite(db, invite.token, PASSWORD, NOW);
+    if (!redeemed.ok) throw new Error(`приглашение не погасилось: ${redeemed.reason}`);
+    return { parentId, token: redeemed.session.token };
+  }
+
+  it('ставит и читает эталон PIN', () => {
+    const db = open();
+    const { parentId } = parentWithSession(db);
+
+    expect(readParentPinHash(db, parentId)).toBeUndefined();
+    setParentPin(db, parentId, PIN_HASH);
+
+    expect(readParentPinHash(db, parentId)).toBe(PIN_HASH);
+  });
+
+  it('не двигает отметку смены учётных данных: сессии и устройства живы', () => {
+    const db = open();
+    const { parentId, token } = parentWithSession(db);
+    const childId = createChild(db, parentId, 'Петя', NOW);
+    markChildReady(db, childId);
+    const invite = issueDeviceInvite(db, childId, 'browser', '', NOW);
+    const claimed = redeemDeviceInvite(db, invite.token, NOW);
+    if (!claimed.ok) throw new Error('устройство не заведено');
+
+    setParentPin(db, parentId, PIN_HASH);
+
+    // PIN подтверждает действие уже вошедшего родителя, а не служит входом:
+    // гасить им сессии и токены устройств значило бы заново раздавать ссылки.
+    const later = new Date(NOW.getTime() + HOUR_MS);
+    expect(resolveParentSession(db, token, later)?.parentId).toBe(parentId);
+    expect(resolveChildDevice(db, claimed.token, later)?.childId).toBe(childId);
+  });
+
+  it('отключённому родителю PIN не поставить и эталона у него нет', () => {
+    const db = open();
+    const { parentId } = parentWithSession(db);
+    setParentPin(db, parentId, PIN_HASH);
+    db.prepare('UPDATE parents SET disabled_at = ? WHERE id = ?').run(NOW.toISOString(), parentId);
+
+    expect(() => setParentPin(db, parentId, PIN_HASH)).toThrow(/отключён/u);
+    expect(readParentPinHash(db, parentId)).toBeUndefined();
+    expect(() => setParentPin(db, 'нет-такого', PIN_HASH)).toThrow(/нет в управляющей базе/u);
+  });
+});
+
 describe('дети и устройства', () => {
   const NOW = new Date('2026-08-19T10:00:00.000Z');
   const PASSWORD = 'пароль-подлиннее';
@@ -650,6 +706,27 @@ describe('дети и устройства', () => {
         createdAt: NOW.toISOString(),
       },
     ]);
+  });
+
+  it('отдаёт номер выпущенного устройства и читает его по номеру', () => {
+    const db = open();
+    const parentId = parentWithPassword(db);
+    const childId = readyChild(db, parentId);
+
+    const invite = issueDeviceInvite(db, childId, 'agent', 'контроллер', NOW);
+
+    // Номер приходит вместе с токеном: без него выпустивший ссылку искал бы
+    // своё же устройство перебором списка.
+    expect(readDevice(db, invite.deviceId)).toEqual({
+      id: invite.deviceId,
+      childId,
+      kind: 'agent',
+      label: 'контроллер',
+      inviteExpiresAt: at(DEVICE_INVITE_TTL_MS).toISOString(),
+      createdAt: NOW.toISOString(),
+    });
+    expect(listDevices(db, childId)).toEqual([readDevice(db, invite.deviceId)]);
+    expect(readDevice(db, invite.deviceId + 1)).toBeUndefined();
   });
 
   it('хранит только отпечатки токенов устройства', () => {

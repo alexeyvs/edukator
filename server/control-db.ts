@@ -47,7 +47,8 @@ const CONTROL_SCHEMA = `
     -- Пусто, пока родитель не установил пароль по приглашению.
     password_hash          TEXT,
     pin_hash               TEXT,
-    -- Отметка смены пароля или PIN: по ней гаснут выданные до неё сессии.
+    -- Отметка смены пароля: по ней гаснут выданные до неё сессии и токены
+    -- устройств. PIN её не двигает — см. setParentPin.
     credentials_changed_at TEXT,
     disabled_at            TEXT,
     created_at             TEXT NOT NULL DEFAULT (${NOW_ISO})
@@ -704,8 +705,8 @@ export function resolveParentSession(
   if (!Number.isFinite(lastSeen) || now.getTime() - lastSeen >= PARENT_SESSION_IDLE_MS) {
     return undefined;
   }
-  // Смена пароля или PIN гасит всё, что было выдано до неё: иначе увод cookie
-  // не лечится ничем, кроме ручной чистки таблицы.
+  // Смена пароля гасит всё, что было выдано до неё: иначе увод cookie не
+  // лечится ничем, кроме ручной чистки таблицы.
   if (row.credentials_changed_at !== null && row.credentials_changed_at > row.created_at) {
     return undefined;
   }
@@ -726,6 +727,40 @@ export function revokeParentSession(
     .prepare('UPDATE parent_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL')
     .run(now.toISOString(), hashToken(token));
   return result.changes > 0;
+}
+
+/**
+ * Ставит родителю PIN. Хеш считает вызывающий: приправка PIN живёт в
+ * `parent-pin.ts` вместе с pepper, и управляющая база про него не знает.
+ *
+ * `credentials_changed_at` эта запись намеренно **не** двигает. Той отметкой
+ * гаснут все родительские сессии и все токены детских устройств, а PIN — не
+ * вход, а второе подтверждение у двух изменяющих маршрутов: ни родительская
+ * cookie, ни токен на детской машине его в себе не несут, и погасить их сменой
+ * PIN значило бы разослать всем детям новые ссылки-приглашения из-за действия,
+ * которое их учётных данных не касается.
+ */
+export function setParentPin(db: Database.Database, parentId: string, pinHash: string): void {
+  const updated = db
+    .prepare('UPDATE parents SET pin_hash = ? WHERE id = ? AND disabled_at IS NULL')
+    .run(pinHash, parentId);
+  if (updated.changes === 0) {
+    throw new Error(`Родителя ${parentId} нет в управляющей базе или он отключён`);
+  }
+}
+
+/**
+ * Эталон PIN родителя. Отдаётся только хешем: открытого значения нет ни в базе,
+ * ни в памяти сервера, а `undefined` значит «PIN не настроен» — маршруту этого
+ * достаточно, чтобы закрыться, а не пускать без подтверждения.
+ */
+export function readParentPinHash(db: Database.Database, parentId: string): string | undefined {
+  const row = db
+    .prepare<[string], { pin_hash: string | null }>(
+      'SELECT pin_hash FROM parents WHERE id = ? AND disabled_at IS NULL',
+    )
+    .get(parentId);
+  return row === undefined || row.pin_hash === null ? undefined : row.pin_hash;
 }
 
 /* ─── Дети и устройства ─────────────────────────────────────────────────── */
@@ -768,6 +803,14 @@ export interface ChildSummary {
   lastActivityAt?: string;
   retiredAt?: string;
   createdAt: string;
+}
+
+/**
+ * Выпущенное приглашение устройства. Номер строки отдаётся вместе с токеном:
+ * иначе выпустивший её маршрут искал бы своё же устройство перебором списка.
+ */
+export interface IssuedDeviceInvite extends IssuedToken {
+  deviceId: number;
 }
 
 export interface DeviceSummary {
@@ -968,7 +1011,7 @@ export function issueDeviceInvite(
   label = '',
   now: Date = new Date(),
   ttlMs: number = DEVICE_INVITE_TTL_MS,
-): IssuedToken {
+): IssuedDeviceInvite {
   const trimmed = label.trim();
   if (trimmed.length > MAX_DEVICE_LABEL_LENGTH) {
     throw new Error(`Подпись устройства длиннее ${MAX_DEVICE_LABEL_LENGTH} знаков`);
@@ -989,11 +1032,13 @@ export function issueDeviceInvite(
 
   const token = createBearerToken();
   const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
-  db.prepare(
-    `INSERT INTO child_devices (child_id, kind, label, invite_hash, invite_expires_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(childId, kind, trimmed, hashToken(token), expiresAt, now.toISOString());
-  return { token, expiresAt };
+  const inserted = db
+    .prepare(
+      `INSERT INTO child_devices (child_id, kind, label, invite_hash, invite_expires_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(childId, kind, trimmed, hashToken(token), expiresAt, now.toISOString());
+  return { token, expiresAt, deviceId: Number(inserted.lastInsertRowid) };
 }
 
 interface DeviceInviteRow {
@@ -1102,24 +1147,41 @@ interface DeviceRow {
   created_at: string;
 }
 
+const DEVICE_COLUMNS = `id, child_id, kind, label, invite_expires_at, claimed_at, revoked_at, created_at`;
+
+function toDeviceSummary(row: DeviceRow): DeviceSummary {
+  return {
+    id: row.id,
+    childId: row.child_id,
+    kind: row.kind,
+    label: row.label,
+    inviteExpiresAt: row.invite_expires_at,
+    ...(row.claimed_at === null ? {} : { claimedAt: row.claimed_at }),
+    ...(row.revoked_at === null ? {} : { revokedAt: row.revoked_at }),
+    createdAt: row.created_at,
+  };
+}
+
 /** Устройства ребёнка. Ни отпечатков, ни токенов наружу отсюда не уходит. */
 export function listDevices(db: Database.Database, childId: string): DeviceSummary[] {
   return db
     .prepare<[string], DeviceRow>(
-      `SELECT id, child_id, kind, label, invite_expires_at, claimed_at, revoked_at, created_at
-         FROM child_devices WHERE child_id = ? ORDER BY id`,
+      `SELECT ${DEVICE_COLUMNS} FROM child_devices WHERE child_id = ? ORDER BY id`,
     )
     .all(childId)
-    .map((row) => ({
-      id: row.id,
-      childId: row.child_id,
-      kind: row.kind,
-      label: row.label,
-      inviteExpiresAt: row.invite_expires_at,
-      ...(row.claimed_at === null ? {} : { claimedAt: row.claimed_at }),
-      ...(row.revoked_at === null ? {} : { revokedAt: row.revoked_at }),
-      createdAt: row.created_at,
-    }));
+    .map(toDeviceSummary);
+}
+
+/**
+ * Одно устройство по `id`. Принадлежность проверяет вызывающий: `id` здесь
+ * сквозной по всему серверу, и без проверки ребёнка отзыв по чужому номеру
+ * гасил бы устройство соседней семьи.
+ */
+export function readDevice(db: Database.Database, deviceId: number): DeviceSummary | undefined {
+  const row = db
+    .prepare<[number], DeviceRow>(`SELECT ${DEVICE_COLUMNS} FROM child_devices WHERE id = ?`)
+    .get(deviceId);
+  return row === undefined ? undefined : toDeviceSummary(row);
 }
 
 interface ChildDeviceRow {
