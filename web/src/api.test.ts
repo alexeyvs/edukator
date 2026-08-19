@@ -4,7 +4,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { browserHomeApi } from './home-api';
 import { browserBossApi } from './boss-api';
 import { browserProfileApi } from './profile-api';
-import { browserParentsApi, type ComputerAccessError } from './parents-api';
+import { parentsApiFor, type ComputerAccessError } from './parents-api';
+import { browserAuthApi } from './auth-api';
+import { browserFamilyApi } from './family-api';
 import { browserRunApi, RunApiError } from './run-api';
 import { browserLearningApi } from './learning-api';
 
@@ -30,9 +32,12 @@ describe('браузерные API-адаптеры', () => {
     await browserHomeApi.startTriage('english');
     await browserHomeApi.finish(7);
     await browserProfileApi.read();
-    await browserParentsApi.read();
-    await browserParentsApi.readRun(42);
-    await browserParentsApi.changeComputerAccess('blocked', '123456');
+    await parentsApiFor('c-1').read();
+    await parentsApiFor('c-1').readRun(42);
+    await parentsApiFor('c-1').changeComputerAccess('blocked', '123456');
+    await parentsApiFor('c-1').changeComputerAccess('automatic');
+    await parentsApiFor('c-1').approveIntegrity(42, 7, '123456');
+    await parentsApiFor('c-1').approveIntegrity(42, 7);
     await browserProfileApi.save({
       name: 'Тимофей',
       interests: ['скейт'],
@@ -53,13 +58,26 @@ describe('браузерные API-адаптеры', () => {
       ['/api/triage/start', expect.objectContaining({ method: 'POST', body: '{"subject":"english"}' })],
       ['/api/run/7/finish', { method: 'POST' }],
       ['/api/profile'],
-      ['/api/parents'],
-      ['/api/parents/runs/42'],
-      ['/api/parents/computer-access', expect.objectContaining({
+      ['/api/parents/c-1'],
+      ['/api/parents/c-1/runs/42'],
+      ['/api/parents/c-1/computer-access', expect.objectContaining({
         method: 'PUT',
         headers: { authorization: 'Bearer 123456', 'content-type': 'application/json' },
         body: '{"mode":"blocked"}',
       })],
+      // Родительской сессии PIN не нужен: заголовка нет вовсе, а пустой значил
+      // бы «прислал неверный PIN».
+      ['/api/parents/c-1/computer-access', expect.objectContaining({
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: '{"mode":"automatic"}',
+      })],
+      ['/api/parents/c-1/runs/42/integrity/7/approve', {
+        method: 'PUT', headers: { authorization: 'Bearer 123456' },
+      }],
+      ['/api/parents/c-1/runs/42/integrity/7/approve', {
+        method: 'PUT', headers: {},
+      }],
       ['/api/profile', expect.objectContaining({ method: 'PUT', body: expect.stringContaining('Тимофей') })],
     ]);
   });
@@ -188,7 +206,7 @@ describe('браузерные API-адаптеры', () => {
     ));
     await expect(browserHomeApi.plan()).rejects.toThrow('Сервер не смог обработать запрос');
     await expect(browserProfileApi.read()).rejects.toThrow('Не получилось сохранить профиль');
-    await expect(browserParentsApi.read()).rejects.toThrow('Не получилось загрузить сводку');
+    await expect(parentsApiFor('c-1').read()).rejects.toThrow('Не получилось загрузить сводку');
     await expect(browserRunApi.next(1)).rejects.toMatchObject({
       message: 'Сервер не смог обработать запрос',
       status: 500,
@@ -199,7 +217,7 @@ describe('браузерные API-адаптеры', () => {
       response({ error: 'Профиль заблокирован' }, { ok: false, status: 409 }),
     ));
     await expect(browserProfileApi.read()).rejects.toThrow('Профиль заблокирован');
-    await expect(browserParentsApi.read()).rejects.toThrow('Профиль заблокирован');
+    await expect(parentsApiFor('c-1').read()).rejects.toThrow('Профиль заблокирован');
   });
 
   it('сохраняет HTTP-статус ошибки управления родительским доступом', async () => {
@@ -207,7 +225,7 @@ describe('браузерные API-адаптеры', () => {
       response({ error: 'Неверный PIN родителя' }, { ok: false, status: 401 }),
     ));
 
-    await expect(browserParentsApi.changeComputerAccess('unlocked', '000000')).rejects.toMatchObject({
+    await expect(parentsApiFor('c-1').changeComputerAccess('unlocked', '000000')).rejects.toMatchObject({
       name: 'ComputerAccessError',
       message: 'Неверный PIN родителя',
       status: 401,
@@ -222,5 +240,65 @@ describe('браузерные API-адаптеры', () => {
     }));
 
     await expect(browserRunApi.next(1)).rejects.toThrow('not json');
+  });
+  it('собирает адреса входа, ссылок и состава семьи', async () => {
+    const fetch = vi.fn().mockResolvedValue(response({ kind: 'anonymous', child: {} }));
+    vi.stubGlobal('fetch', fetch);
+
+    await browserAuthApi.me();
+    await browserAuthApi.login('parent@example.org', 'длинный-пароль');
+    await browserAuthApi.logout();
+    await browserAuthApi.readInvite('t o k');
+    await browserAuthApi.redeemInvite('tok', 'длинный-пароль');
+    await browserAuthApi.claimDevice('tok');
+    await browserFamilyApi.read();
+    await browserFamilyApi.addChild('Марта');
+    await browserFamilyApi.issueDevice('c-1', 'agent', 'Ноутбук');
+    await browserFamilyApi.revokeDevice(4);
+    await browserFamilyApi.setPin('123456');
+
+    expect(fetch.mock.calls).toEqual([
+      ['/api/auth/me'],
+      ['/api/auth/parent/login', expect.objectContaining({
+        method: 'POST',
+        body: '{"email":"parent@example.org","password":"длинный-пароль"}',
+      })],
+      ['/api/auth/parent/logout', { method: 'POST' }],
+      // Токен уходит в путь экранированным: он приходит из адресной строки, и
+      // ни один его знак не должен уметь открыть собственный сегмент.
+      ['/api/auth/parent/invite/t%20o%20k'],
+      ['/api/auth/parent/invite/tok', expect.objectContaining({
+        method: 'POST', body: '{"password":"длинный-пароль"}',
+      })],
+      ['/api/auth/child/claim/tok', { method: 'POST' }],
+      ['/api/family'],
+      ['/api/family/children', expect.objectContaining({ method: 'POST', body: '{"name":"Марта"}' })],
+      ['/api/family/children/c-1/devices', expect.objectContaining({
+        method: 'POST', body: '{"kind":"agent","label":"Ноутбук"}',
+      })],
+      ['/api/family/devices/4/revoke', { method: 'POST' }],
+      ['/api/family/pin', expect.objectContaining({ method: 'POST', body: '{"pin":"123456"}' })],
+    ]);
+  });
+
+  it('оставляет отказ входа на экране входа, не переводя его в потерю сессии', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      response({ error: 'Неверный адрес или пароль' }, { ok: false, status: 401 }),
+    ));
+
+    await expect(browserAuthApi.login('parent@example.org', 'нет')).rejects.toMatchObject({
+      name: 'Error',
+      message: 'Неверный адрес или пароль',
+    });
+  });
+
+  it('отдаёт отказ детской ссылки текстом сервера, а не общим fallback', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      response({ error: 'Ссылка недействительна или уже использована' }, { ok: false, status: 404 }),
+    ));
+
+    await expect(browserAuthApi.claimDevice('tok'))
+      .rejects.toThrow('Ссылка недействительна или уже использована');
+    await expect(browserFamilyApi.addChild('')).rejects.toThrow('Ссылка недействительна или уже использована');
   });
 });

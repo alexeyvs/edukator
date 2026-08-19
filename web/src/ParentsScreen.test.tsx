@@ -103,6 +103,7 @@ function parentsApi(value: ParentsDashboard = DASHBOARD, detail: ParentsRunDetai
   return {
     read: vi.fn().mockResolvedValue(value),
     readRun: vi.fn().mockResolvedValue(detail),
+    approveIntegrity: vi.fn().mockResolvedValue({ status: 'completed', result: {} }),
     changeComputerAccess: vi.fn().mockImplementation(async (mode) => ({
       ...value.computerAccess,
       override: mode === 'automatic' ? null : {
@@ -117,7 +118,7 @@ function parentsApi(value: ParentsDashboard = DASHBOARD, detail: ParentsRunDetai
 
 describe('родительский дашборд', () => {
   it('показывает прогнозы, честное время, семь дней, темы, типы забегов и наблюдения', async () => {
-    const { container } = render(<ParentsScreen api={parentsApi()} />);
+    const { container } = render(<ParentsScreen childId="c-1" api={parentsApi()} />);
 
     expect(await screen.findByRole('heading', { name: 'Картина подготовки без приукрашивания' })).toBeInTheDocument();
     const forecasts = screen.getByRole('region', { name: 'По предметам' });
@@ -153,7 +154,7 @@ describe('родительский дашборд', () => {
 
   it('лениво раскрывает вопросы, ответы, исправления, объяснения и время занятия', async () => {
     const api = parentsApi();
-    const { container } = render(<ParentsScreen api={api} />);
+    const { container } = render(<ParentsScreen childId="c-1" api={api} />);
 
     const toggle = await screen.findByRole('button', { name: /Тест по разбору/u });
     expect(api.readRun).not.toHaveBeenCalled();
@@ -180,7 +181,7 @@ describe('родительский дашборд', () => {
   });
 
   it('ставит непрерывный переключатель сразу после intro и показывает автоматический режим', async () => {
-    const { container } = render(<ParentsScreen api={parentsApi()} />);
+    const { container } = render(<ParentsScreen childId="c-1" api={parentsApi()} />);
 
     const intro = await screen.findByRole('heading', { name: 'Картина подготовки без приукрашивания' });
     const panel = screen.getByRole('region', { name: 'Компьютер заблокирован' });
@@ -198,7 +199,7 @@ describe('родительский дашборд', () => {
     ['blocked', 'Компьютер заблокирован', 'Заблокировать'],
     ['unlocked', 'Компьютер разблокирован', 'Разблокировать'],
   ] as const)('показывает временный режим %s и точный срок', async (mode, title, buttonName) => {
-    render(<ParentsScreen api={parentsApi({
+    render(<ParentsScreen childId="c-1" api={parentsApi({
       ...DASHBOARD,
       computerAccess: {
         ...DASHBOARD.computerAccess,
@@ -249,7 +250,7 @@ describe('родительский дашборд', () => {
     vi.mocked(api.read)
       .mockResolvedValueOnce(expiredDashboard)
       .mockResolvedValueOnce(freshDashboard);
-    await act(async () => { render(<ParentsScreen api={api} />); });
+    await act(async () => { render(<ParentsScreen childId="c-1" api={api} />); });
 
     expect(screen.getByRole('region', { name: 'Компьютер разблокирован' }))
       .toHaveTextContent('Временный режим');
@@ -289,7 +290,7 @@ describe('родительский дашборд', () => {
     vi.mocked(api.read)
       .mockResolvedValueOnce(expiredDashboard)
       .mockReturnValueOnce(new Promise((resolve) => { resolveRefresh = resolve; }));
-    await act(async () => { render(<ParentsScreen api={api} />); });
+    await act(async () => { render(<ParentsScreen childId="c-1" api={api} />); });
 
     await act(async () => { vi.advanceTimersByTime(1_000); });
 
@@ -336,7 +337,7 @@ describe('родительский дашборд', () => {
       .mockResolvedValueOnce(expiredDashboard)
       .mockRejectedValueOnce(new Error('Временная ошибка сети'))
       .mockResolvedValueOnce(freshDashboard);
-    await act(async () => { render(<ParentsScreen api={api} />); });
+    await act(async () => { render(<ParentsScreen childId="c-1" api={api} />); });
 
     await act(async () => {
       vi.advanceTimersByTime(1_000);
@@ -383,7 +384,7 @@ describe('родительский дашборд', () => {
       .mockResolvedValueOnce(expiredDashboard)
       .mockResolvedValueOnce(expiredDashboard)
       .mockResolvedValueOnce(freshDashboard);
-    await act(async () => { render(<ParentsScreen api={api} />); });
+    await act(async () => { render(<ParentsScreen childId="c-1" api={api} />); });
 
     await act(async () => {
       vi.advanceTimersByTime(1_000);
@@ -407,7 +408,7 @@ describe('родительский дашборд', () => {
   it('подтверждает каждую смену отдельно и переиспользует PIN этой вкладки', async () => {
     const api = parentsApi();
     const storage = vi.spyOn(Storage.prototype, 'setItem');
-    render(<ParentsScreen api={api} />);
+    render(<ParentsScreen childId="c-1" api={api} />);
     const pin = await screen.findByLabelText(/PIN родителя/u);
     fireEvent.change(pin, { target: { value: '123456' } });
 
@@ -437,7 +438,7 @@ describe('родительский дашборд', () => {
 
   it('не отправляет команду без корректного PIN', async () => {
     const api = parentsApi();
-    render(<ParentsScreen api={api} />);
+    render(<ParentsScreen childId="c-1" api={api} />);
     fireEvent.change(await screen.findByLabelText(/PIN родителя/u), { target: { value: '123' } });
     fireEvent.click(screen.getByRole('button', { name: 'Заблокировать' }));
 
@@ -452,7 +453,7 @@ describe('родительский дашборд', () => {
     vi.mocked(api.changeComputerAccess)
       .mockRejectedValueOnce(new ComputerAccessError('Неверный PIN родителя', 401))
       .mockRejectedValueOnce(new ComputerAccessError('Сервис временно недоступен', 503));
-    render(<ParentsScreen api={api} />);
+    render(<ParentsScreen childId="c-1" api={api} />);
     const pin = await screen.findByLabelText(/PIN родителя/u);
     fireEvent.change(pin, { target: { value: '123456' } });
     fireEvent.click(screen.getByRole('button', { name: 'Заблокировать' }));
@@ -472,7 +473,7 @@ describe('родительский дашборд', () => {
     let resolve!: (value: ParentsDashboard['computerAccess']) => void;
     const api = parentsApi();
     vi.mocked(api.changeComputerAccess).mockReturnValue(new Promise((done) => { resolve = done; }));
-    render(<ParentsScreen api={api} />);
+    render(<ParentsScreen childId="c-1" api={api} />);
     fireEvent.change(await screen.findByLabelText(/PIN родителя/u), { target: { value: '123456' } });
     fireEvent.click(screen.getByRole('button', { name: 'Заблокировать' }));
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Заблокировать' }));
@@ -491,7 +492,7 @@ describe('родительский дашборд', () => {
   });
 
   it('отключает переключатель, когда PIN на сервере не настроен', async () => {
-    render(<ParentsScreen api={parentsApi({
+    render(<ParentsScreen childId="c-1" api={parentsApi({
       ...DASHBOARD,
       computerAccess: { ...DASHBOARD.computerAccess, configured: false },
     })} />);
@@ -504,7 +505,7 @@ describe('родительский дашборд', () => {
   });
 
   it('спокойно показывает пустую историю, темы и наблюдения', async () => {
-    render(<ParentsScreen api={parentsApi({
+    render(<ParentsScreen childId="c-1" api={parentsApi({
       ...DASHBOARD,
       gaps: [],
       activity: [],
@@ -543,7 +544,7 @@ describe('родительский дашборд', () => {
     delete detail.finishedAt;
     const api = parentsApi(dashboard, detail);
     api.approveIntegrity = vi.fn().mockResolvedValue({ status: 'completed', result: {} });
-    render(<ParentsScreen api={api} />);
+    render(<ParentsScreen childId="c-1" api={api} />);
 
     const review = await screen.findByRole('region', { name: 'Проверка ответов' });
     fireEvent.change(screen.getByLabelText(/PIN родителя/u), { target: { value: '123456' } });
@@ -557,10 +558,62 @@ describe('родительский дашборд', () => {
   it('показывает отказ загрузки и использует read-only API', async () => {
     const api = parentsApi();
     vi.mocked(api.read).mockRejectedValue(new Error('Дашборд временно недоступен'));
-    render(<ParentsScreen api={api} />);
+    render(<ParentsScreen childId="c-1" api={api} />);
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Дашборд временно недоступен');
     await waitFor(() => expect(api.read).toHaveBeenCalledOnce());
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+  it('не спрашивает PIN у вошедшего родителя и меняет режим без него', async () => {
+    const api = parentsApi({
+      ...DASHBOARD,
+      computerAccess: { ...DASHBOARD.computerAccess, configured: false },
+    });
+    render(<ParentsScreen childId="c-1" api={api} pinRequired={false} />);
+
+    const panel = await screen.findByRole('region', { name: 'Компьютер заблокирован' });
+    expect(panel).toHaveTextContent('Вы вошли как родитель — PIN не нужен.');
+    expect(within(panel).queryByLabelText(/PIN родителя/u)).not.toBeInTheDocument();
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Заблокировать' }));
+    const confirmation = await screen.findByRole('dialog');
+    fireEvent.click(within(confirmation).getByRole('button', { name: 'Заблокировать' }));
+    await waitFor(() => expect(api.changeComputerAccess).toHaveBeenCalledExactlyOnceWith('blocked'));
+  });
+
+  it('переключает ребёнка сводки и гасит прежние цифры до прихода новых', async () => {
+    const api = parentsApi();
+    const onSelectChild = vi.fn();
+    render(
+      <ParentsScreen
+        childId="c-1"
+        api={api}
+        siblings={[{ id: 'c-1', name: 'Тимофей' }, { id: 'c-2', name: 'Марта' }]}
+        onSelectChild={onSelectChild}
+      />,
+    );
+
+    const select = await screen.findByLabelText('Ребёнок');
+    expect((select as HTMLSelectElement).value).toBe('c-1');
+    fireEvent.change(select, { target: { value: 'c-2' } });
+    expect(onSelectChild).toHaveBeenCalledWith('c-2');
+  });
+
+  it('не показывает переключатель единственному ребёнку', async () => {
+    render(<ParentsScreen childId="c-1" api={parentsApi()} siblings={[{ id: 'c-1', name: 'Тимофей' }]} />);
+
+    await screen.findByRole('heading', { name: 'Картина подготовки без приукрашивания' });
+    expect(screen.queryByLabelText('Ребёнок')).not.toBeInTheDocument();
+  });
+
+  it('перечитывает сводку при смене ребёнка и не показывает чужие цифры', async () => {
+    const first = parentsApi();
+    const second = parentsApi({ ...DASHBOARD, time: { plannedMinutes: 100, actualMinutes: 7, daily: [] } });
+    const { rerender } = render(<ParentsScreen childId="c-1" api={first} />);
+    expect(await screen.findByRole('region', { name: 'План и факт' })).toHaveTextContent('Факт35 мин');
+
+    rerender(<ParentsScreen childId="c-2" api={second} />);
+    expect(screen.getByRole('status')).toHaveTextContent('Собираю сводку за неделю…');
+    expect(await screen.findByRole('region', { name: 'План и факт' })).toHaveTextContent('Факт7 мин');
   });
 });

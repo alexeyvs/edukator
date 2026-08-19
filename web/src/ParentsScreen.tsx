@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { DailyGateState } from './home-api';
 import {
-  browserParentsApi,
   ComputerAccessError,
+  parentsApiFor,
   type ComputerAccessMode,
   type ParentsApi,
   type ParentsDashboard,
@@ -89,6 +89,7 @@ function accessStatus(access: DailyGateState): { eyebrow: string; title: string;
 function ComputerAccessPanel({
   access,
   api,
+  pinRequired,
   pin,
   onPinChange,
   onChanged,
@@ -96,6 +97,7 @@ function ComputerAccessPanel({
 }: {
   access: ParentsDashboard['computerAccess'];
   api: ParentsApi;
+  pinRequired: boolean;
   pin: string;
   onPinChange: (pin: string) => void;
   onChanged: (next: DailyGateState) => void;
@@ -134,7 +136,10 @@ function ComputerAccessPanel({
           : 'Не получилось получить актуальный режим. Старое состояние не используется.',
     }
     : accessStatus(access);
-  const pinValid = /^\d{6,12}$/u.test(pin);
+  // Без PIN проверять нечего: вошедший родитель подтверждён паролем.
+  const pinValid = !pinRequired || /^\d{6,12}$/u.test(pin);
+  // PIN не настроен — управление закрыто только с детской машины.
+  const canChange = !pinRequired || access.configured;
 
   useEffect(() => {
     if (expiryKey === null || pending) return;
@@ -206,7 +211,9 @@ function ComputerAccessPanel({
     setPending(true);
     setFeedback(null);
     try {
-      const next = await api.changeComputerAccess(selected, pin);
+      const next = pinRequired
+        ? await api.changeComputerAccess(selected, pin)
+        : await api.changeComputerAccess(selected);
       onChanged(next);
       setExpiryRefresh(null);
       setSelected(null);
@@ -232,8 +239,10 @@ function ComputerAccessPanel({
         <p>{status.eyebrow}</p>
         <h2 id="parents-access-title">{status.title}</h2>
         <span>{status.note}</span>
-        {access.configured
-          ? <label className="parents-pin">
+        {!pinRequired
+          ? <p className="parents-access-note">Вы вошли как родитель — PIN не нужен.</p>
+          : access.configured
+            ? <label className="parents-pin">
             <span>PIN родителя</span>
             <input
               aria-describedby="parents-pin-note"
@@ -247,7 +256,7 @@ function ComputerAccessPanel({
             />
             <small id="parents-pin-note">Остаётся только в этой вкладке.</small>
           </label>
-          : <p className="parents-access-unavailable">PIN родителя не настроен. Управление доступом отключено.</p>}
+            : <p className="parents-access-unavailable">PIN родителя не настроен. Управление доступом отключено.</p>}
       </div>
 
       <div className="parents-access-actions">
@@ -255,7 +264,7 @@ function ComputerAccessPanel({
           {ACCESS_MODES.map(({ mode, label }) => (
             <button
               aria-pressed={current === mode}
-              disabled={!access.configured || pending || expiryPending}
+              disabled={!canChange || pending || expiryPending}
               key={mode}
               type="button"
               onClick={() => { if (mode !== current) setSelected(mode); }}
@@ -601,7 +610,33 @@ function Flags({ dashboard }: { dashboard: ParentsDashboard }) {
   );
 }
 
-export function ParentsScreen({ api = browserParentsApi }: { api?: ParentsApi }) {
+export interface ParentsScreenProps {
+  /** Чья сводка. Ребёнок назван всегда: у родителя их может быть несколько. */
+  childId: string;
+  api?: ParentsApi;
+  /**
+   * Спрашивать ли PIN на смене режима доступа. По умолчанию да: экран открыт с
+   * детской машины, где вошедшего родителя нет.
+   */
+  pinRequired?: boolean;
+  /** Остальные дети родителя. Пусто у детского предъявителя: он видит только себя. */
+  siblings?: Array<{ id: string; name: string }>;
+  onSelectChild?: (childId: string) => void;
+  /** Куда вернуться. У ребёнка это план дня, у родителя — состав семьи. */
+  home?: { label: string; onClick: () => void };
+}
+
+export function ParentsScreen({
+  childId,
+  api: providedApi,
+  pinRequired = true,
+  siblings = [],
+  onSelectChild,
+  home,
+}: ParentsScreenProps) {
+  // Свой адаптер на ребёнка, а не общий: собранный в теле функции заново на
+  // каждый рендер, он перезапускал бы чтение сводки бесконечно.
+  const api = useMemo(() => providedApi ?? parentsApiFor(childId), [providedApi, childId]);
   const [dashboard, setDashboard] = useState<ParentsDashboard | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [pin, setPin] = useState('');
@@ -619,6 +654,10 @@ export function ParentsScreen({ api = browserParentsApi }: { api?: ParentsApi })
   useEffect(() => {
     let active = true;
     const generation = ++readGeneration.current;
+    // Смена ребёнка гасит прежнюю сводку до прихода новой: иначе переключатель
+    // на секунду показывал бы чужие цифры под новым именем.
+    setDashboard(null);
+    setProblem(null);
     api.read()
       .then((loaded) => {
         if (active && readGeneration.current === generation) setDashboard(loaded);
@@ -657,7 +696,20 @@ export function ParentsScreen({ api = browserParentsApi }: { api?: ParentsApi })
       <header className="parents-header">
         <a className="brand" href="/" aria-label="Эдукатор">Э</a>
         <div><span>Открытая сводка</span><strong>Для ученика и родителей</strong></div>
-        <a className="parents-home" href="/">К плану дня</a>
+        {siblings.length > 1 && <label className="parents-switch">
+          <span>Ребёнок</span>
+          <select
+            value={childId}
+            onChange={(event) => onSelectChild?.(event.target.value)}
+          >
+            {siblings.map((sibling) => (
+              <option key={sibling.id} value={sibling.id}>{sibling.name}</option>
+            ))}
+          </select>
+        </label>}
+        {home === undefined
+          ? <a className="parents-home" href="/">К плану дня</a>
+          : <button className="parents-home" type="button" onClick={home.onClick}>{home.label}</button>}
       </header>
 
       <section className="parents-intro">
@@ -669,6 +721,7 @@ export function ParentsScreen({ api = browserParentsApi }: { api?: ParentsApi })
       <ComputerAccessPanel
         access={dashboard.computerAccess}
         api={api}
+        pinRequired={pinRequired}
         pin={pin}
         onPinChange={setPin}
         onChanged={(next) => {

@@ -106,31 +106,52 @@ export interface ParentsRunDetail {
 export interface ParentsApi {
   read(): Promise<ParentsDashboard>;
   readRun(runId: number): Promise<ParentsRunDetail>;
-  changeComputerAccess(mode: ComputerAccessMode, pin: string): Promise<DailyGateState>;
-  approveIntegrity?(runId: number, itemId: number, pin: string): Promise<IntegrityStatusResponse>;
+  /**
+   * PIN не обязателен: он подтверждает родителя за детской машиной, а вошедшей
+   * родительской сессии сервер его не спрашивает. Пустой заголовок вместо
+   * отсутствующего означал бы «прислал неверный PIN» и получал бы 401.
+   */
+  changeComputerAccess(mode: ComputerAccessMode, pin?: string): Promise<DailyGateState>;
+  approveIntegrity(runId: number, itemId: number, pin?: string): Promise<IntegrityStatusResponse>;
 }
 
-export const browserParentsApi: ParentsApi = {
-  read: () => requestJson<ParentsDashboard>('/api/parents', undefined, 'Не получилось загрузить сводку'),
-  readRun: (runId) => requestJson<ParentsRunDetail>(
-    `/api/parents/runs/${String(runId)}`,
-    undefined,
-    'Не получилось загрузить занятие',
-  ),
-  changeComputerAccess: (mode, pin) => requestJson<DailyGateState>(
-    '/api/parents/computer-access',
-    {
-      method: 'PUT',
-      headers: { authorization: `Bearer ${pin}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ mode }),
-    },
-    'Не получилось изменить режим доступа',
-    ({ status, message }) => new ComputerAccessError(message, status),
-  ),
-  approveIntegrity: (runId, itemId, pin) => requestJson<IntegrityStatusResponse>(
-    `/api/parents/runs/${String(runId)}/integrity/${String(itemId)}/approve`,
-    { method: 'PUT', headers: { authorization: `Bearer ${pin}` } },
-    'Не получилось подтвердить ответ',
-    ({ status, message }) => new ComputerAccessError(message, status),
-  ),
-};
+/**
+ * Сводка конкретного ребёнка. Ребёнок назван в адресе, а не берётся из
+ * предъявителя: у родителя их несколько, и «сводка того, чья cookie пришла»
+ * оставляла бы его без способа узнать, чей отчёт он читает.
+ */
+export function parentsApiFor(childId: string): ParentsApi {
+  const base = `/api/parents/${encodeURIComponent(childId)}`;
+  return {
+    read: () => requestJson<ParentsDashboard>(base, undefined, 'Не получилось загрузить сводку'),
+    readRun: (runId) => requestJson<ParentsRunDetail>(
+      `${base}/runs/${String(runId)}`,
+      undefined,
+      'Не получилось загрузить занятие',
+    ),
+    changeComputerAccess: (mode, pin) => requestJson<DailyGateState>(
+      `${base}/computer-access`,
+      {
+        method: 'PUT',
+        headers: {
+          ...(pin === undefined ? {} : { authorization: `Bearer ${pin}` }),
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ mode }),
+      },
+      'Не получилось изменить режим доступа',
+      ({ status, message }) => new ComputerAccessError(message, status),
+      { signedOutOn401: pin === undefined },
+    ),
+    approveIntegrity: (runId, itemId, pin) => requestJson<IntegrityStatusResponse>(
+      `${base}/runs/${String(runId)}/integrity/${String(itemId)}/approve`,
+      {
+        method: 'PUT',
+        headers: pin === undefined ? {} : { authorization: `Bearer ${pin}` },
+      },
+      'Не получилось подтвердить ответ',
+      ({ status, message }) => new ComputerAccessError(message, status),
+      { signedOutOn401: pin === undefined },
+    ),
+  };
+}
