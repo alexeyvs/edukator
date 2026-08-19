@@ -45,6 +45,7 @@ import {
   SINGLE_TENANT_CHILD_ID,
   singleTenantContext,
 } from './routes/tenant-context.js';
+import { redactTokenUrl, registerTokenPrivacy } from './routes/token-privacy.js';
 import type { Tenant } from './tenant-registry.js';
 import { createIntegrityCoordinator } from './integrity.js';
 import type { IntegrityReviewer } from './codex/integrity.js';
@@ -189,6 +190,33 @@ export type ServerOptions =
   integrityRetryMs?: number;
 };
 
+/**
+ * Общий обработчик отказов.
+ *
+ * Fastify по умолчанию отдаёт текст исключения в теле ответа, а внутренние
+ * ошибки называют абсолютные пути и содержимое базы. Сервер слушает всю
+ * домашнюю сеть без пароля, так что наружу уходит только факт поломки, а
+ * подробности — в stderr. Отказы самого Fastify (битый JSON в теле — 400)
+ * остаются как есть: они про запрос, а не про внутренности.
+ *
+ * Адрес перед записью проходит `redactTokenUrl`: приглашение и детская ссылка
+ * живут прямо в пути, а stderr сервера читают и хранят как обычный лог, — то
+ * есть полный `request.url` означал бы вход в чужую учётную запись, лежащий в
+ * файле. Отдельной функцией это вынесено потому, что проверить запись можно
+ * только на маршруте, который бросает, а таких в самом сервере нет.
+ */
+export function registerErrorHandler(app: FastifyInstance): void {
+  app.setErrorHandler((error: FastifyError, request, reply) => {
+    const status = error.statusCode ?? 500;
+    if (status < 500) return reply.code(status).send({ error: error.message });
+
+    process.stderr.write(
+      `${request.method} ${redactTokenUrl(request.url)}: ${error.message}\n`,
+    );
+    return reply.code(500).send({ error: 'Внутренняя ошибка сервера' });
+  });
+}
+
 export function buildServer(
   curriculumDir: string = CURRICULUM_DIR,
   options: ServerOptions,
@@ -217,18 +245,8 @@ export function buildServer(
 
   const app = Fastify({ logger: false });
 
-  // Fastify по умолчанию отдаёт текст исключения в теле ответа, а внутренние
-  // ошибки называют абсолютные пути и содержимое базы. Сервер слушает всю
-  // домашнюю сеть без пароля, так что наружу уходит только факт поломки, а
-  // подробности — в stderr. Отказы самого Fastify (битый JSON в теле — 400)
-  // остаются как есть: они про запрос, а не про внутренности.
-  app.setErrorHandler((error: FastifyError, request, reply) => {
-    const status = error.statusCode ?? 500;
-    if (status < 500) return reply.code(status).send({ error: error.message });
-
-    process.stderr.write(`${request.method} ${request.url}: ${error.message}\n`);
-    return reply.code(500).send({ error: 'Внутренняя ошибка сервера' });
-  });
+  registerErrorHandler(app);
+  registerTokenPrivacy(app);
 
   let curriculum: CurriculumStatus = 'ok';
   let graph: TopicGraph | undefined;
