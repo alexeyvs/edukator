@@ -60,6 +60,36 @@ export default defineConfig({
           functions: 80,
           lines: 80,
         },
+        // Многоарендность: `control-db` держит миграцию управляющей базы,
+        // `secrets` — хеши пароля и PIN, `auth` — разрешение предъявителя,
+        // `tenant-registry` — открытие детской базы. Ошибка здесь пускает
+        // одного арендатора в чужие данные, а не портит учебный план, и
+        // `server/**` без поимённого порога оставила бы её на усмотрение
+        // средней цифры по каталогу.
+        'server/{control-db,secrets,auth,tenant-registry}.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        // Каталог данных, замок каталога, адрес клиента, снимок базы и
+        // разделённое спорное состояние появились вместе с арендаторами и
+        // тоже не попадали ни под один порог.
+        'server/{data-dir,data-lock,client-address,backup,dispute-coordinator}.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        // Маршруты входа и семьи названы отдельно: `server/routes/*.ts` выше
+        // задаёт тот же порог, но перечисление руками не даст новому маршруту
+        // аутентификации молча выпасть, если общий шаблон когда-нибудь сузят.
+        'server/routes/{auth,family,gate,tenant-context,token-privacy}.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
         'server/codex/concurrency.ts': {
           statements: 80,
           branches: 80,

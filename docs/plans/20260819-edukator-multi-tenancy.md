@@ -689,10 +689,10 @@ Chromium 127.0.0.1 доверенным источником считает. С�
 
 ### Task 23: Пороги покрытия для новых модулей
 
-- [ ] добавить в `vitest.config.ts` шаблоны для `server/{control-db,secrets,auth,tenant-registry}.ts`
+- [x] добавить в `vitest.config.ts` шаблоны для `server/{control-db,secrets,auth,tenant-registry}.ts`
       и новых маршрутов: поимённые пороги заданы явно, и без правки 80% пофайлово
       для новых модулей осталось бы пожеланием
-- [ ] прогнать `npm run coverage` — пороги должны выполняться
+- [x] прогнать `npm run coverage` — пороги должны выполняться
 
 ### Task 24: Verify acceptance criteria
 
