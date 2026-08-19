@@ -16,13 +16,17 @@ import {
   createParent,
   issueDeviceInvite,
   issueParentInvite,
+  listServiceableChildren,
   openControlDatabase,
+  redeemDeviceInvite,
   redeemParentInvite,
+  resolveChildDevice,
   setParentPin,
 } from '../server/control-db.js';
+import { CHILD_COOKIE, PARENT_COOKIE } from '../server/auth.js';
 import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
 import { hashParentPin } from '../server/parent-pin.js';
-import { loadCurriculum } from '../server/curriculum.js';
+import { loadCurriculum, syncTopicState, type TopicGraph } from '../server/curriculum.js';
 import { startRun } from '../server/run.js';
 import { submitAnswer } from '../server/session.js';
 
@@ -30,14 +34,74 @@ const NOW = new Date('2026-08-08T12:00:00.000Z');
 const TOPICS_PER_SUBJECT = 12;
 const TASKS_PER_TOPIC = 15;
 
+/**
+ * Адрес, на котором сценарий поднимает сервер. Он же — домен cookie: браузер
+ * различает их по имени хоста, а не по порту, так что имя нужно знать до
+ * `listen`, ещё до того как порт вообще выбран.
+ */
+const HOST = '127.0.0.1';
+
+/** Имя ребёнка сценария. Оно же стоит в профиле его базы. */
+const CHILD_NAME = 'Тимофей';
+
+/**
+ * Родитель сценария. Пароль настоящий: им же проверяется форма входа. Адрес —
+ * латиницей: `input type=email` в браузере отвергает кириллицу в имени ящика,
+ * и форма с таким адресом не отправилась бы вовсе.
+ */
+export const E2E_PARENT = {
+  email: 'parent@example.com',
+  password: 'пароль-подлиннее',
+} as const;
+
+/** Кем сценарий смотрит на сервер: вошедшим родителем или машиной ученика. */
+export type E2eSide = 'parent' | 'child';
+
+/** Cookie предъявителя в том виде, в каком её принимает браузер сценария. */
+export interface E2eCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  httpOnly: boolean;
+  secure: boolean;
+  sameSite: 'Strict' | 'Lax';
+}
+
+/**
+ * Браузер сценария глазами помощника. Названо структурно, а не типом
+ * Playwright: помощнику от контекста нужны ровно две операции, и сужение до них
+ * означает, что подсунуть сюда что-то ещё нечего.
+ */
+export interface CookieJar {
+  addCookies(cookies: E2eCookie[]): Promise<void>;
+  clearCookies(): Promise<void>;
+}
+
 export interface E2eHarness {
   app: FastifyInstance;
   db: Database;
   url: string;
   /** Ребёнок сценария: его `id` стоит в адресах родительской сводки. */
   childId: string;
-  /** Ссылка-приглашение устройства: с неё начинается вход ребёнка. */
-  joinPath: string;
+  /**
+   * Заголовок `Cookie` для запросов мимо интерфейса. Он нужен потому, что
+   * `page.request` ходит не браузером, а узлом, и cookie с `Secure` по голому
+   * http не носит — хотя сам браузер 127.0.0.1 доверенным считает.
+   */
+  cookieHeader(side: E2eSide): string;
+  /**
+   * Дети родителя из управляющей базы. Нужны сценарию, который заводит второго
+   * ребёнка через интерфейс: его `id` в ответе не показывается, а наполнять
+   * базу и открывать сводку без него нечем.
+   */
+  children(): Array<{ id: string; name: string }>;
+  /**
+   * Наполняет базу ребёнка темами, профилем и банком. Нужен второму ребёнку:
+   * заведённый через интерфейс приходит с пустой базой, а пустая не годится ни
+   * одному забегу.
+   */
+  seedChild(childId: string, seed?: SeedChildOptions): void;
   assertCodexNotCalled(): void;
   waitForLearningMaterial(topicId: string): Promise<number>;
   prepareBoss(topicId: string): Promise<void>;
@@ -46,12 +110,22 @@ export interface E2eHarness {
   close(): Promise<void>;
 }
 
-interface HarnessOptions {
+/** Чем наполняется база ребёнка. Всё остальное сценарий досеивает сам. */
+export interface SeedChildOptions {
+  /** Имя в профиле; по умолчанию — имя ребёнка сценария. */
+  name?: string;
   triagePassed?: Subject;
+  learningForecastFixture?: Subject;
+}
+
+interface HarnessOptions extends SeedChildOptions {
   controlledWorker?: boolean;
   controlledDispute?: boolean;
-  learningForecastFixture?: Subject;
   parentPin?: string;
+  /** Браузер сценария: помощник кладёт в него cookie предъявителя. */
+  context?: CookieJar;
+  /** Кем сценарий входит в этот браузер. По умолчанию — машина ученика. */
+  signIn?: E2eSide;
 }
 
 function writeCurriculum(directory: string): void {
@@ -160,6 +234,26 @@ function seedLearningForecastFixture(db: Database, subject: Subject): void {
   );
 }
 
+/**
+ * Наполняет базу ребёнка. Темы синхронизируются здесь же: реестр делает это при
+ * первом открытии базы, а помощник приходит раньше него — и банк заданий без
+ * строк `topic_state` не принял бы ни одного задания.
+ */
+function seedChildDatabase(db: Database, graph: TopicGraph, seed: SeedChildOptions): void {
+  syncTopicState(db, graph);
+  writeProfile(db, {
+    name: seed.name ?? CHILD_NAME,
+    partnerName: 'Кекс',
+    interests: ['скейт'],
+    examDate: '2027-05-20',
+  });
+  seedTasks(db);
+  if (seed.triagePassed !== undefined) markTriagePassed(db, seed.triagePassed);
+  if (seed.learningForecastFixture !== undefined) {
+    seedLearningForecastFixture(db, seed.learningForecastFixture);
+  }
+}
+
 function bossTask(topicId: string, serial: number, position: number): GeneratedTask {
   return {
     instruction: `Босс ${topicId}: реши уникальное задание ${serial}.${position}.`,
@@ -251,19 +345,57 @@ export async function startE2eHarness(
     };
   };
   // Семья заводится до сборки сервера: реестр открывает базу ребёнка по
-  // первому обращению, а сценарий приходит уже со ссылкой на руках.
+  // первому обращению, а сценарий приходит уже с готовой cookie предъявителя.
   const control = openControlDatabase(controlDatabasePath(dataDir));
-  const parentId = createParent(control, 'родитель@example.com', NOW);
+  const graph = loadCurriculum(curriculumDir);
+  const parentId = createParent(control, E2E_PARENT.email, NOW);
   const parentInvite = issueParentInvite(control, parentId, NOW);
-  const redeemedParent = redeemParentInvite(control, parentInvite.token, 'пароль-подлиннее', NOW);
+  const redeemedParent = redeemParentInvite(control, parentInvite.token, E2E_PARENT.password, NOW);
   if (!redeemedParent.ok) throw new Error('E2E: родитель не завёл пароль');
   if (options.parentPin !== undefined) {
     setParentPin(control, parentId, hashParentPin(options.parentPin, pepper));
   }
-  const childId = createChild(control, parentId, 'Тимофей', NOW);
+  const childId = createChild(control, parentId, CHILD_NAME, NOW);
   provisionChildDatabase(control, childId, dataDir);
+  // Устройство ученика гасится сразу: сценарию нужна не ссылка, а готовая
+  // cookie, и проходить экран погашения перед каждым забегом значило бы
+  // проверять вход по тринадцать раз вместо одного.
   const deviceInvite = issueDeviceInvite(control, childId, 'browser', 'Ноутбук', NOW);
+  const claimed = redeemDeviceInvite(control, deviceInvite.token, NOW);
+  if (!claimed.ok) throw new Error('E2E: устройство ученика не погашено');
+  // Ученик считается севшим за компьютер: отметку активности ставит разбор его
+  // токена, а без неё диспетчер держит ребёнка спящим и не готовит ему ни
+  // босса, ни персональный разбор — сценарий ждал бы их до срока.
+  resolveChildDevice(control, claimed.token, NOW);
+  const tokens: Record<E2eSide, string> = {
+    parent: redeemedParent.session.token,
+    child: claimed.token,
+  };
   const dbPath = childDatabasePath(dataDir, childId);
+
+  /**
+   * Cookie стороны. `Secure` снять нельзя ни в каком тесте: cookie с префиксом
+   * `__Host-` без него браузер не примет вовсе, а 127.0.0.1 он и по голому http
+   * считает доверенным источником.
+   */
+  function cookieFor(side: E2eSide): E2eCookie {
+    return {
+      name: side === 'parent' ? PARENT_COOKIE : CHILD_COOKIE,
+      value: tokens[side],
+      domain: HOST,
+      path: '/',
+      httpOnly: true,
+      secure: true,
+      sameSite: side === 'parent' ? 'Strict' : 'Lax',
+    };
+  }
+
+  async function signIn(jar: CookieJar, side: E2eSide): Promise<void> {
+    // Чужая cookie снимается: браузер, несущий обе, выбирал бы сторону порядком
+    // разбора предъявителя, а не сценарием.
+    await jar.clearCookies();
+    await jar.addCookies([cookieFor(side)]);
+  }
 
   const app = buildServer(curriculumDir, {
     dataDir,
@@ -285,21 +417,11 @@ export async function startE2eHarness(
     now: () => NOW,
   });
   const db = openDatabase(dbPath);
-  const graph = loadCurriculum(curriculumDir);
 
   try {
-    writeProfile(db, {
-      name: 'Тимофей',
-      partnerName: 'Кекс',
-      interests: ['скейт'],
-      examDate: '2027-05-20',
-    });
-    seedTasks(db);
-    if (options.triagePassed !== undefined) markTriagePassed(db, options.triagePassed);
-    if (options.learningForecastFixture !== undefined) {
-      seedLearningForecastFixture(db, options.learningForecastFixture);
-    }
-    const url = await app.listen({ host: '127.0.0.1', port: 0 });
+    seedChildDatabase(db, graph, options);
+    const url = await app.listen({ host: HOST, port: 0 });
+    if (options.context !== undefined) await signIn(options.context, options.signIn ?? 'child');
 
     function assertCodexNotCalled(): void {
       if (existsSync(codexMarker)) {
@@ -312,7 +434,21 @@ export async function startE2eHarness(
       db,
       url,
       childId,
-      joinPath: `/join/${deviceInvite.token}`,
+      children(): Array<{ id: string; name: string }> {
+        return listServiceableChildren(control).map(({ id, name }) => ({ id, name }));
+      },
+      cookieHeader(side: E2eSide): string {
+        const cookie = cookieFor(side);
+        return `${cookie.name}=${cookie.value}`;
+      },
+      seedChild(id: string, seed: SeedChildOptions = {}): void {
+        const childDb = openDatabase(childDatabasePath(dataDir, id));
+        try {
+          seedChildDatabase(childDb, graph, seed);
+        } finally {
+          childDb.close();
+        }
+      },
       assertCodexNotCalled,
       async waitForLearningMaterial(topicId: string): Promise<number> {
         await waitUntil(

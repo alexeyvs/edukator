@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 import { execFile as execFileCallback } from 'node:child_process';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { startE2eHarness } from './harness.js';
+import { E2E_PARENT, startE2eHarness, type E2eHarness, type E2eSide } from './harness.js';
 
 const execFile = promisify(execFileCallback);
 
@@ -21,6 +21,31 @@ async function assertControllerAcceptsGate(gate: unknown): Promise<void> {
   expect(stdout.trim()).toBe('ok');
 }
 
+/**
+ * Заголовки запроса мимо интерфейса. Оба ставятся руками потому, что
+ * `page.request` — не браузер, а узел: cookie с `Secure` он по голому http не
+ * несёт, а `Origin` на изменяющем запросе не выставляет, и сервер отказал бы
+ * такому запросу как неподтверждённому.
+ */
+function apiHeaders(harness: E2eHarness, side: E2eSide = 'child'): Record<string, string> {
+  return { origin: harness.url, cookie: harness.cookieHeader(side) };
+}
+
+/** Стартует забег в обход интерфейса: сам старт проверяют другие сценарии. */
+async function startRunDirectly(
+  page: import('@playwright/test').Page,
+  harness: E2eHarness,
+  subject: string,
+): Promise<number> {
+  const started = await page.request.post(`${harness.url}/api/run/start`, {
+    data: { subject },
+    headers: apiHeaders(harness),
+  });
+  expect(started.ok()).toBe(true);
+  const { runId } = await started.json() as { runId: number };
+  return runId;
+}
+
 async function startReadyBoss(page: import('@playwright/test').Page, url: string): Promise<void> {
   await page.goto(url);
   const topic = page.locator('.topic-map li').filter({
@@ -37,8 +62,8 @@ async function answerBoss(page: import('@playwright/test').Page, answer: string)
   await page.getByRole('button', { name: 'Проверить' }).click();
 }
 
-test('главная показывает и открывает незавершённый забег прошлого дня', async ({ page }) => {
-  const harness = await startE2eHarness({ triagePassed: 'math' });
+test('главная показывает и открывает незавершённый забег прошлого дня', async ({ context, page }) => {
+  const harness = await startE2eHarness({ context, triagePassed: 'math' });
   try {
     const runId = Number(harness.db.prepare(
       `INSERT INTO runs
@@ -57,13 +82,14 @@ test('главная показывает и открывает незаверш
     expect(harness.db.prepare<[number], { finished_at: string | null }>(
       'SELECT finished_at FROM runs WHERE id = ?',
     ).get(runId)).toEqual({ finished_at: null });
+    harness.assertCodexNotCalled();
   } finally {
     await harness.close();
   }
 });
 
-test('полный забег из двенадцати заданий приводит на финальный экран', async ({ page }) => {
-  const harness = await startE2eHarness({ triagePassed: 'math' });
+test('полный забег из двенадцати заданий приводит на финальный экран', async ({ context, page }) => {
+  const harness = await startE2eHarness({ context, triagePassed: 'math' });
   try {
     await page.goto(harness.url);
     const mathRun = page.locator('.plan-cards article').filter({ hasText: 'Математика' });
@@ -90,19 +116,16 @@ test('полный забег из двенадцати заданий прив�
     expect(harness.db.prepare<[], { kind: string; total: number; correct: number }>(
       'SELECT kind, total, correct FROM runs ORDER BY id DESC LIMIT 1',
     ).get()).toEqual({ kind: 'run', total: 12, correct: 12 });
+    harness.assertCodexNotCalled();
   } finally {
     await harness.close();
   }
 });
 
-test('ошибка с исправлением не увеличивает 12 вопросов и приводит на финал', async ({ page }) => {
-  const harness = await startE2eHarness({ triagePassed: 'math' });
+test('ошибка с исправлением не увеличивает 12 вопросов и приводит на финал', async ({ context, page }) => {
+  const harness = await startE2eHarness({ context, triagePassed: 'math' });
   try {
-    const started = await page.request.post(`${harness.url}/api/run/start`, {
-      data: { subject: 'math' },
-    });
-    expect(started.ok()).toBe(true);
-    const { runId } = await started.json() as { runId: number };
+    const runId = await startRunDirectly(page, harness, 'math');
     await page.goto(`${harness.url}/?runId=${runId}`);
 
     await expect(page.getByText('Жизни: 3 из 3')).toBeVisible();
@@ -147,13 +170,10 @@ test('ошибка с исправлением не увеличивает 12 в
   }
 });
 
-test('текстовый ответ проходит обычный забег', async ({ page }) => {
-  const harness = await startE2eHarness({ triagePassed: 'russian' });
+test('текстовый ответ проходит обычный забег', async ({ context, page }) => {
+  const harness = await startE2eHarness({ context, triagePassed: 'russian' });
   try {
-    const started = await page.request.post(`${harness.url}/api/run/start`, {
-      data: { subject: 'russian' },
-    });
-    const { runId } = await started.json() as { runId: number };
+    const runId = await startRunDirectly(page, harness, 'russian');
     await page.goto(`${harness.url}/?runId=${runId}`);
 
     await expect(page.getByRole('heading', { name: /Вставь слово/ })).toBeVisible();
@@ -161,18 +181,16 @@ test('текстовый ответ проходит обычный забег',
     await page.getByLabel('Ответ').fill('учебник');
     await page.getByRole('button', { name: 'Проверить' }).click();
     await expect(page.locator('.verdict')).toContainText('Верно');
+    harness.assertCodexNotCalled();
   } finally {
     await harness.close();
   }
 });
 
-test('choice отправляет текст выбранной radio-карточки', async ({ page }) => {
-  const harness = await startE2eHarness({ triagePassed: 'english' });
+test('choice отправляет текст выбранной radio-карточки', async ({ context, page }) => {
+  const harness = await startE2eHarness({ context, triagePassed: 'english' });
   try {
-    const started = await page.request.post(`${harness.url}/api/run/start`, {
-      data: { subject: 'english' },
-    });
-    const { runId } = await started.json() as { runId: number };
+    const runId = await startRunDirectly(page, harness, 'english');
     await page.goto(`${harness.url}/?runId=${runId}`);
 
     await expect(page.getByRole('heading', { name: /Выбери правильный перевод/ })).toBeVisible();
@@ -185,19 +203,16 @@ test('choice отправляет текст выбранной radio-карто
       'SELECT answer FROM attempts ORDER BY id DESC LIMIT 1',
     ).get();
     expect(stored?.answer).toBe('окно');
+    harness.assertCodexNotCalled();
   } finally {
     await harness.close();
   }
 });
 
-test('подтверждённый спор возвращает баллы и расширяет accept[]', async ({ page }) => {
-  const harness = await startE2eHarness({ triagePassed: 'math' });
+test('подтверждённый спор возвращает баллы и расширяет accept[]', async ({ context, page }) => {
+  const harness = await startE2eHarness({ context, triagePassed: 'math' });
   try {
-    const started = await page.request.post(`${harness.url}/api/run/start`, {
-      data: { subject: 'math' },
-    });
-    expect(started.ok()).toBe(true);
-    const { runId } = await started.json() as { runId: number };
+    const runId = await startRunDirectly(page, harness, 'math');
 
     await page.goto(`${harness.url}/?runId=${runId}`);
     await page.getByLabel('Число').fill('сорок пять');
@@ -217,13 +232,14 @@ test('подтверждённый спор возвращает баллы и �
     expect(JSON.parse(row?.accept ?? '[]')).toContain('сорок пять');
     expect(row?.is_correct).toBe(1);
     expect(row?.correct).toBe(1);
+    harness.assertCodexNotCalled();
   } finally {
     await harness.close();
   }
 });
 
-test('триаж проходит от старта до ранжирования тем', async ({ page }) => {
-  const harness = await startE2eHarness();
+test('триаж проходит от старта до ранжирования тем', async ({ context, page }) => {
+  const harness = await startE2eHarness({ context });
   try {
     await page.goto(harness.url);
     await page.getByRole('button', { name: 'Пройти триаж' }).click();
@@ -246,20 +262,24 @@ test('триаж проходит от старта до ранжировани�
     expect(harness.db.prepare<[], { kind: string; total: number; correct: number }>(
       'SELECT kind, total, correct FROM runs ORDER BY id DESC LIMIT 1',
     ).get()).toEqual({ kind: 'triage', total: 12, correct: 12 });
+    harness.assertCodexNotCalled();
   } finally {
     await harness.close();
   }
 });
 
-test('карточка ведёт через материал и пять ответов к зачёту и обновлённому прогнозу', async ({ page }) => {
+test('карточка ведёт через материал и пять ответов к зачёту и обновлённому прогнозу', async ({ context, page }) => {
   const harness = await startE2eHarness({
+    context,
     triagePassed: 'math',
     controlledWorker: true,
     learningForecastFixture: 'math',
   });
   try {
     const materialId = await harness.waitForLearningMaterial('math.1');
-    const initialPlan = await page.request.get(`${harness.url}/api/run/plan`);
+    const initialPlan = await page.request.get(`${harness.url}/api/run/plan`, {
+      headers: apiHeaders(harness),
+    });
     expect(initialPlan.ok()).toBe(true);
     const initial = await initialPlan.json() as {
       forecasts: Array<{ subject: string; score: number }>;
@@ -338,8 +358,9 @@ test('карточка ведёт через материал и пять отв
   }
 });
 
-test('после незачёта повтор ведёт к повторному чтению той же теории', async ({ page }) => {
+test('после незачёта повтор ведёт к повторному чтению той же теории', async ({ context, page }) => {
   const harness = await startE2eHarness({
+    context,
     triagePassed: 'math',
     controlledWorker: true,
     learningForecastFixture: 'math',
@@ -374,8 +395,8 @@ test('после незачёта повтор ведёт к повторном�
   }
 });
 
-test('готовый босс переживает reload, закрывает тему после 5 из 5 и убирает её из плана', async ({ page }) => {
-  const harness = await startE2eHarness({ triagePassed: 'math', controlledWorker: true });
+test('готовый босс переживает reload, закрывает тему после 5 из 5 и убирает её из плана', async ({ context, page }) => {
+  const harness = await startE2eHarness({ context, triagePassed: 'math', controlledWorker: true });
   try {
     await harness.prepareBoss('math.1');
     const mastery = harness.db.prepare<[string], { mastery: number }>(
@@ -422,8 +443,9 @@ test('готовый босс переживает reload, закрывает т
   }
 });
 
-test('upheld-спор оставляет бой на достигнутой позиции и позволяет победить', async ({ page }) => {
+test('upheld-спор оставляет бой на достигнутой позиции и позволяет победить', async ({ context, page }) => {
   const harness = await startE2eHarness({
+    context,
     triagePassed: 'math',
     controlledWorker: true,
     controlledDispute: true,
@@ -454,8 +476,8 @@ test('upheld-спор оставляет бой на достигнутой по
   }
 });
 
-test('/parents напрямую и после reload показывает прогнозы, время, темы, ленту и флаги', async ({ page }) => {
-  const harness = await startE2eHarness();
+test('/parents напрямую и после reload показывает прогнозы, время, темы, ленту и флаги', async ({ context, page }) => {
+  const harness = await startE2eHarness({ context });
   try {
     harness.seedParentsDashboard();
     await page.goto(`${harness.url}/parents`);
@@ -486,9 +508,9 @@ test('/parents напрямую и после reload показывает про
   }
 });
 
-test('/parents меняет эффективный доступ: разблокировать, по плану, заблокировать', async ({ page }) => {
+test('/parents меняет эффективный доступ: разблокировать, по плану, заблокировать', async ({ context, page }) => {
   const parentPin = '123456';
-  const harness = await startE2eHarness({ parentPin });
+  const harness = await startE2eHarness({ context, parentPin });
   try {
     await page.clock.setFixedTime(new Date('2026-08-08T12:00:00.000Z'));
     await page.goto(`${harness.url}/parents`);
@@ -500,7 +522,7 @@ test('/parents меняет эффективный доступ: разблок�
       .getByRole('button', { name: 'Разблокировать' }).click();
     await expect(page.getByRole('region', { name: 'Компьютер разблокирован' }))
       .toContainText('Временный режим');
-    const forcedUnlocked = await (await page.request.get(`${harness.url}/api/gate/status`)).json();
+    const forcedUnlocked = await (await page.request.get(`${harness.url}/api/gate/status`, { headers: apiHeaders(harness) })).json();
     expect(forcedUnlocked).toMatchObject({
       automaticUnlocked: false,
       override: { mode: 'unlocked' },
@@ -513,7 +535,7 @@ test('/parents меняет эффективный доступ: разблок�
       .getByRole('button', { name: 'Вернуть режим «По плану»' }).click();
     await expect(page.getByRole('region', { name: 'Компьютер заблокирован' }))
       .toContainText('Режим по плану');
-    const automatic = await (await page.request.get(`${harness.url}/api/gate/status`)).json();
+    const automatic = await (await page.request.get(`${harness.url}/api/gate/status`, { headers: apiHeaders(harness) })).json();
     expect(automatic).toMatchObject({
       automaticUnlocked: false,
       override: null,
@@ -526,13 +548,116 @@ test('/parents меняет эффективный доступ: разблок�
       .getByRole('button', { name: 'Заблокировать' }).click();
     await expect(page.getByRole('region', { name: 'Компьютер заблокирован' }))
       .toContainText('Временный режим');
-    const forcedBlocked = await (await page.request.get(`${harness.url}/api/gate/status`)).json();
+    const forcedBlocked = await (await page.request.get(`${harness.url}/api/gate/status`, { headers: apiHeaders(harness) })).json();
     expect(forcedBlocked).toMatchObject({
       automaticUnlocked: false,
       override: { mode: 'blocked' },
       unlocked: false,
     });
     await assertControllerAcceptsGate(forcedBlocked);
+    harness.assertCodexNotCalled();
+  } finally {
+    await harness.close();
+  }
+});
+
+test('родитель заводит ребёнка, выпускает ссылку, ученик гасит её и начинает забег', async ({ browser, context, page }) => {
+  const harness = await startE2eHarness({ context, signIn: 'parent', triagePassed: 'math' });
+  try {
+    await page.goto(harness.url);
+    await expect(page.getByRole('heading', { name: 'Дети' })).toBeVisible();
+
+    await page.getByLabel('Имя ребёнка').fill('Даша');
+    await page.getByRole('button', { name: 'Завести ребёнка' }).click();
+    const card = page.locator('.family-child').filter({ hasText: 'Даша' });
+    await expect(card).toContainText('Готов к занятиям');
+
+    const added = harness.children().find(({ name }) => name === 'Даша');
+    if (added === undefined) throw new Error('E2E: заведённого ребёнка нет в управляющей базе');
+    // Сервер заводит базу со схемой, но пустую: заданий и профиля в ней нет, и
+    // без них первому же забегу нечего было бы выдать.
+    harness.seedChild(added.id, { name: 'Даша', triagePassed: 'math' });
+
+    await card.getByRole('button', { name: 'Выпустить ссылку' }).click();
+    const invite = card.locator('.family-invite code');
+    await expect(invite).toContainText('/join/');
+    const joinUrl = await invite.textContent() ?? '';
+
+    // Второй компьютер: у него нет ни родительской cookie, ни детской — только
+    // ссылка. Вкладка родителя проверяла бы вход, которого ученик не проходил.
+    const student = await browser.newContext();
+    try {
+      const studentPage = await student.newPage();
+      await studentPage.goto(joinUrl);
+      // Токен уходит из адресной строки сразу: он и есть весь секрет.
+      await expect(studentPage).toHaveURL(`${harness.url}/`);
+
+      const mathRun = studentPage.locator('.plan-cards article').filter({ hasText: 'Математика' });
+      await mathRun.getByRole('button', { name: 'Начать' }).click();
+      await expect(studentPage.getByRole('heading', { name: /вычисли значение/ })).toBeVisible();
+      // Забег ушёл в базу второго ребёнка: у первого его нет. Это и есть
+      // изоляция — одна база на процесс дала бы здесь единицу.
+      expect(harness.db.prepare<[], { count: number }>(
+        "SELECT COUNT(*) AS count FROM runs WHERE kind = 'run'",
+      ).get()).toEqual({ count: 0 });
+    } finally {
+      await student.close();
+    }
+
+    // Ссылка одноразовая: второй заход по ней ничего не открывает.
+    const reused = await page.request.post(`${harness.url}${new URL(joinUrl).pathname.replace('/join/', '/api/auth/child/claim/')}`, {
+      headers: { origin: harness.url },
+    });
+    expect(reused.status()).toBe(404);
+    harness.assertCodexNotCalled();
+  } finally {
+    await harness.close();
+  }
+});
+
+test('PIN нужен только с детской машины: неверный отвергается, вошедшему родителю не спрашивается', async ({ context, page }) => {
+  const parentPin = '123456';
+  const harness = await startE2eHarness({ context, parentPin });
+  try {
+    await page.clock.setFixedTime(new Date('2026-08-08T12:00:00.000Z'));
+    await page.goto(`${harness.url}/parents`);
+    await expect(page.getByRole('heading', { name: 'Картина подготовки без приукрашивания' })).toBeVisible();
+
+    // Неверный PIN — отказ на своём экране, а не выход со сводки: сессия
+    // ученика цела, и режим доступа остаётся прежним.
+    await page.getByLabel('PIN родителя').fill('999999');
+    await page.getByRole('button', { name: 'Заблокировать' }).click();
+    await page.getByRole('dialog', { name: 'Временно заблокировать компьютер?' })
+      .getByRole('button', { name: 'Заблокировать' }).click();
+    await expect(page.locator('.parents-access-feedback.error')).toContainText('Неверный PIN родителя');
+    await expect(page.getByRole('region', { name: 'Компьютер заблокирован' }))
+      .toContainText('Режим по плану');
+
+    await page.getByLabel('PIN родителя').fill(parentPin);
+    await page.getByRole('button', { name: 'Заблокировать' }).click();
+    await page.getByRole('dialog', { name: 'Временно заблокировать компьютер?' })
+      .getByRole('button', { name: 'Заблокировать' }).click();
+    await expect(page.getByRole('region', { name: 'Компьютер заблокирован' }))
+      .toContainText('Временный режим');
+
+    // Та же сводка, но вошедшим родителем. Вход идёт формой, а не подставленной
+    // cookie: PIN не спрашивается именно потому, что пароль уже проверен.
+    await context.clearCookies();
+    await page.goto(harness.url);
+    await page.getByLabel('Электронная почта').fill(E2E_PARENT.email);
+    await page.getByLabel('Пароль').fill(E2E_PARENT.password);
+    await page.getByRole('button', { name: 'Войти' }).click();
+    await page.locator('.family-child').filter({ hasText: 'Тимофей' })
+      .getByRole('button', { name: 'Сводка' }).click();
+    await expect(page.getByRole('heading', { name: 'Картина подготовки без приукрашивания' })).toBeVisible();
+    await expect(page.getByLabel('PIN родителя')).toHaveCount(0);
+    await expect(page.locator('.parents-access-note')).toContainText('PIN не нужен');
+
+    await page.getByRole('button', { name: 'По плану' }).click();
+    await page.getByRole('dialog', { name: 'Вернуть режим «По плану»?' })
+      .getByRole('button', { name: 'Вернуть режим «По плану»' }).click();
+    await expect(page.getByRole('region', { name: 'Компьютер заблокирован' }))
+      .toContainText('Режим по плану');
     harness.assertCodexNotCalled();
   } finally {
     await harness.close();
