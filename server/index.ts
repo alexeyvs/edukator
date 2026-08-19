@@ -30,7 +30,7 @@ import { registerGateRoutes, registerUnavailableGate } from './routes/gate.js';
 import { registerIntegrityRoutes, registerUnavailableIntegrity } from './routes/integrity.js';
 import { codexConcurrency, disputeConcurrency, type CodexConcurrency } from './codex/concurrency.js';
 import { startWorker, type StartWorkerOptions, type WorkerHandle } from './codex/worker.js';
-import { readParentPin } from './parent-pin.js';
+import { hashParentPin, readParentPin, readPinPepper } from './parent-pin.js';
 import { createIntegrityCoordinator } from './integrity.js';
 import type { IntegrityReviewer } from './codex/integrity.js';
 import { finishRun } from './run.js';
@@ -248,6 +248,13 @@ export function buildServer(
   options: ServerOptions = {},
 ): FastifyInstance {
   const parentPin = readParentPin(options.parentPin ?? process.env.EDUKATOR_PARENT_PIN);
+  const pinPepper = readPinPepper(process.env.EDUKATOR_PIN_PEPPER);
+  // Эталон живёт хешем: открытого PIN не остаётся ни в замыкании маршрута, ни в
+  // снимке кучи. Без pepper проверка отказала бы всегда, поэтому PIN считается
+  // ненастроенным — так маршрут отвечает 503, а не молчаливым «неверный PIN».
+  const parentPinHash = parentPin === undefined || pinPepper === undefined
+    ? undefined
+    : hashParentPin(parentPin, pinPepper);
   const webDist = options.webDist
     ?? (process.env.EDUKATOR_WEB_DEV === '1' ? false : WEB_DIST_DIR);
   if (webDist !== false) {
@@ -415,7 +422,8 @@ export function buildServer(
       db: sessionDb,
       graph,
       integrity,
-      ...(parentPin === undefined ? {} : { parentPin }),
+      ...(parentPinHash === undefined ? {} : { parentPinHash }),
+      ...(pinPepper === undefined ? {} : { pinPepper }),
       available: sessionAvailable,
       ...(options.now === undefined ? {} : { now: options.now }),
     });

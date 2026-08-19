@@ -5,31 +5,14 @@ import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { buildServer } from '../server/index.js';
-import { readParentPin, verifyParentPin } from '../server/parent-pin.js';
+import { hashParentPin } from '../server/parent-pin.js';
 import { openDatabase, SUBJECTS } from '../server/db.js';
 import { loadCurriculum } from '../server/curriculum.js';
 import { registerParentsRoutes, registerUnavailableParents } from '../server/routes/parents.js';
 
 const NOW = new Date('2026-08-08T12:00:00.000Z');
 const PARENT_PIN = '123456';
-
-describe('PIN родителей', () => {
-  it('принимает только от 6 до 12 цифр', () => {
-    expect(readParentPin(undefined)).toBeUndefined();
-    expect(readParentPin('12345')).toBeUndefined();
-    expect(readParentPin('1234567890123')).toBeUndefined();
-    expect(readParentPin('12345a')).toBeUndefined();
-    expect(readParentPin(' 123456')).toBeUndefined();
-    expect(readParentPin('123456')).toBe('123456');
-    expect(readParentPin('123456789012')).toBe('123456789012');
-  });
-
-  it('сравнивает PIN через проверку дайджестов фиксированной длины', () => {
-    expect(verifyParentPin(PARENT_PIN, PARENT_PIN)).toBe(true);
-    expect(verifyParentPin(PARENT_PIN, '123457')).toBe(false);
-    expect(verifyParentPin(PARENT_PIN, '1')).toBe(false);
-  });
-});
+const PIN_PEPPER = 'pepper-для-тестов-достаточной-длины';
 
 describe('маршрут родителей', () => {
   let dir: string;
@@ -53,6 +36,7 @@ describe('маршрут родителей', () => {
     }
     process.env.EDUKATOR_DB = join(dir, 'parents.db');
     process.env.EDUKATOR_PARENT_PIN = '999999';
+    process.env.EDUKATOR_PIN_PEPPER = PIN_PEPPER;
     app = buildServer(curriculumDir, {
       seedDir,
       now: () => NOW,
@@ -68,6 +52,7 @@ describe('маршрут родителей', () => {
     await app.close();
     delete process.env.EDUKATOR_DB;
     delete process.env.EDUKATOR_PARENT_PIN;
+    delete process.env.EDUKATOR_PIN_PEPPER;
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -214,6 +199,32 @@ describe('маршрут родителей', () => {
     }
   });
 
+  it('без EDUKATOR_PIN_PEPPER считает PIN ненастроенным, а не принимает его', async () => {
+    process.env.EDUKATOR_PARENT_PIN = '654321';
+    delete process.env.EDUKATOR_PIN_PEPPER;
+    const withoutPepper = buildServer(curriculumDir, {
+      seedDir,
+      now: () => NOW,
+      worker: false,
+    });
+    await withoutPepper.ready();
+    try {
+      const status = await withoutPepper.inject({ method: 'GET', url: '/api/parents' });
+      expect(status.json().computerAccess.configured).toBe(false);
+      const response = await withoutPepper.inject({
+        method: 'PUT',
+        url: '/api/parents/computer-access',
+        headers: { authorization: 'Bearer 654321' },
+        payload: { mode: 'automatic' },
+      });
+      expect(response.statusCode).toBe(503);
+    } finally {
+      await withoutPepper.close();
+      process.env.EDUKATOR_PARENT_PIN = '999999';
+      process.env.EDUKATOR_PIN_PEPPER = PIN_PEPPER;
+    }
+  });
+
   it('возвращает 400 для некорректного режима и 401 для неверного Bearer PIN', async () => {
     const malformed = await app.inject({
       method: 'PUT',
@@ -244,7 +255,8 @@ describe('маршрут родителей', () => {
     registerParentsRoutes(limited, {
       db,
       graph: loadCurriculum(curriculumDir),
-      parentPin: PARENT_PIN,
+      parentPinHash: hashParentPin(PARENT_PIN, PIN_PEPPER),
+      pinPepper: PIN_PEPPER,
       now: () => new Date(clock),
     });
     await limited.ready();
@@ -276,7 +288,8 @@ describe('маршрут родителей', () => {
     registerParentsRoutes(isolated, {
       db,
       graph: loadCurriculum(curriculumDir),
-      parentPin: PARENT_PIN,
+      parentPinHash: hashParentPin(PARENT_PIN, PIN_PEPPER),
+      pinPepper: PIN_PEPPER,
       now: () => NOW,
     });
     await isolated.ready();

@@ -218,8 +218,12 @@ export async function startE2eHarness(
 
   const previousDatabase = process.env.EDUKATOR_DB;
   const previousPath = process.env.PATH;
+  const previousPepper = process.env.EDUKATOR_PIN_PEPPER;
   process.env.EDUKATOR_DB = join(tempDir, 'edukator.db');
   process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+  // Без pepper сервер считает PIN ненастроенным: сценарий с управлением
+  // доступом получил бы 503 вместо проверки PIN.
+  process.env.EDUKATOR_PIN_PEPPER = 'e2e-pepper-достаточной-длины';
 
   let releaseDispute: (() => void) | undefined;
   const disputeGate = new Promise<void>((resolve) => { releaseDispute = resolve; });
@@ -380,6 +384,8 @@ export async function startE2eHarness(
         else process.env.EDUKATOR_DB = previousDatabase;
         if (previousPath === undefined) delete process.env.PATH;
         else process.env.PATH = previousPath;
+        if (previousPepper === undefined) delete process.env.EDUKATOR_PIN_PEPPER;
+        else process.env.EDUKATOR_PIN_PEPPER = previousPepper;
         const codexCalled = existsSync(codexMarker);
         rmSync(tempDir, { recursive: true, force: true });
         if (codexCalled) throw new Error('E2E вызвал настоящий путь codex вместо тестовой подмены');
@@ -392,6 +398,8 @@ export async function startE2eHarness(
     else process.env.EDUKATOR_DB = previousDatabase;
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;
+    if (previousPepper === undefined) delete process.env.EDUKATOR_PIN_PEPPER;
+    else process.env.EDUKATOR_PIN_PEPPER = previousPepper;
     rmSync(tempDir, { recursive: true, force: true });
     throw error;
   }

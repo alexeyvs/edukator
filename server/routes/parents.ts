@@ -25,7 +25,9 @@ interface AuthFailure {
 export interface ParentsRoutesOptions {
   db: Database;
   graph: TopicGraph;
-  parentPin?: string;
+  /** Эталон PIN — только хешем: открытое значение маршруту не нужно. */
+  parentPinHash?: string;
+  pinPepper?: string;
   now?: () => Date;
   available?: () => boolean;
   integrity?: IntegrityCoordinator;
@@ -97,7 +99,7 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
       ...dashboard,
       computerAccess: {
         ...dashboard.computerAccess,
-        configured: options.parentPin !== undefined,
+        configured: options.parentPinHash !== undefined,
       },
     });
   });
@@ -125,7 +127,28 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
     if (stopped !== undefined) return stopped;
     const denied = requireParent(request, reply);
     if (denied !== undefined) return denied;
+    if (options.parentPinHash === undefined) {
+      return reply.code(503).send({ error: 'Управление доступом недоступно: PIN родителя не настроен' });
+    }
+
     const current = now();
+    const at = current.getTime();
+    const recent = recentFailures(request.ip, at);
+    if (recent.length >= PARENT_AUTH_FAILURE_LIMIT) {
+      const retryAfter = Math.max(
+        1,
+        Math.ceil(((recent[0]?.at ?? at) + PARENT_AUTH_WINDOW_MS - at) / 1000),
+      );
+      return reply.header('retry-after', retryAfter).code(429).send({
+        error: 'Слишком много неверных попыток PIN, повторите позже',
+      });
+    }
+
+    if (!verifyParentPin(options.parentPinHash, bearerPin(request), options.pinPepper)) {
+      failures.set(request.ip, [...recent, { at }]);
+      return reply.code(401).send({ error: 'Неверный PIN родителя' });
+    }
+    failures.delete(request.ip);
 
     const mode = readMode(request.body);
     if (mode === undefined) {
