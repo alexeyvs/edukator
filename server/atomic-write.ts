@@ -18,8 +18,11 @@ import { randomUUID } from 'node:crypto';
  * EIO/ENOSPC на сбросе означает, что единственный снимок может исчезнуть после
  * сбоя питания. Игнорируются только файловые системы, которые прямо сообщают,
  * что `fsync` каталога ими не поддерживается.
+ *
+ * Экспортируется: заведение базы ребёнка завершается тем же `rename` и обязано
+ * доносить его до диска так же. Аргумент — путь файла, а не каталога.
  */
-function syncDirectory(path: string): void {
+export function syncDirectory(path: string): void {
   let handle: number;
   try {
     handle = openSync(dirname(path), 'r');

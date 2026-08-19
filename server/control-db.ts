@@ -930,6 +930,33 @@ export function readChild(db: Database.Database, childId: string): ChildSummary 
 }
 
 /**
+ * Ребёнок, которого можно обслуживать: база на месте (`ready`) и он не выведен.
+ * Один предикат на всех — и на разрешение аренды в маршрутах, и на обход детей
+ * воркером: `provisioning` значит «базы ещё нет», и выданный по нему ребёнок
+ * увёл бы занятие или фоновую генерацию в несуществующий файл.
+ */
+export function isChildServiceable(child: ChildSummary | undefined): boolean {
+  return child !== undefined && child.status === 'ready' && child.retiredAt === undefined;
+}
+
+/**
+ * Все обслуживаемые дети сервера, независимо от родителя. Порядок устойчив:
+ * диспетчер воркера обходит детей по нему, и перестановка равных строк давала
+ * бы разный порядок обхода на одинаковом состоянии.
+ */
+export function listServiceableChildren(db: Database.Database): ChildSummary[] {
+  const rows = db
+    .prepare<[], ChildRow>(
+      `SELECT id, parent_id, name, status, last_activity_at, retired_at, created_at
+         FROM children
+        WHERE status = 'ready' AND retired_at IS NULL
+        ORDER BY created_at, id`,
+    )
+    .all();
+  return rows.map(toChildSummary);
+}
+
+/**
  * Выпускает приглашение устройства. Открытый токен возвращается один раз: в
  * базе лежит только его отпечаток, как и у приглашения родителя.
  */

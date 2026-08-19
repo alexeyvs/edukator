@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
-import { databasePath, openDatabase } from './db.js';
+import { openDatabase } from './db.js';
 import {
   CURRICULUM_DIR,
   loadCurriculum,
@@ -36,8 +36,7 @@ import type { IntegrityReviewer } from './codex/integrity.js';
 import { finishRun } from './run.js';
 import { finishLearningMaterial } from './learning.js';
 import { readDailyGate } from './daily-gate.js';
-
-export { databasePath };
+import { ensureDataDir, legacySessionDatabasePath } from './data-dir.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -74,7 +73,7 @@ export type DatabaseStatus = 'ok' | 'error';
  * без текста не отличает занятый файл от непрочитанной схемы — а читают health
  * ровно тогда, когда это и надо различить.
  */
-export function checkDatabase(path: string = databasePath()): DatabaseStatus {
+export function checkDatabase(path: string): DatabaseStatus {
   let db: ReturnType<typeof openDatabase> | undefined;
   try {
     // `fileMustExist` проверяется атомарно самим SQLite: отдельный existsSync
@@ -172,7 +171,7 @@ export function openSessionDatabase(
  * а `recordAttempt` на первом же ответе по ней падает.
  */
 export function syncCurriculumState(
-  path: string = databasePath(),
+  path: string,
   curriculumDir: string = CURRICULUM_DIR,
 ): SyncResult {
   return syncLoadedCurriculum(path, loadCurriculum(curriculumDir));
@@ -227,6 +226,11 @@ export type CurriculumStatus = 'ok' | 'error';
 
 /** Настройки занятия, которые тесты подменяют: разбирающий спор и запуск фона. */
 export type ServerOptions = Omit<SessionRoutesOptions, 'db' | 'graph' | 'available'> & {
+  /**
+   * База занятия. Обязательна и передаётся явно: единой точки вроде прежнего
+   * `EDUKATOR_DB` у многоарендного сервера нет, путь выбирает вызывающий.
+   */
+  dbPath: string;
   /** Подменяется только в тестах ошибочной конфигурации. */
   personaPath?: string;
   /** Подмена настроек воркера в тестах; false отключает его для служебного сервера. */
@@ -245,8 +249,9 @@ export type ServerOptions = Omit<SessionRoutesOptions, 'db' | 'graph' | 'availab
 
 export function buildServer(
   curriculumDir: string = CURRICULUM_DIR,
-  options: ServerOptions = {},
+  options: ServerOptions,
 ): FastifyInstance {
+  const dbPath = options.dbPath;
   const parentPin = readParentPin(options.parentPin ?? process.env.EDUKATOR_PARENT_PIN);
   const pinPepper = readPinPepper(process.env.EDUKATOR_PIN_PEPPER);
   // Эталон живёт хешем: открытого PIN не остаётся ни в замыкании маршрута, ни в
@@ -300,7 +305,7 @@ export function buildServer(
   function trySyncCurriculum(): boolean {
     if (graph === undefined) return false;
     try {
-      syncLoadedCurriculum(databasePath(), graph);
+      syncLoadedCurriculum(dbPath, graph);
       curriculumSynchronized = true;
       return true;
     } catch (error) {
@@ -316,7 +321,7 @@ export function buildServer(
   function trySeedBank(): void {
     if (graph === undefined) return;
     try {
-      const seeded = loadSeedTasks(databasePath(), graph, options.seedDir);
+      const seeded = loadSeedTasks(dbPath, graph, options.seedDir);
       if (seeded.loaded > 0) {
         process.stderr.write(`посевной банк: добавлено ${seeded.loaded} задани(й)\n`);
       }
@@ -332,7 +337,7 @@ export function buildServer(
 
   function tryOpenSession(): SessionDatabase | undefined {
     try {
-      const opened = openSessionDatabase(databasePath());
+      const opened = openSessionDatabase(dbPath);
       if (opened === undefined) {
         process.stderr.write('занятие не поднято: файл базы сменился при открытии\n');
       }
@@ -357,7 +362,7 @@ export function buildServer(
     const budget = options.codexBudget ?? codexConcurrency;
     const disputes = options.disputeBudget ?? disputeConcurrency;
     let worker: WorkerHandle | undefined;
-    const sessionAvailable = (): boolean => fileIdentity(databasePath()) === opened.file;
+    const sessionAvailable = (): boolean => fileIdentity(dbPath) === opened.file;
     const integrity = createIntegrityCoordinator({
       db: sessionDb,
       graph,
@@ -507,7 +512,7 @@ export function buildServer(
   // отвечал бы `ok` процессу, который на все `/api/session/*` до перезапуска
   // отдаёт 503, — то есть врал бы именно о том, ради чего приложение и запущено.
   app.get('/api/health', (_request, reply) => {
-    let database = checkDatabase();
+    let database = checkDatabase(dbPath);
     if (graph !== undefined) {
       // Исправную базу синхронизируем всегда: файл могли заменить под живым
       // процессом. Но исчезнувшую после успешного старта базу не создаём заново
@@ -520,7 +525,7 @@ export function buildServer(
       // создать сам `trySyncCurriculum`: гонять `quick_check` второй раз по уже
       // признанной исправной базе незачем.
       if (!synchronized) database = 'error';
-      else if (database !== 'ok') database = checkDatabase();
+      else if (database !== 'ok') database = checkDatabase(dbPath);
     }
 
     // Исправная база — ещё не работающее занятие: его соединение открыто один
@@ -531,7 +536,7 @@ export function buildServer(
     // ответы ученика уходят в никуда. Переоткрыть соединение здесь нельзя
     // (у занятия могут идти транзакции, а маршруты уже выбраны), поэтому health
     // краснеет до перезапуска — как и на не поднявшемся при старте занятии.
-    const detached = opened !== undefined && fileIdentity(databasePath()) !== opened.file;
+    const detached = opened !== undefined && fileIdentity(dbPath) !== opened.file;
     const sessionNow: DatabaseStatus = session === 'ok' && !detached ? 'ok' : 'error';
     if (detached) {
       process.stderr.write(
@@ -628,7 +633,9 @@ if (isDirectRun) {
 
   if (port !== undefined) {
     const host = readHost(process.env.HOST);
-    const app = buildServer();
+    // Каталог данных заводится до сборки сервера: без него не открыть ни базу
+    // занятия, ни, начиная со следующих задач, управляющую.
+    const app = buildServer(CURRICULUM_DIR, { dbPath: legacySessionDatabasePath(ensureDataDir()) });
     closeOnSignals(app);
     // Отказ прослушивания перехватывается, как и в обеих точках входа CLI: занятое
     // порт-число — обычная ошибка запуска, а необработанный отказ верхнеуровневого

@@ -58,6 +58,7 @@ describe('маршруты занятия', () => {
   let seedDir: string;
   let app: FastifyInstance;
   let db: Database;
+  let dbPath: string;
   let verdict: DisputeReview;
   const reviewed: DisputeContext[] = [];
   /** Фоновые разборы: тест их дожидается, вместо того чтобы гадать о таймингах. */
@@ -71,8 +72,11 @@ describe('маршруты занятия', () => {
   const extra: FastifyInstance[] = [];
 
   /** Сервер со своими настройками, закрываемый вместе с тестом. */
-  function extraServer(options: ServerOptions = {}, dir?: string): FastifyInstance {
-    const instance = buildServer(dir ?? join(tempDir, 'curriculum'), options);
+  function extraServer(
+    options: Omit<ServerOptions, 'dbPath'> = {},
+    dir?: string,
+  ): FastifyInstance {
+    const instance = buildServer(dir ?? join(tempDir, 'curriculum'), { ...options, dbPath });
     extra.push(instance);
     return instance;
   }
@@ -84,7 +88,7 @@ describe('маршруты занятия', () => {
     mkdirSync(curriculumDir);
     mkdirSync(seedDir);
     writeCurriculum(curriculumDir);
-    process.env.EDUKATOR_DB = join(tempDir, 'session.db');
+    dbPath = join(tempDir, 'session.db');
 
     verdict = { studentCorrect: true, note: 'то же число словами' };
     reviewed.length = 0;
@@ -93,6 +97,7 @@ describe('маршруты занятия', () => {
     extra.length = 0;
 
     app = buildServer(curriculumDir, {
+      dbPath,
       seedDir,
       review: (context): Promise<DisputeReview> => {
         reviewed.push(context);
@@ -107,7 +112,7 @@ describe('маршруты занятия', () => {
     });
     await app.ready();
 
-    db = openDatabase(process.env.EDUKATOR_DB);
+    db = openDatabase(dbPath);
     for (const subject of SUBJECTS) storeTasks(db, `${subject}.a`, [task(), task()]);
   });
 
@@ -115,7 +120,6 @@ describe('маршруты занятия', () => {
     db.close();
     for (const instance of extra) await instance.close();
     await app.close();
-    delete process.env.EDUKATOR_DB;
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -649,7 +653,7 @@ describe('маршруты занятия', () => {
       ).toBe('upheld');
     });
 
-    it('не пишет вердикт в отвязанную базу, если EDUKATOR_DB заменили за время разбора', async () => {
+    it('не пишет вердикт в отвязанную базу, если файл базы заменили за время разбора', async () => {
       let release: (() => void) | undefined;
       const slow = extraServer({
         seedDir,
@@ -679,7 +683,7 @@ describe('маршруты занятия', () => {
       const disputeId = (response.json() as { dispute_id: number }).dispute_id;
       expect(reviewed).toHaveLength(1);
 
-      const path = join(tempDir, 'session.db');
+      const path = dbPath;
       rmSync(path, { force: true });
       rmSync(`${path}-wal`, { force: true });
       rmSync(`${path}-shm`, { force: true });

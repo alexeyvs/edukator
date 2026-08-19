@@ -6,13 +6,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../server/index.js';
 
 describe('статика интерфейса', () => {
+  let dbPath: string;
   let app: FastifyInstance | undefined;
   let tempDir: string;
   let webDist: string;
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'edukator-web-'));
-    process.env.EDUKATOR_DB = join(tempDir, 'web.db');
+    dbPath = join(tempDir, 'web.db');
     webDist = join(tempDir, 'dist');
     mkdirSync(webDist);
     writeFileSync(join(webDist, 'index.html'), '<h1>Собранный интерфейс</h1>');
@@ -20,12 +21,11 @@ describe('статика интерфейса', () => {
 
   afterEach(async () => {
     await app?.close();
-    delete process.env.EDUKATOR_DB;
     rmSync(tempDir, { recursive: true, force: true });
   });
 
   it('отдаёт сборку с корня и не перехватывает API', async () => {
-    app = buildServer(undefined, { worker: false, webDist });
+    app = buildServer(undefined, { dbPath, worker: false, webDist });
 
     const page = await app.inject({ method: 'GET', url: '/' });
     const health = await app.inject({ method: 'GET', url: '/api/health' });
@@ -38,7 +38,7 @@ describe('статика интерфейса', () => {
   });
 
   it('отдаёт SPA на прямом маршруте родительской сводки', async () => {
-    app = buildServer(undefined, { worker: false, webDist });
+    app = buildServer(undefined, { dbPath, worker: false, webDist });
 
     const page = await app.inject({ method: 'GET', url: '/parents' });
 
@@ -50,7 +50,7 @@ describe('статика интерфейса', () => {
   it('объясняет ошибку запуска, когда интерфейс не собран', () => {
     const missing = join(tempDir, 'нет-сборки');
 
-    expect(() => buildServer(undefined, { worker: false, webDist: missing })).toThrow(
+    expect(() => buildServer(undefined, { dbPath, worker: false, webDist: missing })).toThrow(
       `интерфейс не собран в ${missing}; выполните npm run build:web`,
     );
   });

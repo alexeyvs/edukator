@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import BetterSqlite3 from 'better-sqlite3';
 import {
@@ -12,7 +11,6 @@ import {
   PROFILE_NAME_MAX_LENGTH,
   SCHEMA_VERSION,
   TABLES,
-  databasePath,
   migrate,
   openDatabase,
   readProfile,
@@ -1843,42 +1841,6 @@ describe('база данных', () => {
   });
 
   describe('путь к базе', () => {
-    it('берётся из EDUKATOR_DB, когда переменная задана', () => {
-      process.env.EDUKATOR_DB = join(tempDir, 'из-окружения.db');
-      try {
-        expect(databasePath()).toBe(join(tempDir, 'из-окружения.db'));
-      } finally {
-        delete process.env.EDUKATOR_DB;
-      }
-    });
-
-    it('пустой EDUKATOR_DB — это не путь, а умолчание', () => {
-      // Пустая строка уходила в SQLite и открывала временную базу, стираемую при
-      // закрытии соединения: прогресс ученика пропадал на каждом перезапуске, а
-      // health при этом оставался зелёным.
-      const fallback = resolve(fileURLToPath(import.meta.url), '..', '..', 'edukator.db');
-      for (const value of ['', '   ']) {
-        process.env.EDUKATOR_DB = value;
-        try {
-          expect(databasePath()).toBe(fallback);
-        } finally {
-          delete process.env.EDUKATOR_DB;
-        }
-      }
-    });
-
-    it('по умолчанию указывает на edukator.db в корне проекта', () => {
-      const saved = process.env.EDUKATOR_DB;
-      delete process.env.EDUKATOR_DB;
-      try {
-        // Полный путь, а не хвост: `/edukator\.db$/` совпал бы и с путём из
-        // переменной окружения, то есть отката к умолчанию бы не доказывал.
-        expect(databasePath()).toBe(resolve(fileURLToPath(import.meta.url), '..', '..', 'edukator.db'));
-      } finally {
-        if (saved !== undefined) process.env.EDUKATOR_DB = saved;
-      }
-    });
-
     it('падает внятной ошибкой, если каталог базы недоступен', () => {
       expect(() => openDatabase(join(tempDir, 'нет-каталога', 'x.db'))).toThrow();
     });

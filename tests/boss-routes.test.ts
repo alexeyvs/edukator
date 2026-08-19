@@ -39,6 +39,7 @@ describe('маршруты босса', () => {
   let dir: string;
   let curriculumDir: string;
   let seedDir: string;
+  let dbPath: string;
   let app: FastifyInstance;
   let db: Database;
 
@@ -49,16 +50,15 @@ describe('маршруты босса', () => {
     mkdirSync(curriculumDir);
     mkdirSync(seedDir);
     writeCurriculum(curriculumDir);
-    process.env.EDUKATOR_DB = join(dir, 'boss.db');
-    app = buildServer(curriculumDir, { seedDir, now: () => NOW, worker: false });
+    dbPath = join(dir, 'boss.db');
+    app = buildServer(curriculumDir, { dbPath, seedDir, now: () => NOW, worker: false });
     await app.ready();
-    db = openDatabase(process.env.EDUKATOR_DB);
+    db = openDatabase(dbPath);
   });
 
   afterEach(async () => {
     db.close();
     await app.close();
-    delete process.env.EDUKATOR_DB;
     rmSync(dir, { recursive: true, force: true });
   });
 

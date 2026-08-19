@@ -677,28 +677,23 @@ describe('посевной банк', () => {
     });
 
     it('заливается при старте сервера, а второй старт ничего не добавляет', async () => {
-      const path = join(tempDir, 'server.db');
-      process.env.EDUKATOR_DB = path;
-      try {
-        const first = buildServer();
-        await first.ready();
-        await first.close();
+      const dbPath = join(tempDir, 'server.db');
+      const first = buildServer(undefined, { dbPath });
+      await first.ready();
+      await first.close();
 
-        const fresh = openDatabase(path);
-        const count = (): number =>
-          (fresh.prepare('SELECT COUNT(*) AS n FROM task_bank').get() as { n: number }).n;
-        const seeded = count();
+      const fresh = openDatabase(dbPath);
+      const count = (): number =>
+        (fresh.prepare('SELECT COUNT(*) AS n FROM task_bank').get() as { n: number }).n;
+      const seeded = count();
 
-        const second = buildServer();
-        await second.ready();
-        await second.close();
+      const second = buildServer(undefined, { dbPath });
+      await second.ready();
+      await second.close();
 
-        expect(seeded).toBeGreaterThanOrEqual(90);
-        expect(count()).toBe(seeded);
-        fresh.close();
-      } finally {
-        delete process.env.EDUKATOR_DB;
-      }
+      expect(seeded).toBeGreaterThanOrEqual(90);
+      expect(count()).toBe(seeded);
+      fresh.close();
     });
 
     it('заливается в базу целиком и не повторяется при перезапуске', () => {

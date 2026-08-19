@@ -20,7 +20,7 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { databasePath, openDatabase, SUBJECTS, type Subject } from '../server/db.js';
+import { openDatabase, SUBJECTS, type Subject } from '../server/db.js';
 import { writeFileAtomic } from '../server/atomic-write.js';
 import { CURRICULUM_DIR, loadCurriculum, syncTopicState } from '../server/curriculum.js';
 import type { CodexRunner } from '../server/codex/client.js';
@@ -70,6 +70,10 @@ export interface PrefetchOptions {
   outDir?: string;
   /** Откуда подгружать посев перед наполнением. */
   seedDir?: string;
+  /**
+   * База, которую греем. Обязательна: единой базы у сервера больше нет, и
+   * умолчание грело бы не того ребёнка (см. `--db`).
+   */
   dbPath?: string;
   curriculumDir?: string;
   /** Подменяемый производитель заданий: тесты не запускают процессов. */
@@ -122,7 +126,10 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
 
   const log = options.log ?? defaultLog;
   const graph = loadCurriculum(options.curriculumDir ?? CURRICULUM_DIR);
-  const db = openDatabase(options.dbPath ?? databasePath());
+  if (options.dbPath === undefined || options.dbPath.trim() === '') {
+    throw new Error('Укажите базу через --db: единой базы у сервера больше нет');
+  }
+  const db = openDatabase(options.dbPath);
 
   try {
     syncTopicState(db, graph);

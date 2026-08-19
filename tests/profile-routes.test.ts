@@ -40,6 +40,7 @@ describe('маршруты профиля', () => {
   let curriculumDir: string;
   let seedDir: string;
   let personaPath: string;
+  let dbPath: string;
   let app: FastifyInstance;
   let db: Database;
   let graph: TopicGraph;
@@ -63,18 +64,17 @@ describe('маршруты профиля', () => {
       '',
       'Коротко и без канцелярита.',
     ].join('\n'));
-    process.env.EDUKATOR_DB = join(tempDir, 'profile-routes.db');
+    dbPath = join(tempDir, 'profile-routes.db');
 
-    app = buildServer(curriculumDir, { seedDir, personaPath });
+    app = buildServer(curriculumDir, { dbPath, seedDir, personaPath });
     await app.ready();
-    db = openDatabase(process.env.EDUKATOR_DB);
+    db = openDatabase(dbPath);
     graph = loadCurriculum(curriculumDir);
   });
 
   afterEach(async () => {
     db.close();
     await app.close();
-    delete process.env.EDUKATOR_DB;
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -184,6 +184,7 @@ describe('маршруты профиля', () => {
 
   it('считает отсутствующую персону ошибкой настройки, а не пусым текстом', async () => {
     const broken = buildServer(curriculumDir, {
+      dbPath,
       seedDir,
       personaPath: join(tempDir, 'missing-persona.md'),
     });
@@ -203,7 +204,7 @@ describe('маршруты профиля', () => {
   it('отвергает персону без раздела знакомства', async () => {
     const withoutIntroduction = join(tempDir, 'persona-without-introduction.md');
     writeFileSync(withoutIntroduction, 'Только правила тона.');
-    const broken = buildServer(curriculumDir, { seedDir, personaPath: withoutIntroduction });
+    const broken = buildServer(curriculumDir, { dbPath, seedDir, personaPath: withoutIntroduction });
     await broken.ready();
     try {
       const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);

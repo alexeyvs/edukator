@@ -55,6 +55,7 @@ describe('маршруты забега', () => {
   let tempDir: string;
   let curriculumDir: string;
   let seedDir: string;
+  let dbPath: string;
   let app: FastifyInstance;
   let db: Database;
 
@@ -65,9 +66,10 @@ describe('маршруты забега', () => {
     mkdirSync(curriculumDir);
     mkdirSync(seedDir);
     writeCurriculum(curriculumDir);
-    process.env.EDUKATOR_DB = join(tempDir, 'run-routes.db');
+    dbPath = join(tempDir, 'run-routes.db');
 
     app = buildServer(curriculumDir, {
+      dbPath,
       seedDir,
       now: () => NOW,
       background: (job): void => void job(),
@@ -79,7 +81,7 @@ describe('маршруты забега', () => {
       })),
     });
     await app.ready();
-    db = openDatabase(process.env.EDUKATOR_DB);
+    db = openDatabase(dbPath);
     for (const subject of SUBJECTS) {
       storeTasks(db, `${subject}.a`, Array.from({ length: 12 }, (_, index) => task(subject, index)));
     }
@@ -88,7 +90,6 @@ describe('маршруты забега', () => {
   afterEach(async () => {
     db.close();
     await app.close();
-    delete process.env.EDUKATOR_DB;
     rmSync(tempDir, { recursive: true, force: true });
   });
 

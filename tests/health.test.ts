@@ -33,17 +33,17 @@ function packageVersion(): string {
 describe('GET /api/health', () => {
   let app: FastifyInstance;
   let tempDir: string;
+  let dbPath: string;
 
   beforeAll(async () => {
     tempDir = mkdtempSync(join(tmpdir(), 'edukator-health-'));
-    process.env.EDUKATOR_DB = join(tempDir, 'health.db');
-    app = buildServer();
+    dbPath = join(tempDir, 'health.db');
+    app = buildServer(undefined, { dbPath });
     await app.ready();
   });
 
   afterAll(async () => {
     await app.close();
-    delete process.env.EDUKATOR_DB;
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -56,7 +56,7 @@ describe('GET /api/health', () => {
   it('слушает 0.0.0.0, чтобы быть доступным из домашней сети', async () => {
     expect(HOST).toBe('0.0.0.0');
 
-    const listening = buildServer();
+    const listening = buildServer(undefined, { dbPath });
     await listening.listen({ host: HOST, port: 0 });
     const bound = listening.server.address();
 
@@ -91,19 +91,21 @@ describe('GET /api/health', () => {
   it('отвечает 503 и status error, когда база недоступна', async () => {
     // Зелёный status над «database: error» врал бы ровно в тот момент, ради
     // которого health и читают.
-    const previous = process.env.EDUKATOR_DB;
-    process.env.EDUKATOR_DB = join(tempDir, 'нет-такого-каталога', 'x.db');
+    const unavailable = buildServer(undefined, {
+      dbPath: join(tempDir, 'нет-такого-каталога', 'x.db'),
+    });
     try {
-      const response = await app.inject({ method: 'GET', url: '/api/health' });
+      const response = await unavailable.inject({ method: 'GET', url: '/api/health' });
       const body = response.json() as { status: string; database: string; version: string };
 
       expect(response.statusCode).toBe(503);
       expect(body.status).toBe('error');
       expect(body.database).toBe('error');
+      // Версия обязана дойти и на сломанной базе: health читают, чтобы понять,
+      // какая сборка сломалась, и пустое поле версии тут бесполезно.
       expect(body.version).toBe(packageVersion());
     } finally {
-      if (previous === undefined) delete process.env.EDUKATOR_DB;
-      else process.env.EDUKATOR_DB = previous;
+      await unavailable.close();
     }
   });
 
@@ -133,7 +135,7 @@ describe('GET /api/health', () => {
   });
 
   it('отвечает 503 без раскрытия деталей карты, если предметы не загрузились', async () => {
-    const failing = buildServer(join(tempDir, 'нет-карт'));
+    const failing = buildServer(join(tempDir, 'нет-карт'), { dbPath });
     try {
       const response = await failing.inject({ method: 'GET', url: '/api/health' });
       expect(response.statusCode).toBe(503);
@@ -175,11 +177,9 @@ describe('GET /api/health', () => {
 
   it('buildServer синхронизирует topic_state, а не только поднимает маршруты', async () => {
     const path = join(tempDir, 'через-buildServer.db');
-    const previous = process.env.EDUKATOR_DB;
-    process.env.EDUKATOR_DB = path;
     // Соединение занятия закрывается хуком `onClose`: без `app.close()` оно и
     // файлы `-wal`/`-shm` живут до конца прогона.
-    const app = buildServer();
+    const app = buildServer(undefined, { dbPath: path });
     try {
       const db = openDatabase(path);
       try {
@@ -190,16 +190,13 @@ describe('GET /api/health', () => {
       }
     } finally {
       await app.close();
-      if (previous === undefined) delete process.env.EDUKATOR_DB;
-      else process.env.EDUKATOR_DB = previous;
     }
   });
 
   it('поднимает сервер и отвечает 503, когда синхронизация карты при старте падает', async () => {
     // Причина остаётся в stderr, а health обязан остаться доступным и показать
     // стабильный статус, не раскрывая клиенту локальные пути и детали схемы.
-    const previous = process.env.EDUKATOR_DB;
-    process.env.EDUKATOR_DB = join(tempDir, 'нет-такого-каталога', 'старт.db');
+    const startPath = join(tempDir, 'нет-такого-каталога', 'старт.db');
     const written: string[] = [];
     const original = process.stderr.write.bind(process.stderr);
     process.stderr.write = ((chunk: string) => {
@@ -209,7 +206,7 @@ describe('GET /api/health', () => {
 
     let failing: FastifyInstance | undefined;
     try {
-      failing = buildServer();
+      failing = buildServer(undefined, { dbPath: startPath });
       const response = await failing.inject({ method: 'GET', url: '/api/health' });
 
       expect(response.statusCode).toBe(503);
@@ -217,18 +214,14 @@ describe('GET /api/health', () => {
     } finally {
       process.stderr.write = original;
       await failing?.close();
-      if (previous === undefined) delete process.env.EDUKATOR_DB;
-      else process.env.EDUKATOR_DB = previous;
     }
 
     expect(written.join('')).toContain('синхронизация карты тем');
   });
 
   it('повторяет синхронизацию карты после восстановления базы', async () => {
-    const previous = process.env.EDUKATOR_DB;
     const parent = join(tempDir, 'временно-недоступно');
     const path = join(parent, 'восстановилась.db');
-    process.env.EDUKATOR_DB = path;
 
     const written: string[] = [];
     const original = process.stderr.write.bind(process.stderr);
@@ -239,7 +232,7 @@ describe('GET /api/health', () => {
 
     let recovering: FastifyInstance | undefined;
     try {
-      recovering = buildServer();
+      recovering = buildServer(undefined, { dbPath: path });
       const unavailable = await recovering.inject({ method: 'GET', url: '/api/health' });
       expect(unavailable.statusCode).toBe(503);
       expect(unavailable.json()).toMatchObject({ database: 'error', curriculum: 'ok' });
@@ -269,8 +262,6 @@ describe('GET /api/health', () => {
     } finally {
       process.stderr.write = original;
       await recovering?.close();
-      if (previous === undefined) delete process.env.EDUKATOR_DB;
-      else process.env.EDUKATOR_DB = previous;
     }
 
     expect(written.join('')).toContain('синхронизация карты тем');
@@ -278,9 +269,7 @@ describe('GET /api/health', () => {
 
   it('повторяет синхронизацию после замены уже исправной базы, но краснеет за занятие', async () => {
     const path = join(tempDir, 'заменённая.db');
-    const previous = process.env.EDUKATOR_DB;
-    process.env.EDUKATOR_DB = path;
-    const replacing = buildServer();
+    const replacing = buildServer(undefined, { dbPath: path });
 
     try {
       expect((await replacing.inject({ method: 'GET', url: '/api/health' })).statusCode).toBe(200);
@@ -321,16 +310,12 @@ describe('GET /api/health', () => {
       }
     } finally {
       await replacing.close();
-      if (previous === undefined) delete process.env.EDUKATOR_DB;
-      else process.env.EDUKATOR_DB = previous;
     }
   });
 
   it('не создаёт заново базу, которая пропала после успешного старта', async () => {
     const path = join(tempDir, 'пропала-после-старта.db');
-    const previous = process.env.EDUKATOR_DB;
-    process.env.EDUKATOR_DB = path;
-    const watching = buildServer();
+    const watching = buildServer(undefined, { dbPath: path });
 
     try {
       expect((await watching.inject({ method: 'GET', url: '/api/health' })).statusCode).toBe(200);
@@ -345,8 +330,6 @@ describe('GET /api/health', () => {
       expect(existsSync(path)).toBe(false);
     } finally {
       await watching.close();
-      if (previous === undefined) delete process.env.EDUKATOR_DB;
-      else process.env.EDUKATOR_DB = previous;
     }
   });
 
@@ -449,7 +432,7 @@ describe('GET /api/health', () => {
   // переносом в основной файл, а восстановлением при следующем запуске.
   // Сигнал взят посторонний: настоящий SIGINT снял бы сам прогон тестов.
   it('закрывает сервер по сигналу', async () => {
-    const closing = buildServer();
+    const closing = buildServer(undefined, { dbPath });
     // Ожидание закрытия ставится до сигнала и разрешается самим `onClose`:
     // явный `close()` в конце теста поднял бы флаг и без единого обработчика
     // сигнала, то есть проверка проходила бы и на пустой `closeOnSignals`.
@@ -479,7 +462,7 @@ describe('GET /api/health', () => {
   // из-под незакрытой базы, то есть ровно то, ради чего заводился `onClose`.
   it('по умолчанию слушает те же сигналы, что снимают потомков', async () => {
     const signals: readonly NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP'];
-    const closing = buildServer();
+    const closing = buildServer(undefined, { dbPath });
     await closing.ready();
     const before = signals.map((signal) => process.listenerCount(signal));
 
@@ -539,14 +522,16 @@ describe('GET /api/health', () => {
   });
 
   it('прямой CLI-запуск возвращает код 1 на битом PORT до открытия базы', () => {
-    const path = join(tempDir, 'cli-invalid-port.db');
+    const dir = join(tempDir, 'cli-invalid-port');
     const result = spawnSync(process.execPath, [tsxCli, serverCli], {
       encoding: 'utf8',
-      env: { ...process.env, PORT: 'не-порт', EDUKATOR_DB: path },
+      env: { ...process.env, PORT: 'не-порт', EDUKATOR_DATA_DIR: dir },
     });
 
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(/edukator не поднялся:.*PORT/u);
-    expect(existsSync(path)).toBe(false);
+    // Каталог данных не заведён: битый PORT обязан отсекаться до всякой работы
+    // с диском, иначе ошибка запуска оставляла бы за собой полупустой каталог.
+    expect(existsSync(dir)).toBe(false);
   });
 });

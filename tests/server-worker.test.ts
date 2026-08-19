@@ -31,17 +31,17 @@ function generated(question: string): GeneratedTask {
 
 describe('воркер рабочего сервера', () => {
   let tempDir: string;
+  let dbPath: string;
   let app: FastifyInstance | undefined;
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'edukator-server-worker-'));
     mkdirSync(join(tempDir, 'seed-bank'));
-    process.env.EDUKATOR_DB = join(tempDir, 'worker.db');
+    dbPath = join(tempDir, 'worker.db');
   });
 
   afterEach(async () => {
     await app?.close();
-    delete process.env.EDUKATOR_DB;
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -56,6 +56,7 @@ describe('воркер рабочего сервера', () => {
     let peak = 0;
     const startedProduce = new Promise<void>((resolve) => {
       app = buildServer(undefined, {
+        dbPath,
         seedDir: join(tempDir, 'seed-bank'),
         codexBudget: budget,
         disputeBudget: disputes,
@@ -85,7 +86,7 @@ describe('воркер рабочего сервера', () => {
 
     // buildServer уже синхронизировал карту; одно готовое задание оставляет тему
     // голодной для воркера и одновременно даёт открыть спор через HTTP.
-    const db = openDatabase(process.env.EDUKATOR_DB);
+    const db = openDatabase(dbPath);
     const graph = loadCurriculum();
     const topic = activeTopics(db, graph, 1)[0];
     if (topic === undefined) throw new Error('планировщик не выбрал тему для теста');
@@ -134,7 +135,7 @@ describe('воркер рабочего сервера', () => {
     });
     await closing;
 
-    const reopened = openDatabase(process.env.EDUKATOR_DB);
+    const reopened = openDatabase(dbPath);
     expect(reopened.prepare('SELECT COUNT(*) AS n FROM task_bank WHERE topic_id = ?').get(topic.id))
       .toEqual({ n: 3 });
     reopened.close();
@@ -148,6 +149,7 @@ describe('воркер рабочего сервера', () => {
       reachedWait = resolve;
     });
     app = buildServer(undefined, {
+      dbPath,
       seedDir: join(tempDir, 'seed-bank'),
       log: (message) => logged.push(message),
       worker: {
@@ -161,7 +163,7 @@ describe('воркер рабочего сервера', () => {
       },
     });
 
-    const db = openDatabase(process.env.EDUKATOR_DB);
+    const db = openDatabase(dbPath);
     const topic = activeTopics(db, loadCurriculum(), 1)[0];
     if (topic === undefined) throw new Error('планировщик не выбрал тему для теста');
     storeTasks(db, topic.id, [generated('В инвентаре 90 монет, половину потратили. Сколько осталось?')]);

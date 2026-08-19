@@ -216,10 +216,9 @@ export async function startE2eHarness(
   writeFileSync(codexShim, `#!/bin/sh\ntouch '${codexMarker}'\nexit 97\n`);
   chmodSync(codexShim, 0o755);
 
-  const previousDatabase = process.env.EDUKATOR_DB;
+  const dbPath = join(tempDir, 'edukator.db');
   const previousPath = process.env.PATH;
   const previousPepper = process.env.EDUKATOR_PIN_PEPPER;
-  process.env.EDUKATOR_DB = join(tempDir, 'edukator.db');
   process.env.PATH = `${binDir}:${previousPath ?? ''}`;
   // Без pepper сервер считает PIN ненастроенным: сценарий с управлением
   // доступом получил бы 503 вместо проверки PIN.
@@ -235,6 +234,7 @@ export async function startE2eHarness(
     };
   };
   const app = buildServer(curriculumDir, {
+    dbPath,
     worker: options.controlledWorker === true
       ? {
           produce: controlledProducer(),
@@ -253,7 +253,7 @@ export async function startE2eHarness(
     now: () => NOW,
     ...(options.parentPin === undefined ? {} : { parentPin: options.parentPin }),
   });
-  const db = openDatabase(process.env.EDUKATOR_DB);
+  const db = openDatabase(dbPath);
   const graph = loadCurriculum(curriculumDir);
 
   try {
@@ -380,8 +380,6 @@ export async function startE2eHarness(
         releaseDispute?.();
         await app.close();
         db.close();
-        if (previousDatabase === undefined) delete process.env.EDUKATOR_DB;
-        else process.env.EDUKATOR_DB = previousDatabase;
         if (previousPath === undefined) delete process.env.PATH;
         else process.env.PATH = previousPath;
         if (previousPepper === undefined) delete process.env.EDUKATOR_PIN_PEPPER;
@@ -394,8 +392,6 @@ export async function startE2eHarness(
   } catch (error) {
     await app.close();
     db.close();
-    if (previousDatabase === undefined) delete process.env.EDUKATOR_DB;
-    else process.env.EDUKATOR_DB = previousDatabase;
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;
     if (previousPepper === undefined) delete process.env.EDUKATOR_PIN_PEPPER;

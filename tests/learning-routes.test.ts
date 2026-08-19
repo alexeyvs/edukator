@@ -52,6 +52,7 @@ describe('Learning API', () => {
   let tempDir: string;
   let curriculumDir: string;
   let seedDir: string;
+  let dbPath: string;
   let app: FastifyInstance;
   let db: Database;
   let serial: number;
@@ -64,10 +65,11 @@ describe('Learning API', () => {
     mkdirSync(curriculumDir);
     mkdirSync(seedDir);
     writeCurriculum(curriculumDir);
-    process.env.EDUKATOR_DB = join(tempDir, 'learning.db');
+    dbPath = join(tempDir, 'learning.db');
     serial = 0;
     integrityDecision = 'meaningful';
     app = buildServer(curriculumDir, {
+      dbPath,
       seedDir,
       now: () => NOW,
       review: async () => {
@@ -88,7 +90,7 @@ describe('Learning API', () => {
       }),
     });
     await app.ready();
-    db = openDatabase(process.env.EDUKATOR_DB);
+    db = openDatabase(dbPath);
     for (const subject of SUBJECTS) {
       storeTasks(db, `${subject}.a`, Array.from({ length: 12 }, (_, index) =>
         task(`обычный-${subject}`, index)));
@@ -98,7 +100,6 @@ describe('Learning API', () => {
   afterEach(async () => {
     db.close();
     await app.close();
-    delete process.env.EDUKATOR_DB;
     rmSync(tempDir, { recursive: true, force: true });
   });
 

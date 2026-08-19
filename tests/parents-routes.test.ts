@@ -18,6 +18,7 @@ describe('маршрут родителей', () => {
   let dir: string;
   let curriculumDir: string;
   let seedDir: string;
+  let dbPath: string;
   let app: FastifyInstance;
   let db: Database;
 
@@ -34,23 +35,23 @@ describe('маршрут родителей', () => {
           exam_weight: 3, difficulty: 2, prereqs: [], answer_format: 'text', prompt_seed: 'Проверяй знания по теме' }],
       }));
     }
-    process.env.EDUKATOR_DB = join(dir, 'parents.db');
+    dbPath = join(dir, 'parents.db');
     process.env.EDUKATOR_PARENT_PIN = '999999';
     process.env.EDUKATOR_PIN_PEPPER = PIN_PEPPER;
     app = buildServer(curriculumDir, {
+      dbPath,
       seedDir,
       now: () => NOW,
       worker: false,
       parentPin: PARENT_PIN,
     });
     await app.ready();
-    db = openDatabase(process.env.EDUKATOR_DB);
+    db = openDatabase(dbPath);
   });
 
   afterEach(async () => {
     db.close();
     await app.close();
-    delete process.env.EDUKATOR_DB;
     delete process.env.EDUKATOR_PARENT_PIN;
     delete process.env.EDUKATOR_PIN_PEPPER;
     rmSync(dir, { recursive: true, force: true });
@@ -180,6 +181,7 @@ describe('маршрут родителей', () => {
   it('читает PIN из EDUKATOR_PARENT_PIN без тестовой подмены', async () => {
     process.env.EDUKATOR_PARENT_PIN = '654321';
     const fromEnvironment = buildServer(curriculumDir, {
+      dbPath,
       seedDir,
       now: () => NOW,
       worker: false,
@@ -203,6 +205,7 @@ describe('маршрут родителей', () => {
     process.env.EDUKATOR_PARENT_PIN = '654321';
     delete process.env.EDUKATOR_PIN_PEPPER;
     const withoutPepper = buildServer(curriculumDir, {
+      dbPath,
       seedDir,
       now: () => NOW,
       worker: false,

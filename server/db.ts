@@ -1,10 +1,5 @@
-import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import { LEARNING_TASK_COUNT } from './learning-constants.js';
-
-const here = dirname(fileURLToPath(import.meta.url));
-const projectRoot = resolve(here, '..');
 
 /**
  * Версия схемы. Хранится в `PRAGMA user_version`; миграция сравнивает её со
@@ -420,21 +415,6 @@ const INTEGRITY_SCHEMA = `
   CREATE INDEX IF NOT EXISTS integrity_items_by_run
     ON integrity_items (run_id, status, id);
 `;
-
-/**
- * Путь к базе: переопределяется через EDUKATOR_DB, чтобы тесты и dev-запуск
- * не дрались за один файл.
- *
- * Пустое значение — это незаданная переменная, а не путь: `??` ловит только
- * отсутствие, а `EDUKATOR_DB=` уходило пустой строкой в SQLite, и та молча
- * открывала временную базу, стираемую при закрытии соединения. Прогресс ученика
- * пропадал бы на каждом перезапуске, а `/api/health` при этом оставался зелёным.
- */
-export function databasePath(): string {
-  const value = process.env.EDUKATOR_DB;
-  if (value === undefined || value.trim() === '') return resolve(projectRoot, 'edukator.db');
-  return value;
-}
 
 /**
  * Номер версии схемы базы. База новее кода отвергается, а не считается
@@ -1069,7 +1049,7 @@ export interface OpenDatabaseOptions {
 }
 
 export function openDatabase(
-  path: string = databasePath(),
+  path: string,
   options: OpenDatabaseOptions = {},
 ): Database.Database {
   const db = new Database(path, { fileMustExist: options.fileMustExist ?? false });
