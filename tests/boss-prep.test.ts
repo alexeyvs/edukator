@@ -167,6 +167,27 @@ describe('подготовка боёв с боссом', () => {
       .toMatchObject({ batchId: restored.batchId, resumed: false });
   });
 
+  // Диспетчер обходит одного ребёнка дважды за обход: сначала добивая банк до
+  // порога всем поровну, потом до полного запаса. Босса заказывает только
+  // второй заход, и «пропустить фазу» обязано значить «не звать модель».
+  it('не заказывает бой, когда фаза подготовки босса выключена', async () => {
+    db.prepare('UPDATE topic_state SET mastery = 0.8 WHERE topic_id = ?').run(TOPIC);
+    let calls = 0;
+    const report = await runWarmupCycle({
+      db, graph, prepareBoss: false, target: 1, threshold: 1, now: () => NOW,
+      produce: () => {
+        calls += 1;
+        return Promise.resolve(five(`floor-${String(calls)}`));
+      },
+    });
+
+    expect(report.bossPreparation).toBeUndefined();
+    expect(db.prepare('SELECT COUNT(*) AS n FROM boss_batches').get()).toEqual({ n: 0 });
+    // Вызов был ровно один — обычный долив темы, а не подготовка боя.
+    expect(calls).toBe(1);
+    expect(report.refilled[0]).toMatchObject({ topicId: TOPIC, stored: 5 });
+  });
+
   it('встроена в обычный цикл и делит с прогревом единый предел процессов', async () => {
     db.prepare('UPDATE topic_state SET mastery = 0.8 WHERE topic_id = ?').run(TOPIC);
     const budget = new CodexConcurrency(1);

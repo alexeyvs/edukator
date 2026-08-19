@@ -25,7 +25,7 @@ import { registerAuthRoutes, registerUnavailableAuth } from './routes/auth.js';
 import { registerFamilyRoutes, registerUnavailableFamily } from './routes/family.js';
 import { codexConcurrency, disputeConcurrency, type CodexConcurrency } from './codex/concurrency.js';
 import { createQuotedRunner } from './codex/quota.js';
-import { startWorker, type StartWorkerOptions, type WorkerHandle } from './codex/worker.js';
+import { WarmupDispatcher, type DispatcherWorkerOptions } from './codex/dispatcher.js';
 import { readPinPepper } from './parent-pin.js';
 import { controlDatabasePath, dataDir as defaultDataDir, ensureDataDir } from './data-dir.js';
 import { openControlDatabase, validateControlSchema } from './control-db.js';
@@ -91,7 +91,7 @@ export type ServerOptions =
   /** Подменяется только в тестах ошибочной конфигурации. */
   personaPath?: string;
   /** Подмена настроек воркера в тестах; false отключает его для служебного сервера. */
-  worker?: false | Omit<StartWorkerOptions, 'db' | 'graph' | 'budget'>;
+  worker?: false | DispatcherWorkerOptions;
   /** Подменяемый бюджет фонового воркера. */
   codexBudget?: CodexConcurrency;
   /** Проверяющий осмысленность; по умолчанию — вызов codex. */
@@ -237,48 +237,59 @@ export function buildServer(
     });
     registry = tenants;
 
-    // Воркер свой на каждую открытую базу и заводится вместе с ней: общего
-    // соединения занятия у сервера больше нет, а греть банк ребёнка, который ни
-    // разу не пришёл, незачем — за него платили бы все остальные. Обход детей
-    // одним диспетчером с честной очередью появится задачей 17.
-    const workers = new Map<string, WorkerHandle>();
-    let listening = false;
-    function ensureWorker(tenant: Tenant): void {
-      if (options.worker === false || !listening || workers.has(tenant.childId)) return;
-      const worker = options.worker ?? {};
-      workers.set(
-        tenant.childId,
-        startWorker({
-          db: tenant.db,
-          graph: loaded,
-          budget,
-          log,
-          ...(options.now === undefined ? {} : { now: options.now }),
-          ...worker,
-          // Квота надевается на сам вызов модели, а не на бюджет: за одним
-          // слотом семафора прячется от двух вызовов (батч — генератор и
-          // проверяющий) до шести (персональный материал), и счёт по слотам
-          // превратил бы предел в кратный ему. Обёртка идёт после спреда
-          // настроек: подменённый в тестах `run` она оборачивает, а не теряет.
-          run: createQuotedRunner({
-            control: controlDb,
-            childId: tenant.childId,
-            ...(worker.run === undefined ? {} : { run: worker.run }),
+    // Отдельная привязка: сужение `options.worker` до настроек не доживает до
+    // тела вложенной функции, а обёртка квоты берёт `run` именно оттуда.
+    const workerSettings = options.worker === false ? undefined : options.worker ?? {};
+
+    // Прогрев на весь процесс один, а не на каждую открытую базу: бюджет codex
+    // процессный, и свой цикл у каждого ребёнка означал бы гонку за два слота, в
+    // которой занимающийся ученик стоит наравне с тем, кто ушёл спать. Порядок
+    // и фазы обхода — в `WarmupDispatcher`.
+    const dispatcher =
+      workerSettings === undefined
+        ? undefined
+        : new WarmupDispatcher({
+            control,
+            graph: loaded,
+            log,
+            budget,
+            // Отказ базы одного ребёнка обход не останавливает: причину уже
+            // назвал реестр, диспетчер просто идёт к следующему.
+            open: (childId: string) => {
+              try {
+                return tenants.open(childId).db;
+              } catch {
+                return undefined;
+              }
+            },
+            // Квота надевается на сам вызов модели, а не на бюджет: за одним
+            // слотом семафора прячется от двух вызовов (батч — генератор и
+            // проверяющий) до шести (персональный материал), и счёт по слотам
+            // превратил бы предел в кратный ему. Подменённый в тестах `run`
+            // обёртка оборачивает, а не теряет.
+            runFor: (childId: string) =>
+              createQuotedRunner({
+                control: controlDb,
+                childId,
+                ...(workerSettings.run === undefined ? {} : { run: workerSettings.run }),
+                ...(options.now === undefined ? {} : { now: options.now }),
+              }),
+            worker: workerSettings,
             ...(options.now === undefined ? {} : { now: options.now }),
-          }),
-        }),
-      );
-    }
+          });
 
     /**
-     * Реестр в том виде, в каком его видит допуск. Обёртка нужна ровно ради
-     * воркера: он привязан к соединению, а соединение заводится по первому
-     * обращению — то есть внутри `open`, а не при старте сервера.
+     * Реестр в том виде, в каком его видит допуск. Обёртка нужна ради
+     * будильника диспетчера: вернувшийся ребёнок узнаётся по первому своему
+     * запросу, то есть внутри `open`, а не при старте сервера.
      */
     const opener: TenantOpener = {
       open(childId: string): Tenant {
         const tenant = tenants.open(childId);
-        ensureWorker(tenant);
+        // Будильник только по новому в обходе ребёнку: вернувшийся после
+        // перерыва не должен досиживать чужую паузу, а занимающийся не должен
+        // будить диспетчер каждым своим запросом (см. `wake`).
+        dispatcher?.wake(childId);
         return tenant;
       },
     };
@@ -348,18 +359,14 @@ export function buildServer(
       ...(options.now === undefined ? {} : { now: options.now }),
     });
 
+    // Прогрев начинается с прослушиванием, а не со сборки: греть банк раньше,
+    // чем сервер вообще способен ответить ученику, незачем, а тесты маршрутов
+    // ходят через `inject` и фоновой генерации не поднимают вовсе.
     app.addHook('onListen', async () => {
-      listening = true;
-      // Базы, открытые до прослушивания (тест или родительский маршрут завёл
-      // ребёнка), воркера ещё не получили: он не должен начинать греть банк
-      // раньше, чем сервер вообще способен ответить ученику.
-      for (const tenant of tenants.list()) ensureWorker(tenant);
+      dispatcher?.start();
     });
     app.addHook('onClose', async () => {
-      listening = false;
-      for (const worker of workers.values()) worker.stop();
-      await Promise.allSettled([...workers.values()].map((worker) => worker.done));
-      workers.clear();
+      await dispatcher?.stop();
       // Сначала арендаторы, потом управляющая база: закрытие аренды дожидается
       // её разбора спора, а он ходит и в `control.db` за квотой.
       await tenants.closeAll();

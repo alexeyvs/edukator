@@ -12,23 +12,17 @@ import {
 } from '../server/curriculum.js';
 import { storeTasks, countAvailable, takeTask } from '../server/codex/bank.js';
 import {
-  CodexRunError,
   CodexUnavailableError,
   type CodexRequest,
 } from '../server/codex/client.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import {
-  backoffDelay,
-  BACKOFF_BASE_MS,
-  BACKOFF_MAX_MS,
   everyRefillFailed,
-  IDLE_INTERVAL_MS,
   MAX_BATCHES_PER_TOPIC,
   MAX_CODEX_CONCURRENCY,
   QUEUE_TARGET,
   REFILL_BELOW,
   runWarmupCycle,
-  startWorker,
   WARM_TOPICS,
   type CycleReport,
   type ProduceRequest,
@@ -694,234 +688,6 @@ describe('воркер тёплой очереди', () => {
     });
   });
 
-  describe('пауза между циклами', () => {
-    it('растёт от базовой вдвое за каждый отказ подряд и упирается в потолок', () => {
-      expect(backoffDelay(0)).toBe(IDLE_INTERVAL_MS);
-      expect(backoffDelay(1)).toBe(BACKOFF_BASE_MS);
-      expect(backoffDelay(2)).toBe(BACKOFF_BASE_MS * 2);
-      expect(backoffDelay(3)).toBe(BACKOFF_BASE_MS * 4);
-      expect(backoffDelay(50)).toBe(BACKOFF_MAX_MS);
-    });
-
-    it('откладывает следующий цикл всё дальше, пока codex не отвечает', async () => {
-      const graph = graphOf([topic('math.a')]);
-      const delays: number[] = [];
-      let cycles = 0;
-
-      const handle = startWorker({
-        db,
-        graph,
-        log,
-        produce: () => {
-          cycles += 1;
-          return Promise.reject(new CodexUnavailableError('codex не найден'));
-        },
-        wait: (ms): Promise<void> => {
-          delays.push(ms);
-          if (delays.length >= 3) handle.stop();
-          return Promise.resolve();
-        },
-      });
-
-      await handle.done;
-
-      expect(cycles).toBe(3);
-      expect(delays).toEqual([BACKOFF_BASE_MS, BACKOFF_BASE_MS * 2, BACKOFF_BASE_MS * 4]);
-    });
-
-    it('возвращается к обычному интервалу, когда codex снова отвечает', async () => {
-      const graph = graphOf([topic('math.a')]);
-      const delays: number[] = [];
-      let cycles = 0;
-
-      const handle = startWorker({
-        db,
-        graph,
-        log,
-        produce: (request) => {
-          cycles += 1;
-          return cycles === 1
-            ? Promise.reject(new CodexUnavailableError('codex не найден'))
-            : Promise.resolve(batchOf(request.topic.id, QUEUE_TARGET));
-        },
-        wait: (ms): Promise<void> => {
-          delays.push(ms);
-          if (delays.length >= 2) handle.stop();
-          return Promise.resolve();
-        },
-      });
-
-      await handle.done;
-
-      expect(delays).toEqual([BACKOFF_BASE_MS, IDLE_INTERVAL_MS]);
-      expect(countAvailable(db, 'math.a')).toBe(QUEUE_TARGET);
-    });
-
-    // `CodexUnavailableError` покрывает не всякий отказ модели: процесс,
-    // стартовавший и вышедший с ненулевым кодом (просроченная авторизация,
-    // исчерпанная квота), приезжает как `CodexRunError`. Без отступа воркер
-    // запускал бы codex по каждой голодной теме раз в минуту вечно.
-    it('откладывает цикл, в котором не долилась ни одна голодная тема', async () => {
-      const graph = graphOf([topic('math.a'), topic('math.b')]);
-      const delays: number[] = [];
-
-      const handle = startWorker({
-        db,
-        graph,
-        log,
-        produce: () => Promise.reject(new CodexRunError('codex завершился с кодом 1: not logged in')),
-        wait: (ms): Promise<void> => {
-          delays.push(ms);
-          if (delays.length >= 2) handle.stop();
-          return Promise.resolve();
-        },
-      });
-
-      await handle.done;
-
-      expect(delays).toEqual([BACKOFF_BASE_MS, BACKOFF_BASE_MS * 2]);
-      expect(logged.join('\n')).toMatch(/ни одна из 2 голодных тем не пополнена/);
-    });
-
-    // Иначе отступ включался бы на здоровой модели: одна тема упала, соседняя
-    // долилась — очередь греется, ждать полчаса не за чем.
-    it('не откладывает цикл, в котором долилась хотя бы одна тема', async () => {
-      const graph = graphOf([topic('math.a'), topic('math.b')]);
-      const delays: number[] = [];
-
-      const handle = startWorker({
-        db,
-        graph,
-        log,
-        produce: (request) =>
-          request.topic.id === 'math.a'
-            ? Promise.reject(new CodexRunError('codex завершился с кодом 1'))
-            : Promise.resolve(batchOf(request.topic.id, QUEUE_TARGET)),
-        wait: (ms): Promise<void> => {
-          delays.push(ms);
-          handle.stop();
-          return Promise.resolve();
-        },
-      });
-
-      await handle.done;
-
-      expect(delays).toEqual([IDLE_INTERVAL_MS]);
-    });
-
-    // Пустой цикл — не отказ: греть просто нечего, все темы уже тёплые.
-    it('не откладывает цикл, в котором голодных тем не было', async () => {
-      const graph = graphOf([topic('math.a')]);
-      storeTasks(db, 'math.a', batchOf('math.a', QUEUE_TARGET));
-      const delays: number[] = [];
-
-      const handle = startWorker({
-        db,
-        graph,
-        log,
-        produce: () => Promise.reject(new CodexRunError('сюда дойти не должны')),
-        wait: (ms): Promise<void> => {
-          delays.push(ms);
-          // Два цикла: `IDLE_INTERVAL_MS` и `BACKOFF_BASE_MS` совпадают, и по
-          // одной паузе «отступа нет» от «отступ взведён» не отличить. Пустые
-          // циклы одинаковы, поэтому взведённый отступ дал бы удвоение.
-          if (delays.length === 2) handle.stop();
-          return Promise.resolve();
-        },
-      });
-
-      await handle.done;
-
-      expect(delays).toEqual([IDLE_INTERVAL_MS, IDLE_INTERVAL_MS]);
-    });
-
-    it('не роняет воркер на неожиданной ошибке цикла', async () => {
-      const graph = graphOf([topic('math.a')]);
-      // Профиль читается до всякой генерации: разбор его полей — это уже не
-      // отказ темы, а отказ цикла.
-      writeProfile(db, { name: 'Тимофей', interests: [] });
-      db.prepare('UPDATE profile SET interests = ?').run('не json');
-      const delays: number[] = [];
-
-      const handle = startWorker({
-        db,
-        graph,
-        log,
-        produce: producer().produce,
-        wait: (ms): Promise<void> => {
-          delays.push(ms);
-          // Два цикла, а не один: `IDLE_INTERVAL_MS` и `BACKOFF_BASE_MS` равны,
-          // и по первой паузе отступ от обычного интервала не отличить —
-          // проверка на одном цикле проходила бы и с невзведённым отступом.
-          if (delays.length === 2) handle.stop();
-          return Promise.resolve();
-        },
-      });
-
-      await handle.done;
-
-      expect(delays).toEqual([BACKOFF_BASE_MS, BACKOFF_BASE_MS * 2]);
-      expect(logged.join('\n')).toMatch(/цикл пополнения провалился.*Профиль повреждён/su);
-    });
-
-    it('останавливается по stop, не начиная нового цикла', async () => {
-      const graph = graphOf([topic('math.a')]);
-      const delays: number[] = [];
-      let cycles = 0;
-
-      const handle = startWorker({
-        db,
-        graph,
-        log,
-        produce: (request) => {
-          cycles += 1;
-          return Promise.resolve(batchOf(request.topic.id, QUEUE_TARGET));
-        },
-        wait: (ms): Promise<void> => {
-          delays.push(ms);
-          handle.stop();
-          return Promise.resolve();
-        },
-      });
-
-      await handle.done;
-
-      expect(cycles).toBe(1);
-      expect(delays).toEqual([IDLE_INTERVAL_MS]);
-    });
-
-    // Пауза после отказов codex доходит до получаса, и остановка обязана её
-    // прерывать, а не досиживать. Остальные тесты этого не ловят: их `wait`
-    // отдаёт готовый промис и гонка завершается им, а не будильником.
-    it('прерывает начатую паузу, а не досиживает её до конца', async () => {
-      const graph = graphOf([topic('math.a')]);
-      let waiting: (() => void) | null = null;
-
-      const handle = startWorker({
-        db,
-        graph,
-        log,
-        produce: (request) => Promise.resolve(batchOf(request.topic.id, QUEUE_TARGET)),
-        // Пауза не кончается сама: единственный выход — будильник `stop()`.
-        wait: (): Promise<void> =>
-          new Promise<void>((resolve) => {
-            waiting = resolve;
-          }),
-      });
-
-      await new Promise<void>((resolve) => setTimeout(resolve, 10));
-      expect(waiting).not.toBeNull();
-      handle.stop();
-
-      await expect(
-        Promise.race([
-          handle.done,
-          new Promise((_, reject) => setTimeout(() => reject(new Error('не остановился')), 500)),
-        ]),
-      ).resolves.toBeUndefined();
-    });
-  });
-
   describe('итог цикла', () => {
     const refill = (patch: Partial<RefillReport>): RefillReport => ({
       topicId: 'math.a',
@@ -962,8 +728,5 @@ describe('воркер тёплой очереди', () => {
     expect(MAX_CODEX_CONCURRENCY).toBe(2);
     expect(MAX_BATCHES_PER_TOPIC).toBe(4);
     expect(WARM_TOPICS).toBe(3);
-    expect(IDLE_INTERVAL_MS).toBe(60_000);
-    expect(BACKOFF_BASE_MS).toBe(60_000);
-    expect(BACKOFF_MAX_MS).toBe(1_800_000);
   });
 });

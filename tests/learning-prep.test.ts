@@ -384,6 +384,20 @@ describe('отбор и подготовка учебных материалов
     expect(db.prepare('SELECT COUNT(*) AS n FROM learning_tasks').get()).toEqual({ n: 0 });
   });
 
+  // Та же причина, что и у босса: заход фазы порога материал не готовит, иначе
+  // диспетчер заказывал бы его дважды за один обход ребёнка.
+  it('не зовёт методиста, когда фаза подготовки материала выключена', async () => {
+    triage(db, 'math', 'math.best');
+    storeTasks(db, 'math.best', Array.from({ length: 8 }, () => task('warm')));
+    const report = await runWarmupCycle({
+      db, graph: buildTopicGraph([topic('math.best')]), prepareLearning: false,
+      learningProduce: () => Promise.reject(new Error('методиста звать было нельзя')),
+    });
+
+    expect(report.learningPreparation).toBeUndefined();
+    expect(db.prepare('SELECT COUNT(*) AS n FROM learning_materials').get()).toEqual({ n: 0 });
+  });
+
   it('встраивается после обычного прогрева и учитывается общим backoff', async () => {
     triage(db, 'math', 'math.best');
     storeTasks(db, 'math.best', Array.from({ length: 8 }, () => task('warm')));

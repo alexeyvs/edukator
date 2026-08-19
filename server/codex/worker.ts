@@ -56,15 +56,6 @@ export const WARM_TOPICS = 3;
  */
 export const MAX_BATCHES_PER_TOPIC = 4;
 
-/** Пауза между циклами, когда всё в порядке. */
-export const IDLE_INTERVAL_MS = 60 * 1000;
-
-/** Первая пауза после недоступности codex; дальше удваивается. */
-export const BACKOFF_BASE_MS = 60 * 1000;
-
-/** Потолок паузы: codex может вернуться в любой момент, и ждать его полдня незачем. */
-export const BACKOFF_MAX_MS = 30 * 60 * 1000;
-
 /** Что нужно генератору для одного батча по теме. */
 export interface ProduceRequest {
   topic: Topic;
@@ -96,6 +87,17 @@ export interface WorkerOptions {
   concurrency?: number;
   /** Потолок батчей на тему за цикл; по умолчанию `MAX_BATCHES_PER_TOPIC`. */
   maxBatches?: number;
+  /**
+   * Готовить ли босса в этом заходе; по умолчанию да.
+   *
+   * Флаг нужен диспетчеру: одного ребёнка он обходит дважды за обход — сначала
+   * добивая банк до порога всем подряд, потом до полного запаса. Подготовка
+   * босса относится не к запасу, а к ребёнку целиком, и без флага второй заход
+   * заказывал бы её заново — то есть тратил бы вызовы модели на уже сделанное.
+   */
+  prepareBoss?: boolean;
+  /** Готовить ли персональный материал в этом заходе; по умолчанию да. */
+  prepareLearning?: boolean;
   /** Производитель заданий; по умолчанию генератор с проверяющим. */
   produce?: TaskProducer;
   now?: () => Date;
@@ -337,14 +339,20 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
       ...(options.run === undefined ? {} : { run: options.run }),
     });
   const budget = options.budget ?? codexConcurrency;
-  const boss = await prepareNextBoss({
-    db,
-    graph,
-    produce,
-    budget,
-    ...(options.now === undefined ? {} : { now: options.now() }),
-    log,
-  });
+  // Пустой отчёт вместо вызова: подготовка босса — это генерация целого набора
+  // заданий, и «пропустить фазу» обязано означать «не звать модель», а не
+  // «позвать и выбросить».
+  const boss: BossPreparationReport =
+    options.prepareBoss === false
+      ? { batches: 0, stored: 0, ready: false, recovered: false, codexUnavailable: false }
+      : await prepareNextBoss({
+          db,
+          graph,
+          produce,
+          budget,
+          ...(options.now === undefined ? {} : { now: options.now() }),
+          log,
+        });
   if (boss.codexUnavailable) {
     return { topics: [], refilled: [], codexUnavailable: true, bossPreparation: boss };
   }
@@ -404,7 +412,7 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
   });
 
   let learning: LearningPreparationReport | undefined;
-  if (!unavailable) {
+  if (!unavailable && options.prepareLearning !== false) {
     learning = await prepareLearningMaterials({
       db,
       graph,
@@ -438,6 +446,19 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
 }
 
 /**
+ * Попытки фоновой подготовки цикла: долитые темы, босс и персональные
+ * материалы. Отдельная функция потому, что таких попыток считает не только
+ * `everyRefillFailed`: диспетчер складывает их по всем детям обхода, а
+ * собственный обход отчёта у него разъехался бы с этим молча.
+ */
+export function cycleAttempts(report: CycleReport): { stored: number; error?: string }[] {
+  const attempts: { stored: number; error?: string }[] = [...report.refilled];
+  if (report.bossPreparation?.topicId !== undefined) attempts.push(report.bossPreparation);
+  attempts.push(...(report.learningPreparation?.prepared ?? []));
+  return attempts;
+}
+
+/**
  * Цикл, не давший ничего: голодные темы были, и каждая упёрлась в ошибку.
  *
  * Нужен потому, что `CodexUnavailableError` покрывает не всякий отказ модели:
@@ -454,96 +475,8 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
  * тогда, когда очередь пополняется.
  */
 export function everyRefillFailed(report: CycleReport): boolean {
-  const attempts: { stored: number; error?: string }[] = [...report.refilled];
-  if (report.bossPreparation?.topicId !== undefined) attempts.push(report.bossPreparation);
-  attempts.push(...(report.learningPreparation?.prepared ?? []));
+  const attempts = cycleAttempts(report);
   return attempts.length > 0 && attempts.every(
     (attempt) => attempt.error !== undefined && attempt.stored === 0,
   );
-}
-
-/**
- * Пауза до следующего цикла: обычный интервал, пока codex отвечает, и удвоение
- * от `BACKOFF_BASE_MS` за каждый подряд идущий отказ, до потолка.
- */
-export function backoffDelay(failures: number): number {
-  if (failures <= 0) return IDLE_INTERVAL_MS;
-  return Math.min(BACKOFF_BASE_MS * 2 ** (failures - 1), BACKOFF_MAX_MS);
-}
-
-export interface WorkerHandle {
-  /** Прекращает цикл: текущее пополнение доигрывается, новое не начинается. */
-  stop: () => void;
-  /** Завершается, когда цикл действительно остановлен. */
-  done: Promise<void>;
-}
-
-export interface StartWorkerOptions extends WorkerOptions {
-  /** Пауза между циклами; тесты подменяют её, чтобы не ждать по-настоящему. */
-  wait?: (ms: number) => Promise<void>;
-}
-
-/** Таймер не держит процесс живым: воркер не повод не дать серверу завершиться. */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms).unref();
-  });
-}
-
-/** Запускает бесконечный цикл пополнения. Остановка — через `stop()`. */
-export function startWorker(options: StartWorkerOptions): WorkerHandle {
-  const log = options.log ?? defaultLog;
-  const wait = options.wait ?? sleep;
-  let stopped = false;
-  let wake: (() => void) | null = null;
-
-  const done = (async (): Promise<void> => {
-    let failures = 0;
-
-    while (!stopped) {
-      let unavailable = false;
-      try {
-        const report = await runWarmupCycle(options);
-        unavailable = report.codexUnavailable;
-        if (!unavailable && everyRefillFailed(report)) {
-          unavailable = true;
-          const backgroundAttempts = report.refilled.length
-            + (report.bossPreparation?.topicId === undefined ? 0 : 1)
-            + (report.learningPreparation?.prepared.length ?? 0);
-          const failedLabel = backgroundAttempts === report.refilled.length
-            ? `ни одна из ${report.refilled.length} голодных тем не пополнена`
-            : `все ${backgroundAttempts} фоновые подготовки провалились`;
-          log(
-            `воркер: ${failedLabel}, ` +
-              'пауза увеличена',
-          );
-        }
-      } catch (error) {
-        // Цикл не должен уронить сервер: ошибка сюда доходит только неожиданная,
-        // и следующий цикл — единственный способ узнать, что она прошла.
-        unavailable = true;
-        log(`воркер: цикл пополнения провалился: ${(error as Error).message}`);
-      }
-
-      failures = unavailable ? failures + 1 : 0;
-      if (stopped) break;
-
-      // Гонка паузы с будильником: после отказов codex пауза доходит до
-      // получаса, а `stop()` обязан прерывать её, а не досиживать.
-      await Promise.race([
-        wait(backoffDelay(failures)),
-        new Promise<void>((resolve) => {
-          wake = resolve;
-        }),
-      ]);
-    }
-  })();
-
-  return {
-    stop: (): void => {
-      stopped = true;
-      wake?.();
-    },
-    done,
-  };
 }
