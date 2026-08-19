@@ -8,13 +8,7 @@ import type { TopicGraph } from '../curriculum.js';
 import { SUBJECTS, type Subject } from '../db.js';
 import { forecastFor } from '../forecast.js';
 import { readTopicStates } from '../mastery.js';
-import {
-  assertRunReadyForIntegrity,
-  finishRun,
-  runProgress,
-  startRun,
-  type RunProgress,
-} from '../run.js';
+import { assertRunReadyForIntegrity, finishRun, runProgress, startRun, type RunProgress } from '../run.js';
 import { planFromDatabase } from '../scheduler.js';
 import { SessionError } from '../session-error.js';
 import { readStreak } from '../streak.js';
@@ -23,16 +17,18 @@ import { bossProgress } from '../boss-rules.js';
 import { learningMaterialCards } from '../learning.js';
 import { readDailyGate } from '../daily-gate.js';
 import { readSubjectCalibrations } from '../subject-calibration.js';
-import type { IntegrityCoordinator } from '../integrity.js';
+import {
+  ROUTE_ACCESS,
+  failAuth,
+  type TenantContext,
+  type TenantContextResolver,
+} from './tenant-context.js';
 import { integrityPublicJson } from './integrity.js';
 
 export interface RunRoutesOptions {
-  db: Database;
+  context: TenantContextResolver;
   graph: TopicGraph;
   now?: () => Date;
-  /** Соединение всё ещё привязано к текущему файлу базы. */
-  available?: () => boolean;
-  integrity?: IntegrityCoordinator;
 }
 
 class BadRequest extends Error {}
@@ -79,8 +75,8 @@ function activeRunCards(
   });
 }
 
-function unavailable(options: RunRoutesOptions, reply: FastifyReply): FastifyReply | undefined {
-  if (options.available?.() !== false) return undefined;
+function unavailable(context: TenantContext, reply: FastifyReply): FastifyReply | undefined {
+  if (context.tenant.available()) return undefined;
   return reply.code(503).send({ error: 'Забег недоступен: файл базы заменён, нужен перезапуск' });
 }
 
@@ -90,7 +86,7 @@ function fail(reply: FastifyReply, error: unknown): FastifyReply {
     const status = error.code === 'run-not-found' ? 404 : 409;
     return reply.code(status).send({ error: error.message, code: error.code });
   }
-  throw error;
+  return failAuth(reply, error);
 }
 
 function readStart(body: unknown): { subject: Subject; topicId?: string } {
@@ -116,87 +112,97 @@ function readPathId(value: string): number {
   return id;
 }
 
+/** Тело плана: активные забеги, рекомендации, прогнозы и состояние тем. */
+function planResponse(db: Database, graph: TopicGraph, at: Date): Record<string, unknown> {
+  const calibrations = readSubjectCalibrations(db, graph);
+  const triaged = new Set(SUBJECTS.filter((subject) => calibrations.get(subject)?.triagePassed));
+  const gate = readDailyGate(db, at);
+  const active = activeRunCards(db, graph, triaged);
+  const planned = planFromDatabase(
+    db,
+    graph,
+    Math.max(0, gate.remaining - active.length),
+    at,
+  ).map((item) => ({
+    subject: item.subject,
+    topic: { id: item.topic.id, title: item.topic.title },
+    priority: item.priority,
+    triagePassed: triaged.has(item.subject),
+  }));
+  const plan = [...active, ...planned];
+  const states = readTopicStates(db);
+  const forecasts = SUBJECTS.flatMap((subject) => {
+    const forecast = forecastFor(graph, states, subject, at);
+    return forecast === null ? [] : [forecast];
+  });
+  const triage = SUBJECTS.map((subject) => ({
+    subject,
+    passed: triaged.has(subject),
+    needed: calibrations.get(subject)?.calibrated !== true,
+  }));
+
+  const topics = graph.order.map((topic) => {
+    const state = states.get(topic.id);
+    if (state === undefined) {
+      throw new Error(`План: тема «${topic.id}» не заведена в topic_state`);
+    }
+    return {
+      id: topic.id,
+      title: topic.title,
+      subject: topic.subject,
+      bossProgress: bossProgress(state.mastery),
+      readiness: bossTopicState(db, topic.id),
+    };
+  });
+
+  const learning = learningMaterialCards(db).map((material) => {
+    const topic = graph.byId.get(material.topicId);
+    if (topic === undefined || topic.subject !== material.subject) {
+      throw new Error(`План: тема материала «${material.topicId}» не согласована с предметом`);
+    }
+    return {
+      id: material.id,
+      subject: material.subject,
+      topic: { id: topic.id, title: topic.title },
+      recommendationReason: material.recommendationReason,
+      estimatedMinutes: material.estimatedMinutes,
+      status: material.status,
+    };
+  });
+
+  return {
+    plan,
+    learning,
+    forecasts,
+    triage,
+    streak: readStreak(db, at),
+    topics,
+    gate,
+  };
+}
+
 /** Регистрирует план, старт и финиш обычного забега. */
 export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOptions): void {
-  const { db, graph } = options;
+  const { graph } = options;
   const now = options.now ?? ((): Date => new Date());
 
-  app.get('/api/run/plan', (_request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
-
-    const at = now();
-    const calibrations = readSubjectCalibrations(db, graph);
-    const triaged = new Set(SUBJECTS.filter((subject) => calibrations.get(subject)?.triagePassed));
-    const gate = readDailyGate(db, at);
-    const active = activeRunCards(db, graph, triaged);
-    const planned = planFromDatabase(
-      db,
-      graph,
-      Math.max(0, gate.remaining - active.length),
-      at,
-    ).map((item) => ({
-      subject: item.subject,
-      topic: { id: item.topic.id, title: item.topic.title },
-      priority: item.priority,
-      triagePassed: triaged.has(item.subject),
-    }));
-    const plan = [...active, ...planned];
-    const states = readTopicStates(db);
-    const forecasts = SUBJECTS.flatMap((subject) => {
-      const forecast = forecastFor(graph, states, subject, at);
-      return forecast === null ? [] : [forecast];
-    });
-    const triage = SUBJECTS.map((subject) => ({
-      subject,
-      passed: triaged.has(subject),
-      needed: calibrations.get(subject)?.calibrated !== true,
-    }));
-
-    const topics = graph.order.map((topic) => {
-      const state = states.get(topic.id);
-      if (state === undefined) {
-        throw new Error(`План: тема «${topic.id}» не заведена в topic_state`);
-      }
-      return {
-        id: topic.id,
-        title: topic.title,
-        subject: topic.subject,
-        bossProgress: bossProgress(state.mastery),
-        readiness: bossTopicState(db, topic.id),
-      };
-    });
-
-    const learning = learningMaterialCards(db).map((material) => {
-      const topic = graph.byId.get(material.topicId);
-      if (topic === undefined || topic.subject !== material.subject) {
-        throw new Error(`План: тема материала «${material.topicId}» не согласована с предметом`);
-      }
-      return {
-        id: material.id,
-        subject: material.subject,
-        topic: { id: topic.id, title: topic.title },
-        recommendationReason: material.recommendationReason,
-        estimatedMinutes: material.estimatedMinutes,
-        status: material.status,
-      };
-    });
-
-    return reply.send({
-      plan,
-      learning,
-      forecasts,
-      triage,
-      streak: readStreak(db, at),
-      topics,
-      gate,
-    });
+  app.get('/api/run/plan', (request, reply) => {
+    try {
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
+      return reply.send(planResponse(context.tenant.db, graph, now()));
+    } catch (error) {
+      return failAuth(reply, error);
+    }
   });
 
   app.post('/api/run/start', (request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
     try {
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const db = context.tenant.db;
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
       const start = readStart(request.body);
       return reply.send(startRun(db, graph, start.subject, {
         now: now(),
@@ -208,18 +214,20 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
   });
 
   app.post<{ Params: { id: string } }>('/api/run/:id/finish', (request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
     try {
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
+      const db = context.tenant.db;
       const runId = readPathId(request.params.id);
       const row = db.prepare<[number], { kind: string; finished_at: string | null }>(
         'SELECT kind, finished_at FROM runs WHERE id = ?',
       ).get(runId);
-      if (options.integrity === undefined || row?.kind !== 'run' || row.finished_at !== null) {
+      if (row?.kind !== 'run' || row.finished_at !== null) {
         return reply.send(finishRun(db, graph, runId, { now: now() }));
       }
       assertRunReadyForIntegrity(db, runId);
-      const state = options.integrity.begin(runId);
+      const state = context.tenant.integrity.begin(runId);
       return reply.send(state.status === 'completed' ? state.result : integrityPublicJson(state));
     } catch (error) {
       return fail(reply, error);

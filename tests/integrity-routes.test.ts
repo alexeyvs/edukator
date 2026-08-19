@@ -13,6 +13,7 @@ import {
   registerIntegrityRoutes,
   registerUnavailableIntegrity,
 } from '../server/routes/integrity.js';
+import { fakeContext } from './tenant-context-helper.js';
 
 const NOW = new Date('2026-08-18T12:00:00.000Z');
 const PIN = '123456';
@@ -42,6 +43,7 @@ describe('HTTP-поток проверки осмысленности', () => {
   let dir: string;
   let app: FastifyInstance;
   let db: Database;
+  let dbPath: string;
   let reviewBatches: number[];
 
   beforeEach(async () => {
@@ -51,9 +53,10 @@ describe('HTTP-поток проверки осмысленности', () => {
     mkdirSync(curriculum);
     mkdirSync(seed);
     writeCurriculum(curriculum);
-    process.env.EDUKATOR_DB = join(dir, 'test.db');
+    dbPath = join(dir, 'test.db');
     reviewBatches = [];
     app = buildServer(curriculum, {
+      dbPath,
       seedDir: seed,
       worker: false,
       parentPin: PIN,
@@ -74,14 +77,13 @@ describe('HTTP-поток проверки осмысленности', () => {
       log: (): void => undefined,
     });
     await app.ready();
-    db = openDatabase(process.env.EDUKATOR_DB);
+    db = openDatabase(dbPath);
     storeTasks(db, 'math.a', Array.from({ length: 12 }, (_, index) => task(index)));
   });
 
   afterEach(async () => {
     db.close();
     await app.close();
-    delete process.env.EDUKATOR_DB;
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -186,7 +188,9 @@ function coordinatorStub(
 describe('валидация HTTP-маршрутов проверки осмысленности', () => {
   it('отвергает некорректные идентификаторы, ответ и время', async () => {
     const app = Fastify();
-    registerIntegrityRoutes(app, { coordinator: coordinatorStub(null) });
+    registerIntegrityRoutes(app, {
+      context: fakeContext({} as Database, { integrity: coordinatorStub(null) }),
+    });
     await app.ready();
     try {
       expect((await app.inject({ method: 'GET', url: '/api/integrity/nope' })).statusCode).toBe(400);
@@ -226,11 +230,15 @@ describe('валидация HTTP-маршрутов проверки осмыс
     const retry = vi.fn(() => completed);
     const success = Fastify();
     registerIntegrityRoutes(success, {
-      coordinator: coordinatorStub({ status: 'checking', flagged: 1 }, retry),
+      context: fakeContext({} as Database, {
+        integrity: coordinatorStub({ status: 'checking', flagged: 1 }, retry),
+      }),
     });
     await success.ready();
     const conflict = Fastify();
-    registerIntegrityRoutes(conflict, { coordinator: coordinatorStub(null) });
+    registerIntegrityRoutes(conflict, {
+      context: fakeContext({} as Database, { integrity: coordinatorStub(null) }),
+    });
     await conflict.ready();
     try {
       const response = await success.inject({
@@ -256,8 +264,10 @@ describe('валидация HTTP-маршрутов проверки осмыс
   it('отдаёт 503 при отвязанной базе и в недоступном сервере', async () => {
     const detached = Fastify();
     registerIntegrityRoutes(detached, {
-      coordinator: coordinatorStub(null),
-      available: () => false,
+      context: fakeContext({} as Database, {
+        integrity: coordinatorStub(null),
+        available: () => false,
+      }),
     });
     await detached.ready();
     const unavailable = Fastify();

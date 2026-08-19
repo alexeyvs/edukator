@@ -10,6 +10,7 @@ import { reserveBossTasks } from '../server/codex/bank.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import { registerBossRoutes, registerUnavailableBoss } from '../server/routes/boss.js';
 import { loadCurriculum } from '../server/curriculum.js';
+import { fakeContext } from './tenant-context-helper.js';
 
 const NOW = new Date('2026-08-08T12:00:00.000Z');
 const TOPIC = 'math.a';
@@ -201,7 +202,10 @@ describe('маршруты босса', () => {
 
   it('отдаёт 503 для каждого boss URL при отвязанной или не поднятой базе', async () => {
     const detached = Fastify();
-    registerBossRoutes(detached, { db, graph: loadCurriculum(curriculumDir), available: () => false });
+    registerBossRoutes(detached, {
+      context: fakeContext(db, { available: () => false }),
+      graph: loadCurriculum(curriculumDir),
+    });
     const unavailable = Fastify();
     registerUnavailableBoss(unavailable, 'база недоступна');
     await Promise.all([detached.ready(), unavailable.ready()]);

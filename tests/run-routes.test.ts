@@ -10,6 +10,7 @@ import { openDatabase, SUBJECTS } from '../server/db.js';
 import { loadCurriculum } from '../server/curriculum.js';
 import { buildServer } from '../server/index.js';
 import { registerRunRoutes, registerUnavailableRun } from '../server/routes/run.js';
+import { fakeContext } from './tenant-context-helper.js';
 
 const NOW = new Date('2026-08-08T12:00:00.000Z');
 
@@ -602,9 +603,8 @@ describe('маршруты забега', () => {
   it('отдаёт 503 на всех URL, когда соединение отвязано или занятие не поднялось', async () => {
     const detached = Fastify();
     registerRunRoutes(detached, {
-      db,
+      context: fakeContext(db, { available: () => false }),
       graph: loadCurriculum(curriculumDir),
-      available: () => false,
     });
     await detached.ready();
 

@@ -12,15 +12,18 @@ import {
 } from '../learning.js';
 import { runProgress } from '../run.js';
 import { readDailyGate } from '../daily-gate.js';
-import type { IntegrityCoordinator } from '../integrity.js';
+import {
+  ROUTE_ACCESS,
+  failAuth,
+  type TenantContext,
+  type TenantContextResolver,
+} from './tenant-context.js';
 import { integrityPublicJson } from './integrity.js';
 
 export interface LearningRoutesOptions {
-  db: Database;
+  context: TenantContextResolver;
   graph: TopicGraph;
   now?: () => Date;
-  available?: () => boolean;
-  integrity?: IntegrityCoordinator;
 }
 
 class BadRequest extends Error {}
@@ -34,8 +37,8 @@ function readPathId(value: string, label: string): number {
   return id;
 }
 
-function unavailable(options: LearningRoutesOptions, reply: FastifyReply): FastifyReply | undefined {
-  if (options.available?.() !== false) return undefined;
+function unavailable(context: TenantContext, reply: FastifyReply): FastifyReply | undefined {
+  if (context.tenant.available()) return undefined;
   return reply.code(503).send({
     error: 'Учебный материал недоступен: файл базы заменён, нужен перезапуск',
   });
@@ -47,7 +50,7 @@ function fail(reply: FastifyReply, error: unknown): FastifyReply {
     return reply.code(error.code === 'learning-not-found' ? 404 : 409)
       .send({ error: error.message, code: error.code });
   }
-  throw error;
+  return failAuth(reply, error);
 }
 
 function materialJson(db: Database, graph: TopicGraph, materialId: number): Record<string, unknown> {
@@ -73,15 +76,16 @@ function materialJson(db: Database, graph: TopicGraph, materialId: number): Reco
 }
 
 export function registerLearningRoutes(app: FastifyInstance, options: LearningRoutesOptions): void {
-  const { db, graph } = options;
+  const { graph } = options;
   const now = options.now ?? ((): Date => new Date());
 
   app.get<{ Params: { id: string } }>('/api/learning/:id', (request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
     try {
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
       return reply.send(materialJson(
-        db,
+        context.tenant.db,
         graph,
         readPathId(request.params.id, 'Идентификатор материала'),
       ));
@@ -91,9 +95,11 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
   });
 
   app.post<{ Params: { id: string } }>('/api/learning/:id/open', (request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
     try {
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const db = context.tenant.db;
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
       const materialId = readPathId(request.params.id, 'Идентификатор материала');
       const opened = openLearningMaterial(db, materialId, { now: now() });
       return reply.send({ ...opened, material: materialJson(db, graph, materialId) });
@@ -103,9 +109,11 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
   });
 
   app.post<{ Params: { id: string } }>('/api/learning/:id/test', (request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
     try {
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const db = context.tenant.db;
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
       const started = startLearningRun(
         db,
         readPathId(request.params.id, 'Идентификатор материала'),
@@ -118,23 +126,17 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
   });
 
   app.post<{ Params: { runId: string } }>('/api/learning/run/:runId/finish', (request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
     try {
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const db = context.tenant.db;
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
       const at = now();
       const runId = readPathId(request.params.runId, 'Идентификатор lesson-run');
-      if (options.integrity !== undefined) {
-        assertLearningReadyForIntegrity(db, runId);
-        const state = options.integrity.begin(runId);
-        if (state.status !== 'completed') return reply.send(integrityPublicJson(state));
-        const result = state.result as unknown as ReturnType<typeof finishLearningMaterial>;
-        const learningGate = readDailyGate(db, at).learning;
-        return reply.send({
-          ...result,
-          required: learningGate.required && learningGate.materialId === result.materialId,
-        });
-      }
-      const result = finishLearningMaterial(db, graph, runId, { now: at });
+      assertLearningReadyForIntegrity(db, runId);
+      const state = context.tenant.integrity.begin(runId);
+      if (state.status !== 'completed') return reply.send(integrityPublicJson(state));
+      const result = state.result as unknown as ReturnType<typeof finishLearningMaterial>;
       const learningGate = readDailyGate(db, at).learning;
       return reply.send({
         ...result,

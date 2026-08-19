@@ -13,6 +13,7 @@ import {
   registerProfileRoutes,
   registerUnavailableProfile,
 } from '../server/routes/profile.js';
+import { fakeContext } from './tenant-context-helper.js';
 
 function writeCurriculum(dir: string): void {
   for (const subject of SUBJECTS) {
@@ -218,7 +219,10 @@ describe('маршруты профиля', () => {
 
   it('отдаёт 503 на обоих URL, если соединение отвязано или профиль не поднялся', async () => {
     const detached = Fastify();
-    registerProfileRoutes(detached, { db, personaPath, available: () => false });
+    registerProfileRoutes(detached, {
+      context: fakeContext(db, { available: () => false }),
+      personaPath,
+    });
     await detached.ready();
     const unavailable = Fastify();
     registerUnavailableProfile(unavailable, 'база недоступна');
@@ -238,7 +242,7 @@ describe('маршруты профиля', () => {
 
   it('использует репозиторную персону без тестовой подмены пути', async () => {
     const direct = Fastify();
-    registerProfileRoutes(direct, { db });
+    registerProfileRoutes(direct, { context: fakeContext(db) });
     await direct.ready();
     try {
       const response = await direct.inject({ method: 'GET', url: '/api/profile' });

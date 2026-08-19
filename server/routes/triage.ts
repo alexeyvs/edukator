@@ -7,13 +7,17 @@ import { runProgress, startRun } from '../run.js';
 import { SessionError } from '../session-error.js';
 import { nextTriageTask } from '../triage.js';
 import { issuedTaskJson } from './task-json.js';
+import {
+  ROUTE_ACCESS,
+  failAuth,
+  type TenantContext,
+  type TenantContextResolver,
+} from './tenant-context.js';
 
 export interface TriageRoutesOptions {
-  db: Database;
+  context: TenantContextResolver;
   graph: TopicGraph;
   now?: () => Date;
-  /** Соединение всё ещё привязано к текущему файлу базы. */
-  available?: () => boolean;
 }
 
 interface TriageRun {
@@ -24,8 +28,8 @@ interface TriageRun {
 
 class BadRequest extends Error {}
 
-function unavailable(options: TriageRoutesOptions, reply: FastifyReply): FastifyReply | undefined {
-  if (options.available?.() !== false) return undefined;
+function unavailable(context: TenantContext, reply: FastifyReply): FastifyReply | undefined {
+  if (context.tenant.available()) return undefined;
   return reply.code(503).send({ error: 'Триаж недоступен: файл базы заменён, нужен перезапуск' });
 }
 
@@ -54,7 +58,7 @@ function fail(reply: FastifyReply, error: unknown): FastifyReply {
     const status = error.code === 'run-not-found' ? 404 : 409;
     return reply.code(status).send({ error: error.message, code: error.code });
   }
-  throw error;
+  return failAuth(reply, error);
 }
 
 function readTriageRun(db: Database, id: number): TriageRun {
@@ -71,14 +75,15 @@ function readTriageRun(db: Database, id: number): TriageRun {
 
 /** Регистрирует запуск триажа и выдачу диагностического задания. */
 export function registerTriageRoutes(app: FastifyInstance, options: TriageRoutesOptions): void {
-  const { db, graph } = options;
+  const { graph } = options;
   const now = options.now ?? ((): Date => new Date());
 
   app.post('/api/triage/start', (request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
     try {
-      return reply.send(startRun(db, graph, readSubject(request.body), {
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
+      return reply.send(startRun(context.tenant.db, graph, readSubject(request.body), {
         kind: 'triage',
         now: now(),
       }));
@@ -88,9 +93,11 @@ export function registerTriageRoutes(app: FastifyInstance, options: TriageRoutes
   });
 
   app.get<{ Params: { id: string } }>('/api/triage/:id/next', (request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
     try {
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const db = context.tenant.db;
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
       const id = readPathId(request.params.id);
       const run = readTriageRun(db, id);
       const result = nextTriageTask(db, graph, id, { subject: run.subject });

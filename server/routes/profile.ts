@@ -2,7 +2,6 @@
  * HTTP-обвязка профиля. Хранение и наложение патча живут в
  * `db.ts`; здесь только граница HTTP и текст знакомства из единой персоны.
  */
-import type { Database } from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { readPersonaIntroduction } from '../codex/prompt.js';
 import {
@@ -11,19 +10,23 @@ import {
   writeProfile,
   type Profile,
 } from '../db.js';
+import {
+  ROUTE_ACCESS,
+  failAuth,
+  type TenantContext,
+  type TenantContextResolver,
+} from './tenant-context.js';
 
 export interface ProfileRoutesOptions {
-  db: Database;
+  context: TenantContextResolver;
   /** Путь параметром нужен для проверки ошибочной конфигурации. */
   personaPath?: string;
-  /** Соединение всё ещё привязано к текущему файлу базы. */
-  available?: () => boolean;
 }
 
 class BadRequest extends Error {}
 
-function unavailable(options: ProfileRoutesOptions, reply: FastifyReply): FastifyReply | undefined {
-  if (options.available?.() !== false) return undefined;
+function unavailable(context: TenantContext, reply: FastifyReply): FastifyReply | undefined {
+  if (context.tenant.available()) return undefined;
   return reply.code(503).send({
     error: 'Профиль недоступен: файл базы заменён, нужен перезапуск',
   });
@@ -72,17 +75,25 @@ function response(profile: Profile, options: ProfileRoutesOptions): Profile & { 
 
 /** Регистрирует чтение и частичную правку профиля. */
 export function registerProfileRoutes(app: FastifyInstance, options: ProfileRoutesOptions): void {
-  app.get('/api/profile', (_request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
-    return reply.send(response(readProfile(options.db), options));
+  app.get('/api/profile', (request, reply) => {
+    try {
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
+      return reply.send(response(readProfile(context.tenant.db), options));
+    } catch (error) {
+      return failAuth(reply, error);
+    }
   });
 
   app.put('/api/profile', (request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
     try {
-      return reply.send(response(writeProfile(options.db, readPatch(request.body)), options));
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
+      return reply.send(
+        response(writeProfile(context.tenant.db, readPatch(request.body)), options),
+      );
     } catch (error) {
       if (
         error instanceof BadRequest ||
@@ -91,7 +102,7 @@ export function registerProfileRoutes(app: FastifyInstance, options: ProfileRout
       ) {
         return reply.code(400).send({ error: (error as Error).message });
       }
-      throw error;
+      return failAuth(reply, error);
     }
   });
 }

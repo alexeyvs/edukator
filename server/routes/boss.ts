@@ -1,5 +1,4 @@
 /** HTTP-граница боя с боссом; правила переходов живут в `boss.ts`. */
-import type { Database } from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { TopicGraph } from '../curriculum.js';
 import {
@@ -14,12 +13,17 @@ import {
 } from '../boss.js';
 import { MAX_ANSWER_LENGTH } from '../codex/prompt.js';
 import { issuedTaskJson } from './task-json.js';
+import {
+  ROUTE_ACCESS,
+  failAuth,
+  type TenantContext,
+  type TenantContextResolver,
+} from './tenant-context.js';
 
 export interface BossRoutesOptions {
-  db: Database;
+  context: TenantContextResolver;
   graph: TopicGraph;
   now?: () => Date;
-  available?: () => boolean;
 }
 
 class BadRequest extends Error {}
@@ -67,46 +71,55 @@ function fail(reply: FastifyReply, error: unknown): FastifyReply {
   if (error instanceof BossError) {
     return reply.code(STATUS_BY_CODE[error.code]).send({ error: error.message, code: error.code });
   }
-  throw error;
+  return failAuth(reply, error);
 }
 
-function unavailable(options: BossRoutesOptions, reply: FastifyReply): FastifyReply | undefined {
-  if (options.available?.() !== false) return undefined;
+function unavailable(context: TenantContext, reply: FastifyReply): FastifyReply | undefined {
+  if (context.tenant.available()) return undefined;
   return reply.code(503).send({ error: 'Босс недоступен: файл базы заменён, нужен перезапуск' });
 }
 
 export function registerBossRoutes(app: FastifyInstance, options: BossRoutesOptions): void {
-  const { db, graph } = options;
+  const { graph } = options;
   const now = options.now ?? ((): Date => new Date());
 
-  app.get('/api/boss/topics', (_request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
-    return reply.send({
-      topics: graph.order.map((topic) => ({
-        id: topic.id,
-        title: topic.title,
-        subject: topic.subject,
-        readiness: bossTopicState(db, topic.id),
-      })),
-    });
+  app.get('/api/boss/topics', (request, reply) => {
+    try {
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
+      return reply.send({
+        topics: graph.order.map((topic) => ({
+          id: topic.id,
+          title: topic.title,
+          subject: topic.subject,
+          readiness: bossTopicState(context.tenant.db, topic.id),
+        })),
+      });
+    } catch (error) {
+      return failAuth(reply, error);
+    }
   });
 
   app.post('/api/boss/start', (request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
     try {
-      return reply.send(startBoss(db, graph, readTopicId(request.body), { now: now() }));
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
+      return reply.send(
+        startBoss(context.tenant.db, graph, readTopicId(request.body), { now: now() }),
+      );
     } catch (error) {
       return fail(reply, error);
     }
   });
 
   app.get<{ Params: { id: string } }>('/api/boss/:id/next', (request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
     try {
-      const result = nextBossTask(db, graph, readPathId(request.params.id));
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
+      const result = nextBossTask(context.tenant.db, graph, readPathId(request.params.id));
       return reply.send({ ...result, task: issuedTaskJson(result.task, false) });
     } catch (error) {
       return fail(reply, error);
@@ -114,19 +127,23 @@ export function registerBossRoutes(app: FastifyInstance, options: BossRoutesOpti
   });
 
   app.get<{ Params: { id: string } }>('/api/boss/:id/state', (request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
     try {
-      return reply.send(bossFightState(db, graph, readPathId(request.params.id)));
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
+      return reply.send(
+        bossFightState(context.tenant.db, graph, readPathId(request.params.id)),
+      );
     } catch (error) {
       return fail(reply, error);
     }
   });
 
   app.post<{ Params: { id: string } }>('/api/boss/:id/answer', (request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
     try {
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
       const body = request.body;
       if (!isObject(body)) throw new BadRequest('Тело ответа должно быть объектом');
       const answer = body['answer'];
@@ -143,7 +160,7 @@ export function registerBossRoutes(app: FastifyInstance, options: BossRoutesOpti
           (typeof durationMs !== 'number' || !Number.isSafeInteger(durationMs) || durationMs < 0)) {
         throw new BadRequest('Поле duration_ms должно быть целым числом миллисекунд не меньше 0');
       }
-      return reply.send(submitBossAnswer(db, graph, {
+      return reply.send(submitBossAnswer(context.tenant.db, graph, {
         runId: readPathId(request.params.id),
         taskId: readId(body['task_id'], 'Поле task_id'),
         answer,
@@ -157,10 +174,13 @@ export function registerBossRoutes(app: FastifyInstance, options: BossRoutesOpti
   });
 
   app.post<{ Params: { id: string } }>('/api/boss/:id/concede', (request, reply) => {
-    const stopped = unavailable(options, reply);
-    if (stopped !== undefined) return stopped;
     try {
-      return reply.send(concedeBoss(db, readPathId(request.params.id), { now: now() }));
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
+      return reply.send(
+        concedeBoss(context.tenant.db, readPathId(request.params.id), { now: now() }),
+      );
     } catch (error) {
       return fail(reply, error);
     }

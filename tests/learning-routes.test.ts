@@ -13,6 +13,7 @@ import { readStreak } from '../server/streak.js';
 import { registerLearningRoutes, registerUnavailableLearning } from '../server/routes/learning.js';
 import { loadCurriculum } from '../server/curriculum.js';
 import { resolveDispute } from '../server/session.js';
+import { fakeContext } from './tenant-context-helper.js';
 
 const NOW = new Date('2026-08-09T12:00:00.000Z');
 
@@ -768,7 +769,7 @@ describe('Learning API', () => {
   it('отдаёт 503 на всех learning URL при отвязанной или неподнятой базе', async () => {
     const graph = loadCurriculum(curriculumDir);
     const detached = Fastify();
-    registerLearningRoutes(detached, { db, graph, available: () => false });
+    registerLearningRoutes(detached, { context: fakeContext(db, { available: () => false }), graph });
     await detached.ready();
     const unavailable = Fastify();
     registerUnavailableLearning(unavailable, 'база недоступна');

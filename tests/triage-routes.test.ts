@@ -13,6 +13,7 @@ import {
   registerTriageRoutes,
   registerUnavailableTriage,
 } from '../server/routes/triage.js';
+import { fakeContext } from './tenant-context-helper.js';
 
 const NOW = new Date('2026-08-08T12:00:00.000Z');
 
@@ -248,9 +249,8 @@ describe('маршруты триажа', () => {
 
     const detached = Fastify();
     registerTriageRoutes(detached, {
-      db,
+      context: fakeContext(db, { available: () => false }),
       graph: loadCurriculum(curriculumDir),
-      available: () => false,
     });
     await detached.ready();
     const unavailable = Fastify();

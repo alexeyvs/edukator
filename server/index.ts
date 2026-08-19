@@ -31,11 +31,6 @@ import { registerIntegrityRoutes, registerUnavailableIntegrity } from './routes/
 import { codexConcurrency, disputeConcurrency, type CodexConcurrency } from './codex/concurrency.js';
 import { startWorker, type StartWorkerOptions, type WorkerHandle } from './codex/worker.js';
 import { hashParentPin, readParentPin, readPinPepper } from './parent-pin.js';
-import { createIntegrityCoordinator } from './integrity.js';
-import type { IntegrityReviewer } from './codex/integrity.js';
-import { finishRun } from './run.js';
-import { finishLearningMaterial } from './learning.js';
-import { readDailyGate } from './daily-gate.js';
 import { ensureDataDir, legacySessionDatabasePath } from './data-dir.js';
 import {
   fileIdentity,
@@ -46,6 +41,16 @@ import {
   DisputeCoordinator,
   type DisputeCoordinatorOptions,
 } from './dispute-coordinator.js';
+import {
+  SINGLE_TENANT_CHILD_ID,
+  singleTenantContext,
+} from './routes/tenant-context.js';
+import type { Tenant } from './tenant-registry.js';
+import { createIntegrityCoordinator } from './integrity.js';
+import type { IntegrityReviewer } from './codex/integrity.js';
+import { finishRun } from './run.js';
+import { finishLearningMaterial } from './learning.js';
+import { readDailyGate } from './daily-gate.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -160,7 +165,7 @@ export type CurriculumStatus = 'ok' | 'error';
 
 /** Настройки занятия, которые тесты подменяют: разбирающий спор и запуск фона. */
 export type ServerOptions =
-  & Omit<SessionRoutesOptions, 'db' | 'graph' | 'available' | 'disputes'>
+  & Omit<SessionRoutesOptions, 'context' | 'graph'>
   & Omit<DisputeCoordinatorOptions, 'db' | 'graph' | 'available' | 'log'>
   & {
   /**
@@ -300,6 +305,18 @@ export function buildServer(
     const disputes = options.disputeBudget ?? disputeConcurrency;
     let worker: WorkerHandle | undefined;
     const sessionAvailable = (): boolean => fileIdentity(dbPath) === opened.file;
+    // Состояние разбора спора своё на каждую базу, а не на процесс: до задачи 15
+    // база здесь одна, но координатор уже тот же, что заводит реестр детских баз.
+    const disputeCoordinator = new DisputeCoordinator({
+      db: sessionDb,
+      graph,
+      available: sessionAvailable,
+      disputeBudget: disputes,
+      ...(options.review === undefined ? {} : { review: options.review }),
+      ...(options.background === undefined ? {} : { background: options.background }),
+      ...(options.log === undefined ? {} : { log: options.log }),
+      ...(options.disputeRetryMs === undefined ? {} : { disputeRetryMs: options.disputeRetryMs }),
+    });
     const integrity = createIntegrityCoordinator({
       db: sessionDb,
       graph,
@@ -328,23 +345,21 @@ export function buildServer(
       ...(options.integrityRetryMs === undefined ? {} : { retryMs: options.integrityRetryMs }),
       ...(options.log === undefined ? {} : { log: options.log }),
     });
-    // Состояние разбора спора своё на каждую базу, а не на процесс: до задачи 15
-    // база здесь одна, но координатор уже тот же, что заводит реестр детских баз.
-    const disputeCoordinator = new DisputeCoordinator({
+    // Аренда собирается руками: до задачи 15 база здесь одна и реестра ещё нет,
+    // но маршруты уже спрашивают её контекстом запроса, а не замыканием.
+    const tenant: Tenant = {
+      childId: SINGLE_TENANT_CHILD_ID,
+      path: dbPath,
       db: sessionDb,
-      graph,
+      file: opened.file,
       available: sessionAvailable,
-      disputeBudget: disputes,
-      ...(options.review === undefined ? {} : { review: options.review }),
-      ...(options.background === undefined ? {} : { background: options.background }),
-      ...(options.log === undefined ? {} : { log: options.log }),
-      ...(options.disputeRetryMs === undefined ? {} : { disputeRetryMs: options.disputeRetryMs }),
-    });
-    registerSessionRoutes(app, {
-      db: sessionDb,
-      graph,
       disputes: disputeCoordinator,
-      available: sessionAvailable,
+      integrity,
+    };
+    const context = singleTenantContext(tenant);
+    registerSessionRoutes(app, {
+      context,
+      graph,
       ...(options.now === undefined ? {} : { now: options.now }),
       ...(options.log === undefined ? {} : { log: options.log }),
       ...(options.seedDir === undefined ? {} : { seedDir: options.seedDir }),
@@ -353,49 +368,39 @@ export function buildServer(
     // без исполнителя только потому, что браузер уже потерял attempt_id.
     disputeCoordinator.restore();
     registerRunRoutes(app, {
-      db: sessionDb,
+      context,
       graph,
-      integrity,
-      available: sessionAvailable,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
     registerTriageRoutes(app, {
-      db: sessionDb,
+      context,
       graph,
-      available: sessionAvailable,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
-    registerIntegrityRoutes(app, { coordinator: integrity, available: sessionAvailable });
+    registerIntegrityRoutes(app, { context });
     registerProfileRoutes(app, {
-      db: sessionDb,
-      available: sessionAvailable,
+      context,
       ...(options.personaPath === undefined ? {} : { personaPath: options.personaPath }),
     });
     registerBossRoutes(app, {
-      db: sessionDb,
+      context,
       graph,
-      available: sessionAvailable,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
     registerParentsRoutes(app, {
-      db: sessionDb,
+      context,
       graph,
-      integrity,
-      ...(parentPinHash === undefined ? {} : { parentPinHash }),
+      ...(parentPinHash === undefined ? {} : { parentPinHash: () => parentPinHash }),
       ...(pinPepper === undefined ? {} : { pinPepper }),
-      available: sessionAvailable,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
     registerLearningRoutes(app, {
-      db: sessionDb,
+      context,
       graph,
-      integrity,
-      available: sessionAvailable,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
     registerGateRoutes(app, {
-      db: sessionDb,
-      available: sessionAvailable,
+      context,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
     app.addHook('onListen', async () => {
@@ -413,8 +418,8 @@ export function buildServer(
       worker?.stop();
       await Promise.allSettled([
         ...(worker === undefined ? [] : [worker.done]),
-        integrity.stop(),
         disputeCoordinator.stop(),
+        integrity.stop(),
       ]);
       sessionDb.close();
     });
@@ -428,6 +433,10 @@ export function buildServer(
       graph === undefined ? 'карта тем не загружена' : 'база недоступна',
     );
     registerUnavailableTriage(
+      app,
+      graph === undefined ? 'карта тем не загружена' : 'база недоступна',
+    );
+    registerUnavailableIntegrity(
       app,
       graph === undefined ? 'карта тем не загружена' : 'база недоступна',
     );
@@ -448,10 +457,6 @@ export function buildServer(
       graph === undefined ? 'карта тем не загружена' : 'база недоступна',
     );
     registerUnavailableGate(
-      app,
-      graph === undefined ? 'карта тем не загружена' : 'база недоступна',
-    );
-    registerUnavailableIntegrity(
       app,
       graph === undefined ? 'карта тем не загружена' : 'база недоступна',
     );

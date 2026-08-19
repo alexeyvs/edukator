@@ -7,10 +7,8 @@
  * выглядела бы как «ученик что-то не так нажал».
  */
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import type { Database } from 'better-sqlite3';
 import type { TopicGraph } from '../curriculum.js';
 import { MAX_ANSWER_LENGTH } from '../codex/prompt.js';
-import type { DisputeCoordinator } from '../dispute-coordinator.js';
 import {
   nextTask,
   openDispute,
@@ -21,6 +19,12 @@ import {
   type SessionErrorCode,
 } from '../session.js';
 import { issuedTaskJson } from './task-json.js';
+import {
+  ROUTE_ACCESS,
+  failAuth,
+  type TenantContext,
+  type TenantContextResolver,
+} from './tenant-context.js';
 
 /** Код ответа на отказ по состоянию занятия. */
 const STATUS_BY_CODE: Record<SessionErrorCode, number> = {
@@ -54,20 +58,17 @@ const STATUS_BY_CODE: Record<SessionErrorCode, number> = {
 export { MAX_ANSWER_LENGTH };
 
 export interface SessionRoutesOptions {
-  db: Database;
-  graph: TopicGraph;
   /**
-   * Разбор споров этого же арендатора. Состояние разбора живёт не здесь: оно
-   * переживает запрос и обязано быть своим на каждую базу (см.
-   * `server/dispute-coordinator.ts`).
+   * База, признак подмены файла и разбор споров приходят вместе с арендой:
+   * состояние разбора переживает запрос и обязано быть своим на каждую базу
+   * (см. `server/dispute-coordinator.ts`).
    */
-  disputes: DisputeCoordinator;
+  context: TenantContextResolver;
+  graph: TopicGraph;
   now?: () => Date;
   log?: (message: string) => void;
   /** Каталог посевного банка; по умолчанию репозиторный. */
   seedDir?: string;
-  /** Соединение всё ещё привязано к текущему файлу базы. */
-  available?: () => boolean;
 }
 
 function defaultLog(message: string): void {
@@ -107,30 +108,28 @@ function fail(reply: FastifyReply, error: unknown): FastifyReply {
   if (error instanceof SessionError) {
     return reply.code(STATUS_BY_CODE[error.code]).send({ error: error.message, code: error.code });
   }
-  throw error;
+  return failAuth(reply, error);
 }
 
 export function registerSessionRoutes(
   app: FastifyInstance,
   options: SessionRoutesOptions,
 ): void {
-  const { db, graph, disputes } = options;
+  const { graph } = options;
   const log = options.log ?? defaultLog;
   const now = options.now ?? ((): Date => new Date());
 
-  function isAvailable(): boolean {
-    return options.available?.() !== false;
-  }
-
-  function unavailable(reply: FastifyReply): FastifyReply | undefined {
-    if (isAvailable()) return undefined;
+  function unavailable(context: TenantContext, reply: FastifyReply): FastifyReply | undefined {
+    if (context.tenant.available()) return undefined;
     return reply.code(503).send({ error: 'Занятие недоступно: файл базы заменён, нужен перезапуск' });
   }
 
   app.get('/api/session/next', (request, reply) => {
-    const stopped = unavailable(reply);
-    if (stopped !== undefined) return stopped;
     try {
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const db = context.tenant.db;
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
       const runId = readQueryId(request.query, 'runId');
       const excludeTaskId = readQueryId(request.query, 'excludeTaskId');
       const result = nextTask(db, graph, {
@@ -186,9 +185,11 @@ export function registerSessionRoutes(
   });
 
   app.post('/api/session/answer', (request, reply) => {
-    const stopped = unavailable(reply);
-    if (stopped !== undefined) return stopped;
     try {
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const db = context.tenant.db;
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
       const body = request.body;
       const taskId = readId(body, 'task_id');
       const runId = isObject(body) && body['runId'] !== undefined ? readId(body, 'runId') : undefined;
@@ -260,28 +261,31 @@ export function registerSessionRoutes(
   });
 
   app.post('/api/session/retry/skip', (request, reply) => {
-    const stopped = unavailable(reply);
-    if (stopped !== undefined) return stopped;
     try {
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
       const runId = readId(request.body, 'runId');
       const taskId = readId(request.body, 'task_id');
-      return reply.send({ progress: skipRetry(db, runId, taskId) });
+      return reply.send({ progress: skipRetry(context.tenant.db, runId, taskId) });
     } catch (error) {
       return fail(reply, error);
     }
   });
 
   app.post('/api/session/dispute', (request, reply) => {
-    const stopped = unavailable(reply);
-    if (stopped !== undefined) return stopped;
     try {
+      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const db = context.tenant.db;
+      const stopped = unavailable(context, reply);
+      if (stopped !== undefined) return stopped;
       const attemptId = readId(request.body, 'attempt_id');
       const dispute = openDispute(db, attemptId);
       // Не только на заведение: спор остаётся `open`, когда разбор не удался
       // (codex недоступен, ответ не разобрался), и повторное нажатие кнопки —
       // единственное, что ставит его на разбор снова. Параллельный второй разбор
       // безопасен: `resolveDispute` перечитывает спор уже под записью.
-      if (dispute.status === 'open') disputes.schedule(dispute.id);
+      if (dispute.status === 'open') context.tenant.disputes.schedule(dispute.id);
 
       // 202: спор принят, но вердикта ещё нет — его приносит следующий запрос
       // состояния, а не этот ответ.

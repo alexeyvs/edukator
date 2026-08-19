@@ -19,6 +19,14 @@ import {
   type BackgroundRunner,
   type DisputeCoordinatorOptions,
 } from './dispute-coordinator.js';
+import {
+  createIntegrityCoordinator,
+  type IntegrityCoordinator,
+  type IntegrityCoordinatorOptions,
+} from './integrity.js';
+import { finishRun } from './run.js';
+import { finishLearningMaterial } from './learning.js';
+import { readDailyGate } from './daily-gate.js';
 
 /**
  * Отпечаток файла базы: устройство и inode. Нужен, чтобы отличить тот файл, с
@@ -146,6 +154,8 @@ export interface Tenant {
    * совпадают.
    */
   disputes: DisputeCoordinator;
+  /** Проверка осмысленности ответов этой детской базы. */
+  integrity: IntegrityCoordinator;
 }
 
 export interface TenantRegistryOptions {
@@ -171,6 +181,10 @@ export interface TenantRegistryOptions {
   disputeBudget?: DisputeCoordinatorOptions['disputeBudget'];
   /** Пауза перед автоматическим повтором незакрытого спора. */
   disputeRetryMs?: number;
+  integrityReview?: IntegrityCoordinatorOptions['review'];
+  integrityBudget?: IntegrityCoordinatorOptions['budget'];
+  integrityRetryMs?: number;
+  now?: () => Date;
 }
 
 /**
@@ -191,6 +205,10 @@ export class TenantRegistry {
   readonly #openSession: (path: string) => SessionDatabase | undefined;
   readonly #log: (message: string) => void;
   readonly #disputeOptions: Omit<DisputeCoordinatorOptions, 'db' | 'graph' | 'available'>;
+  readonly #integrityOptions: Pick<
+    IntegrityCoordinatorOptions,
+    'review' | 'budget' | 'background' | 'retryMs' | 'now' | 'log'
+  >;
   readonly #tenants = new Map<string, Tenant>();
   /** Дети, открытие которых идёт прямо сейчас: см. `open`. */
   readonly #opening = new Set<string>();
@@ -215,6 +233,14 @@ export class TenantRegistry {
       ...(options.background === undefined ? {} : { background: options.background }),
       ...(options.disputeBudget === undefined ? {} : { disputeBudget: options.disputeBudget }),
       ...(options.disputeRetryMs === undefined ? {} : { disputeRetryMs: options.disputeRetryMs }),
+    };
+    this.#integrityOptions = {
+      log: this.#log,
+      ...(options.integrityReview === undefined ? {} : { review: options.integrityReview }),
+      ...(options.integrityBudget === undefined ? {} : { budget: options.integrityBudget }),
+      ...(options.background === undefined ? {} : { background: options.background }),
+      ...(options.integrityRetryMs === undefined ? {} : { retryMs: options.integrityRetryMs }),
+      ...(options.now === undefined ? {} : { now: options.now }),
     };
   }
 
@@ -299,6 +325,30 @@ export class TenantRegistry {
       graph: this.#graph,
       available,
     });
+    const integrity = createIntegrityCoordinator({
+      ...this.#integrityOptions,
+      db: opened.db,
+      graph: this.#graph,
+      available,
+      complete: (runId, at) => {
+        const kind = opened.db.prepare<[number], { kind: string }>(
+          'SELECT kind FROM runs WHERE id = ?',
+        ).get(runId)?.kind;
+        if (kind === 'lesson') {
+          const result = finishLearningMaterial(opened.db, this.#graph, runId, { now: at });
+          const learningGate = readDailyGate(opened.db, at).learning;
+          const completed = {
+            ...result,
+            required: learningGate.required && learningGate.materialId === result.materialId,
+          };
+          opened.db.prepare('UPDATE runs SET summary = ? WHERE id = ?')
+            .run(JSON.stringify(completed), runId);
+          return completed;
+        }
+        if (kind === 'run') return { ...finishRun(opened.db, this.#graph, runId, { now: at }) };
+        throw new Error(`Проверка осмысленности не завершает занятие вида «${String(kind)}»`);
+      },
+    });
     const tenant: Tenant = {
       childId,
       path,
@@ -306,6 +356,7 @@ export class TenantRegistry {
       file,
       available,
       disputes,
+      integrity,
     };
     this.#tenants.set(childId, tenant);
     // Восстановление идёт при открытии каждой базы, а не один раз при старте
@@ -328,7 +379,7 @@ export class TenantRegistry {
     const tenant = this.#tenants.get(childId);
     if (tenant === undefined) return;
     this.#tenants.delete(childId);
-    await tenant.disputes.stop();
+    await Promise.allSettled([tenant.disputes.stop(), tenant.integrity.stop()]);
     this.#closeQuietly(childId, tenant.db);
   }
 
