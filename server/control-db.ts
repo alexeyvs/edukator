@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { relative, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import { MAX_SECRET_LENGTH, hashSecret, verifySecret } from './secrets.js';
 
@@ -723,4 +724,443 @@ export function revokeParentSession(
     .prepare('UPDATE parent_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL')
     .run(now.toISOString(), hashToken(token));
   return result.changes > 0;
+}
+
+/* ─── Дети и устройства ─────────────────────────────────────────────────── */
+
+/**
+ * Срок приглашения устройства. Сутки, а не неделя приглашения родителя: ссылку
+ * ребёнку показывают на экране здесь и сейчас, и всё, что она переживает, —
+ * дорога от родительского телефона до детского компьютера.
+ */
+export const DEVICE_INVITE_TTL_MS = DAY_MS;
+
+/** Предел длины имени ребёнка: оно только подпись в списке, не ключ. */
+export const MAX_CHILD_NAME_LENGTH = 64;
+
+/** Предел длины подписи устройства: та же роль, тот же предел. */
+export const MAX_DEVICE_LABEL_LENGTH = 64;
+
+/**
+ * Каталог детских баз внутри каталога данных. Имя файла — сам `id`, поэтому
+ * ничего, кроме `id`, в путь не подставляется.
+ */
+export const CHILDREN_DIR = 'children';
+
+/**
+ * Допустимый `id` ребёнка. Тот же запрет, что и в `CHILD_ID_CHECK` схемы, но
+ * проверенный до любого обращения к файловой системе: `id` служит именем файла,
+ * и всё, кроме шестнадцатеричных знаков, — это чужой путь.
+ */
+export const CHILD_ID_PATTERN = /^[0-9a-f]{8,64}$/u;
+
+export type ChildStatus = 'provisioning' | 'ready' | 'failed';
+
+export type DeviceKind = 'browser' | 'agent';
+
+export interface ChildSummary {
+  id: string;
+  parentId: string;
+  name: string;
+  status: ChildStatus;
+  lastActivityAt?: string;
+  retiredAt?: string;
+  createdAt: string;
+}
+
+export interface DeviceSummary {
+  id: number;
+  childId: string;
+  kind: DeviceKind;
+  label: string;
+  inviteExpiresAt: string;
+  claimedAt?: string;
+  revokedAt?: string;
+  createdAt: string;
+}
+
+/** Причина отказа детскому предъявителю. Наружу маршрут отдаёт один общий текст. */
+export type ChildAuthFailure = 'unknown-token' | 'expired' | 'used' | 'disabled' | 'retired';
+
+export type DeviceClaimResult =
+  | { ok: true; childId: string; deviceId: number; kind: DeviceKind; token: string }
+  | { ok: false; reason: ChildAuthFailure };
+
+export interface ChildPrincipal {
+  childId: string;
+  parentId: string;
+  deviceId: number;
+  kind: DeviceKind;
+  name: string;
+}
+
+/**
+ * Путь базы ребёнка. Колонки с путём в управляющей базе нет намеренно: он
+ * считается из непрозрачного `id`, и подменить его записью в базе нельзя.
+ * Итог канонизируется и сверяется с каталогом `children/`: даже если проверка
+ * формата однажды ослабнет, наружу этого каталога путь не выйдет.
+ */
+export function childDatabasePath(dataDir: string, childId: string): string {
+  if (!CHILD_ID_PATTERN.test(childId)) {
+    throw new Error(`Идентификатор ребёнка «${childId}» не годится в имя файла базы`);
+  }
+  const root = resolve(dataDir, CHILDREN_DIR);
+  const file = resolve(root, `${childId}.db`);
+  // `relative` сравнивает уже канонизированные пути: `..` и разделитель внутри
+  // `id` дали бы здесь либо выход вверх, либо вложенный каталог.
+  if (relative(root, file) !== `${childId}.db`) {
+    throw new Error(`Путь базы ребёнка «${childId}» выводит за каталог ${CHILDREN_DIR}`);
+  }
+  return file;
+}
+
+function requireLiveParent(db: Database.Database, parentId: string): void {
+  const parent = db
+    .prepare<[string], { disabled_at: string | null }>('SELECT disabled_at FROM parents WHERE id = ?')
+    .get(parentId);
+  if (parent === undefined) throw new Error(`Родителя ${parentId} нет в управляющей базе`);
+  if (parent.disabled_at !== null) throw new Error(`Родитель ${parentId} отключён`);
+}
+
+/**
+ * Заводит ребёнка. Статус `provisioning` — не украшение: базы у него ещё нет, и
+ * до её появления он не должен доставаться ни маршрутам, ни воркеру.
+ */
+export function createChild(
+  db: Database.Database,
+  parentId: string,
+  name: string,
+  now: Date = new Date(),
+): string {
+  const trimmed = name.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_CHILD_NAME_LENGTH) {
+    throw new Error(`Имя ребёнка должно быть от 1 до ${MAX_CHILD_NAME_LENGTH} знаков`);
+  }
+  requireLiveParent(db, parentId);
+  const id = randomBytes(16).toString('hex');
+  db.prepare(
+    `INSERT INTO children (id, parent_id, name, status, created_at)
+     VALUES (?, ?, ?, 'provisioning', ?)`,
+  ).run(id, parentId, trimmed, now.toISOString());
+  return id;
+}
+
+function setChildStatus(db: Database.Database, childId: string, status: ChildStatus): void {
+  const updated = db
+    .prepare('UPDATE children SET status = ? WHERE id = ? AND retired_at IS NULL')
+    .run(status, childId);
+  if (updated.changes === 0) {
+    throw new Error(`Ребёнка ${childId} нет в управляющей базе или он уже выведен`);
+  }
+}
+
+/** Переводит ребёнка в рабочее состояние. Зовётся, когда база уже на месте. */
+export function markChildReady(db: Database.Database, childId: string): void {
+  setChildStatus(db, childId, 'ready');
+}
+
+/**
+ * Отмечает неудачу заведения. Без этого статуса оборванное заведение навсегда
+ * осталось бы `provisioning` и молча ждало бы базы, которой никто не создаёт.
+ */
+export function markChildFailed(db: Database.Database, childId: string): void {
+  setChildStatus(db, childId, 'failed');
+}
+
+/**
+ * Выводит ребёнка. Устройства не трогаются: их действительность проверяется на
+ * каждом обращении, и `retired_at` гасит их той же выборкой.
+ */
+export function retireChild(db: Database.Database, childId: string, now: Date = new Date()): boolean {
+  const updated = db
+    .prepare('UPDATE children SET retired_at = ? WHERE id = ? AND retired_at IS NULL')
+    .run(now.toISOString(), childId);
+  return updated.changes > 0;
+}
+
+interface ChildRow {
+  id: string;
+  parent_id: string;
+  name: string;
+  status: ChildStatus;
+  last_activity_at: string | null;
+  retired_at: string | null;
+  created_at: string;
+}
+
+function toChildSummary(row: ChildRow): ChildSummary {
+  return {
+    id: row.id,
+    parentId: row.parent_id,
+    name: row.name,
+    status: row.status,
+    ...(row.last_activity_at === null ? {} : { lastActivityAt: row.last_activity_at }),
+    ...(row.retired_at === null ? {} : { retiredAt: row.retired_at }),
+    createdAt: row.created_at,
+  };
+}
+
+/** Список детей родителя. Выведенные не показываются, пока их не спросят явно. */
+export function listChildren(
+  db: Database.Database,
+  parentId: string,
+  options: { includeRetired?: boolean } = {},
+): ChildSummary[] {
+  const rows = db
+    .prepare<[string, number], ChildRow>(
+      `SELECT id, parent_id, name, status, last_activity_at, retired_at, created_at
+         FROM children
+        WHERE parent_id = ? AND (? = 1 OR retired_at IS NULL)
+        ORDER BY created_at, id`,
+    )
+    .all(parentId, options.includeRetired === true ? 1 : 0);
+  return rows.map(toChildSummary);
+}
+
+/** Один ребёнок по `id`. Принадлежность проверяет вызывающий: здесь её нет. */
+export function readChild(db: Database.Database, childId: string): ChildSummary | undefined {
+  const row = db
+    .prepare<[string], ChildRow>(
+      `SELECT id, parent_id, name, status, last_activity_at, retired_at, created_at
+         FROM children WHERE id = ?`,
+    )
+    .get(childId);
+  return row === undefined ? undefined : toChildSummary(row);
+}
+
+/**
+ * Выпускает приглашение устройства. Открытый токен возвращается один раз: в
+ * базе лежит только его отпечаток, как и у приглашения родителя.
+ */
+export function issueDeviceInvite(
+  db: Database.Database,
+  childId: string,
+  kind: DeviceKind,
+  label = '',
+  now: Date = new Date(),
+  ttlMs: number = DEVICE_INVITE_TTL_MS,
+): IssuedToken {
+  const trimmed = label.trim();
+  if (trimmed.length > MAX_DEVICE_LABEL_LENGTH) {
+    throw new Error(`Подпись устройства длиннее ${MAX_DEVICE_LABEL_LENGTH} знаков`);
+  }
+  const child = db
+    .prepare<[string], { parent_id: string; status: ChildStatus; retired_at: string | null }>(
+      'SELECT parent_id, status, retired_at FROM children WHERE id = ?',
+    )
+    .get(childId);
+  if (child === undefined) throw new Error(`Ребёнка ${childId} нет в управляющей базе`);
+  if (child.retired_at !== null) throw new Error(`Ребёнок ${childId} выведен`);
+  // Приглашение для ребёнка без готовой базы дало бы вход в никуда: устройство
+  // погасило бы ссылку, а первый же запрос упёрся бы в отсутствующего арендатора.
+  if (child.status !== 'ready') {
+    throw new Error(`Ребёнок ${childId} ещё не готов (${child.status})`);
+  }
+  requireLiveParent(db, child.parent_id);
+
+  const token = createBearerToken();
+  const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
+  db.prepare(
+    `INSERT INTO child_devices (child_id, kind, label, invite_hash, invite_expires_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(childId, kind, trimmed, hashToken(token), expiresAt, now.toISOString());
+  return { token, expiresAt };
+}
+
+interface DeviceInviteRow {
+  id: number;
+  child_id: string;
+  kind: DeviceKind;
+  claimed_at: string | null;
+  invite_expires_at: string;
+  retired_at: string | null;
+  disabled_at: string | null;
+}
+
+function selectDeviceInvite(db: Database.Database, token: string): DeviceInviteRow | undefined {
+  return db
+    .prepare<[string], DeviceInviteRow>(
+      `SELECT d.id, d.child_id, d.kind, d.claimed_at, d.invite_expires_at,
+              c.retired_at, p.disabled_at
+         FROM child_devices d
+         JOIN children c ON c.id = d.child_id
+         JOIN parents p ON p.id = c.parent_id
+        WHERE d.invite_hash = ?`,
+    )
+    .get(hashToken(token));
+}
+
+function deviceInviteFailure(
+  row: DeviceInviteRow | undefined,
+  now: Date,
+): ChildAuthFailure | undefined {
+  if (row === undefined) return 'unknown-token';
+  if (row.disabled_at !== null) return 'disabled';
+  if (row.retired_at !== null) return 'retired';
+  if (row.claimed_at !== null) return 'used';
+  if (row.invite_expires_at <= now.toISOString()) return 'expired';
+  return undefined;
+}
+
+/**
+ * Гасит приглашение устройства и выдаёт его постоянный токен. Погашение и
+ * проверка условий — один `UPDATE`: два одновременных перехода по одной ссылке
+ * обязаны завести ровно одно устройство, иначе перехвативший ссылку получает
+ * такой же вход, как и ребёнок.
+ */
+export function redeemDeviceInvite(
+  db: Database.Database,
+  token: string,
+  now: Date = new Date(),
+): DeviceClaimResult {
+  const known = selectDeviceInvite(db, token);
+  if (known === undefined) return { ok: false, reason: 'unknown-token' };
+
+  const deviceToken = createBearerToken();
+  const stamp = now.toISOString();
+  const inviteHash = hashToken(token);
+
+  return db.transaction((): DeviceClaimResult => {
+    // Отключённый родитель и выведенный ребёнок проверяются под записью: между
+    // чтением выше и этой строкой их мог погасить соседний запрос.
+    const before = selectDeviceInvite(db, token);
+    const blocked = deviceInviteFailure(before, now);
+    if (blocked !== undefined && blocked !== 'used' && blocked !== 'expired') {
+      return { ok: false, reason: blocked };
+    }
+    const consumed = db
+      .prepare(
+        `UPDATE child_devices SET claimed_at = ?, token_hash = ?
+          WHERE invite_hash = ? AND claimed_at IS NULL AND invite_expires_at > ?`,
+      )
+      .run(stamp, hashToken(deviceToken), inviteHash, stamp);
+    if (consumed.changes === 0) {
+      return { ok: false, reason: deviceInviteFailure(selectDeviceInvite(db, token), now) ?? 'used' };
+    }
+
+    const row = selectDeviceInvite(db, token);
+    if (row === undefined) return { ok: false, reason: 'unknown-token' };
+    return {
+      ok: true,
+      childId: row.child_id,
+      deviceId: row.id,
+      kind: row.kind,
+      token: deviceToken,
+    };
+  }).immediate();
+}
+
+/** Отзыв устройства. Строка остаётся для разбора, но предъявителем уже не служит. */
+export function revokeDevice(
+  db: Database.Database,
+  deviceId: number,
+  now: Date = new Date(),
+): boolean {
+  const updated = db
+    .prepare('UPDATE child_devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
+    .run(now.toISOString(), deviceId);
+  return updated.changes > 0;
+}
+
+interface DeviceRow {
+  id: number;
+  child_id: string;
+  kind: DeviceKind;
+  label: string;
+  invite_expires_at: string;
+  claimed_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+/** Устройства ребёнка. Ни отпечатков, ни токенов наружу отсюда не уходит. */
+export function listDevices(db: Database.Database, childId: string): DeviceSummary[] {
+  return db
+    .prepare<[string], DeviceRow>(
+      `SELECT id, child_id, kind, label, invite_expires_at, claimed_at, revoked_at, created_at
+         FROM child_devices WHERE child_id = ? ORDER BY id`,
+    )
+    .all(childId)
+    .map((row) => ({
+      id: row.id,
+      childId: row.child_id,
+      kind: row.kind,
+      label: row.label,
+      inviteExpiresAt: row.invite_expires_at,
+      ...(row.claimed_at === null ? {} : { claimedAt: row.claimed_at }),
+      ...(row.revoked_at === null ? {} : { revokedAt: row.revoked_at }),
+      createdAt: row.created_at,
+    }));
+}
+
+interface ChildDeviceRow {
+  id: number;
+  child_id: string;
+  parent_id: string;
+  kind: DeviceKind;
+  name: string;
+  status: ChildStatus;
+  claimed_at: string;
+  last_activity_at: string | null;
+  retired_at: string | null;
+  disabled_at: string | null;
+  credentials_changed_at: string | null;
+}
+
+/**
+ * Разрешает токен устройства в детского предъявителя. Все четыре события
+ * инвалидации проверяются **здесь**, на каждом обращении, а не при выдаче:
+ * токен устройства живёт на детском компьютере месяцами, и отзыв, вывод
+ * ребёнка, отключение родителя или смена пароля обязаны действовать сразу.
+ * `undefined` — отказ по любой причине: снаружи они неразличимы.
+ */
+export function resolveChildDevice(
+  db: Database.Database,
+  token: string,
+  now: Date = new Date(),
+): ChildPrincipal | undefined {
+  const row = db
+    .prepare<[string], ChildDeviceRow>(
+      `SELECT d.id, d.child_id, d.kind, d.claimed_at,
+              c.parent_id, c.name, c.status, c.last_activity_at, c.retired_at,
+              p.disabled_at, p.credentials_changed_at
+         FROM child_devices d
+         JOIN children c ON c.id = d.child_id
+         JOIN parents p ON p.id = c.parent_id
+        WHERE d.token_hash = ? AND d.revoked_at IS NULL`,
+    )
+    .get(hashToken(token));
+  if (row === undefined) return undefined;
+  if (row.disabled_at !== null) return undefined;
+  if (row.retired_at !== null) return undefined;
+  // Смена пароля родителя — обычно реакция на увод учётной записи, и всё, что
+  // было выдано до неё, считается уведённым вместе с ней.
+  if (row.credentials_changed_at !== null && row.credentials_changed_at > row.claimed_at) {
+    return undefined;
+  }
+  // Ребёнок без готовой базы предъявителем не служит: обслуживать его нечем.
+  if (row.status !== 'ready') return undefined;
+
+  // Отметка активности глушится тем же сроком, что и `last_seen_at` сессии:
+  // занятие бьёт в управляющую базу на каждом задании, а диспетчеру воркера
+  // хватает свежести в минутах.
+  const lastActivity = row.last_activity_at === null ? undefined : Date.parse(row.last_activity_at);
+  if (
+    lastActivity === undefined ||
+    !Number.isFinite(lastActivity) ||
+    now.getTime() - lastActivity >= SESSION_TOUCH_MS
+  ) {
+    db.prepare('UPDATE children SET last_activity_at = ? WHERE id = ?').run(
+      now.toISOString(),
+      row.child_id,
+    );
+  }
+
+  return {
+    childId: row.child_id,
+    parentId: row.parent_id,
+    deviceId: row.id,
+    kind: row.kind,
+    name: row.name,
+  };
 }

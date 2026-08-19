@@ -5,24 +5,40 @@ import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import BetterSqlite3 from 'better-sqlite3';
 import {
+  CHILDREN_DIR,
   CONTROL_SCHEMA_VERSION,
   CONTROL_TABLES,
+  DEVICE_INVITE_TTL_MS,
+  MAX_CHILD_NAME_LENGTH,
+  MAX_DEVICE_LABEL_LENGTH,
   MAX_EMAIL_LENGTH,
   MIN_PASSWORD_LENGTH,
   PARENT_INVITE_TTL_MS,
   PARENT_SESSION_IDLE_MS,
   PARENT_SESSION_MAX_MS,
   SESSION_TOUCH_MS,
+  childDatabasePath,
+  createChild,
   createParent,
   hashToken,
+  issueDeviceInvite,
   issueParentInvite,
+  listChildren,
+  listDevices,
   loginParent,
+  markChildFailed,
+  markChildReady,
   migrateControl,
   normalizeEmail,
   openControlDatabase,
+  readChild,
   readParentInvite,
+  redeemDeviceInvite,
   redeemParentInvite,
+  resolveChildDevice,
   resolveParentSession,
+  retireChild,
+  revokeDevice,
   revokeParentSession,
   validateControlSchema,
 } from '../server/control-db.js';
@@ -540,5 +556,317 @@ describe('родители, приглашения и сессии', () => {
     expect(SESSION_TOUCH_MS).toBe(5 * 60 * 1000);
     expect(MIN_PASSWORD_LENGTH).toBe(10);
     expect(MAX_EMAIL_LENGTH).toBe(254);
+  });
+});
+
+describe('дети и устройства', () => {
+  const NOW = new Date('2026-08-19T10:00:00.000Z');
+  const PASSWORD = 'пароль-подлиннее';
+
+  function at(ms: number): Date {
+    return new Date(NOW.getTime() + ms);
+  }
+
+  /** Родитель с паролем: без него у ребёнка нет ни владельца, ни отметки смены. */
+  function parentWithPassword(db: Database, email = 'mama@example.com'): string {
+    const parentId = createParent(db, email, NOW);
+    const invite = issueParentInvite(db, parentId, NOW);
+    const redeemed = redeemParentInvite(db, invite.token, PASSWORD, NOW);
+    if (!redeemed.ok) throw new Error(`приглашение не погасилось: ${redeemed.reason}`);
+    return parentId;
+  }
+
+  /** Готовый ребёнок: заведение всегда начинается с `provisioning`. */
+  function readyChild(db: Database, parentId: string, name = 'Петя', now: Date = NOW): string {
+    const childId = createChild(db, parentId, name, now);
+    markChildReady(db, childId);
+    return childId;
+  }
+
+  /** Устройство с погашенным приглашением: дальше проверяется уже его токен. */
+  function claimedDevice(
+    db: Database,
+    childId: string,
+    kind: 'browser' | 'agent' = 'browser',
+    now: Date = NOW,
+  ): { token: string; deviceId: number } {
+    const invite = issueDeviceInvite(db, childId, kind, 'ноутбук', now);
+    const claimed = redeemDeviceInvite(db, invite.token, now);
+    if (!claimed.ok) throw new Error(`приглашение устройства не погасилось: ${claimed.reason}`);
+    return { token: claimed.token, deviceId: claimed.deviceId };
+  }
+
+  it('ведёт полный путь: ребёнок → готовность → устройство → предъявитель', () => {
+    const db = open();
+    const parentId = parentWithPassword(db);
+    const childId = createChild(db, parentId, '  Петя  ', NOW);
+
+    expect(readChild(db, childId)).toEqual({
+      id: childId,
+      parentId,
+      name: 'Петя',
+      status: 'provisioning',
+      createdAt: NOW.toISOString(),
+    });
+    // Пока базы нет, приглашать устройство некуда.
+    expect(() => issueDeviceInvite(db, childId, 'browser', '', NOW)).toThrow(/ещё не готов/);
+
+    markChildReady(db, childId);
+    const invite = issueDeviceInvite(db, childId, 'browser', ' ноутбук ', NOW);
+    expect(invite.expiresAt).toBe(at(DEVICE_INVITE_TTL_MS).toISOString());
+
+    const claimed = redeemDeviceInvite(db, invite.token, at(HOUR_MS));
+    expect(claimed.ok).toBe(true);
+    if (!claimed.ok) return;
+    expect(claimed.childId).toBe(childId);
+    expect(claimed.kind).toBe('browser');
+    expect(claimed.token).not.toBe(invite.token);
+
+    expect(resolveChildDevice(db, claimed.token, at(2 * HOUR_MS))).toEqual({
+      childId,
+      parentId,
+      deviceId: claimed.deviceId,
+      kind: 'browser',
+      name: 'Петя',
+    });
+    expect(listDevices(db, childId)).toEqual([
+      {
+        id: claimed.deviceId,
+        childId,
+        kind: 'browser',
+        label: 'ноутбук',
+        inviteExpiresAt: at(DEVICE_INVITE_TTL_MS).toISOString(),
+        claimedAt: at(HOUR_MS).toISOString(),
+        createdAt: NOW.toISOString(),
+      },
+    ]);
+  });
+
+  it('хранит только отпечатки токенов устройства', () => {
+    const db = open();
+    const childId = readyChild(db, parentWithPassword(db));
+    const invite = issueDeviceInvite(db, childId, 'agent', '', NOW);
+    const claimed = redeemDeviceInvite(db, invite.token, NOW);
+    expect(claimed.ok).toBe(true);
+    if (!claimed.ok) return;
+
+    const row = db
+      .prepare<[], { invite_hash: string; token_hash: string | null }>(
+        'SELECT invite_hash, token_hash FROM child_devices',
+      )
+      .get();
+    expect(row?.invite_hash).toBe(hashToken(invite.token));
+    expect(row?.token_hash).toBe(hashToken(claimed.token));
+    expect(JSON.stringify(row)).not.toContain(invite.token);
+    expect(JSON.stringify(row)).not.toContain(claimed.token);
+  });
+
+  it('два одновременных погашения заводят ровно одно устройство', () => {
+    const first = open();
+    const parentId = parentWithPassword(first);
+    const childId = readyChild(first, parentId);
+    const invite = issueDeviceInvite(first, childId, 'browser', '', NOW);
+    const second = open();
+
+    const winner = redeemDeviceInvite(first, invite.token, NOW);
+    const loser = redeemDeviceInvite(second, invite.token, NOW);
+
+    expect(winner.ok).toBe(true);
+    expect(loser).toEqual({ ok: false, reason: 'used' });
+    expect(
+      first.prepare<[], { n: number }>('SELECT count(*) AS n FROM child_devices').get()?.n,
+    ).toBe(1);
+    if (!winner.ok) return;
+    // Токен победителя работает: проигравший не переписал его своим.
+    expect(resolveChildDevice(first, winner.token, NOW)?.childId).toBe(childId);
+  });
+
+  it('отказывает по чужому, протухшему и уже погашенному приглашению устройства', () => {
+    const db = open();
+    const childId = readyChild(db, parentWithPassword(db));
+    const stale = issueDeviceInvite(db, childId, 'browser', '', NOW);
+    const fresh = issueDeviceInvite(db, childId, 'browser', '', NOW);
+
+    expect(redeemDeviceInvite(db, 'нет такого токена', NOW)).toEqual({
+      ok: false,
+      reason: 'unknown-token',
+    });
+    expect(redeemDeviceInvite(db, stale.token, at(DEVICE_INVITE_TTL_MS))).toEqual({
+      ok: false,
+      reason: 'expired',
+    });
+    expect(redeemDeviceInvite(db, fresh.token, NOW).ok).toBe(true);
+    expect(redeemDeviceInvite(db, fresh.token, NOW)).toEqual({ ok: false, reason: 'used' });
+    // Протухшее приглашение так и не завело устройства.
+    expect(
+      db.prepare<[], { n: number }>('SELECT count(*) AS n FROM child_devices WHERE claimed_at IS NOT NULL').get()?.n,
+    ).toBe(1);
+  });
+
+  it('отзыв устройства гасит только его', () => {
+    const db = open();
+    const childId = readyChild(db, parentWithPassword(db));
+    const laptop = claimedDevice(db, childId);
+    const agent = claimedDevice(db, childId, 'agent');
+
+    expect(revokeDevice(db, laptop.deviceId, at(HOUR_MS))).toBe(true);
+    // Повторный отзыв уже ничего не меняет: строка помечена один раз.
+    expect(revokeDevice(db, laptop.deviceId, at(2 * HOUR_MS))).toBe(false);
+
+    expect(resolveChildDevice(db, laptop.token, at(2 * HOUR_MS))).toBeUndefined();
+    expect(resolveChildDevice(db, agent.token, at(2 * HOUR_MS))?.deviceId).toBe(agent.deviceId);
+    expect(listDevices(db, childId).find((device) => device.id === laptop.deviceId)?.revokedAt).toBe(
+      at(HOUR_MS).toISOString(),
+    );
+  });
+
+  it('вывод ребёнка гасит его устройства и не трогает соседа', () => {
+    const db = open();
+    const parentId = parentWithPassword(db);
+    // Разные отметки заведения: список упорядочен по ним, и совпадающие
+    // отметки свели бы проверку порядка к сравнению случайных id.
+    const petya = readyChild(db, parentId, 'Петя', NOW);
+    const vasya = readyChild(db, parentId, 'Вася', at(1000));
+    const petyaDevice = claimedDevice(db, petya);
+    const vasyaDevice = claimedDevice(db, vasya);
+
+    expect(retireChild(db, petya, at(HOUR_MS))).toBe(true);
+    expect(retireChild(db, petya, at(2 * HOUR_MS))).toBe(false);
+
+    expect(resolveChildDevice(db, petyaDevice.token, at(2 * HOUR_MS))).toBeUndefined();
+    expect(resolveChildDevice(db, vasyaDevice.token, at(2 * HOUR_MS))?.childId).toBe(vasya);
+    expect(listChildren(db, parentId).map((child) => child.id)).toEqual([vasya]);
+    expect(listChildren(db, parentId, { includeRetired: true }).map((child) => child.id)).toEqual([
+      petya,
+      vasya,
+    ]);
+    // Выведенному ребёнку новых устройств не выпускают.
+    expect(() => issueDeviceInvite(db, petya, 'browser', '', at(2 * HOUR_MS))).toThrow(/выведен/);
+  });
+
+  it('отключение родителя гасит устройства его детей и не трогает чужих', () => {
+    const db = open();
+    const mama = parentWithPassword(db, 'mama@example.com');
+    const papa = parentWithPassword(db, 'papa@example.com');
+    const petya = readyChild(db, mama, 'Петя');
+    const alien = readyChild(db, papa, 'Соня');
+    const petyaDevice = claimedDevice(db, petya);
+    const alienDevice = claimedDevice(db, alien);
+
+    db.prepare('UPDATE parents SET disabled_at = ? WHERE id = ?').run(at(HOUR_MS).toISOString(), mama);
+
+    expect(resolveChildDevice(db, petyaDevice.token, at(2 * HOUR_MS))).toBeUndefined();
+    expect(resolveChildDevice(db, alienDevice.token, at(2 * HOUR_MS))?.childId).toBe(alien);
+    expect(() => createChild(db, mama, 'Новый', at(2 * HOUR_MS))).toThrow(/отключён/);
+    expect(() => issueDeviceInvite(db, petya, 'browser', '', at(2 * HOUR_MS))).toThrow(/отключён/);
+  });
+
+  it('смена пароля родителя гасит устройства, выданные до неё, и не гасит выданные после', () => {
+    const db = open();
+    const parentId = parentWithPassword(db);
+    const childId = readyChild(db, parentId);
+    const before = claimedDevice(db, childId, 'browser', at(HOUR_MS));
+
+    db.prepare('UPDATE parents SET credentials_changed_at = ? WHERE id = ?').run(
+      at(2 * HOUR_MS).toISOString(),
+      parentId,
+    );
+    const after = claimedDevice(db, childId, 'browser', at(3 * HOUR_MS));
+
+    expect(resolveChildDevice(db, before.token, at(4 * HOUR_MS))).toBeUndefined();
+    expect(resolveChildDevice(db, after.token, at(4 * HOUR_MS))?.deviceId).toBe(after.deviceId);
+  });
+
+  it('пишет last_activity_at не чаще раза в пять минут', () => {
+    const db = open();
+    const childId = readyChild(db, parentWithPassword(db));
+    const device = claimedDevice(db, childId);
+
+    function lastActivity(): string | null {
+      return (
+        db
+          .prepare<[string], { last_activity_at: string | null }>(
+            'SELECT last_activity_at FROM children WHERE id = ?',
+          )
+          .get(childId)?.last_activity_at ?? null
+      );
+    }
+
+    expect(resolveChildDevice(db, device.token, at(HOUR_MS))?.childId).toBe(childId);
+    expect(lastActivity()).toBe(at(HOUR_MS).toISOString());
+
+    // Занятие бьёт в управляющую базу на каждом задании: запись глушится.
+    resolveChildDevice(db, device.token, at(HOUR_MS + SESSION_TOUCH_MS - 1));
+    expect(lastActivity()).toBe(at(HOUR_MS).toISOString());
+
+    resolveChildDevice(db, device.token, at(HOUR_MS + SESSION_TOUCH_MS));
+    expect(lastActivity()).toBe(at(HOUR_MS + SESSION_TOUCH_MS).toISOString());
+    expect(readChild(db, childId)?.lastActivityAt).toBe(at(HOUR_MS + SESSION_TOUCH_MS).toISOString());
+  });
+
+  it('не пускает ребёнка без готовой базы и не заводит его с пустым именем', () => {
+    const db = open();
+    const parentId = parentWithPassword(db);
+    const childId = readyChild(db, parentId);
+    const device = claimedDevice(db, childId);
+
+    markChildFailed(db, childId);
+    expect(resolveChildDevice(db, device.token, at(HOUR_MS))).toBeUndefined();
+    expect(readChild(db, childId)?.status).toBe('failed');
+
+    expect(() => createChild(db, parentId, '   ', NOW)).toThrow(/от 1 до/);
+    expect(() => createChild(db, parentId, 'и'.repeat(MAX_CHILD_NAME_LENGTH + 1), NOW)).toThrow(/от 1 до/);
+    expect(() => createChild(db, 'нет такого родителя', 'Петя', NOW)).toThrow(/нет в управляющей базе/);
+    expect(() => issueDeviceInvite(db, 'нет такого ребёнка', 'browser', '', NOW)).toThrow(
+      /нет в управляющей базе/,
+    );
+    expect(readChild(db, 'нет такого ребёнка')).toBeUndefined();
+
+    // Выведенного ребёнка нельзя ни оживить, ни пометить неудачей.
+    retireChild(db, childId, at(HOUR_MS));
+    expect(() => markChildReady(db, childId)).toThrow(/уже выведен/);
+  });
+
+  it('не принимает подпись устройства длиннее предела', () => {
+    const db = open();
+    const childId = readyChild(db, parentWithPassword(db));
+    expect(() =>
+      issueDeviceInvite(db, childId, 'browser', 'п'.repeat(MAX_DEVICE_LABEL_LENGTH + 1), NOW),
+    ).toThrow(/Подпись устройства/);
+    expect(listDevices(db, childId)).toEqual([]);
+  });
+
+  it('считает путь базы ребёнка из id и не выпускает его из каталога children', () => {
+    const childId = 'a'.repeat(32);
+    expect(childDatabasePath('/данные', childId)).toBe(join('/данные', CHILDREN_DIR, `${childId}.db`));
+    // Относительный каталог данных тоже канонизируется.
+    expect(childDatabasePath('данные', childId)).toBe(
+      join(process.cwd(), 'данные', CHILDREN_DIR, `${childId}.db`),
+    );
+
+    for (const bad of ['..', '../../etc/passwd', 'a/../../b', 'ab/cd', 'ab\\cd', 'AB12', 'abc', '']) {
+      expect(() => childDatabasePath('/данные', bad)).toThrow(/не годится в имя файла базы/);
+    }
+  });
+
+  it('не даёт завести ребёнка с id, выводящим за каталог', () => {
+    const db = open();
+    const parentId = parentWithPassword(db);
+    // Заведение выдаёт id само, но схема обязана держать и прямую запись.
+    expect(() =>
+      db.prepare('INSERT INTO children (id, parent_id, name) VALUES (?, ?, ?)').run(
+        '../../etc/passwd',
+        parentId,
+        'Петя',
+      ),
+    ).toThrow(/CHECK/);
+    expect(createChild(db, parentId, 'Петя', NOW)).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it('держит калибровочные константы спеки: срок приглашения устройства и пределы подписей', () => {
+    expect(DEVICE_INVITE_TTL_MS).toBe(24 * 60 * 60 * 1000);
+    expect(MAX_CHILD_NAME_LENGTH).toBe(64);
+    expect(MAX_DEVICE_LABEL_LENGTH).toBe(64);
+    expect(CHILDREN_DIR).toBe('children');
   });
 });
