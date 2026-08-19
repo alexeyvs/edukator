@@ -24,6 +24,7 @@ import { registerIntegrityRoutes, registerUnavailableIntegrity } from './routes/
 import { registerAuthRoutes, registerUnavailableAuth } from './routes/auth.js';
 import { registerFamilyRoutes, registerUnavailableFamily } from './routes/family.js';
 import { codexConcurrency, disputeConcurrency, type CodexConcurrency } from './codex/concurrency.js';
+import { createQuotedRunner } from './codex/quota.js';
 import { startWorker, type StartWorkerOptions, type WorkerHandle } from './codex/worker.js';
 import { readPinPepper } from './parent-pin.js';
 import { controlDatabasePath, dataDir as defaultDataDir, ensureDataDir } from './data-dir.js';
@@ -214,6 +215,9 @@ export function buildServer(
 
   if (graph !== undefined && control !== undefined) {
     const loaded = graph;
+    // Отдельная привязка, а не сам `control`: сужение типа не доживает до тела
+    // вложенной функции, а квота списывается именно оттуда.
+    const controlDb = control;
     const budget = options.codexBudget ?? codexConcurrency;
     const tenants = new TenantRegistry({
       control,
@@ -241,6 +245,7 @@ export function buildServer(
     let listening = false;
     function ensureWorker(tenant: Tenant): void {
       if (options.worker === false || !listening || workers.has(tenant.childId)) return;
+      const worker = options.worker ?? {};
       workers.set(
         tenant.childId,
         startWorker({
@@ -249,7 +254,18 @@ export function buildServer(
           budget,
           log,
           ...(options.now === undefined ? {} : { now: options.now }),
-          ...(options.worker ?? {}),
+          ...worker,
+          // Квота надевается на сам вызов модели, а не на бюджет: за одним
+          // слотом семафора прячется от двух вызовов (батч — генератор и
+          // проверяющий) до шести (персональный материал), и счёт по слотам
+          // превратил бы предел в кратный ему. Обёртка идёт после спреда
+          // настроек: подменённый в тестах `run` она оборачивает, а не теряет.
+          run: createQuotedRunner({
+            control: controlDb,
+            childId: tenant.childId,
+            ...(worker.run === undefined ? {} : { run: worker.run }),
+            ...(options.now === undefined ? {} : { now: options.now }),
+          }),
         }),
       );
     }

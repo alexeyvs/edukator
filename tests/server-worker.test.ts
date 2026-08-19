@@ -14,7 +14,8 @@ import {
   MAX_CODEX_CONCURRENCY,
   MAX_DISPUTE_CONCURRENCY,
 } from '../server/codex/concurrency.js';
-import { CodexUnavailableError } from '../server/codex/client.js';
+import { CodexUnavailableError, type CodexRequest } from '../server/codex/client.js';
+import { readCodexQuota } from '../server/control-db.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import type { DisputeReview } from '../server/codex/dispute.js';
 
@@ -27,6 +28,19 @@ function generated(question: string): GeneratedTask {
     explain: '90 : 2 = 45.',
     joke: 'Арифметика без сдачи.',
     difficulty: 2,
+  };
+}
+
+/** Вердикт проверяющего «всё в порядке»: батч доезжает до банка целиком. */
+function verdict(): unknown {
+  return {
+    answer: '45',
+    unambiguous: true,
+    natural: true,
+    on_topic: true,
+    age_appropriate: true,
+    hint_safe: true,
+    note: '',
   };
 }
 
@@ -145,6 +159,48 @@ describe('воркер рабочего сервера', () => {
     expect(reopened.prepare('SELECT COUNT(*) AS n FROM task_bank WHERE topic_id = ?').get(topic.id))
       .toEqual({ n: 3 });
     reopened.close();
+  });
+
+  it('списывает квоту ребёнка на каждый вызов codex своего воркера', async () => {
+    // Воркер собирается на подменённом `run`, а не на `produce`: проверяется
+    // именно обёртка квоты, которую `buildServer` надевает на вызов модели.
+    const calls: CodexRequest[] = [];
+    let cycleDone: (() => void) | undefined;
+    const finished = new Promise<void>((resolve) => {
+      cycleDone = resolve;
+    });
+    server = await startTenantServer({
+      dataDir: join(tempDir, 'data'),
+      seedDir: join(tempDir, 'seed-bank'),
+      log: () => undefined,
+      worker: {
+        topics: 1,
+        target: 1,
+        threshold: 1,
+        maxBatches: 1,
+        run: (request) => {
+          calls.push(request);
+          return Promise.resolve(
+            request.schemaPath.includes('verdicts')
+              ? JSON.stringify({ items: [verdict()] })
+              : JSON.stringify({ items: [generated('Сколько монет останется из девяноста?')] }),
+          );
+        },
+        // Пауза наступает после цикла: к этому моменту вызовы кончились, и
+        // счётчик можно сверять, не гоняясь за следующим заходом.
+        wait: async () => {
+          cycleDone?.();
+          await new Promise<void>(() => undefined);
+        },
+      },
+    });
+    app = server.app;
+
+    await app.listen({ host: HOST, port: 0 });
+    await finished;
+
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect(readCodexQuota(server.control, server.childId).used).toBe(calls.length);
   });
 
   it('при недоступном codex откладывает воркер, но оставляет обычное занятие рабочим', async () => {
