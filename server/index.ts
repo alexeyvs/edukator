@@ -42,6 +42,10 @@ import {
   openSessionDatabase,
   type SessionDatabase,
 } from './tenant-registry.js';
+import {
+  DisputeCoordinator,
+  type DisputeCoordinatorOptions,
+} from './dispute-coordinator.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -155,7 +159,10 @@ export const DEFAULT_PORT = 3000;
 export type CurriculumStatus = 'ok' | 'error';
 
 /** Настройки занятия, которые тесты подменяют: разбирающий спор и запуск фона. */
-export type ServerOptions = Omit<SessionRoutesOptions, 'db' | 'graph' | 'available'> & {
+export type ServerOptions =
+  & Omit<SessionRoutesOptions, 'db' | 'graph' | 'available' | 'disputes'>
+  & Omit<DisputeCoordinatorOptions, 'db' | 'graph' | 'available' | 'log'>
+  & {
   /**
    * База занятия. Обязательна и передаётся явно: единой точки вроде прежнего
    * `EDUKATOR_DB` у многоарендного сервера нет, путь выбирает вызывающий.
@@ -321,13 +328,30 @@ export function buildServer(
       ...(options.integrityRetryMs === undefined ? {} : { retryMs: options.integrityRetryMs }),
       ...(options.log === undefined ? {} : { log: options.log }),
     });
-    const waitForReviews = registerSessionRoutes(app, {
-      ...options,
+    // Состояние разбора спора своё на каждую базу, а не на процесс: до задачи 15
+    // база здесь одна, но координатор уже тот же, что заводит реестр детских баз.
+    const disputeCoordinator = new DisputeCoordinator({
       db: sessionDb,
       graph,
       available: sessionAvailable,
       disputeBudget: disputes,
+      ...(options.review === undefined ? {} : { review: options.review }),
+      ...(options.background === undefined ? {} : { background: options.background }),
+      ...(options.log === undefined ? {} : { log: options.log }),
+      ...(options.disputeRetryMs === undefined ? {} : { disputeRetryMs: options.disputeRetryMs }),
     });
+    registerSessionRoutes(app, {
+      db: sessionDb,
+      graph,
+      disputes: disputeCoordinator,
+      available: sessionAvailable,
+      ...(options.now === undefined ? {} : { now: options.now }),
+      ...(options.log === undefined ? {} : { log: options.log }),
+      ...(options.seedDir === undefined ? {} : { seedDir: options.seedDir }),
+    });
+    // Спор переживает процесс в SQLite. После перезапуска его нельзя оставлять
+    // без исполнителя только потому, что браузер уже потерял attempt_id.
+    disputeCoordinator.restore();
     registerRunRoutes(app, {
       db: sessionDb,
       graph,
@@ -389,8 +413,8 @@ export function buildServer(
       worker?.stop();
       await Promise.allSettled([
         ...(worker === undefined ? [] : [worker.done]),
-        waitForReviews(),
         integrity.stop(),
+        disputeCoordinator.stop(),
       ]);
       sessionDb.close();
     });

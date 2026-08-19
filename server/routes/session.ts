@@ -1,6 +1,6 @@
 /**
  * HTTP-обвязка занятия. Логика живёт в `server/session.ts`, здесь только разбор
- * запроса, коды ответов и запуск фонового разбора спора.
+ * запроса, коды ответов и заказ фонового разбора спора координатору арендатора.
  *
  * Отказ по состоянию (`SessionError`) отличается от поломки: первый — обычный
  * ответ 4xx, второй обязан остаться пятисоткой, иначе ошибка в банке заданий
@@ -9,15 +9,12 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { Database } from 'better-sqlite3';
 import type { TopicGraph } from '../curriculum.js';
-import { disputeReviewer, type DisputeReviewer } from '../codex/dispute.js';
 import { MAX_ANSWER_LENGTH } from '../codex/prompt.js';
-import { disputeConcurrency, type CodexConcurrency } from '../codex/concurrency.js';
+import type { DisputeCoordinator } from '../dispute-coordinator.js';
 import {
   nextTask,
   openDispute,
-  openDisputes,
   readResolvedDispute,
-  resolveDispute,
   skipRetry,
   submitAnswer,
   SessionError,
@@ -56,28 +53,21 @@ const STATUS_BY_CODE: Record<SessionErrorCode, number> = {
  */
 export { MAX_ANSWER_LENGTH };
 
-/** Потолок отступа: при долгом отказе — не больше четырёх запусков в час. */
-export const DISPUTE_RETRY_MAX_MS = 15 * 60_000;
-
-/** Запуск фоновой работы: тесты подменяют её, чтобы дождаться разбора. */
-export type BackgroundRunner = (task: () => Promise<void>) => void;
-
 export interface SessionRoutesOptions {
   db: Database;
   graph: TopicGraph;
-  /** Разбирающий спор; по умолчанию — вызов codex. */
-  review?: DisputeReviewer;
-  background?: BackgroundRunner;
+  /**
+   * Разбор споров этого же арендатора. Состояние разбора живёт не здесь: оно
+   * переживает запрос и обязано быть своим на каждую базу (см.
+   * `server/dispute-coordinator.ts`).
+   */
+  disputes: DisputeCoordinator;
   now?: () => Date;
   log?: (message: string) => void;
   /** Каталог посевного банка; по умолчанию репозиторный. */
   seedDir?: string;
   /** Соединение всё ещё привязано к текущему файлу базы. */
   available?: () => boolean;
-  /** Отдельный бюджет разбора споров. */
-  disputeBudget?: CodexConcurrency;
-  /** Пауза перед автоматическим повтором незакрытого спора. */
-  disputeRetryMs?: number;
 }
 
 function defaultLog(message: string): void {
@@ -123,27 +113,10 @@ function fail(reply: FastifyReply, error: unknown): FastifyReply {
 export function registerSessionRoutes(
   app: FastifyInstance,
   options: SessionRoutesOptions,
-): () => Promise<void> {
-  const { db, graph } = options;
-  const review = options.review ?? disputeReviewer();
+): void {
+  const { db, graph, disputes } = options;
   const log = options.log ?? defaultLog;
-  const background: BackgroundRunner = options.background ?? ((task) => void task());
   const now = options.now ?? ((): Date => new Date());
-  const budget = options.disputeBudget ?? disputeConcurrency;
-  const disputeRetryMs = options.disputeRetryMs ?? 1_000;
-  // Короткие повторы быстро переживают случайный отказ, но постоянная поломка
-  // codex не должна запускать сотни внешних процессов в час на каждый спор.
-
-  /**
-   * Споры, разбор которых уже идёт. Без этого набора каждое повторное нажатие
-   * кнопки (а состояние спора клиент узнаёт именно повторным запросом) поднимало
-   * бы ещё один процесс codex на минуты.
-   */
-  const reviewing = new Set<number>();
-  const pendingReviews = new Set<Promise<unknown>>();
-  const retryTimers = new Map<number, ReturnType<typeof setTimeout>>();
-  const retryDelays = new Map<number, number>();
-  let stopped = false;
 
   function isAvailable(): boolean {
     return options.available?.() !== false;
@@ -152,75 +125,6 @@ export function registerSessionRoutes(
   function unavailable(reply: FastifyReply): FastifyReply | undefined {
     if (isAvailable()) return undefined;
     return reply.code(503).send({ error: 'Занятие недоступно: файл базы заменён, нужен перезапуск' });
-  }
-
-  /**
-   * Разбор идёт фоном: ученик нажал кнопку и решает дальше, а вызов модели
-   * занимает минуты. Ошибка разбора спор не закрывает — он остаётся открытым, и
-   * следующее нажатие кнопки ставит его на разбор заново.
-   *
-   * Разборы не делят бюджет с воркером: фоновый прогрев не должен задерживать
-   * ответ ученику. Набор `reviewing` держит только повтор по одному
-   * и тому же спору, а разных споров
-   * бывает сколько угодно, и каждый — это ещё один процесс codex на минуты.
-   * Сверх предела спор остаётся открытым и попадёт на разбор со следующим
-   * запросом — ровно тот же сценарий, что и при недоступном codex.
-   */
-  function scheduleReview(id: number): void {
-    if (stopped || !isAvailable() || reviewing.has(id)) return;
-    const pending = budget.tryRun(() =>
-      resolveDispute(db, graph, id, async (context) => {
-        const verdict = await review(context);
-        // За минуты внешнего разбора файл по EDUKATOR_DB могли
-        // заменить. После await ещё раз сверяем inode: дальше
-        // `resolveDispute` сразу и без нового await пишет вердикт транзакцией.
-        // Писать в отвязанный inode нельзя: вердикт и boss-переходы
-        // не попадут в базу, которая теперь лежит по этому пути.
-        if (!isAvailable()) {
-          throw new Error('файл базы заменён во время разбора');
-        }
-        return verdict;
-      }),
-    );
-    if (pending === undefined) {
-      log(`разбор спора ${id} отложен: заняты все ${budget.limit} места codex`);
-      scheduleRetry(id);
-      return;
-    }
-    reviewing.add(id);
-    pendingReviews.add(pending);
-    background(async () => {
-      try {
-        await pending;
-        const timer = retryTimers.get(id);
-        if (timer !== undefined) clearTimeout(timer);
-        retryTimers.delete(id);
-        retryDelays.delete(id);
-      } catch (error) {
-        log(`разбор спора ${id} не выполнен: ${(error as Error).message}`);
-        // Заменённую базу этот процесс всё равно не переоткроет, поэтому
-        // повторы до перезапуска лишь занимали бы бюджет Codex.
-        if (isAvailable()) scheduleRetry(id);
-      } finally {
-        pendingReviews.delete(pending);
-        // Именно в `finally`: снятая только при успехе пометка навсегда
-        // запретила бы повторный разбор спора, который как раз и остался
-        // открытым из-за недоступного codex.
-        reviewing.delete(id);
-      }
-    });
-  }
-
-  function scheduleRetry(id: number): void {
-    if (stopped || !isAvailable() || retryTimers.has(id)) return;
-    const delay = retryDelays.get(id) ?? disputeRetryMs;
-    retryDelays.set(id, Math.min(delay * 2, DISPUTE_RETRY_MAX_MS));
-    const timer = setTimeout(() => {
-      retryTimers.delete(id);
-      scheduleReview(id);
-    }, delay);
-    timer.unref();
-    retryTimers.set(id, timer);
   }
 
   app.get('/api/session/next', (request, reply) => {
@@ -377,7 +281,7 @@ export function registerSessionRoutes(
       // (codex недоступен, ответ не разобрался), и повторное нажатие кнопки —
       // единственное, что ставит его на разбор снова. Параллельный второй разбор
       // безопасен: `resolveDispute` перечитывает спор уже под записью.
-      if (dispute.status === 'open') scheduleReview(dispute.id);
+      if (dispute.status === 'open') disputes.schedule(dispute.id);
 
       // 202: спор принят, но вердикта ещё нет — его приносит следующий запрос
       // состояния, а не этот ответ.
@@ -393,24 +297,6 @@ export function registerSessionRoutes(
       return fail(reply, error);
     }
   });
-
-  // Спор переживает процесс в SQLite. После перезапуска его нельзя оставлять
-  // без исполнителя только потому, что браузер уже потерял attempt_id.
-  for (const id of openDisputes(db)) scheduleReview(id);
-
-  // `app.close()` закрывает соединение занятия. Фоновый разбор уже держит
-  // ссылку на него и после удачного ответа модели пишет вердикт транзакцией,
-  // поэтому закрывать базу раньше — превращать штатное завершение в случайный
-  // `database connection is not open`. На сигнале `runChild` сначала снимает
-  // потомка, так что ожидание здесь быстро завершается и WAL закрывается после
-  // всей работы с базой.
-  return async () => {
-    stopped = true;
-    for (const timer of retryTimers.values()) clearTimeout(timer);
-    retryTimers.clear();
-    retryDelays.clear();
-    await Promise.allSettled([...pendingReviews]);
-  };
 }
 
 /**

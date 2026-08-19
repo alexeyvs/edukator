@@ -10,7 +10,8 @@ import { loadCurriculum } from '../server/curriculum.js';
 import { storeTasks } from '../server/codex/bank.js';
 import type { DisputeContext, DisputeReview } from '../server/codex/dispute.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
-import { DISPUTE_RETRY_MAX_MS, MAX_ANSWER_LENGTH } from '../server/routes/session.js';
+import { MAX_ANSWER_LENGTH } from '../server/routes/session.js';
+import { DISPUTE_RETRY_MAX_MS } from '../server/dispute-coordinator.js';
 import { MAX_DISPUTE_CONCURRENCY } from '../server/codex/concurrency.js';
 
 /** Карта из одной темы на предмет: без всех трёх файлов карта не грузится. */

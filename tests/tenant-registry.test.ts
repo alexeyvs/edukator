@@ -4,7 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import { openDatabase } from '../server/db.js';
-import { buildTopicGraph, type Topic, type TopicGraph } from '../server/curriculum.js';
+import { buildTopicGraph, syncTopicState, type Topic, type TopicGraph } from '../server/curriculum.js';
+import { storeTasks } from '../server/codex/bank.js';
+import type { DisputeReview } from '../server/codex/dispute.js';
+import { openDispute, submitAnswer } from '../server/session.js';
 import {
   childDatabasePath,
   createChild,
@@ -105,7 +108,7 @@ describe('реестр детских баз', () => {
   }
 
   describe('открытие', () => {
-    it('открывает базу ребёнка, заводит темы и заливает посев', () => {
+    it('открывает базу ребёнка, заводит темы и заливает посев', async () => {
       const childId = readyChild();
       const tenants = registry();
 
@@ -124,7 +127,7 @@ describe('реестр детских баз', () => {
       expect(tasks?.count).toBe(1);
       expect(log).toContain(`посевной банк ребёнка ${childId}: добавлено 1 задани(й)`);
 
-      tenants.closeAll();
+      await tenants.closeAll();
     });
 
     it('два одновременных первых обращения дают одну миграцию и один посев', async () => {
@@ -149,10 +152,10 @@ describe('реестр детских баз', () => {
       expect(tenants.size).toBe(1);
       expect(log.filter((line) => line.startsWith('посевной банк'))).toHaveLength(1);
 
-      tenants.closeAll();
+      await tenants.closeAll();
     });
 
-    it('отдаёт то же соединение при повторном обращении', () => {
+    it('отдаёт то же соединение при повторном обращении', async () => {
       const childId = readyChild();
       const tenants = registry();
 
@@ -164,15 +167,15 @@ describe('реестр детских баз', () => {
       expect(tenants.peek(childId)).toBe(first);
       expect(tenants.list()).toEqual([first]);
 
-      tenants.closeAll();
+      await tenants.closeAll();
     });
 
-    it('переоткрывает базу после закрытия', () => {
+    it('переоткрывает базу после закрытия', async () => {
       const childId = readyChild();
       const tenants = registry();
 
       const first = tenants.open(childId);
-      tenants.close(childId);
+      await tenants.close(childId);
       expect(tenants.size).toBe(0);
       expect(tenants.peek(childId)).toBeUndefined();
 
@@ -180,10 +183,10 @@ describe('реестр детских баз', () => {
       expect(second).not.toBe(first);
       expect(second.db.prepare<[], { one: number }>('SELECT 1 AS one').get()?.one).toBe(1);
 
-      tenants.closeAll();
+      await tenants.closeAll();
     });
 
-    it('не пускает повторный вход в открытие той же базы', () => {
+    it('не пускает повторный вход в открытие той же базы', async () => {
       // Синхронное открытие само по себе замок: событийный цикл не вклинится
       // между проверкой кеша и записью в неё. Заход из собственного стека этот
       // замок обходит — там проверка кеша уже прошла, а записи ещё нет.
@@ -205,14 +208,14 @@ describe('реестр детских баз', () => {
       expect((reentered as Error).message).toMatch(/Повторный вход/u);
       expect(tenants.size).toBe(1);
 
-      tenants.closeAll();
+      await tenants.closeAll();
     });
 
-    it('говорит о состояниях без темы в карте, но их не удаляет', () => {
+    it('говорит о состояниях без темы в карте, но их не удаляет', async () => {
       const childId = readyChild();
       const full = registry();
       full.open(childId);
-      full.closeAll();
+      await full.closeAll();
 
       // Тема выпала из карты: обычно это переименованный `id`, то есть прогресс,
       // который больше никогда не попадёт ни в план, ни в прогноз.
@@ -225,10 +228,10 @@ describe('реестр детских баз', () => {
         .get('math.b');
       expect(kept?.topic_id).toBe('math.b');
 
-      shrunk.closeAll();
+      await shrunk.closeAll();
     });
 
-    it('порча посева не отменяет открытие базы', () => {
+    it('порча посева не отменяет открытие базы', async () => {
       // Без посева первая тема просто холодная, а отказ здесь оставил бы
       // ученика вовсе без занятия.
       const childId = readyChild();
@@ -240,19 +243,17 @@ describe('реестр детских баз', () => {
       expect(tenant.available()).toBe(true);
       expect(log.some((line) => line.includes('посевной банк ребёнка') && line.includes('не загружен'))).toBe(true);
 
-      tenants.closeAll();
+      await tenants.closeAll();
     });
 
-    it('закрытие неизвестного ребёнка — не ошибка', () => {
+    it('закрытие неизвестного ребёнка — не ошибка', async () => {
       const tenants = registry();
-      expect(() => {
-        tenants.close('нет-такого');
-      }).not.toThrow();
+      await expect(tenants.close('нет-такого')).resolves.toBeUndefined();
     });
   });
 
   describe('отпечаток файла', () => {
-    it('сохраняет отпечаток открытого файла и считает базу доступной', () => {
+    it('сохраняет отпечаток открытого файла и считает базу доступной', async () => {
       const childId = readyChild();
       const tenants = registry();
 
@@ -262,10 +263,10 @@ describe('реестр детских баз', () => {
       expect(tenant.file).toBe(`${String(info.dev)}:${String(info.ino)}`);
       expect(tenant.available()).toBe(true);
 
-      tenants.closeAll();
+      await tenants.closeAll();
     });
 
-    it('подмена файла краснит именно того ребёнка, чью базу подменили', () => {
+    it('подмена файла краснит именно того ребёнка, чью базу подменили', async () => {
       const first = readyChild('Тимофей');
       const second = readyChild('Мирон');
       const tenants = registry();
@@ -283,12 +284,12 @@ describe('реестр детских баз', () => {
       // Общий отпечаток на весь сервер погасил бы занятие и второму ребёнку.
       expect(two.available()).toBe(true);
 
-      tenants.closeAll();
+      await tenants.closeAll();
     });
   });
 
   describe('потолок открытых баз', () => {
-    it('отказывает новому арендатору и не трогает уже открытых', () => {
+    it('отказывает новому арендатору и не трогает уже открытых', async () => {
       const first = readyChild('Тимофей');
       const second = readyChild('Мирон');
       const tenants = registry({ maxOpen: 1 });
@@ -308,10 +309,10 @@ describe('реестр детских баз', () => {
       expect(tenants.open(first)).toBe(one);
       expect(log.some((line) => line.includes('открытые базы не тронуты'))).toBe(true);
 
-      tenants.closeAll();
+      await tenants.closeAll();
     });
 
-    it('потолок должен быть положительным целым', () => {
+    it('потолок должен быть положительным целым', async () => {
       // Ноль неотличим от «детей нет»: сервер поднялся бы и отказывал всем.
       for (const maxOpen of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
         expect(() => registry({ maxOpen })).toThrow(/положительным целым/u);
@@ -323,13 +324,13 @@ describe('реестр детских баз', () => {
   });
 
   describe('кого не обслуживает', () => {
-    it('не открывает базу неизвестного ребёнка', () => {
+    it('не открывает базу неизвестного ребёнка', async () => {
       const tenants = registry();
       expect(() => tenants.open('0123456789ab')).toThrow(TenantError);
       expect(tenants.size).toBe(0);
     });
 
-    it('не открывает базу ребёнка в provisioning, failed и retired', () => {
+    it('не открывает базу ребёнка в provisioning, failed и retired', async () => {
       const parentId = createParent(control, 'родитель@example.com');
       const provisioning = createChild(control, parentId, 'Ещё-заводится');
       const failed = createChild(control, parentId, 'Сорвался');
@@ -350,7 +351,7 @@ describe('реестр детских баз', () => {
       expect(tenants.size).toBe(0);
     });
 
-    it('сообщает о недоступной базе и не запоминает арендатора', () => {
+    it('сообщает о недоступной базе и не запоминает арендатора', async () => {
       const childId = readyChild();
       rmSync(childDatabasePath(tempDir, childId), { force: true });
       const tenants = registry();
@@ -369,7 +370,7 @@ describe('реестр детских баз', () => {
       expect(existsSync(childDatabasePath(tempDir, childId))).toBe(false);
     });
 
-    it('не запоминает арендатора, если темы не завелись', () => {
+    it('не запоминает арендатора, если темы не завелись', async () => {
       const childId = readyChild();
       const tenants = registry({ graph: buildTopicGraph([topic('math.a')]) });
       // Соединение подменено на закрытое: `syncTopicState` упадёт на нём так же,
@@ -387,12 +388,12 @@ describe('реестр детских баз', () => {
       // Реестр не испорчен отказом: следующий открывает ту же базу как обычно.
       expect(tenants.open(childId).childId).toBe(childId);
 
-      tenants.closeAll();
+      await tenants.closeAll();
     });
   });
 
   describe('соединение занятия', () => {
-    it('привязывает соединение занятия к отпечатку открытого файла', () => {
+    it('привязывает соединение занятия к отпечатку открытого файла', async () => {
       const path = join(tempDir, 'отпечаток.db');
       openDatabase(path).close();
       const info = statSync(path);
@@ -406,7 +407,7 @@ describe('реестр детских баз', () => {
       }
     });
 
-    it('не поднимает занятие, если файл базы подменили в окне открытия', () => {
+    it('не поднимает занятие, если файл базы подменили в окне открытия', async () => {
       // Отпечаток снимается и до открытия: сними его только после — соединение
       // осталось бы на прежнем inode, а сверка в health навсегда совпадала бы с
       // новым файлом, то есть 200 отвечал бы занятию, чьи записи уходят в никуда.
@@ -429,7 +430,7 @@ describe('реестр детских баз', () => {
       expect(() => leaked?.prepare('SELECT 1').get()).toThrow();
     });
 
-    it('не поднимает занятие на месте пропавшего файла и не заводит его', () => {
+    it('не поднимает занятие на месте пропавшего файла и не заводит его', async () => {
       // Пропавший до открытия файл `openDatabase` завёл бы заново: отпечаток
       // совпал бы с новым, а прогресс остался бы в удалённом. Сверять не с чем —
       // занятие не поднимается. Пустая база при этом не должна остаться на диске:
@@ -443,22 +444,144 @@ describe('реестр детских баз', () => {
     });
   });
 
+  describe('разбор споров', () => {
+    /**
+     * Заводит в базе ребёнка незакрытый спор и закрывает соединение: ровно то
+     * состояние, в котором база достаётся серверу после перезапуска.
+     */
+    function openDisputeFor(childId: string): number {
+      const db = openDatabase(childDatabasePath(tempDir, childId));
+      try {
+        syncTopicState(db, GRAPH);
+        const { stored } = storeTasks(db, 'math.a', [
+          {
+            instruction: `Спорное задание ${childId}: 90 монет пополам — сколько осталось?`,
+            material: '',
+            material_format: 'none',
+            choices: [],
+            answer: '45',
+            accept: ['45'],
+            hint: 'Половина от девяноста.',
+            explain: '90 : 2 = 45 — вот и весь фокус.',
+            joke: 'Кошелёк похудел вдвое, зато ты нет.',
+            difficulty: 2,
+          },
+        ]);
+        const taskId = stored[0]?.id;
+        if (taskId === undefined) throw new Error('задание не легло в банк');
+        db.prepare("UPDATE task_bank SET status = 'used' WHERE id = ?").run(taskId);
+        const attempt = submitAnswer(db, GRAPH, { taskId, answer: 'сорок пять' });
+        return openDispute(db, attempt.attemptId).id;
+      } finally {
+        db.close();
+      }
+    }
+
+    function statusOf(childId: string, disputeId: number): string | undefined {
+      const db = openDatabase(childDatabasePath(tempDir, childId));
+      try {
+        return db
+          .prepare<[number], { status: string }>('SELECT status FROM disputes WHERE id = ?')
+          .get(disputeId)?.status;
+      } finally {
+        db.close();
+      }
+    }
+
+    it('восстанавливает незакрытый спор при открытии базы', async () => {
+      // Восстановление идёт на открытии каждой базы, а не один раз при старте:
+      // база второго ребёнка открывается только по первому его обращению.
+      const childId = readyChild();
+      const disputeId = openDisputeFor(childId);
+      const pending: Promise<void>[] = [];
+      const tenants = registry({
+        review: (): Promise<DisputeReview> =>
+          Promise.resolve({ studentCorrect: true, note: 'то же число словами' }),
+        background: (job): void => {
+          pending.push(job());
+        },
+      });
+
+      tenants.open(childId);
+      await Promise.all(pending);
+
+      expect(
+        tenants.peek(childId)?.db
+          .prepare<[number], { status: string }>('SELECT status FROM disputes WHERE id = ?')
+          .get(disputeId)?.status,
+      ).toBe('upheld');
+
+      await tenants.closeAll();
+    });
+
+    it('вердикт уходит в ту базу, где спор открыт', async () => {
+      const mine = readyChild('Тимофей');
+      const alien = readyChild('Мирон');
+      const disputeId = openDisputeFor(mine);
+      // Номера у разных детей совпадают: общее состояние разбора отправило бы
+      // вердикт не в ту базу.
+      expect(openDisputeFor(alien)).toBe(disputeId);
+      const pending: Promise<void>[] = [];
+      const tenants = registry({
+        review: (): Promise<DisputeReview> =>
+          Promise.resolve({ studentCorrect: true, note: 'то же число словами' }),
+        background: (job): void => {
+          pending.push(job());
+        },
+      });
+
+      tenants.open(mine);
+      await Promise.all(pending);
+      await tenants.closeAll();
+
+      expect(statusOf(mine, disputeId)).toBe('upheld');
+      expect(statusOf(alien, disputeId)).toBe('open');
+    });
+
+    it('закрытие дожидается идущего разбора, а потом закрывает базу', async () => {
+      // Обратный порядок превращал бы штатное закрытие в случайный
+      // `database connection is not open` посреди записи вердикта.
+      const childId = readyChild();
+      const disputeId = openDisputeFor(childId);
+      let release: (() => void) | undefined;
+      const hanging = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const tenants = registry({
+        review: async (): Promise<DisputeReview> => {
+          await hanging;
+          return { studentCorrect: true, note: 'то же число словами' };
+        },
+      });
+
+      const tenant = tenants.open(childId);
+      // Закрытие начинается, пока разбор ещё висит: не дождись оно вердикта,
+      // запись пришлась бы на уже закрытое соединение.
+      const closing = tenants.closeAll();
+      release?.();
+      await closing;
+
+      expect(statusOf(childId, disputeId)).toBe('upheld');
+      expect(() => tenant.db.prepare('SELECT 1').get()).toThrow();
+    });
+  });
+
   describe('закрытие', () => {
-    it('closeAll закрывает все открытые базы', () => {
+    it('closeAll закрывает все открытые базы', async () => {
       const first = readyChild('Тимофей');
       const second = readyChild('Мирон');
       const tenants = registry();
       const one = tenants.open(first);
       const two = tenants.open(second);
 
-      tenants.closeAll();
+      await tenants.closeAll();
 
       expect(tenants.size).toBe(0);
       expect(() => one.db.prepare('SELECT 1').get()).toThrow();
       expect(() => two.db.prepare('SELECT 1').get()).toThrow();
     });
 
-    it('отказ закрытия попадает в журнал, но не роняет обход', () => {
+    it('отказ закрытия попадает в журнал, но не роняет обход', async () => {
       const first = readyChild('Тимофей');
       const second = readyChild('Мирон');
       let stubborn: Database | undefined;
@@ -481,7 +604,7 @@ describe('реестр детских баз', () => {
       tenants.open(first);
       const two = tenants.open(second);
 
-      tenants.closeAll();
+      await tenants.closeAll();
 
       expect(log.some((line) => line.includes('не закрыта: соединение занято'))).toBe(true);
       expect(() => two.db.prepare('SELECT 1').get()).toThrow();

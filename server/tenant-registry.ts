@@ -14,6 +14,11 @@ import { openDatabase } from './db.js';
 import { syncTopicState, type TopicGraph } from './curriculum.js';
 import { loadSeedBank, SeedBankError } from './codex/seed-bank.js';
 import { childDatabasePath, isChildServiceable, readChild } from './control-db.js';
+import {
+  DisputeCoordinator,
+  type BackgroundRunner,
+  type DisputeCoordinatorOptions,
+} from './dispute-coordinator.js';
 
 /**
  * Отпечаток файла базы: устройство и inode. Нужен, чтобы отличить тот файл, с
@@ -135,6 +140,12 @@ export interface Tenant {
    * краснит именно этого ребёнка и не трогает остальных.
    */
   available: () => boolean;
+  /**
+   * Разбор споров этой базы. Он живёт рядом с проверкой отпечатка по той же
+   * причине: спор — строка в базе конкретного ребёнка, и номера у разных детей
+   * совпадают.
+   */
+  disputes: DisputeCoordinator;
 }
 
 export interface TenantRegistryOptions {
@@ -152,6 +163,14 @@ export interface TenantRegistryOptions {
   openSession?: (path: string) => SessionDatabase | undefined;
   /** Куда писать о происходящем; по умолчанию stderr. */
   log?: (message: string) => void;
+  /** Разбирающий спор; по умолчанию — вызов codex. */
+  review?: DisputeCoordinatorOptions['review'];
+  /** Запуск фоновой работы разбора; тесты его дожидаются. */
+  background?: BackgroundRunner;
+  /** Бюджет разбора споров; он процессный и общий на всех детей. */
+  disputeBudget?: DisputeCoordinatorOptions['disputeBudget'];
+  /** Пауза перед автоматическим повтором незакрытого спора. */
+  disputeRetryMs?: number;
 }
 
 /**
@@ -171,6 +190,7 @@ export class TenantRegistry {
   readonly #seedDir: string | undefined;
   readonly #openSession: (path: string) => SessionDatabase | undefined;
   readonly #log: (message: string) => void;
+  readonly #disputeOptions: Omit<DisputeCoordinatorOptions, 'db' | 'graph' | 'available'>;
   readonly #tenants = new Map<string, Tenant>();
   /** Дети, открытие которых идёт прямо сейчас: см. `open`. */
   readonly #opening = new Set<string>();
@@ -189,6 +209,13 @@ export class TenantRegistry {
     this.#seedDir = options.seedDir;
     this.#openSession = options.openSession ?? ((path) => openSessionDatabase(path));
     this.#log = options.log ?? ((message) => process.stderr.write(`${message}\n`));
+    this.#disputeOptions = {
+      log: this.#log,
+      ...(options.review === undefined ? {} : { review: options.review }),
+      ...(options.background === undefined ? {} : { background: options.background }),
+      ...(options.disputeBudget === undefined ? {} : { disputeBudget: options.disputeBudget }),
+      ...(options.disputeRetryMs === undefined ? {} : { disputeRetryMs: options.disputeRetryMs }),
+    };
   }
 
   /** Сколько баз открыто сейчас. */
@@ -265,28 +292,51 @@ export class TenantRegistry {
     }
 
     const file = opened.file;
+    const available = (): boolean => fileIdentity(path) === file;
+    const disputes = new DisputeCoordinator({
+      ...this.#disputeOptions,
+      db: opened.db,
+      graph: this.#graph,
+      available,
+    });
     const tenant: Tenant = {
       childId,
       path,
       db: opened.db,
       file,
-      available: () => fileIdentity(path) === file,
+      available,
+      disputes,
     };
     this.#tenants.set(childId, tenant);
+    // Восстановление идёт при открытии каждой базы, а не один раз при старте
+    // сервера: спор переживает процесс в SQLite, а база второго ребёнка
+    // открывается только по первому его обращению — и до него незакрытый спор
+    // остался бы без исполнителя навсегда.
+    disputes.restore();
     return tenant;
   }
 
-  /** Закрывает базу одного ребёнка. Отсутствующая аренда — не ошибка. */
-  close(childId: string): void {
+  /**
+   * Закрывает базу одного ребёнка. Отсутствующая аренда — не ошибка.
+   *
+   * Сначала останавливается разбор споров, и только потом закрывается
+   * соединение: фоновый разбор держит на него ссылку и после ответа модели
+   * пишет вердикт транзакцией, так что обратный порядок превращал бы штатное
+   * закрытие в случайный `database connection is not open`.
+   */
+  async close(childId: string): Promise<void> {
     const tenant = this.#tenants.get(childId);
     if (tenant === undefined) return;
     this.#tenants.delete(childId);
+    await tenant.disputes.stop();
     this.#closeQuietly(childId, tenant.db);
   }
 
   /** Закрывает все базы: остановка сервера обходит арендаторов через неё. */
-  closeAll(): void {
-    for (const childId of [...this.#tenants.keys()]) this.close(childId);
+  async closeAll(): Promise<void> {
+    // Последовательно, а не пулом: закрытий столько же, сколько открытых баз,
+    // а ждать они умеют только собственные разборы.
+    for (const childId of [...this.#tenants.keys()]) await this.close(childId);
   }
 
   #syncCurriculum(childId: string, db: Database.Database): void {
