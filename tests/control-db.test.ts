@@ -6,6 +6,7 @@ import type { Database } from 'better-sqlite3';
 import BetterSqlite3 from 'better-sqlite3';
 import {
   CHILDREN_DIR,
+  CODEX_DAILY_QUOTA,
   CONTROL_SCHEMA_VERSION,
   CONTROL_TABLES,
   DEVICE_INVITE_TTL_MS,
@@ -32,9 +33,11 @@ import {
   normalizeEmail,
   openControlDatabase,
   readChild,
+  readCodexQuota,
   readParentInvite,
   redeemDeviceInvite,
   redeemParentInvite,
+  reserveCodexCall,
   resolveChildDevice,
   resolveParentSession,
   retireChild,
@@ -868,5 +871,107 @@ describe('дети и устройства', () => {
     expect(MAX_CHILD_NAME_LENGTH).toBe(64);
     expect(MAX_DEVICE_LABEL_LENGTH).toBe(64);
     expect(CHILDREN_DIR).toBe('children');
+  });
+});
+
+describe('суточная квота codex', () => {
+  const NOW = new Date('2026-08-19T10:00:00.000Z');
+
+  function seeded(db: Database, id = 'abcdef01'): string {
+    return seedChild(db, seedParent(db), id);
+  }
+
+  it('считает вызовы по ребёнку и отказывает на пределе', () => {
+    const db = open();
+    const childId = seeded(db);
+    const other = seedChild(db, seedParent(db, 'p2', 'papa@example.com'), 'abcdef02');
+
+    expect(reserveCodexCall(db, childId, NOW, 2)).toEqual({
+      ok: true,
+      day: '2026-08-19',
+      used: 1,
+      remaining: 1,
+      limit: 2,
+    });
+    expect(reserveCodexCall(db, childId, NOW, 2).remaining).toBe(0);
+
+    const refused = reserveCodexCall(db, childId, NOW, 2);
+    expect(refused.ok).toBe(false);
+    // Отказ не должен наращивать счётчик: иначе исчерпанная квота уходила бы
+    // за предел, и поднять его на день вручную стало бы нечем.
+    expect(refused.used).toBe(2);
+    expect(readCodexQuota(db, childId, NOW, 2)).toEqual({
+      day: '2026-08-19',
+      used: 2,
+      remaining: 0,
+      limit: 2,
+    });
+
+    // Квота у каждого ребёнка своя: сосед по серверу не расходует чужую.
+    expect(reserveCodexCall(db, other, NOW, 2)).toMatchObject({ ok: true, used: 1 });
+  });
+
+  it('списывает и неудачные вызовы: возврата резерва нет', () => {
+    const db = open();
+    const childId = seeded(db);
+
+    // Резерв берётся до вызова, и итог вызова его не меняет — иначе зацикливание
+    // на ошибках codex обходило бы защиту, ради которой квота и заведена.
+    reserveCodexCall(db, childId, NOW, 3);
+    reserveCodexCall(db, childId, NOW, 3);
+
+    expect(readCodexQuota(db, childId, NOW, 3)).toMatchObject({ used: 2, remaining: 1 });
+  });
+
+  it('два параллельных резерва на границе предела пропускают только один', () => {
+    const first = open();
+    const childId = seeded(first);
+    const second = open();
+
+    expect(reserveCodexCall(first, childId, NOW, 2).ok).toBe(true);
+
+    const winner = reserveCodexCall(first, childId, NOW, 2);
+    const loser = reserveCodexCall(second, childId, NOW, 2);
+
+    expect(winner.ok).toBe(true);
+    expect(loser.ok).toBe(false);
+    expect(
+      first.prepare<[], { calls: number }>('SELECT calls FROM codex_quota').get()?.calls,
+    ).toBe(2);
+  });
+
+  it('сутки сменяются по московской полуночи, а не по UTC', () => {
+    const db = open();
+    const childId = seeded(db);
+
+    // 23:00 и 02:00 по UTC — это один московский день: полночь UTC его не рвёт.
+    reserveCodexCall(db, childId, new Date('2026-08-18T23:00:00.000Z'), 2);
+    const sameDay = reserveCodexCall(db, childId, new Date('2026-08-19T02:00:00.000Z'), 2);
+    expect(sameDay).toMatchObject({ ok: true, day: '2026-08-19', used: 2 });
+
+    // 20:59 UTC — ещё 19-е по Москве, 21:00 UTC — уже 20-е.
+    expect(reserveCodexCall(db, childId, new Date('2026-08-19T20:59:00.000Z'), 2).ok).toBe(false);
+    expect(reserveCodexCall(db, childId, new Date('2026-08-19T21:00:00.000Z'), 2)).toMatchObject({
+      ok: true,
+      day: '2026-08-20',
+      used: 1,
+    });
+    // Вчерашняя строка остаётся: она нужна разбору, а не выдаче.
+    expect(readCodexQuota(db, childId, new Date('2026-08-19T20:00:00.000Z'), 2).used).toBe(2);
+  });
+
+  it('отвергает неизвестного ребёнка и предел, который не положительное целое', () => {
+    const db = open();
+    const childId = seeded(db);
+
+    expect(() => reserveCodexCall(db, 'deadbeef', NOW, 2)).toThrow();
+    // Нулевой предел неотличим от «квота кончилась навсегда», дробный — от опечатки.
+    expect(() => reserveCodexCall(db, childId, NOW, 0)).toThrow(/Предел суточной квоты/);
+    expect(() => reserveCodexCall(db, childId, NOW, 1.5)).toThrow(/Предел суточной квоты/);
+    expect(() => readCodexQuota(db, childId, NOW, -1)).toThrow(/Предел суточной квоты/);
+  });
+
+  it('держит калибровочные константы спеки: суточная квота вызовов', () => {
+    expect(CODEX_DAILY_QUOTA).toBe(60);
   });
 });

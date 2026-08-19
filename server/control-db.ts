@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { relative, resolve } from 'node:path';
 import Database from 'better-sqlite3';
+import { moscowDate } from './moscow-time.js';
 import { MAX_SECRET_LENGTH, hashSecret, verifySecret } from './secrets.js';
 
 /**
@@ -1163,4 +1164,90 @@ export function resolveChildDevice(
     kind: row.kind,
     name: row.name,
   };
+}
+
+/* ─── Суточная квота вызовов codex ──────────────────────────────────────── */
+
+/**
+ * Предел вызовов codex на ребёнка в сутки. Единица счёта — один `runCodexCli`,
+ * а не один слот семафора: за одним `budget.run` прячется от двух до шести
+ * настоящих вызовов, и счёт по слотам превратил бы предел в кратный ему.
+ * Число задано спекой; меняете его — меняйте и её.
+ */
+export const CODEX_DAILY_QUOTA = 60;
+
+/** Состояние квоты ребёнка на московские сутки. */
+export interface CodexQuotaState {
+  day: string;
+  used: number;
+  remaining: number;
+  limit: number;
+}
+
+/** Итог резерва. `ok = false` — предел исчерпан, счётчик при этом не вырос. */
+export interface CodexQuotaReservation extends CodexQuotaState {
+  ok: boolean;
+}
+
+function requireQuotaLimit(limit: number): void {
+  // Ноль неотличим от «квота кончилась навсегда», дробное — от опечатки в
+  // переменной окружения; и то и другое молча остановило бы весь фон.
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new Error(`Предел суточной квоты должен быть положительным целым, получено ${limit}`);
+  }
+}
+
+function selectQuotaCalls(db: Database.Database, childId: string, day: string): number {
+  const row = db
+    .prepare<[string, string], { calls: number }>(
+      'SELECT calls FROM codex_quota WHERE child_id = ? AND day = ?',
+    )
+    .get(childId, day);
+  return row?.calls ?? 0;
+}
+
+function quotaState(db: Database.Database, childId: string, day: string, limit: number): CodexQuotaState {
+  const used = selectQuotaCalls(db, childId, day);
+  return { day, used, remaining: Math.max(0, limit - used), limit };
+}
+
+/**
+ * Резервирует один вызов codex для ребёнка на текущие московские сутки.
+ *
+ * Резерв берётся **до** вызова и не возвращается, чем бы вызов ни кончился:
+ * иначе зацикливание на ошибках модели обходило бы защиту, ради которой квота и
+ * заведена. Проверка предела и приращение — один `INSERT ... ON CONFLICT` под
+ * `immediate()`: разнеси их, и два фоновых конвейера на границе предела оба
+ * увидели бы «место есть».
+ */
+export function reserveCodexCall(
+  db: Database.Database,
+  childId: string,
+  now: Date = new Date(),
+  limit: number = CODEX_DAILY_QUOTA,
+): CodexQuotaReservation {
+  requireQuotaLimit(limit);
+  const day = moscowDate(now);
+  return db
+    .transaction((): CodexQuotaReservation => {
+      const reserved = db
+        .prepare(
+          `INSERT INTO codex_quota (child_id, day, calls) VALUES (?, ?, 1)
+             ON CONFLICT (child_id, day) DO UPDATE SET calls = calls + 1 WHERE calls < ?`,
+        )
+        .run(childId, day, limit);
+      return { ok: reserved.changes > 0, ...quotaState(db, childId, day, limit) };
+    })
+    .immediate();
+}
+
+/** Читает квоту ребёнка на московские сутки, содержащие `now`, ничего не списывая. */
+export function readCodexQuota(
+  db: Database.Database,
+  childId: string,
+  now: Date = new Date(),
+  limit: number = CODEX_DAILY_QUOTA,
+): CodexQuotaState {
+  requireQuotaLimit(limit);
+  return quotaState(db, childId, moscowDate(now), limit);
 }
