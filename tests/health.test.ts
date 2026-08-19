@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +11,6 @@ import {
   closeOnSignals,
   DEFAULT_PORT,
   HOST,
-  openSessionDatabase,
   readHost,
   readPort,
   readVersion,
@@ -331,56 +330,6 @@ describe('GET /api/health', () => {
     } finally {
       await watching.close();
     }
-  });
-
-  it('привязывает соединение занятия к отпечатку открытого файла', () => {
-    const path = join(tempDir, 'отпечаток.db');
-    openDatabase(path).close();
-    const info = statSync(path);
-
-    const opened = openSessionDatabase(path);
-    try {
-      expect(opened?.file).toBe(`${String(info.dev)}:${String(info.ino)}`);
-      expect(opened?.db.prepare<[], { one: number }>('SELECT 1 AS one').get()?.one).toBe(1);
-    } finally {
-      opened?.db.close();
-    }
-  });
-
-  it('не поднимает занятие, если файл базы подменили в окне открытия', () => {
-    // Отпечаток снимается и до открытия: сними его только после — соединение
-    // осталось бы на прежнем inode, а сверка в health навсегда совпадала бы с
-    // новым файлом, то есть 200 отвечал бы занятию, чьи записи уходят в никуда.
-    const path = join(tempDir, 'подменена-в-окне.db');
-    openDatabase(path).close();
-
-    let leaked: ReturnType<typeof openDatabase> | undefined;
-    const opened = openSessionDatabase(path, (target) => {
-      const db = openDatabase(target);
-      leaked = db;
-      rmSync(target, { force: true });
-      rmSync(`${target}-wal`, { force: true });
-      rmSync(`${target}-shm`, { force: true });
-      openDatabase(target).close();
-      return db;
-    });
-
-    expect(opened).toBeUndefined();
-    // Отвергнутое соединение закрыто, а не брошено открытым.
-    expect(() => leaked?.prepare('SELECT 1').get()).toThrow();
-  });
-
-  it('не поднимает занятие на месте пропавшего файла и не заводит его', () => {
-    // Пропавший до открытия файл `openDatabase` завёл бы заново: отпечаток
-    // совпал бы с новым, а прогресс остался бы в удалённом. Сверять не с чем —
-    // занятие не поднимается. Пустая база при этом не должна остаться на диске:
-    // health отвечал бы по ней «ok», и следующий запуск встал бы зелёным.
-    const path = join(tempDir, 'заведена-открытием.db');
-
-    const opened = openSessionDatabase(path);
-
-    expect(opened).toBeUndefined();
-    expect(existsSync(path)).toBe(false);
   });
 
   it('сообщает об ошибке базы, если путь недоступен', () => {

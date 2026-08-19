@@ -37,6 +37,11 @@ import { finishRun } from './run.js';
 import { finishLearningMaterial } from './learning.js';
 import { readDailyGate } from './daily-gate.js';
 import { ensureDataDir, legacySessionDatabasePath } from './data-dir.js';
+import {
+  fileIdentity,
+  openSessionDatabase,
+  type SessionDatabase,
+} from './tenant-registry.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -87,81 +92,6 @@ export function checkDatabase(path: string): DatabaseStatus {
   } finally {
     db?.close();
   }
-}
-
-/**
- * Отпечаток файла базы: устройство и inode. Нужен, чтобы отличить тот файл, с
- * которым занятие открыло соединение при старте, от положенного на его место
- * другого. Иначе подмену не заметить вовсе: по отвязанному файлу отвечает не
- * только `SELECT 1` — под WAL проходит и запись. `SQLITE_FCNTL_HAS_MOVED`, из-за
- * которого в журнальном режиме была бы `SQLITE_READONLY_DBMOVED`, при WAL не
- * спрашивают, так что транзакция завершается успехом, а её данные остаются в
- * файле, которого по пути базы больше нет (проверено на нашем `openDatabase`).
- * Молчаливая потеря и есть причина держать отпечаток руками.
- *
- * `undefined` — файла нет или он не читается; такой ответ значит «сверять не с
- * чем», а не «тот же самый».
- */
-function fileIdentity(path: string): string | undefined {
-  try {
-    const info = statSync(path);
-    return `${String(info.dev)}:${String(info.ino)}`;
-  } catch {
-    return undefined;
-  }
-}
-
-/** Соединение занятия вместе с отпечатком файла, к которому оно привязано. */
-export interface SessionDatabase {
-  db: ReturnType<typeof openDatabase>;
-  file: string;
-}
-
-/**
- * Открывает соединение занятия и снимает отпечаток файла **до и после**
- * открытия. Одного замера после открытия мало: подмена файла ровно в это окно
- * привязывает соединение к прежнему inode, а в отпечаток кладёт уже новый — тот
- * самый, что health и увидит по пути базы. Сверка совпала бы навсегда, и health
- * до перезапуска отвечал бы 200 занятию, чьи записи уходят в отвязанный файл.
- * Пропавший перед открытием файл (`before === undefined`) — тот же случай, и
- * открытие до него даже не доходит: `openDatabase` завёл бы пустую базу на
- * месте потерянной, а она переживает отказ занятия. Health по ней отвечает
- * «ok», следующий запуск поднимается зелёным — и потеря всего прогресса
- * выглядит здоровьем. По той же причине открытие идёт с `fileMustExist`: файл
- * может пропасть и между замером и открытием, а этот запрет проверяет сам
- * SQLite, атомарно с открытием.
- *
- * Расхождение замеров значит «связь соединения с файлом не подтверждена»:
- * соединение закрывается, занятие не поднимается — как и при недоступной базе.
- * Отказ самого открытия пролетает наверх: его причину печатает вызывающий.
- *
- * Проверка остаётся вероятностной, и точнее её здесь не сделать. Замена вида
- * A→B→A целиком внутри окна открытия (файл подменили и вернули прежний обратно)
- * даёт совпадение замеров при соединении с B. Закрыть эту дыру можно было бы
- * только отпечатком того файла, который открыл сам SQLite, а он наружу не
- * выведен: `better-sqlite3` не отдаёт дескриптор, `PRAGMA database_list` знает
- * лишь путь, и пробной записью подмену не поймать — под WAL она проходит без
- * ошибки (см. `fileIdentity`). Договориться с тем, кто подменяет файл, тоже
- * нельзя: это человек с `cp` мимо всякой блокировки.
- */
-export function openSessionDatabase(
-  path: string,
-  open: (target: string) => ReturnType<typeof openDatabase> = (target) =>
-    openDatabase(target, { fileMustExist: true }),
-): SessionDatabase | undefined {
-  const before = fileIdentity(path);
-  if (before === undefined) return undefined;
-  const db = open(path);
-  const after = fileIdentity(path);
-  if (after === before) return { db, file: before };
-
-  // Уборка в своём `try`: отказ закрытия не имеет права заслонить причину.
-  try {
-    db.close();
-  } catch (error) {
-    process.stderr.write(`соединение занятия не закрыто: ${(error as Error).message}\n`);
-  }
-  return undefined;
 }
 
 /**
