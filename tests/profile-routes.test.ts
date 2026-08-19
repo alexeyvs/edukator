@@ -8,7 +8,7 @@ import { buildGenerationPrompt } from '../server/codex/prompt.js';
 import { runWarmupCycle } from '../server/codex/worker.js';
 import { loadCurriculum, type TopicGraph } from '../server/curriculum.js';
 import { openDatabase, SUBJECTS } from '../server/db.js';
-import { buildServer } from '../server/index.js';
+import { startTenantServer, type TenantServer } from './server-harness.js';
 import {
   registerProfileRoutes,
   registerUnavailableProfile,
@@ -41,7 +41,7 @@ describe('маршруты профиля', () => {
   let curriculumDir: string;
   let seedDir: string;
   let personaPath: string;
-  let dbPath: string;
+  let server: TenantServer;
   let app: FastifyInstance;
   let db: Database;
   let graph: TopicGraph;
@@ -65,17 +65,20 @@ describe('маршруты профиля', () => {
       '',
       'Коротко и без канцелярита.',
     ].join('\n'));
-    dbPath = join(tempDir, 'profile-routes.db');
-
-    app = buildServer(curriculumDir, { dbPath, seedDir, personaPath });
-    await app.ready();
-    db = openDatabase(dbPath);
+    server = await startTenantServer({
+      dataDir: join(tempDir, 'data'),
+      curriculumDir,
+      seedDir,
+      personaPath,
+    });
+    app = server.app;
+    db = openDatabase(server.dbPath);
     graph = loadCurriculum(curriculumDir);
   });
 
   afterEach(async () => {
     db.close();
-    await app.close();
+    await server.close();
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -184,15 +187,15 @@ describe('маршруты профиля', () => {
   });
 
   it('считает отсутствующую персону ошибкой настройки, а не пусым текстом', async () => {
-    const broken = buildServer(curriculumDir, {
-      dbPath,
+    const broken = await startTenantServer({
+      dataDir: join(tempDir, 'без-персоны'),
+      curriculumDir,
       seedDir,
       personaPath: join(tempDir, 'missing-persona.md'),
     });
-    await broken.ready();
     try {
       const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-      const response = await broken.inject({ method: 'GET', url: '/api/profile' });
+      const response = await broken.app.inject({ method: 'GET', url: '/api/profile' });
       stderr.mockRestore();
 
       expect(response.statusCode).toBe(500);
@@ -205,11 +208,15 @@ describe('маршруты профиля', () => {
   it('отвергает персону без раздела знакомства', async () => {
     const withoutIntroduction = join(tempDir, 'persona-without-introduction.md');
     writeFileSync(withoutIntroduction, 'Только правила тона.');
-    const broken = buildServer(curriculumDir, { dbPath, seedDir, personaPath: withoutIntroduction });
-    await broken.ready();
+    const broken = await startTenantServer({
+      dataDir: join(tempDir, 'персона-без-знакомства'),
+      curriculumDir,
+      seedDir,
+      personaPath: withoutIntroduction,
+    });
     try {
       const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-      const response = await broken.inject({ method: 'GET', url: '/api/profile' });
+      const response = await broken.app.inject({ method: 'GET', url: '/api/profile' });
       stderr.mockRestore();
       expect(response.statusCode).toBe(500);
     } finally {

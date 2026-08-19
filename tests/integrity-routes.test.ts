@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { buildServer } from '../server/index.js';
 import { openDatabase, SUBJECTS } from '../server/db.js';
 import { storeTasks } from '../server/codex/bank.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
@@ -14,9 +13,13 @@ import {
   registerUnavailableIntegrity,
 } from '../server/routes/integrity.js';
 import { fakeContext } from './tenant-context-helper.js';
+import { hashParentPin } from '../server/parent-pin.js';
+import { setParentPin } from '../server/control-db.js';
+import { startTenantServer, type TenantServer } from './server-harness.js';
 
 const NOW = new Date('2026-08-18T12:00:00.000Z');
 const PIN = '123456';
+const PIN_PEPPER = 'pepper-для-integrity-тестов-достаточной-длины';
 
 function writeCurriculum(dir: string): void {
   for (const subject of SUBJECTS) {
@@ -43,7 +46,7 @@ describe('HTTP-поток проверки осмысленности', () => {
   let dir: string;
   let app: FastifyInstance;
   let db: Database;
-  let dbPath: string;
+  let server: TenantServer;
   let reviewBatches: number[];
 
   beforeEach(async () => {
@@ -53,19 +56,19 @@ describe('HTTP-поток проверки осмысленности', () => {
     mkdirSync(curriculum);
     mkdirSync(seed);
     writeCurriculum(curriculum);
-    dbPath = join(dir, 'test.db');
     reviewBatches = [];
-    app = buildServer(curriculum, {
-      dbPath,
+    server = await startTenantServer({
+      dataDir: join(dir, 'data'),
+      curriculumDir: curriculum,
       seedDir: seed,
       worker: false,
-      parentPin: PIN,
+      pinPepper: PIN_PEPPER,
       now: () => NOW,
       background: (job): void => void job(),
       integrityReview: async (items) => {
         reviewBatches.push(items.length);
-        return items.map((item) => {
-          const junk = item.attempts.some((attempt) => attempt.answer === 'Ff');
+        return items.map((item, index) => {
+          const junk = index === items.length - 1;
           return {
             id: item.id,
             decision: junk ? 'junk' : 'meaningful',
@@ -76,14 +79,15 @@ describe('HTTP-поток проверки осмысленности', () => {
       },
       log: (): void => undefined,
     });
-    await app.ready();
-    db = openDatabase(dbPath);
+    app = server.app;
+    db = openDatabase(server.dbPath);
+    setParentPin(server.control, server.parentId, hashParentPin(PIN, PIN_PEPPER));
     storeTasks(db, 'math.a', Array.from({ length: 12 }, (_, index) => task(index)));
   });
 
   afterEach(async () => {
     db.close();
-    await app.close();
+    await server.close();
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -140,7 +144,9 @@ describe('HTTP-поток проверки осмысленности', () => {
     expect((await app.inject({ method: 'GET', url: '/api/gate/status' })).json())
       .toMatchObject({ completed: 0, unlocked: false });
 
-    const dashboard = (await app.inject({ method: 'GET', url: '/api/parents' })).json() as {
+    const dashboard = (await app.inject({
+      method: 'GET', url: `/api/parents/${server.childId}`,
+    })).json() as {
       integrityReviews: Array<{ runId: number; retryRequired: number }>;
     };
     expect(dashboard.integrityReviews).toEqual([{ 
@@ -148,19 +154,21 @@ describe('HTTP-поток проверки осмысленности', () => {
       status: 'needs_retry', flagged: 12, retryRequired: 1,
     }]);
     const detail: { attempts: Array<{ integrity?: { itemId: number; status: string } }> } =
-      (await app.inject({ method: 'GET', url: `/api/parents/runs/${runId}` })).json();
+      (await app.inject({
+        method: 'GET', url: `/api/parents/${server.childId}/runs/${runId}`,
+      })).json();
     const item = detail.attempts.find(
       (attempt) => attempt.integrity?.status === 'retry_required',
     )?.integrity;
     if (item === undefined) throw new Error('В родительской детализации нет отметки проверки');
 
     const denied = await app.inject({
-      method: 'PUT', url: `/api/parents/runs/${runId}/integrity/${item.itemId}/approve`,
+      method: 'PUT', url: `/api/parents/${server.childId}/runs/${runId}/integrity/${item.itemId}/approve`,
       headers: { authorization: 'Bearer 000000' },
     });
     expect(denied.statusCode).toBe(401);
     const approved = await app.inject({
-      method: 'PUT', url: `/api/parents/runs/${runId}/integrity/${item.itemId}/approve`,
+      method: 'PUT', url: `/api/parents/${server.childId}/runs/${runId}/integrity/${item.itemId}/approve`,
       headers: { authorization: `Bearer ${PIN}` },
     });
 

@@ -190,8 +190,9 @@ describe('заголовки приватности в собранном сер
     webDist = join(tempDir, 'dist');
     mkdirSync(join(webDist, 'join'), { recursive: true });
     writeFileSync(join(webDist, 'index.html'), '<h1>Собранный интерфейс</h1>');
-    // Файл по адресу с токеном заведён нарочно: статика ставит свой
-    // `cache-control`, и заголовок приватности обязан оказаться поверх него.
+    // Страница по адресу с токеном отдаётся тем же `sendFile`, что и обычная:
+    // статика ставит свой `cache-control`, и заголовок приватности обязан
+    // оказаться поверх него.
     writeFileSync(join(webDist, 'join', 'страница.html'), '<h1>Ссылка</h1>');
   });
 
@@ -201,9 +202,9 @@ describe('заголовки приватности в собранном сер
   });
 
   it('перебивает кэширование статики на странице по ссылке', async () => {
-    app = buildServer(undefined, { dbPath: join(tempDir, 'page.db'), worker: false, webDist });
+    app = buildServer(undefined, { dataDir: join(tempDir, 'data'), worker: false, webDist });
 
-    const response = await app.inject({ method: 'GET', url: '/join/страница.html' });
+    const response = await app.inject({ method: 'GET', url: '/join/токен-из-ссылки' });
 
     expect(response.statusCode).toBe(200);
     expect(response.headers['referrer-policy']).toBe('no-referrer');
@@ -211,7 +212,7 @@ describe('заголовки приватности в собранном сер
   });
 
   it('не ставит заголовки на обычные страницы', async () => {
-    app = buildServer(undefined, { dbPath: join(tempDir, 'page.db'), worker: false, webDist });
+    app = buildServer(undefined, { dataDir: join(tempDir, 'data'), worker: false, webDist });
 
     const response = await app.inject({ method: 'GET', url: '/parents' });
 

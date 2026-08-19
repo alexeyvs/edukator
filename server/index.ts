@@ -1,17 +1,10 @@
 import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import type Database from 'better-sqlite3';
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
-import { openDatabase } from './db.js';
-import {
-  CURRICULUM_DIR,
-  loadCurriculum,
-  syncTopicState,
-  type SyncResult,
-  type TopicGraph,
-} from './curriculum.js';
-import { loadSeedBank, SeedBankError, type LoadSeedBankResult } from './codex/seed-bank.js';
+import { CURRICULUM_DIR, loadCurriculum, type TopicGraph } from './curriculum.js';
 import {
   registerSessionRoutes,
   registerUnavailableSession,
@@ -28,30 +21,19 @@ import { registerParentsRoutes, registerUnavailableParents } from './routes/pare
 import { registerLearningRoutes, registerUnavailableLearning } from './routes/learning.js';
 import { registerGateRoutes, registerUnavailableGate } from './routes/gate.js';
 import { registerIntegrityRoutes, registerUnavailableIntegrity } from './routes/integrity.js';
+import { registerAuthRoutes, registerUnavailableAuth } from './routes/auth.js';
+import { registerFamilyRoutes, registerUnavailableFamily } from './routes/family.js';
 import { codexConcurrency, disputeConcurrency, type CodexConcurrency } from './codex/concurrency.js';
 import { startWorker, type StartWorkerOptions, type WorkerHandle } from './codex/worker.js';
-import { hashParentPin, readParentPin, readPinPepper } from './parent-pin.js';
-import { ensureDataDir, legacySessionDatabasePath } from './data-dir.js';
-import {
-  fileIdentity,
-  openSessionDatabase,
-  type SessionDatabase,
-} from './tenant-registry.js';
-import {
-  DisputeCoordinator,
-  type DisputeCoordinatorOptions,
-} from './dispute-coordinator.js';
-import {
-  SINGLE_TENANT_CHILD_ID,
-  singleTenantContext,
-} from './routes/tenant-context.js';
+import { readPinPepper } from './parent-pin.js';
+import { controlDatabasePath, dataDir as defaultDataDir, ensureDataDir } from './data-dir.js';
+import { openControlDatabase, validateControlSchema } from './control-db.js';
+import { fileIdentity, TenantRegistry, type Tenant } from './tenant-registry.js';
+import type { DisputeCoordinatorOptions } from './dispute-coordinator.js';
+import { createTenantContext } from './routes/tenant-context.js';
 import { redactTokenUrl, registerTokenPrivacy } from './routes/token-privacy.js';
-import type { Tenant } from './tenant-registry.js';
-import { createIntegrityCoordinator } from './integrity.js';
-import type { IntegrityReviewer } from './codex/integrity.js';
-import { finishRun } from './run.js';
-import { finishLearningMaterial } from './learning.js';
-import { readDailyGate } from './daily-gate.js';
+import type { TenantOpener } from './auth.js';
+import type { IntegrityCoordinatorOptions } from './integrity.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -60,7 +42,7 @@ export const WEB_DIST_DIR = resolve(projectRoot, 'web', 'dist');
 /**
  * Версия приложения из package.json — отдаётся в /api/health. Нечитаемый или
  * битый файл роняет не запрос, а только само поле: маршрут здоровья читают,
- * чтобы узнать причину поломки, и 500 вместо «database: error» её как раз прячет.
+ * чтобы узнать причину поломки, и 500 вместо «control: error» её как раз прячет.
  */
 export function readVersion(): string {
   try {
@@ -75,87 +57,6 @@ export function readVersion(): string {
 
 export type DatabaseStatus = 'ok' | 'error';
 
-/**
- * Проверка живости базы: открыть, домигрировать до текущей схемы и выполнить
- * тривиальный запрос. Дешёвой её называть нельзя — `validateSchema` заодно
- * гоняет `quick_check` по всем страницам, — поэтому повторно за запрос она
- * вызывается только на восстановлении после неудачного старта. Синхронизация
- * карты тем открывает базу своим соединением и тот же `quick_check` повторяет:
- * опрос здоровья стоит двух проходов по файлу, и это осознанная плата за то,
- * что занятие не делит соединение с health.
- *
- * Причина отказа уходит в stderr: логгер Fastify выключен, а «database: error»
- * без текста не отличает занятый файл от непрочитанной схемы — а читают health
- * ровно тогда, когда это и надо различить.
- */
-export function checkDatabase(path: string): DatabaseStatus {
-  let db: ReturnType<typeof openDatabase> | undefined;
-  try {
-    // `fileMustExist` проверяется атомарно самим SQLite: отдельный existsSync
-    // оставлял окно, в котором пропавший файл успевал создаться заново.
-    db = openDatabase(path, { fileMustExist: true });
-    db.prepare('SELECT 1').get();
-    return 'ok';
-  } catch (error) {
-    process.stderr.write(`база ${path} недоступна: ${(error as Error).message}\n`);
-    return 'error';
-  } finally {
-    db?.close();
-  }
-}
-
-/**
- * Заводит в `topic_state` темы, которых там ещё нет (спека: «при старте сервера
- * отсутствующие темы заводятся с нулевыми значениями»). Без этого планировщик
- * считает недостающую строку нулевым состоянием и спокойно ставит тему в план,
- * а `recordAttempt` на первом же ответе по ней падает.
- */
-export function syncCurriculumState(
-  path: string,
-  curriculumDir: string = CURRICULUM_DIR,
-): SyncResult {
-  return syncLoadedCurriculum(path, loadCurriculum(curriculumDir));
-}
-
-/**
- * Заливает посевной банк в `task_bank`. Идемпотентна: повторный запуск ничего
- * не добавляет — задания отсекаются по отпечатку формулировки. Вызывается один
- * раз за старт, после того как темы заведены: без строк `topic_state` вставка
- * упала бы на внешнем ключе.
- */
-export function loadSeedTasks(
-  path: string,
-  graph: TopicGraph,
-  seedDir?: string,
-): LoadSeedBankResult {
-  const db = openDatabase(path);
-  try {
-    return loadSeedBank(db, graph, seedDir === undefined ? {} : { dir: seedDir });
-  } finally {
-    db.close();
-  }
-}
-
-function syncLoadedCurriculum(path: string, graph: TopicGraph): SyncResult {
-  const db = openDatabase(path);
-  try {
-    const result = syncTopicState(db, graph);
-
-    // Осиротевшие строки не удаляются (тема может вернуться в карту), но и
-    // молчать о них нельзя: обычно это переименованный `id`, то есть прогресс,
-    // который больше никогда не попадёт ни в план, ни в прогноз.
-    if (result.stale.length > 0) {
-      process.stderr.write(
-        `в topic_state есть состояния без темы в карте: ${result.stale.join(', ')}\n`,
-      );
-    }
-
-    return result;
-  } finally {
-    db.close();
-  }
-}
-
 /** Адрес по умолчанию; скрипт рабочего запуска переопределяет его через `HOST`. */
 export const HOST = '0.0.0.0';
 
@@ -164,30 +65,50 @@ export const DEFAULT_PORT = 3000;
 
 export type CurriculumStatus = 'ok' | 'error';
 
-/** Настройки занятия, которые тесты подменяют: разбирающий спор и запуск фона. */
+/**
+ * Адреса, по которым браузеру отдаётся сама страница приложения.
+ *
+ * Список объявлен одним местом нарочно: маршрутов у клиента больше, чем у
+ * сервера, и забытый здесь адрес виден не как ошибка сборки, а как мёртвая
+ * ссылка у ребёнка — тот перешёл по приглашению и получил 404 от Fastify.
+ * `/join/:token` и `/invite/:token` называются шаблоном, потому что токен в
+ * них — часть пути, а не запрос (см. `server/routes/token-privacy.ts`).
+ */
+export const APP_PAGES = ['/', '/parents', '/join/:token', '/invite/:token'] as const;
+
+/** Настройки сервера, которые подменяют тесты и рабочий запуск. */
 export type ServerOptions =
   & Omit<SessionRoutesOptions, 'context' | 'graph'>
   & Omit<DisputeCoordinatorOptions, 'db' | 'graph' | 'available' | 'log'>
   & {
   /**
-   * База занятия. Обязательна и передаётся явно: единой точки вроде прежнего
-   * `EDUKATOR_DB` у многоарендного сервера нет, путь выбирает вызывающий.
+   * Каталог данных: `control.db` рядом с `children/<id>.db`. Обязателен и
+   * передаётся явно: единой точки вроде прежнего `EDUKATOR_DB` у многоарендного
+   * сервера нет, каталог выбирает вызывающий.
    */
-  dbPath: string;
+  dataDir: string;
   /** Подменяется только в тестах ошибочной конфигурации. */
   personaPath?: string;
   /** Подмена настроек воркера в тестах; false отключает его для служебного сервера. */
   worker?: false | Omit<StartWorkerOptions, 'db' | 'graph' | 'budget'>;
   /** Подменяемый бюджет фонового воркера. */
   codexBudget?: CodexConcurrency;
-  /** false оставляет статику Vite dev-серверу; строка подменяет каталог в тестах. */
-  webDist?: string | false;
-  /** Явная подмена родительского PIN для HTTP-тестов. */
-  parentPin?: string;
-  /** Подменяемая проверка осмысленности; по умолчанию — отдельный вызов codex. */
-  integrityReview?: IntegrityReviewer;
+  /** Проверяющий осмысленность; по умолчанию — вызов codex. */
+  integrityReview?: IntegrityCoordinatorOptions['review'];
+  /** Общий процессный бюджет проверки осмысленности. */
+  integrityBudget?: IntegrityCoordinatorOptions['budget'];
   /** Первая пауза фонового повтора проверки. */
   integrityRetryMs?: number;
+  /** false оставляет статику Vite dev-серверу; строка подменяет каталог в тестах. */
+  webDist?: string | false;
+  /** Потолок одновременно открытых детских баз; по умолчанию — потолок реестра. */
+  maxOpenTenants?: number;
+  /** Серверный pepper PIN; по умолчанию из `EDUKATOR_PIN_PEPPER`. */
+  pinPepper?: string;
+  /** Кому верить в `X-Forwarded-For`; по умолчанию из окружения. */
+  trustedProxies?: Set<string>;
+  /** Снять `Secure` с cookie. Только для разработки по голому http. */
+  insecureCookies?: boolean;
 };
 
 /**
@@ -195,9 +116,9 @@ export type ServerOptions =
  *
  * Fastify по умолчанию отдаёт текст исключения в теле ответа, а внутренние
  * ошибки называют абсолютные пути и содержимое базы. Сервер слушает всю
- * домашнюю сеть без пароля, так что наружу уходит только факт поломки, а
- * подробности — в stderr. Отказы самого Fastify (битый JSON в теле — 400)
- * остаются как есть: они про запрос, а не про внутренности.
+ * домашнюю сеть, так что наружу уходит только факт поломки, а подробности — в
+ * stderr. Отказы самого Fastify (битый JSON в теле — 400) остаются как есть:
+ * они про запрос, а не про внутренности.
  *
  * Адрес перед записью проходит `redactTokenUrl`: приглашение и детская ссылка
  * живут прямо в пути, а stderr сервера читают и хранят как обычный лог, — то
@@ -217,19 +138,25 @@ export function registerErrorHandler(app: FastifyInstance): void {
   });
 }
 
+/**
+ * Собирает сервер.
+ *
+ * Отказы точечные: карта тем и управляющая база гасят всё разом — без них не
+ * разобрать ни одного предъявителя, — а испорченная база одного ребёнка
+ * краснит только его запросы. Соединения занятия в замыкании больше нет:
+ * маршруты регистрируются один раз, а базу выбирает предъявитель (см.
+ * `server/routes/tenant-context.ts`).
+ */
 export function buildServer(
   curriculumDir: string = CURRICULUM_DIR,
   options: ServerOptions,
 ): FastifyInstance {
-  const dbPath = options.dbPath;
-  const parentPin = readParentPin(options.parentPin ?? process.env.EDUKATOR_PARENT_PIN);
-  const pinPepper = readPinPepper(process.env.EDUKATOR_PIN_PEPPER);
-  // Эталон живёт хешем: открытого PIN не остаётся ни в замыкании маршрута, ни в
-  // снимке кучи. Без pepper проверка отказала бы всегда, поэтому PIN считается
-  // ненастроенным — так маршрут отвечает 503, а не молчаливым «неверный PIN».
-  const parentPinHash = parentPin === undefined || pinPepper === undefined
-    ? undefined
-    : hashParentPin(parentPin, pinPepper);
+  const dataDir = options.dataDir;
+  const controlPath = controlDatabasePath(dataDir);
+  const log = options.log ?? ((message: string): void => {
+    process.stderr.write(`${message}\n`);
+  });
+  const pinPepper = readPinPepper(options.pinPepper ?? process.env['EDUKATOR_PIN_PEPPER']);
   const webDist = options.webDist
     ?? (process.env.EDUKATOR_WEB_DEV === '1' ? false : WEB_DIST_DIR);
   if (webDist !== false) {
@@ -250,7 +177,6 @@ export function buildServer(
 
   let curriculum: CurriculumStatus = 'ok';
   let graph: TopicGraph | undefined;
-  let curriculumSynchronized = false;
 
   // Непрочитанная карта тем не должна мешать серверу подняться: иначе
   // /api/health — единственное, что умеет назвать причину поломки — становится
@@ -259,140 +185,123 @@ export function buildServer(
     graph = loadCurriculum(curriculumDir);
   } catch (error) {
     curriculum = 'error';
-    process.stderr.write(`карта тем не загружена: ${(error as Error).message}\n`);
+    log(`карта тем не загружена: ${(error as Error).message}`);
   }
 
-  function trySyncCurriculum(): boolean {
-    if (graph === undefined) return false;
+  /**
+   * Открывает управляющую базу. Каталог данных заводится здесь же: без него не
+   * открыть ни `control.db`, ни базу первого же ребёнка, а отдельный `mkdir` у
+   * каждого вызывающего рано или поздно забыли бы.
+   */
+  function tryOpenControl(): Database.Database | undefined {
     try {
-      syncLoadedCurriculum(dbPath, graph);
-      curriculumSynchronized = true;
-      return true;
+      ensureDataDir(dataDir);
+      return openControlDatabase(controlPath);
     } catch (error) {
-      process.stderr.write(`синхронизация карты тем не выполнена: ${(error as Error).message}\n`);
-      return false;
-    }
-  }
-
-  // Посев заливается один раз за старт, а не на каждом /api/health: он
-  // идемпотентен, но разбирать три файла и биться об уникальный индекс на
-  // каждом опросе здоровья незачем. Отсутствие или порча посева сервер не
-  // роняет — без него приложение работает, просто первая тема холодная.
-  function trySeedBank(): void {
-    if (graph === undefined) return;
-    try {
-      const seeded = loadSeedTasks(dbPath, graph, options.seedDir);
-      if (seeded.loaded > 0) {
-        process.stderr.write(`посевной банк: добавлено ${seeded.loaded} задани(й)\n`);
-      }
-    } catch (error) {
-      // Частичный итог печатается вместе с причиной: порча одной записи не
-      // отменяет остальные, и «посевной банк не загружен» без числа заданий
-      // читалось бы как «не загружено ничего».
-      const loaded = error instanceof SeedBankError ? error.result.loaded : 0;
-      const partial = loaded > 0 ? ` (успело добавиться ${loaded} задани(й))` : '';
-      process.stderr.write(`посевной банк не загружен${partial}: ${(error as Error).message}\n`);
-    }
-  }
-
-  function tryOpenSession(): SessionDatabase | undefined {
-    try {
-      const opened = openSessionDatabase(dbPath);
-      if (opened === undefined) {
-        process.stderr.write('занятие не поднято: файл базы сменился при открытии\n');
-      }
-      return opened;
-    } catch (error) {
-      process.stderr.write(`занятие не поднято: база недоступна: ${(error as Error).message}\n`);
+      log(`управляющая база недоступна: ${(error as Error).message}`);
       return undefined;
     }
   }
 
-  if (trySyncCurriculum()) trySeedBank();
+  const control = tryOpenControl();
+  // Отпечаток снимается один раз, после открытия: `openControlDatabase` заводит
+  // файл, если его нет, так что замер «до» здесь ничего не значил бы. Сверять с
+  // ним health обязан по той же причине, что и по детским базам: под WAL запись
+  // в подменённый файл проходит молча (см. `fileIdentity`).
+  const controlFile = control === undefined ? undefined : fileIdentity(controlPath);
 
-  // Занятию нужно живое соединение: выдача задания, приём ответа и разбор спора
-  // идут транзакциями, а открывать базу на каждый запрос значит терять WAL и
-  // получать чужой снимок посреди read-modify-write.
-  // Вместе с соединением снимается отпечаток файла, с которым оно открыто:
-  // health сверяет с ним то, что лежит по пути базы сейчас (см. `fileIdentity`).
-  const opened = graph !== undefined && curriculumSynchronized ? tryOpenSession() : undefined;
-  const session: DatabaseStatus = graph !== undefined && opened !== undefined ? 'ok' : 'error';
-  if (graph !== undefined && opened !== undefined) {
-    const sessionDb = opened.db;
+  let registry: TenantRegistry | undefined;
+
+  if (graph !== undefined && control !== undefined) {
+    const loaded = graph;
     const budget = options.codexBudget ?? codexConcurrency;
-    const disputes = options.disputeBudget ?? disputeConcurrency;
-    let worker: WorkerHandle | undefined;
-    const sessionAvailable = (): boolean => fileIdentity(dbPath) === opened.file;
-    // Состояние разбора спора своё на каждую базу, а не на процесс: до задачи 15
-    // база здесь одна, но координатор уже тот же, что заводит реестр детских баз.
-    const disputeCoordinator = new DisputeCoordinator({
-      db: sessionDb,
-      graph,
-      available: sessionAvailable,
-      disputeBudget: disputes,
+    const tenants = new TenantRegistry({
+      control,
+      dataDir,
+      graph: loaded,
+      log,
+      ...(options.maxOpenTenants === undefined ? {} : { maxOpen: options.maxOpenTenants }),
+      ...(options.seedDir === undefined ? {} : { seedDir: options.seedDir }),
       ...(options.review === undefined ? {} : { review: options.review }),
       ...(options.background === undefined ? {} : { background: options.background }),
-      ...(options.log === undefined ? {} : { log: options.log }),
+      disputeBudget: options.disputeBudget ?? disputeConcurrency,
       ...(options.disputeRetryMs === undefined ? {} : { disputeRetryMs: options.disputeRetryMs }),
-    });
-    const integrity = createIntegrityCoordinator({
-      db: sessionDb,
-      graph,
-      budget,
-      available: sessionAvailable,
-      complete: (runId, at) => {
-        const kind = sessionDb.prepare<[number], { kind: string }>('SELECT kind FROM runs WHERE id = ?')
-          .get(runId)?.kind;
-        if (kind === 'lesson') {
-          const result = finishLearningMaterial(sessionDb, graph, runId, { now: at });
-          const learningGate = readDailyGate(sessionDb, at).learning;
-          const completed = {
-            ...result,
-            required: learningGate.required && learningGate.materialId === result.materialId,
-          };
-          sessionDb.prepare('UPDATE runs SET summary = ? WHERE id = ?')
-            .run(JSON.stringify(completed), runId);
-          return completed;
-        }
-        if (kind === 'run') return { ...finishRun(sessionDb, graph, runId, { now: at }) };
-        throw new Error(`Проверка осмысленности не завершает занятие вида «${String(kind)}»`);
-      },
-      ...(options.integrityReview === undefined ? {} : { review: options.integrityReview }),
-      ...(options.background === undefined ? {} : { background: options.background }),
+      ...(options.integrityReview === undefined ? {} : { integrityReview: options.integrityReview }),
+      integrityBudget: options.integrityBudget ?? options.codexBudget ?? codexConcurrency,
+      ...(options.integrityRetryMs === undefined ? {} : { integrityRetryMs: options.integrityRetryMs }),
       ...(options.now === undefined ? {} : { now: options.now }),
-      ...(options.integrityRetryMs === undefined ? {} : { retryMs: options.integrityRetryMs }),
-      ...(options.log === undefined ? {} : { log: options.log }),
     });
-    // Аренда собирается руками: до задачи 15 база здесь одна и реестра ещё нет,
-    // но маршруты уже спрашивают её контекстом запроса, а не замыканием.
-    const tenant: Tenant = {
-      childId: SINGLE_TENANT_CHILD_ID,
-      path: dbPath,
-      db: sessionDb,
-      file: opened.file,
-      available: sessionAvailable,
-      disputes: disputeCoordinator,
-      integrity,
+    registry = tenants;
+
+    // Воркер свой на каждую открытую базу и заводится вместе с ней: общего
+    // соединения занятия у сервера больше нет, а греть банк ребёнка, который ни
+    // разу не пришёл, незачем — за него платили бы все остальные. Обход детей
+    // одним диспетчером с честной очередью появится задачей 17.
+    const workers = new Map<string, WorkerHandle>();
+    let listening = false;
+    function ensureWorker(tenant: Tenant): void {
+      if (options.worker === false || !listening || workers.has(tenant.childId)) return;
+      workers.set(
+        tenant.childId,
+        startWorker({
+          db: tenant.db,
+          graph: loaded,
+          budget,
+          log,
+          ...(options.now === undefined ? {} : { now: options.now }),
+          ...(options.worker ?? {}),
+        }),
+      );
+    }
+
+    /**
+     * Реестр в том виде, в каком его видит допуск. Обёртка нужна ровно ради
+     * воркера: он привязан к соединению, а соединение заводится по первому
+     * обращению — то есть внутри `open`, а не при старте сервера.
+     */
+    const opener: TenantOpener = {
+      open(childId: string): Tenant {
+        const tenant = tenants.open(childId);
+        ensureWorker(tenant);
+        return tenant;
+      },
     };
-    const context = singleTenantContext(tenant);
+
+    const context = createTenantContext({
+      control,
+      tenants: opener,
+      ...(options.now === undefined ? {} : { now: options.now }),
+    });
+
+    registerAuthRoutes(app, {
+      control,
+      ...(options.now === undefined ? {} : { now: options.now }),
+      ...(options.trustedProxies === undefined ? {} : { trustedProxies: options.trustedProxies }),
+      ...(options.insecureCookies === undefined
+        ? { insecureCookies: process.env['EDUKATOR_INSECURE_COOKIES'] === '1' }
+        : { insecureCookies: options.insecureCookies }),
+    });
+    registerFamilyRoutes(app, {
+      control,
+      dataDir,
+      ...(pinPepper === undefined ? {} : { pinPepper }),
+      ...(options.now === undefined ? {} : { now: options.now }),
+    });
     registerSessionRoutes(app, {
       context,
-      graph,
+      graph: loaded,
+      log,
       ...(options.now === undefined ? {} : { now: options.now }),
-      ...(options.log === undefined ? {} : { log: options.log }),
       ...(options.seedDir === undefined ? {} : { seedDir: options.seedDir }),
     });
-    // Спор переживает процесс в SQLite. После перезапуска его нельзя оставлять
-    // без исполнителя только потому, что браузер уже потерял attempt_id.
-    disputeCoordinator.restore();
     registerRunRoutes(app, {
       context,
-      graph,
+      graph: loaded,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
     registerTriageRoutes(app, {
       context,
-      graph,
+      graph: loaded,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
     registerIntegrityRoutes(app, { context });
@@ -402,136 +311,114 @@ export function buildServer(
     });
     registerBossRoutes(app, {
       context,
-      graph,
+      graph: loaded,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
     registerParentsRoutes(app, {
       context,
-      graph,
-      ...(parentPinHash === undefined ? {} : { parentPinHash: () => parentPinHash }),
+      graph: loaded,
+      control,
       ...(pinPepper === undefined ? {} : { pinPepper }),
+      ...(options.trustedProxies === undefined ? {} : { trustedProxies: options.trustedProxies }),
       ...(options.now === undefined ? {} : { now: options.now }),
     });
     registerLearningRoutes(app, {
       context,
-      graph,
+      graph: loaded,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
     registerGateRoutes(app, {
       context,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
+
     app.addHook('onListen', async () => {
-      if (options.worker === false || worker !== undefined) return;
-      worker = startWorker({
-        db: sessionDb,
-        graph,
-        budget,
-        ...(options.now === undefined ? {} : { now: options.now }),
-        ...(options.log === undefined ? {} : { log: options.log }),
-        ...(options.worker ?? {}),
-      });
+      listening = true;
+      // Базы, открытые до прослушивания (тест или родительский маршрут завёл
+      // ребёнка), воркера ещё не получили: он не должен начинать греть банк
+      // раньше, чем сервер вообще способен ответить ученику.
+      for (const tenant of tenants.list()) ensureWorker(tenant);
     });
     app.addHook('onClose', async () => {
-      worker?.stop();
-      await Promise.allSettled([
-        ...(worker === undefined ? [] : [worker.done]),
-        disputeCoordinator.stop(),
-        integrity.stop(),
-      ]);
-      sessionDb.close();
+      listening = false;
+      for (const worker of workers.values()) worker.stop();
+      await Promise.allSettled([...workers.values()].map((worker) => worker.done));
+      workers.clear();
+      // Сначала арендаторы, потом управляющая база: закрытие аренды дожидается
+      // её разбора спора, а он ходит и в `control.db` за квотой.
+      await tenants.closeAll();
+      control.close();
     });
   } else {
-    registerUnavailableSession(
-      app,
-      graph === undefined ? 'карта тем не загружена' : 'база недоступна',
-    );
-    registerUnavailableRun(
-      app,
-      graph === undefined ? 'карта тем не загружена' : 'база недоступна',
-    );
-    registerUnavailableTriage(
-      app,
-      graph === undefined ? 'карта тем не загружена' : 'база недоступна',
-    );
-    registerUnavailableIntegrity(
-      app,
-      graph === undefined ? 'карта тем не загружена' : 'база недоступна',
-    );
-    registerUnavailableProfile(
-      app,
-      graph === undefined ? 'карта тем не загружена' : 'база недоступна',
-    );
-    registerUnavailableBoss(
-      app,
-      graph === undefined ? 'карта тем не загружена' : 'база недоступна',
-    );
-    registerUnavailableParents(
-      app,
-      graph === undefined ? 'карта тем не загружена' : 'база недоступна',
-    );
-    registerUnavailableLearning(
-      app,
-      graph === undefined ? 'карта тем не загружена' : 'база недоступна',
-    );
-    registerUnavailableGate(
-      app,
-      graph === undefined ? 'карта тем не загружена' : 'база недоступна',
-    );
+    const reason = graph === undefined ? 'карта тем не загружена' : 'управляющая база недоступна';
+    registerUnavailableAuth(app, reason);
+    registerUnavailableFamily(app, reason);
+    registerUnavailableSession(app, reason);
+    registerUnavailableRun(app, reason);
+    registerUnavailableTriage(app, reason);
+    registerUnavailableIntegrity(app, reason);
+    registerUnavailableProfile(app, reason);
+    registerUnavailableBoss(app, reason);
+    registerUnavailableParents(app, reason);
+    registerUnavailableLearning(app, reason);
+    registerUnavailableGate(app, reason);
+    if (control !== undefined) {
+      app.addHook('onClose', async () => {
+        control.close();
+      });
+    }
   }
 
-  // `status` выводится из проверки базы, а не из факта «маршрут ответил»:
-  // здоровье читают ровно тогда, когда что-то сломалось, и зелёный статус над
-  // «database: error» ввёл бы в заблуждение именно в этот момент.
-  //
-  // Занятие входит в статус наравне с базой. Маршруты выбираются один раз при
-  // старте, и поднявшаяся позже база их уже не вернёт: без этого поля health
-  // отвечал бы `ok` процессу, который на все `/api/session/*` до перезапуска
-  // отдаёт 503, — то есть врал бы именно о том, ради чего приложение и запущено.
-  app.get('/api/health', (_request, reply) => {
-    let database = checkDatabase(dbPath);
-    if (graph !== undefined) {
-      // Исправную базу синхронизируем всегда: файл могли заменить под живым
-      // процессом. Но исчезнувшую после успешного старта базу не создаём заново
-      // — потеря прогресса должна остаться красным health. Повторная попытка
-      // создать базу нужна только для восстановления после ошибки старта.
-      const synchronized = database === 'ok' || !curriculumSynchronized
-        ? trySyncCurriculum()
-        : false;
-      // Повторная проверка нужна только там, где база была недоступна и её мог
-      // создать сам `trySyncCurriculum`: гонять `quick_check` второй раз по уже
-      // признанной исправной базе незачем.
-      if (!synchronized) database = 'error';
-      else if (database !== 'ok') database = checkDatabase(dbPath);
+  /**
+   * Состояние управляющей базы. Проверяется подробно: без неё сервер не умеет
+   * разобрать ни одного предъявителя, то есть не работает вовсе, — и цена
+   * `quick_check` по одному маленькому файлу здесь оправдана.
+   */
+  function checkControl(): DatabaseStatus {
+    if (control === undefined || controlFile === undefined) return 'error';
+    try {
+      if (fileIdentity(controlPath) !== controlFile) {
+        throw new Error('файл заменён после старта, нужен перезапуск');
+      }
+      validateControlSchema(control);
+      return 'ok';
+    } catch (error) {
+      log(`управляющая база ${controlPath} недоступна: ${(error as Error).message}`);
+      return 'error';
     }
+  }
 
-    // Исправная база — ещё не работающее занятие: его соединение открыто один
-    // раз при старте и держит тот файл, который лежал по пути тогда. Замена или
-    // восстановление базы под живым процессом оставляет соединение на старом,
-    // уже отвязанном файле, и под WAL это ничем не проявляется: пишется он без
-    // ошибки, а данные остаются в файле, которого по пути базы нет, — то есть
-    // ответы ученика уходят в никуда. Переоткрыть соединение здесь нельзя
-    // (у занятия могут идти транзакции, а маршруты уже выбраны), поэтому health
-    // краснеет до перезапуска — как и на не поднявшемся при старте занятии.
-    const detached = opened !== undefined && fileIdentity(dbPath) !== opened.file;
-    const sessionNow: DatabaseStatus = session === 'ok' && !detached ? 'ok' : 'error';
-    if (detached) {
-      process.stderr.write(
-        `файл базы заменён после старта: занятие держит прежний, нужен перезапуск\n`,
-      );
+  // `status` выводится из проверки, а не из факта «маршрут ответил»: здоровье
+  // читают ровно тогда, когда что-то сломалось, и зелёный статус над
+  // «control: error» ввёл бы в заблуждение именно в этот момент.
+  //
+  // Детские базы обходятся **только открытые**. Открыть базу каждого ребёнка
+  // ради `quick_check` значило бы, что опрос здоровья заводит соединения,
+  // которых никто не просил, и платит за всех выведенных детей сразу; а
+  // ребёнок, к которому не обращались, сломаться с прошлого раза не мог.
+  app.get('/api/health', (_request, reply) => {
+    const control = checkControl();
+    const open = registry?.list() ?? [];
+    // Подмена файла базы под живым процессом ничем не проявляется сама: под WAL
+    // запись в отвязанный файл проходит без ошибки, а данные остаются там, где
+    // их уже никто не найдёт. Переоткрыть соединение здесь нельзя — у занятия
+    // могут идти транзакции, — поэтому ребёнок краснеет до перезапуска.
+    const detached = open.filter((tenant) => !tenant.available()).map((tenant) => tenant.childId);
+    if (detached.length > 0) {
+      log(`файл базы заменён после старта у детей: ${detached.join(', ')}; нужен перезапуск`);
     }
 
     const status: DatabaseStatus =
-      database === 'ok' && curriculum === 'ok' && sessionNow === 'ok' ? 'ok' : 'error';
+      control === 'ok' && curriculum === 'ok' && detached.length === 0 ? 'ok' : 'error';
 
     return reply
       .code(status === 'ok' ? 200 : 503)
       .send({
         status,
         version: readVersion(),
-        database,
+        control,
         curriculum,
-        session: sessionNow,
+        children: { open: open.length, detached },
       });
   });
 
@@ -539,7 +426,11 @@ export function buildServer(
     void app.register(fastifyStatic, {
       root: webDist,
     });
-    app.get('/parents', (_request, reply) => reply.sendFile('index.html'));
+    // Страница у приложения одна: маршрутизацию внутри неё делает клиент, и
+    // серверу остаётся отдать по каждому её адресу тот же `index.html`.
+    for (const page of APP_PAGES) {
+      app.get(page, (_request, reply) => reply.sendFile('index.html'));
+    }
   }
 
   return app;
@@ -547,7 +438,7 @@ export function buildServer(
 
 /**
  * Останавливает сервер по сигналу. Без этого `onClose` не срабатывает никогда:
- * процесс снимают по Ctrl-C, соединение занятия остаётся открытым, и WAL
+ * процесс снимают по Ctrl-C, соединения занятия остаются открытыми, и WAL
  * закрывается не переносом в основной файл, а восстановлением при следующем
  * запуске. `once`: второй тот же сигнал должен убивать процесс по-обычному,
  * иначе зависшее закрытие нечем прервать.
@@ -599,7 +490,7 @@ if (isDirectRun) {
   // Порт разбирается до `buildServer()`: `PORT=abc` — такая же обычная ошибка
   // запуска, как занятый порт, но брошенная после сборки сервера она уносила бы
   // процесс необработанным исключением мимо `app.close()`, то есть из-под уже
-  // открытого соединения занятия и с непереселённым WAL.
+  // открытых баз и с непереселённым WAL.
   let port: number | undefined;
   try {
     port = readPort(process.env.PORT);
@@ -610,14 +501,12 @@ if (isDirectRun) {
 
   if (port !== undefined) {
     const host = readHost(process.env.HOST);
-    // Каталог данных заводится до сборки сервера: без него не открыть ни базу
-    // занятия, ни, начиная со следующих задач, управляющую.
-    const app = buildServer(CURRICULUM_DIR, { dbPath: legacySessionDatabasePath(ensureDataDir()) });
+    const app = buildServer(CURRICULUM_DIR, { dataDir: defaultDataDir() });
     closeOnSignals(app);
     // Отказ прослушивания перехватывается, как и в обеих точках входа CLI: занятое
     // порт-число — обычная ошибка запуска, а необработанный отказ верхнеуровневого
     // `await` печатал бы стек `node:net` и уносил процесс мимо `app.close()`, то
-    // есть оставлял бы соединение занятия незакрытым, а WAL — непереселённым.
+    // есть оставлял бы базы незакрытыми, а WAL — непереселённым.
     try {
       await app.listen({ host, port });
       console.log(`edukator слушает http://${host}:${port}`);

@@ -21,7 +21,6 @@ import {
   controlDatabasePath,
   dataDir,
   ensureDataDir,
-  legacySessionDatabasePath,
   provisionChildDatabase,
 } from '../server/data-dir.js';
 import { SCHEMA_VERSION, TABLES, openDatabase } from '../server/db.js';
@@ -63,9 +62,8 @@ describe('каталог данных', () => {
       expect(DEFAULT_DATA_DIR.endsWith(`${'/'}data`)).toBe(true);
     });
 
-    it('управляющая база и база занятия лежат в каталоге данных', () => {
+    it('управляющая база лежит в каталоге данных', () => {
       expect(controlDatabasePath(tempDir)).toBe(join(tempDir, CONTROL_DB_FILE));
-      expect(legacySessionDatabasePath(tempDir)).toBe(join(tempDir, 'edukator.db'));
     });
 
     it('заводит каталог данных вместе с children/', () => {

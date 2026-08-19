@@ -65,17 +65,6 @@ export function ensureDataDir(dir: string = dataDir()): string {
   return dir;
 }
 
-/**
- * Путь единственной базы занятия рабочего запуска.
- *
- * Времянка до перевода `buildServer` на реестр арендаторов: сервер пока умеет
- * держать одно соединение занятия, и брать его неоткуда, кроме как из каталога
- * данных. Тесты и e2e путь задают явно и этой функцией не пользуются.
- */
-export function legacySessionDatabasePath(dir: string = dataDir()): string {
-  return resolve(dir, 'edukator.db');
-}
-
 /** Суффикс временного файла заведения. По нему же он и убирается на повторе. */
 const TEMP_SUFFIX = '.tmp';
 

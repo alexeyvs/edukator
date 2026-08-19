@@ -13,6 +13,7 @@ import {
   redeemDeviceInvite,
   redeemParentInvite,
   openControlDatabase,
+  setParentPin,
 } from '../server/control-db.js';
 import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
 import { CHILD_COOKIE, PARENT_COOKIE } from '../server/auth.js';
@@ -26,14 +27,7 @@ import { registerProfileRoutes } from '../server/routes/profile.js';
 import { registerRunRoutes } from '../server/routes/run.js';
 import { registerSessionRoutes } from '../server/routes/session.js';
 import { registerTriageRoutes } from '../server/routes/triage.js';
-import {
-  SINGLE_TENANT_CHILD_ID,
-  createTenantContext,
-  failAuth,
-  singleTenantContext,
-} from '../server/routes/tenant-context.js';
-import { AuthError } from '../server/auth.js';
-import { fakeTenant } from './tenant-context-helper.js';
+import { createTenantContext, failAuth } from '../server/routes/tenant-context.js';
 
 const NOW = new Date('2026-08-19T09:00:00.000Z');
 const PASSWORD = 'пароль-подлиннее';
@@ -108,6 +102,10 @@ describe('контекст арендатора', () => {
       anonymous: { ...SAME_ORIGIN },
     };
 
+    // PIN живёт в `control.db` и свой у каждой семьи: маршрут читает его
+    // оттуда, а не из настроек процесса.
+    setParentPin(control, parentId, hashParentPin(PIN, PEPPER));
+
     const context = createTenantContext({ control, tenants, now: () => NOW });
     app = Fastify();
     registerSessionRoutes(app, { context, graph: GRAPH, now: () => NOW, log: () => undefined });
@@ -120,7 +118,7 @@ describe('контекст арендатора', () => {
     registerParentsRoutes(app, {
       context,
       graph: GRAPH,
-      parentPinHash: () => hashParentPin(PIN, PEPPER),
+      control,
       pinPepper: PEPPER,
       now: () => NOW,
     });
@@ -274,28 +272,6 @@ describe('контекст арендатора', () => {
       expect(response.statusCode).toBe(403);
       expect(response.json()).toEqual({ error: 'Запрос пришёл не со страницы приложения' });
       expect(tenants.peek(childId)).toBeUndefined();
-    });
-  });
-
-  describe('единственная база до задачи 15', () => {
-    it('отдаёт ту же аренду и своего детского предъявителя', () => {
-      const tenant = fakeTenant(control);
-      const context = singleTenantContext(tenant)({ headers: {}, method: 'GET' } as never);
-      expect(context.tenant).toBe(tenant);
-      expect(context.bearer.kind).toBe('browser');
-      expect(context.child.id).toBe(SINGLE_TENANT_CHILD_ID);
-    });
-
-    it('отвечает на чужого ребёнка в адресе так же, как рабочее разрешение', () => {
-      const context = singleTenantContext(fakeTenant(control));
-      expect(() => context({ headers: {}, method: 'GET' } as never, { childId: 'deadbeef' }))
-        .toThrow(AuthError);
-    });
-
-    it('не пускает туда, куда детскому предъявителю нельзя', () => {
-      const context = singleTenantContext(fakeTenant(control));
-      expect(() => context({ headers: {}, method: 'GET' } as never, { allow: ['parent'] }))
-        .toThrow(AuthError);
     });
   });
 

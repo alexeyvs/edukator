@@ -8,7 +8,7 @@ import { storeTasks } from '../server/codex/bank.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import { loadCurriculum } from '../server/curriculum.js';
 import { openDatabase, SUBJECTS, type Subject } from '../server/db.js';
-import { buildServer } from '../server/index.js';
+import { startTenantServer, type TenantServer } from './server-harness.js';
 import {
   registerTriageRoutes,
   registerUnavailableTriage,
@@ -57,7 +57,7 @@ describe('маршруты триажа', () => {
   let tempDir: string;
   let curriculumDir: string;
   let seedDir: string;
-  let dbPath: string;
+  let server: TenantServer;
   let app: FastifyInstance;
   let db: Database;
 
@@ -68,11 +68,14 @@ describe('маршруты триажа', () => {
     mkdirSync(curriculumDir);
     mkdirSync(seedDir);
     writeCurriculum(curriculumDir);
-    dbPath = join(tempDir, 'triage-routes.db');
-
-    app = buildServer(curriculumDir, { dbPath, seedDir, now: () => NOW });
-    await app.ready();
-    db = openDatabase(dbPath);
+    server = await startTenantServer({
+      dataDir: join(tempDir, 'data'),
+      curriculumDir,
+      seedDir,
+      now: () => NOW,
+    });
+    app = server.app;
+    db = openDatabase(server.dbPath);
     for (const subject of SUBJECTS) {
       for (let topicNumber = 1; topicNumber <= 3; topicNumber += 1) {
         storeTasks(db, `${subject}.${topicNumber}`, [1, 2, 3].map(
@@ -84,7 +87,7 @@ describe('маршруты триажа', () => {
 
   afterEach(async () => {
     db.close();
-    await app.close();
+    await server.close();
     rmSync(tempDir, { recursive: true, force: true });
   });
 

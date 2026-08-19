@@ -301,3 +301,19 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
     });
   });
 }
+
+/**
+ * Заглушка входа на сервере без управляющей базы или карты тем. 503, а не 404:
+ * родитель, который не может войти, обязан увидеть поломку сервера, а не
+ * пропавший маршрут — по 404 он полез бы искать ошибку в собственной ссылке.
+ */
+export function registerUnavailableAuth(app: FastifyInstance, reason: string): void {
+  const send = (_request: unknown, reply: FastifyReply): FastifyReply =>
+    reply.code(503).send({ error: `Вход недоступен: ${reason}` });
+  app.post('/api/auth/parent/login', send);
+  app.post('/api/auth/parent/logout', send);
+  app.get('/api/auth/parent/invite/:token', send);
+  app.post('/api/auth/parent/invite/:token', send);
+  app.post('/api/auth/child/claim/:token', send);
+  app.get('/api/auth/me', send);
+}

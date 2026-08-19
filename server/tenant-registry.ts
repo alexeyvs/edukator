@@ -312,7 +312,15 @@ export class TenantRegistry {
       this.#seedBank(childId, opened.db);
     } catch (error) {
       if (opened !== undefined) this.#closeQuietly(childId, opened.db);
-      throw error;
+      // Испорченный файл базы — состояние одного арендатора, а не поломка
+      // сервера: пятисотка от `openDatabase` увела бы отказ в общий обработчик
+      // и звала бы к перезапуску всю семью. Наружу уходит общий текст
+      // (`AUTH_MESSAGE.unavailable`), а чья именно база испорчена, видно только
+      // отсюда: остальные дети при этом работают, и по одному 503 их не
+      // различить.
+      this.#log(`база ребёнка ${childId} недоступна: ${(error as Error).message}`);
+      if (error instanceof TenantError) throw error;
+      throw new TenantError('unavailable', `База ребёнка ${childId} недоступна: ${path}`);
     } finally {
       this.#opening.delete(childId);
     }

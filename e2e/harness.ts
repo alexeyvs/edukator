@@ -10,6 +10,18 @@ import type { TaskProducer } from '../server/codex/worker.js';
 import type { LearningProducer } from '../server/learning-prep.js';
 import { openDatabase, SUBJECTS, writeProfile, type Subject } from '../server/db.js';
 import { buildServer } from '../server/index.js';
+import {
+  childDatabasePath,
+  createChild,
+  createParent,
+  issueDeviceInvite,
+  issueParentInvite,
+  openControlDatabase,
+  redeemParentInvite,
+  setParentPin,
+} from '../server/control-db.js';
+import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
+import { hashParentPin } from '../server/parent-pin.js';
 import { loadCurriculum } from '../server/curriculum.js';
 import { startRun } from '../server/run.js';
 import { submitAnswer } from '../server/session.js';
@@ -22,6 +34,10 @@ export interface E2eHarness {
   app: FastifyInstance;
   db: Database;
   url: string;
+  /** Ребёнок сценария: его `id` стоит в адресах родительской сводки. */
+  childId: string;
+  /** Ссылка-приглашение устройства: с неё начинается вход ребёнка. */
+  joinPath: string;
   assertCodexNotCalled(): void;
   waitForLearningMaterial(topicId: string): Promise<number>;
   prepareBoss(topicId: string): Promise<void>;
@@ -216,13 +232,14 @@ export async function startE2eHarness(
   writeFileSync(codexShim, `#!/bin/sh\ntouch '${codexMarker}'\nexit 97\n`);
   chmodSync(codexShim, 0o755);
 
-  const dbPath = join(tempDir, 'edukator.db');
+  const dataDir = ensureDataDir(join(tempDir, 'data'));
+  const pepper = 'e2e-pepper-достаточной-длины';
   const previousPath = process.env.PATH;
   const previousPepper = process.env.EDUKATOR_PIN_PEPPER;
   process.env.PATH = `${binDir}:${previousPath ?? ''}`;
   // Без pepper сервер считает PIN ненастроенным: сценарий с управлением
   // доступом получил бы 503 вместо проверки PIN.
-  process.env.EDUKATOR_PIN_PEPPER = 'e2e-pepper-достаточной-длины';
+  process.env.EDUKATOR_PIN_PEPPER = pepper;
 
   let releaseDispute: (() => void) | undefined;
   const disputeGate = new Promise<void>((resolve) => { releaseDispute = resolve; });
@@ -233,8 +250,23 @@ export async function startE2eHarness(
       note: 'Ответ ученика равнозначен эталону.',
     };
   };
+  // Семья заводится до сборки сервера: реестр открывает базу ребёнка по
+  // первому обращению, а сценарий приходит уже со ссылкой на руках.
+  const control = openControlDatabase(controlDatabasePath(dataDir));
+  const parentId = createParent(control, 'родитель@example.com', NOW);
+  const parentInvite = issueParentInvite(control, parentId, NOW);
+  const redeemedParent = redeemParentInvite(control, parentInvite.token, 'пароль-подлиннее', NOW);
+  if (!redeemedParent.ok) throw new Error('E2E: родитель не завёл пароль');
+  if (options.parentPin !== undefined) {
+    setParentPin(control, parentId, hashParentPin(options.parentPin, pepper));
+  }
+  const childId = createChild(control, parentId, 'Тимофей', NOW);
+  provisionChildDatabase(control, childId, dataDir);
+  const deviceInvite = issueDeviceInvite(control, childId, 'browser', 'Ноутбук', NOW);
+  const dbPath = childDatabasePath(dataDir, childId);
+
   const app = buildServer(curriculumDir, {
-    dbPath,
+    dataDir,
     worker: options.controlledWorker === true
       ? {
           produce: controlledProducer(),
@@ -251,7 +283,6 @@ export async function startE2eHarness(
       reason: 'Ответ в браузерном сценарии осмысленный.',
     })),
     now: () => NOW,
-    ...(options.parentPin === undefined ? {} : { parentPin: options.parentPin }),
   });
   const db = openDatabase(dbPath);
   const graph = loadCurriculum(curriculumDir);
@@ -280,6 +311,8 @@ export async function startE2eHarness(
       app,
       db,
       url,
+      childId,
+      joinPath: `/join/${deviceInvite.token}`,
       assertCodexNotCalled,
       async waitForLearningMaterial(topicId: string): Promise<number> {
         await waitUntil(
@@ -379,6 +412,7 @@ export async function startE2eHarness(
       async close(): Promise<void> {
         releaseDispute?.();
         await app.close();
+        control.close();
         db.close();
         if (previousPath === undefined) delete process.env.PATH;
         else process.env.PATH = previousPath;
@@ -391,6 +425,7 @@ export async function startE2eHarness(
     };
   } catch (error) {
     await app.close();
+    control.close();
     db.close();
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;

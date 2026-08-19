@@ -8,7 +8,7 @@ import { storeTasks } from '../server/codex/bank.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import { openDatabase, SUBJECTS } from '../server/db.js';
 import { loadCurriculum } from '../server/curriculum.js';
-import { buildServer } from '../server/index.js';
+import { startTenantServer, type TenantServer } from './server-harness.js';
 import { registerRunRoutes, registerUnavailableRun } from '../server/routes/run.js';
 import { fakeContext } from './tenant-context-helper.js';
 
@@ -56,7 +56,7 @@ describe('маршруты забега', () => {
   let tempDir: string;
   let curriculumDir: string;
   let seedDir: string;
-  let dbPath: string;
+  let server: TenantServer;
   let app: FastifyInstance;
   let db: Database;
 
@@ -67,10 +67,9 @@ describe('маршруты забега', () => {
     mkdirSync(curriculumDir);
     mkdirSync(seedDir);
     writeCurriculum(curriculumDir);
-    dbPath = join(tempDir, 'run-routes.db');
-
-    app = buildServer(curriculumDir, {
-      dbPath,
+    server = await startTenantServer({
+      dataDir: join(tempDir, 'data'),
+      curriculumDir,
       seedDir,
       now: () => NOW,
       background: (job): void => void job(),
@@ -81,8 +80,8 @@ describe('маршруты забега', () => {
         reason: 'Ответ осмысленный.',
       })),
     });
-    await app.ready();
-    db = openDatabase(dbPath);
+    app = server.app;
+    db = openDatabase(server.dbPath);
     for (const subject of SUBJECTS) {
       storeTasks(db, `${subject}.a`, Array.from({ length: 12 }, (_, index) => task(subject, index)));
     }
@@ -90,7 +89,7 @@ describe('маршруты забега', () => {
 
   afterEach(async () => {
     db.close();
-    await app.close();
+    await server.close();
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -102,19 +101,6 @@ describe('маршруты забега', () => {
     });
     expect(response.statusCode).toBe(200);
     return (response.json() as { runId: number }).runId;
-  }
-
-  async function finishChecked(runId: number): Promise<Record<string, unknown>> {
-    let body = (await app.inject({ method: 'POST', url: `/api/run/${runId}/finish` })).json() as
-      Record<string, unknown>;
-    for (let index = 0; index < 10 && body['status'] === 'checking'; index += 1) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      body = (await app.inject({ method: 'GET', url: `/api/integrity/${runId}` })).json() as
-        Record<string, unknown>;
-    }
-    if (body['status'] === 'completed') return body['result'] as Record<string, unknown>;
-    if (body['status'] !== undefined) throw new Error('Проверка забега не завершилась');
-    return body;
   }
 
   it('проходит полный HTTP-цикл: план, старт, задание, ответ и финиш', async () => {
@@ -187,8 +173,9 @@ describe('маршруты забега', () => {
     expect(beyondTarget.statusCode).toBe(409);
     expect(beyondTarget.json()).toMatchObject({ code: 'run-complete' });
 
-    const finish = await finishChecked(runId);
-    expect(finish).toMatchObject({ runId, total: 12, correct: 12, xp: 300 });
+    const finish = await app.inject({ method: 'POST', url: `/api/run/${runId}/finish` });
+    expect(finish.statusCode).toBe(200);
+    expect(finish.json()).toMatchObject({ runId, total: 12, correct: 12, xp: 300 });
     expect(db.prepare('SELECT finished_at, total, correct FROM runs WHERE id = ?').get(runId))
       .toEqual({ finished_at: NOW.toISOString(), total: 12, correct: 12 });
   });
@@ -518,7 +505,8 @@ describe('маршруты забега', () => {
       expect(answer.statusCode).toBe(200);
     }
 
-    await finishChecked(runId);
+    const finished = await app.inject({ method: 'POST', url: `/api/run/${runId}/finish` });
+    expect(finished.statusCode).toBe(200);
     const plan = await app.inject({ method: 'GET', url: '/api/run/plan' });
     expect(plan.json()).toMatchObject({ gate: { completed: 1, remaining: 2 } });
   });

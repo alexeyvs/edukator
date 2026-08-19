@@ -5,6 +5,12 @@ import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import type { Database } from 'better-sqlite3';
 import { buildServer, type ServerOptions } from '../server/index.js';
+import {
+  childHeaders,
+  startTenantServer,
+  withDefaultHeaders,
+  type TenantServer,
+} from './server-harness.js';
 import { openDatabase, SUBJECTS } from '../server/db.js';
 import { loadCurriculum } from '../server/curriculum.js';
 import { storeTasks } from '../server/codex/bank.js';
@@ -59,7 +65,8 @@ describe('маршруты занятия', () => {
   let seedDir: string;
   let app: FastifyInstance;
   let db: Database;
-  let dbPath: string;
+  let server: TenantServer;
+  let dataDir: string;
   let verdict: DisputeReview;
   const reviewed: DisputeContext[] = [];
   /** Фоновые разборы: тест их дожидается, вместо того чтобы гадать о таймингах. */
@@ -72,12 +79,16 @@ describe('маршруты занятия', () => {
    */
   const extra: FastifyInstance[] = [];
 
-  /** Сервер со своими настройками, закрываемый вместе с тестом. */
+  /**
+   * Сервер со своими настройками поверх того же каталога данных и с той же
+   * детской cookie: перезапуск сервера ребёнку устройства не меняет.
+   */
   function extraServer(
-    options: Omit<ServerOptions, 'dbPath'> = {},
+    options: Omit<ServerOptions, 'dataDir'> = {},
     dir?: string,
   ): FastifyInstance {
-    const instance = buildServer(dir ?? join(tempDir, 'curriculum'), { ...options, dbPath });
+    const instance = buildServer(dir ?? join(tempDir, 'curriculum'), { ...options, dataDir });
+    withDefaultHeaders(instance, childHeaders(server.childToken));
     extra.push(instance);
     return instance;
   }
@@ -89,7 +100,7 @@ describe('маршруты занятия', () => {
     mkdirSync(curriculumDir);
     mkdirSync(seedDir);
     writeCurriculum(curriculumDir);
-    dbPath = join(tempDir, 'session.db');
+    dataDir = join(tempDir, 'data');
 
     verdict = { studentCorrect: true, note: 'то же число словами' };
     reviewed.length = 0;
@@ -97,8 +108,9 @@ describe('маршруты занятия', () => {
     logged.length = 0;
     extra.length = 0;
 
-    app = buildServer(curriculumDir, {
-      dbPath,
+    server = await startTenantServer({
+      dataDir,
+      curriculumDir,
       seedDir,
       review: (context): Promise<DisputeReview> => {
         reviewed.push(context);
@@ -111,16 +123,16 @@ describe('маршруты занятия', () => {
         logged.push(message);
       },
     });
-    await app.ready();
+    app = server.app;
 
-    db = openDatabase(dbPath);
+    db = openDatabase(server.dbPath);
     for (const subject of SUBJECTS) storeTasks(db, `${subject}.a`, [task(), task()]);
   });
 
   afterEach(async () => {
     db.close();
     for (const instance of extra) await instance.close();
-    await app.close();
+    await server.close();
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -555,7 +567,10 @@ describe('маршруты занятия', () => {
           pending.push(job());
         },
       });
-      await recovered.ready();
+      // Незакрытый спор подхватывается при открытии базы ребёнка, а не при
+      // старте сервера: баз у сервера столько, сколько детей, и открывается
+      // база по первому обращению — до него разбирать было бы нечего и некому.
+      expect((await recovered.inject({ method: 'GET', url: '/api/gate/status' })).statusCode).toBe(200);
       await Promise.all(pending);
 
       expect(reviewed).toHaveLength(1);
@@ -684,7 +699,7 @@ describe('маршруты занятия', () => {
       const disputeId = (response.json() as { dispute_id: number }).dispute_id;
       expect(reviewed).toHaveLength(1);
 
-      const path = dbPath;
+      const path = server.dbPath;
       rmSync(path, { force: true });
       rmSync(`${path}-wal`, { force: true });
       rmSync(`${path}-shm`, { force: true });

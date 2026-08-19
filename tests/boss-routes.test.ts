@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { buildServer } from '../server/index.js';
+import { startTenantServer, type TenantServer } from './server-harness.js';
 import { openDatabase, SUBJECTS } from '../server/db.js';
 import { reserveBossTasks } from '../server/codex/bank.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
@@ -40,7 +40,7 @@ describe('маршруты босса', () => {
   let dir: string;
   let curriculumDir: string;
   let seedDir: string;
-  let dbPath: string;
+  let server: TenantServer;
   let app: FastifyInstance;
   let db: Database;
 
@@ -51,15 +51,20 @@ describe('маршруты босса', () => {
     mkdirSync(curriculumDir);
     mkdirSync(seedDir);
     writeCurriculum(curriculumDir);
-    dbPath = join(dir, 'boss.db');
-    app = buildServer(curriculumDir, { dbPath, seedDir, now: () => NOW, worker: false });
-    await app.ready();
-    db = openDatabase(dbPath);
+    server = await startTenantServer({
+      dataDir: join(dir, 'data'),
+      curriculumDir,
+      seedDir,
+      now: () => NOW,
+      worker: false,
+    });
+    app = server.app;
+    db = openDatabase(server.dbPath);
   });
 
   afterEach(async () => {
     db.close();
-    await app.close();
+    await server.close();
     rmSync(dir, { recursive: true, force: true });
   });
 

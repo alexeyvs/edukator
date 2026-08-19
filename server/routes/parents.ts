@@ -13,6 +13,7 @@
  * ничего не добавляет. Смысл PIN ровно один — «за детской машиной сейчас сидит
  * родитель».
  */
+import type { Database } from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { TopicGraph } from '../curriculum.js';
 import {
@@ -21,9 +22,18 @@ import {
   type ComputerAccessOverrideMode,
 } from '../computer-access.js';
 import { readDailyGate } from '../daily-gate.js';
-import { verifyParentPin } from '../parent-pin.js';
+import { readPinPepper, verifyParentPin } from '../parent-pin.js';
 import { readParentsDashboard, readParentsRunDetail } from '../parents.js';
-import type { Bearer } from '../auth.js';
+import {
+  checkLoginGate,
+  clearLoginFailures,
+  readParentEmail,
+  readParentPinHash,
+  recordLoginFailure,
+  type LoginTarget,
+} from '../control-db.js';
+import { clientAddress, readTrustedProxies } from '../client-address.js';
+import { headerValue, type Bearer } from '../auth.js';
 import {
   ROUTE_ACCESS,
   childIdParam,
@@ -33,25 +43,23 @@ import {
 } from './tenant-context.js';
 import { integrityPublicJson } from './integrity.js';
 
-export const PARENT_AUTH_FAILURE_LIMIT = 5;
-export const PARENT_AUTH_WINDOW_MS = 5 * 60 * 1000;
-
 type ComputerAccessMode = ComputerAccessOverrideMode | 'automatic';
-
-interface AuthFailure {
-  at: number;
-}
 
 export interface ParentsRoutesOptions {
   context: TenantContextResolver;
   graph: TopicGraph;
   /**
-   * Эталон PIN родителя — только хешем и только по его `id`: PIN свой у каждой
-   * семьи, и один общий на процесс означал бы, что чужой родитель управляет
-   * доступом к компьютеру не своего ребёнка.
+   * Управляющая база. В ней и эталон PIN семьи, и счётчик неудачных попыток:
+   * PIN свой у каждой семьи, и один общий на процесс означал бы, что чужой
+   * родитель управляет доступом к компьютеру не своего ребёнка.
    */
-  parentPinHash?: (parentId: string) => string | undefined;
+  control: Database;
   pinPepper?: string;
+  /**
+   * Кому верить в `X-Forwarded-For`. По умолчанию — список из окружения: без
+   * него счётчик по адресу считал бы адрес, присланный самим подбирающим.
+   */
+  trustedProxies?: Set<string>;
   now?: () => Date;
 }
 
@@ -88,19 +96,88 @@ function bearerPin(request: FastifyRequest): string {
 
 export function registerParentsRoutes(app: FastifyInstance, options: ParentsRoutesOptions): void {
   const now = options.now ?? ((): Date => new Date());
-  const failures = new Map<string, AuthFailure[]>();
+  const control = options.control;
+  const pepper = readPinPepper(options.pinPepper);
+  const trusted = options.trustedProxies
+    ?? readTrustedProxies(process.env['EDUKATOR_TRUSTED_PROXIES']);
 
-  function recentFailures(ip: string, at: number): AuthFailure[] {
-    const cutoff = at - PARENT_AUTH_WINDOW_MS;
-    const recent = (failures.get(ip) ?? []).filter((failure) => failure.at > cutoff);
-    if (recent.length === 0) failures.delete(ip);
-    else failures.set(ip, recent);
-    return recent;
+  /**
+   * Эталон PIN родителя этого ребёнка; `undefined` — PIN не настроен.
+   *
+   * Ненастроенный серверный pepper считается тем же состоянием: сверять эталон
+   * без него нечем, и честный 503 «PIN не настроен» полезнее молчаливого
+   * «неверный PIN» — по последнему родитель искал бы ошибку в своих цифрах.
+   */
+  function pinHash(context: TenantContext): string | undefined {
+    if (pepper === undefined) return undefined;
+    return readParentPinHash(control, context.child.parentId);
   }
 
-  /** Эталон PIN родителя этого ребёнка; `undefined` — PIN не настроен. */
-  function pinHash(context: TenantContext): string | undefined {
-    return options.parentPinHash?.(context.child.parentId);
+  /**
+   * Кого считает счётчик неудач. Учётная запись родителя и адрес клиента — те
+   * же два ключа, что и у входа по паролю, но с другим `kind`: подбор PIN за
+   * детской машиной не должен закрывать родителю вход по паролю, и наоборот.
+   *
+   * Счётчик живёт в `control.db`, а не в памяти процесса: процессная карта
+   * забывала всё при перезапуске — а перезапуск сервера подбирающий вызвать
+   * умеет, и пятиминутная пауза кончалась бы вместе с ним.
+   */
+  function pinTarget(context: TenantContext, request: FastifyRequest): LoginTarget {
+    const email = readParentEmail(control, context.child.parentId);
+    return {
+      kind: 'pin',
+      ...(email === undefined ? {} : { email }),
+      address: clientAddress({
+        socketAddress: request.socket.remoteAddress,
+        forwardedFor: headerValue(request.headers, 'x-forwarded-for'),
+        trusted,
+      }),
+    };
+  }
+
+  function authorizeChange(
+    context: TenantContext,
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ): FastifyReply | undefined {
+    if (!needsPin(context.bearer)) return undefined;
+    const expected = pinHash(context);
+    if (expected === undefined) {
+      return reply.code(503).send({
+        error: 'Управление доступом недоступно: PIN родителя не настроен',
+      });
+    }
+    if (bearerPin(request) === '') {
+      return reply.code(401).send({ error: 'Нужен PIN родителя' });
+    }
+
+    const target = pinTarget(context, request);
+    const current = now();
+    const gate = checkLoginGate(control, target, current);
+    if (!gate.allowed) {
+      const retryAfter = Math.max(1, Math.ceil(gate.retryAfterMs / 1000));
+      return reply
+        .header('retry-after', retryAfter)
+        .code(gate.reason === 'unavailable' ? 503 : 429)
+        .send({
+          error: gate.reason === 'unavailable'
+            ? 'Управление доступом временно недоступно'
+            : 'Слишком много неверных попыток PIN, повторите позже',
+        });
+    }
+
+    if (!verifyParentPin(expected, bearerPin(request), pepper)) {
+      const counted = recordLoginFailure(control, target, current);
+      if (counted.reason === 'unavailable') {
+        const retryAfter = Math.max(1, Math.ceil(counted.retryAfterMs / 1000));
+        return reply.header('retry-after', retryAfter).code(503).send({
+          error: 'Управление доступом временно недоступно',
+        });
+      }
+      return reply.code(401).send({ error: 'Неверный PIN родителя' });
+    }
+    clearLoginFailures(control, target);
+    return undefined;
   }
 
   function positiveId(value: string | undefined): number | undefined {
@@ -172,33 +249,9 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
 
-      const expected = pinHash(context);
       const current = now();
-      if (needsPin(context.bearer)) {
-        if (expected === undefined) {
-          return reply.code(503).send({
-            error: 'Управление доступом недоступно: PIN родителя не настроен',
-          });
-        }
-
-        const at = current.getTime();
-        const recent = recentFailures(request.ip, at);
-        if (recent.length >= PARENT_AUTH_FAILURE_LIMIT) {
-          const retryAfter = Math.max(
-            1,
-            Math.ceil(((recent[0]?.at ?? at) + PARENT_AUTH_WINDOW_MS - at) / 1000),
-          );
-          return reply.header('retry-after', retryAfter).code(429).send({
-            error: 'Слишком много неверных попыток PIN, повторите позже',
-          });
-        }
-
-        if (!verifyParentPin(expected, bearerPin(request), options.pinPepper)) {
-          failures.set(request.ip, [...recent, { at }]);
-          return reply.code(401).send({ error: 'Неверный PIN родителя' });
-        }
-        failures.delete(request.ip);
-      }
+      const denied = authorizeChange(context, request, reply);
+      if (denied !== undefined) return denied;
 
       const mode = readMode(request.body);
       if (mode === undefined) {
@@ -227,32 +280,8 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
       }
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
-
-      const expected = pinHash(context);
-      if (needsPin(context.bearer)) {
-        if (expected === undefined) {
-          return reply.code(503).send({
-            error: 'Управление доступом недоступно: PIN родителя не настроен',
-          });
-        }
-        const at = now().getTime();
-        const recent = recentFailures(request.ip, at);
-        if (recent.length >= PARENT_AUTH_FAILURE_LIMIT) {
-          const retryAfter = Math.max(
-            1,
-            Math.ceil(((recent[0]?.at ?? at) + PARENT_AUTH_WINDOW_MS - at) / 1000),
-          );
-          return reply.header('retry-after', retryAfter).code(429).send({
-            error: 'Слишком много неверных попыток PIN, повторите позже',
-          });
-        }
-        if (!verifyParentPin(expected, bearerPin(request), options.pinPepper)) {
-          failures.set(request.ip, [...recent, { at }]);
-          return reply.code(401).send({ error: 'Неверный PIN родителя' });
-        }
-        failures.delete(request.ip);
-      }
-
+      const denied = authorizeChange(context, request, reply);
+      if (denied !== undefined) return denied;
       const runId = positiveId(request.params.runId);
       const itemId = positiveId(request.params.itemId);
       if (runId === undefined || itemId === undefined) {

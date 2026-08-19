@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { buildServer, HOST } from '../server/index.js';
+import { HOST } from '../server/index.js';
+import { startTenantServer, type TenantServer } from './server-harness.js';
 import { openDatabase } from '../server/db.js';
 import { loadCurriculum } from '../server/curriculum.js';
 import { activeTopics } from '../server/scheduler.js';
@@ -31,17 +32,16 @@ function generated(question: string): GeneratedTask {
 
 describe('воркер рабочего сервера', () => {
   let tempDir: string;
-  let dbPath: string;
+  let server: TenantServer | undefined;
   let app: FastifyInstance | undefined;
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'edukator-server-worker-'));
     mkdirSync(join(tempDir, 'seed-bank'));
-    dbPath = join(tempDir, 'worker.db');
   });
 
   afterEach(async () => {
-    await app?.close();
+    await server?.close();
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -52,59 +52,65 @@ describe('воркер рабочего сервера', () => {
     const disputes = new CodexConcurrency(MAX_DISPUTE_CONCURRENCY);
     const releaseProduce: ((tasks: GeneratedTask[]) => void)[] = [];
     let releaseReview: ((review: DisputeReview) => void) | undefined;
+    let resolveProduce: (() => void) | undefined;
     const producingTopics: string[] = [];
     let peak = 0;
     const startedProduce = new Promise<void>((resolve) => {
-      app = buildServer(undefined, {
-        dbPath,
-        seedDir: join(tempDir, 'seed-bank'),
-        codexBudget: budget,
-        disputeBudget: disputes,
-        worker: {
-          topics: 2,
-          target: 2,
-          threshold: 2,
-          produce: (request) => {
-            producingTopics.push(request.topic.id);
-            peak = Math.max(peak, budget.active + disputes.active);
-            if (producingTopics.length === MAX_CODEX_CONCURRENCY) resolve();
-            return new Promise<GeneratedTask[]>((done) => {
-              releaseProduce.push(done);
-            });
-          },
-        },
-        review: () => {
+      resolveProduce = resolve;
+    });
+    server = await startTenantServer({
+      dataDir: join(tempDir, 'data'),
+      seedDir: join(tempDir, 'seed-bank'),
+      codexBudget: budget,
+      disputeBudget: disputes,
+      worker: {
+        topics: 2,
+        target: 2,
+        threshold: 2,
+        produce: (request) => {
+          producingTopics.push(request.topic.id);
           peak = Math.max(peak, budget.active + disputes.active);
-          return new Promise<DisputeReview>((done) => {
-            releaseReview = done;
+          if (producingTopics.length === MAX_CODEX_CONCURRENCY) resolveProduce?.();
+          return new Promise<GeneratedTask[]>((done) => {
+            releaseProduce.push(done);
           });
         },
-      });
+      },
+      review: () => {
+        peak = Math.max(peak, budget.active + disputes.active);
+        return new Promise<DisputeReview>((done) => {
+          releaseReview = done;
+        });
+      },
     });
-    const server = app;
-    if (server === undefined) throw new Error('сервер теста не собран');
+    app = server.app;
+    const running = app;
+    const childDb = server.dbPath;
 
-    // buildServer уже синхронизировал карту; одно готовое задание оставляет тему
-    // голодной для воркера и одновременно даёт открыть спор через HTTP.
-    const db = openDatabase(dbPath);
+    // Аренда уже открыта прогревом, а значит и карта синхронизирована; одно
+    // готовое задание оставляет тему голодной для воркера и одновременно даёт
+    // открыть спор через HTTP.
+    const db = openDatabase(server.dbPath);
     const graph = loadCurriculum();
     const topic = activeTopics(db, graph, 1)[0];
     if (topic === undefined) throw new Error('планировщик не выбрал тему для теста');
     storeTasks(db, topic.id, [generated('В инвентаре 90 монет, половину потратили. Сколько осталось?')]);
     db.close();
 
-    await server.listen({ host: HOST, port: 0 });
+    // Воркер заводится на уже открытую базу при переходе сервера к
+    // прослушиванию: греть банк ребёнка, который ни разу не пришёл, незачем.
+    await running.listen({ host: HOST, port: 0 });
     await startedProduce;
 
-    const next = await server.inject({ method: 'GET', url: '/api/session/next' });
+    const next = await running.inject({ method: 'GET', url: '/api/session/next' });
     const taskId = (next.json() as { task: { id: number } }).task.id;
-    const answer = await server.inject({
+    const answer = await running.inject({
       method: 'POST',
       url: '/api/session/answer',
       payload: { task_id: taskId, answer: '44' },
     });
     const attemptId = (answer.json() as { attempt_id: number }).attempt_id;
-    const dispute = await server.inject({
+    const dispute = await running.inject({
       method: 'POST',
       url: '/api/session/dispute',
       payload: { attempt_id: attemptId },
@@ -120,7 +126,7 @@ describe('воркер рабочего сервера', () => {
     expect(disputes.tryRun(() => Promise.resolve())).toBeUndefined();
 
     let closed = false;
-    const closing = server.close().then(() => {
+    const closing = running.close().then(() => {
       closed = true;
     });
     await Promise.resolve();
@@ -135,7 +141,7 @@ describe('воркер рабочего сервера', () => {
     });
     await closing;
 
-    const reopened = openDatabase(dbPath);
+    const reopened = openDatabase(childDb);
     expect(reopened.prepare('SELECT COUNT(*) AS n FROM task_bank WHERE topic_id = ?').get(topic.id))
       .toEqual({ n: 3 });
     reopened.close();
@@ -148,8 +154,8 @@ describe('воркер рабочего сервера', () => {
     const waiting = new Promise<void>((resolve) => {
       reachedWait = resolve;
     });
-    app = buildServer(undefined, {
-      dbPath,
+    server = await startTenantServer({
+      dataDir: join(tempDir, 'data'),
       seedDir: join(tempDir, 'seed-bank'),
       log: (message) => logged.push(message),
       worker: {
@@ -162,8 +168,9 @@ describe('воркер рабочего сервера', () => {
         },
       },
     });
+    app = server.app;
 
-    const db = openDatabase(dbPath);
+    const db = openDatabase(server.dbPath);
     const topic = activeTopics(db, loadCurriculum(), 1)[0];
     if (topic === undefined) throw new Error('планировщик не выбрал тему для теста');
     storeTasks(db, topic.id, [generated('В инвентаре 90 монет, половину потратили. Сколько осталось?')]);

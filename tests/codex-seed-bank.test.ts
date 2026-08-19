@@ -12,6 +12,7 @@ import {
   type TopicGraph,
 } from '../server/curriculum.js';
 import { buildServer } from '../server/index.js';
+import { childHeaders, startTenantServer } from './server-harness.js';
 import { countAvailable, storeTasks, takeTask } from '../server/codex/bank.js';
 import { CodexUnavailableError } from '../server/codex/client.js';
 import { runWarmupCycle } from '../server/codex/worker.js';
@@ -676,10 +677,12 @@ describe('посевной банк', () => {
       }
     });
 
-    it('заливается при старте сервера, а второй старт ничего не добавляет', async () => {
-      const dbPath = join(tempDir, 'server.db');
-      const first = buildServer(undefined, { dbPath });
-      await first.ready();
+    // Посев заливается при открытии базы ребёнка, а не при старте сервера: баз
+    // у сервера столько, сколько детей, и открывается база по первому обращению.
+    it('заливается при открытии базы ребёнка, а второй старт ничего не добавляет', async () => {
+      const dataDir = join(tempDir, 'данные');
+      const first = await startTenantServer({ dataDir });
+      const dbPath = first.dbPath;
       await first.close();
 
       const fresh = openDatabase(dbPath);
@@ -687,8 +690,8 @@ describe('посевной банк', () => {
         (fresh.prepare('SELECT COUNT(*) AS n FROM task_bank').get() as { n: number }).n;
       const seeded = count();
 
-      const second = buildServer(undefined, { dbPath });
-      await second.ready();
+      const second = buildServer(undefined, { dataDir });
+      await second.inject({ method: 'GET', url: '/api/gate/status', headers: childHeaders(first.childToken) });
       await second.close();
 
       expect(seeded).toBeGreaterThanOrEqual(90);

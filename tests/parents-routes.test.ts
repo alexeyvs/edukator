@@ -4,25 +4,27 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { buildServer } from '../server/index.js';
 import { hashParentPin } from '../server/parent-pin.js';
 import { openDatabase, SUBJECTS } from '../server/db.js';
 import { loadCurriculum } from '../server/curriculum.js';
+import { openControlDatabase, setParentPin } from '../server/control-db.js';
+import { controlDatabasePath, ensureDataDir } from '../server/data-dir.js';
 import { registerParentsRoutes, registerUnavailableParents } from '../server/routes/parents.js';
-import {
-  SINGLE_TENANT_CHILD_ID,
-} from '../server/routes/tenant-context.js';
-import { fakeContext } from './tenant-context-helper.js';
+import { fakeContext, FAKE_CHILD_ID } from './tenant-context-helper.js';
+import { startTenantServer, type TenantServer } from './server-harness.js';
 
 const NOW = new Date('2026-08-08T12:00:00.000Z');
 const PARENT_PIN = '123456';
 const PIN_PEPPER = 'pepper-для-тестов-достаточной-длины';
+/** Пятнадцать минут паузы `LOGIN_LOCKOUT_MS` в секундах ответа. */
+const LOCKOUT_SECONDS = '900';
 
 describe('маршрут родителей', () => {
   let dir: string;
   let curriculumDir: string;
   let seedDir: string;
-  let dbPath: string;
+  let clock: Date;
+  let server: TenantServer;
   let app: FastifyInstance;
   let db: Database;
 
@@ -39,18 +41,20 @@ describe('маршрут родителей', () => {
           exam_weight: 3, difficulty: 2, prereqs: [], answer_format: 'text', prompt_seed: 'Проверяй знания по теме' }],
       }));
     }
-    dbPath = join(dir, 'parents.db');
-    process.env.EDUKATOR_PARENT_PIN = '999999';
-    process.env.EDUKATOR_PIN_PEPPER = PIN_PEPPER;
-    app = buildServer(curriculumDir, {
-      dbPath,
+    clock = NOW;
+    server = await startTenantServer({
+      dataDir: join(dir, 'data'),
+      curriculumDir,
       seedDir,
-      now: () => NOW,
+      now: () => clock,
       worker: false,
-      parentPin: PARENT_PIN,
+      pinPepper: PIN_PEPPER,
     });
-    await app.ready();
-    db = openDatabase(dbPath);
+    app = server.app;
+    db = openDatabase(server.dbPath);
+    // PIN живёт в `control.db` и ставится родительским маршрутом семьи; здесь
+    // он кладётся напрямую — предмет теста не в том, как его завели.
+    setParentPin(server.control, server.parentId, hashParentPin(PARENT_PIN, PIN_PEPPER));
   });
 
   it('по запросу раскрывает вопросы, ответы, эталон и время завершённого занятия', async () => {
@@ -73,7 +77,7 @@ describe('маршрут родителей', () => {
 
     const response = await app.inject({
       method: 'GET',
-      url: `/api/parents/${SINGLE_TENANT_CHILD_ID}/runs/${String(runId)}`,
+      url: `/api/parents/${server.childId}/runs/${String(runId)}`,
     });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
@@ -99,11 +103,11 @@ describe('маршрут родителей', () => {
   it('проверяет id и не раскрывает занятие вне недельной сводки', async () => {
     expect((await app.inject({
       method: 'GET',
-      url: `/api/parents/${SINGLE_TENANT_CHILD_ID}/runs/nope`,
+      url: `/api/parents/${server.childId}/runs/nope`,
     })).statusCode).toBe(400);
     const missing = await app.inject({
       method: 'GET',
-      url: `/api/parents/${SINGLE_TENANT_CHILD_ID}/runs/999`,
+      url: `/api/parents/${server.childId}/runs/999`,
     });
     expect(missing.statusCode).toBe(404);
     expect(missing.json()).toEqual({ error: 'Занятие не найдено в текущей недельной сводке' });
@@ -111,9 +115,7 @@ describe('маршрут родителей', () => {
 
   afterEach(async () => {
     db.close();
-    await app.close();
-    delete process.env.EDUKATOR_PARENT_PIN;
-    delete process.env.EDUKATOR_PIN_PEPPER;
+    await server.close();
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -132,7 +134,7 @@ describe('маршрут родителей', () => {
        VALUES (?, 'math.internal-secret', 'ответ ученика', 0, 60000, ?)`,
     ).run(taskId, NOW.toISOString());
 
-    const response = await app.inject({ method: 'GET', url: `/api/parents/${SINGLE_TENANT_CHILD_ID}` });
+    const response = await app.inject({ method: 'GET', url: `/api/parents/${server.childId}` });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       generatedAt: NOW.toISOString(),
@@ -155,7 +157,7 @@ describe('маршрут родителей', () => {
   it('устанавливает оба ручных режима и возвращает управление автоматике', async () => {
     const change = async (mode: string) => app.inject({
       method: 'PUT',
-      url: `/api/parents/${SINGLE_TENANT_CHILD_ID}/computer-access`,
+      url: `/api/parents/${server.childId}/computer-access`,
       headers: { authorization: `Bearer ${PARENT_PIN}` },
       payload: { mode },
     });
@@ -179,7 +181,7 @@ describe('маршрут родителей', () => {
       override: { mode: 'unlocked' },
       unlocked: true,
     });
-    expect((await app.inject({ method: 'GET', url: `/api/parents/${SINGLE_TENANT_CHILD_ID}` })).json())
+    expect((await app.inject({ method: 'GET', url: `/api/parents/${server.childId}` })).json())
       .toMatchObject({ computerAccess: { override: { mode: 'unlocked' }, unlocked: true } });
 
     const automatic = await change('automatic');
@@ -191,60 +193,69 @@ describe('маршрут родителей', () => {
     });
   });
 
-  it('читает PIN из EDUKATOR_PARENT_PIN без тестовой подмены', async () => {
-    process.env.EDUKATOR_PARENT_PIN = '654321';
-    const fromEnvironment = buildServer(curriculumDir, {
-      dbPath,
-      seedDir,
-      now: () => NOW,
-      worker: false,
+  // PIN свой у каждой семьи: общий на процесс означал бы, что сосед по серверу
+  // управляет доступом к компьютеру чужого ребёнка своими цифрами.
+  it('не принимает PIN одной семьи на ребёнке другой', async () => {
+    const other = server.addFamily('сосед@example.com');
+
+    const foreign = await app.inject({
+      method: 'PUT',
+      url: `/api/parents/${other.child.childId}/computer-access`,
+      headers: { ...other.child.headers, authorization: `Bearer ${PARENT_PIN}` },
+      payload: { mode: 'blocked' },
     });
-    await fromEnvironment.ready();
-    try {
-      const response = await fromEnvironment.inject({
-        method: 'PUT',
-        url: `/api/parents/${SINGLE_TENANT_CHILD_ID}/computer-access`,
-        headers: { authorization: 'Bearer 654321' },
-        payload: { mode: 'automatic' },
-      });
-      expect(response.statusCode).toBe(200);
-    } finally {
-      await fromEnvironment.close();
-      process.env.EDUKATOR_PARENT_PIN = '999999';
-    }
+
+    // У соседа PIN не настроен вовсе, и чужой сюда не подходит ни при каких
+    // цифрах: 503 «не настроен», а не 200 и не «неверный PIN».
+    expect(foreign.statusCode).toBe(503);
+    expect(foreign.json()).toEqual({
+      error: 'Управление доступом недоступно: PIN родителя не настроен',
+    });
+    expect((await app.inject({
+      method: 'GET',
+      url: `/api/parents/${other.child.childId}`,
+      headers: other.child.headers,
+    })).json()).toMatchObject({ computerAccess: { configured: false } });
   });
 
-  it('без EDUKATOR_PIN_PEPPER считает PIN ненастроенным, а не принимает его', async () => {
-    process.env.EDUKATOR_PARENT_PIN = '654321';
-    delete process.env.EDUKATOR_PIN_PEPPER;
-    const withoutPepper = buildServer(curriculumDir, {
-      dbPath,
+  it('без серверного pepper считает PIN ненастроенным, а не принимает его', async () => {
+    const withoutPepper = await startTenantServer({
+      dataDir: join(dir, 'без-pepper'),
+      curriculumDir,
       seedDir,
-      now: () => NOW,
+      now: () => clock,
       worker: false,
+      // Явно пустой pepper: короткий и отсутствующий — одно и то же состояние.
+      pinPepper: 'короткий',
     });
-    await withoutPepper.ready();
     try {
-      const status = await withoutPepper.inject({ method: 'GET', url: `/api/parents/${SINGLE_TENANT_CHILD_ID}` });
-      expect(status.json().computerAccess.configured).toBe(false);
-      const response = await withoutPepper.inject({
+      setParentPin(
+        withoutPepper.control,
+        withoutPepper.parentId,
+        hashParentPin(PARENT_PIN, PIN_PEPPER),
+      );
+      const status = await withoutPepper.app.inject({
+        method: 'GET',
+        url: `/api/parents/${withoutPepper.childId}`,
+      });
+      expect(status.json()).toMatchObject({ computerAccess: { configured: false } });
+
+      const response = await withoutPepper.app.inject({
         method: 'PUT',
-        url: `/api/parents/${SINGLE_TENANT_CHILD_ID}/computer-access`,
-        headers: { authorization: 'Bearer 654321' },
+        url: `/api/parents/${withoutPepper.childId}/computer-access`,
+        headers: { authorization: `Bearer ${PARENT_PIN}` },
         payload: { mode: 'automatic' },
       });
       expect(response.statusCode).toBe(503);
     } finally {
       await withoutPepper.close();
-      process.env.EDUKATOR_PARENT_PIN = '999999';
-      process.env.EDUKATOR_PIN_PEPPER = PIN_PEPPER;
     }
   });
 
   it('возвращает 400 для некорректного режима и 401 для неверного Bearer PIN', async () => {
     const malformed = await app.inject({
       method: 'PUT',
-      url: `/api/parents/${SINGLE_TENANT_CHILD_ID}/computer-access`,
+      url: `/api/parents/${server.childId}/computer-access`,
       headers: { authorization: `Bearer ${PARENT_PIN}` },
       payload: { mode: 'forever' },
     });
@@ -256,7 +267,7 @@ describe('маршрут родителей', () => {
     for (const authorization of [undefined, 'Basic 123456', 'Bearer 999999']) {
       const response = await app.inject({
         method: 'PUT',
-        url: `/api/parents/${SINGLE_TENANT_CHILD_ID}/computer-access`,
+        url: `/api/parents/${server.childId}/computer-access`,
         ...(authorization === undefined ? {} : { headers: { authorization } }),
         payload: { mode: 'blocked' },
       });
@@ -265,86 +276,87 @@ describe('маршрут родителей', () => {
     }
   });
 
-  it('после пяти ошибок ограничивает только этот IP на пять минут', async () => {
-    let clock = NOW.getTime();
-    const limited = Fastify();
-    registerParentsRoutes(limited, {
-      context: fakeContext(db),
-      graph: loadCurriculum(curriculumDir),
-      parentPinHash: () => hashParentPin(PARENT_PIN, PIN_PEPPER),
-      pinPepper: PIN_PEPPER,
-      now: () => new Date(clock),
-    });
-    await limited.ready();
-    const request = (pin: string, remoteAddress: string) => limited.inject({
-      method: 'PUT',
-      url: `/api/parents/${SINGLE_TENANT_CHILD_ID}/computer-access`,
-      remoteAddress,
-      headers: { authorization: `Bearer ${pin}` },
-      payload: { mode: 'blocked' },
-    });
-    try {
-      for (let attempt = 0; attempt < 5; attempt += 1) {
-        expect((await request('000000', '192.0.2.1')).statusCode).toBe(401);
+  describe('счётчик неудачных PIN', () => {
+    function attempt(pin: string, remoteAddress = '192.0.2.1', childId = server.childId) {
+      return app.inject({
+        method: 'PUT',
+        url: `/api/parents/${childId}/computer-access`,
+        remoteAddress,
+        headers: { authorization: `Bearer ${pin}` },
+        payload: { mode: 'blocked' },
+      });
+    }
+
+    // Счётчик живёт в `control.db`, а не в памяти процесса: иначе перезапуск
+    // сервера — то, что подбирающий вызвать умеет, — снимал бы паузу.
+    it('после пяти ошибок закрывает семью и с другого адреса', async () => {
+      for (let index = 0; index < 5; index += 1) {
+        expect((await attempt('000000')).statusCode).toBe(401);
       }
-      const blocked = await request(PARENT_PIN, '192.0.2.1');
+
+      const blocked = await attempt(PARENT_PIN);
       expect(blocked.statusCode).toBe(429);
-      expect(blocked.headers['retry-after']).toBe('300');
-      expect((await request(PARENT_PIN, '192.0.2.2')).statusCode).toBe(200);
+      expect(blocked.headers['retry-after']).toBe(LOCKOUT_SECONDS);
+      // Смена адреса паузу не снимает: считается ещё и учётная запись родителя.
+      expect((await attempt(PARENT_PIN, '198.51.100.7')).statusCode).toBe(429);
 
-      clock += 5 * 60 * 1000;
-      expect((await request(PARENT_PIN, '192.0.2.1')).statusCode).toBe(200);
-    } finally {
-      await limited.close();
-    }
-  });
+      clock = new Date(NOW.getTime() + 15 * 60 * 1000 + 1);
+      expect((await attempt(PARENT_PIN)).statusCode).toBe(200);
+    });
 
-  it('успешный PIN до лимита очищает ошибки этого IP', async () => {
-    const isolated = Fastify();
-    registerParentsRoutes(isolated, {
-      context: fakeContext(db),
-      graph: loadCurriculum(curriculumDir),
-      parentPinHash: () => hashParentPin(PARENT_PIN, PIN_PEPPER),
-      pinPepper: PIN_PEPPER,
-      now: () => NOW,
-    });
-    await isolated.ready();
-    const request = (pin: string) => isolated.inject({
-      method: 'PUT',
-      url: `/api/parents/${SINGLE_TENANT_CHILD_ID}/computer-access`,
-      remoteAddress: '192.0.2.10',
-      headers: { authorization: `Bearer ${pin}` },
-      payload: { mode: 'blocked' },
-    });
-    try {
-      for (let attempt = 0; attempt < 4; attempt += 1) {
-        expect((await request('000000')).statusCode).toBe(401);
+    // Порог по адресу выше почтового намеренно: за одним адресом стоит вся
+    // семья вместе с NAT, и общий порог означал бы, что ошибившийся брат
+    // закрывает вход соседней семье.
+    it('не закрывает соседнюю семью, ошибавшуюся с того же адреса', async () => {
+      const other = server.addFamily('сосед@example.com');
+      setParentPin(server.control, other.parentId, hashParentPin('654321', PIN_PEPPER));
+      for (let index = 0; index < 5; index += 1) {
+        expect((await attempt('000000')).statusCode).toBe(401);
       }
-      expect((await request(PARENT_PIN)).statusCode).toBe(200);
-      for (let attempt = 0; attempt < 5; attempt += 1) {
-        expect((await request('000000')).statusCode).toBe(401);
+
+      const neighbour = await app.inject({
+        method: 'PUT',
+        url: `/api/parents/${other.child.childId}/computer-access`,
+        remoteAddress: '192.0.2.1',
+        headers: { ...other.child.headers, authorization: 'Bearer 654321' },
+        payload: { mode: 'blocked' },
+      });
+
+      expect((await attempt(PARENT_PIN)).statusCode).toBe(429);
+      expect(neighbour.statusCode).toBe(200);
+    });
+
+    it('верный PIN до предела гасит почтовый счётчик', async () => {
+      for (let index = 0; index < 4; index += 1) {
+        expect((await attempt('000000')).statusCode).toBe(401);
       }
-      expect((await request(PARENT_PIN)).statusCode).toBe(429);
-    } finally {
-      await isolated.close();
-    }
+      expect((await attempt(PARENT_PIN)).statusCode).toBe(200);
+
+      for (let index = 0; index < 5; index += 1) {
+        expect((await attempt('000000')).statusCode).toBe(401);
+      }
+      expect((await attempt(PARENT_PIN)).statusCode).toBe(429);
+    });
   });
 
   it('возвращает 503, когда PIN не настроен', async () => {
     const withoutPin = Fastify();
+    const control = openControlDatabase(controlDatabasePath(ensureDataDir(join(dir, 'без-pin'))));
     registerParentsRoutes(withoutPin, {
       context: fakeContext(db),
       graph: loadCurriculum(curriculumDir),
+      control,
+      pinPepper: PIN_PEPPER,
       now: () => NOW,
     });
     await withoutPin.ready();
     try {
-      const dashboard = await withoutPin.inject({ method: 'GET', url: `/api/parents/${SINGLE_TENANT_CHILD_ID}` });
+      const dashboard = await withoutPin.inject({ method: 'GET', url: `/api/parents/${FAKE_CHILD_ID}` });
       expect(dashboard.statusCode).toBe(200);
       expect(dashboard.json()).toMatchObject({ computerAccess: { configured: false } });
       const response = await withoutPin.inject({
         method: 'PUT',
-        url: `/api/parents/${SINGLE_TENANT_CHILD_ID}/computer-access`,
+        url: `/api/parents/${FAKE_CHILD_ID}/computer-access`,
         payload: { mode: 'blocked' },
       });
       expect(response.statusCode).toBe(503);
@@ -353,31 +365,35 @@ describe('маршрут родителей', () => {
       });
     } finally {
       await withoutPin.close();
+      control.close();
     }
   });
 
   it('отдаёт явный 503 при отвязанной и не поднятой базе', async () => {
     const detached = Fastify();
+    const control = openControlDatabase(controlDatabasePath(ensureDataDir(join(dir, 'отвязанная'))));
     registerParentsRoutes(detached, {
       context: fakeContext(db, { available: () => false }),
       graph: loadCurriculum(curriculumDir),
+      control,
     });
     const unavailable = Fastify();
     registerUnavailableParents(unavailable, 'карта тем не загружена');
     await Promise.all([detached.ready(), unavailable.ready()]);
     try {
-      expect((await detached.inject({ method: 'GET', url: `/api/parents/${SINGLE_TENANT_CHILD_ID}` })).statusCode).toBe(503);
-      expect((await unavailable.inject({ method: 'GET', url: `/api/parents/${SINGLE_TENANT_CHILD_ID}` })).statusCode).toBe(503);
-      expect((await detached.inject({ method: 'GET', url: `/api/parents/${SINGLE_TENANT_CHILD_ID}/runs/1` })).statusCode).toBe(503);
-      expect((await unavailable.inject({ method: 'GET', url: `/api/parents/${SINGLE_TENANT_CHILD_ID}/runs/1` })).statusCode).toBe(503);
+      expect((await detached.inject({ method: 'GET', url: `/api/parents/${FAKE_CHILD_ID}` })).statusCode).toBe(503);
+      expect((await unavailable.inject({ method: 'GET', url: `/api/parents/${FAKE_CHILD_ID}` })).statusCode).toBe(503);
+      expect((await detached.inject({ method: 'GET', url: `/api/parents/${FAKE_CHILD_ID}/runs/1` })).statusCode).toBe(503);
+      expect((await unavailable.inject({ method: 'GET', url: `/api/parents/${FAKE_CHILD_ID}/runs/1` })).statusCode).toBe(503);
       expect((await detached.inject({
-        method: 'PUT', url: `/api/parents/${SINGLE_TENANT_CHILD_ID}/computer-access`, payload: { mode: 'blocked' },
+        method: 'PUT', url: `/api/parents/${FAKE_CHILD_ID}/computer-access`, payload: { mode: 'blocked' },
       })).statusCode).toBe(503);
       expect((await unavailable.inject({
-        method: 'PUT', url: `/api/parents/${SINGLE_TENANT_CHILD_ID}/computer-access`, payload: { mode: 'blocked' },
+        method: 'PUT', url: `/api/parents/${FAKE_CHILD_ID}/computer-access`, payload: { mode: 'blocked' },
       })).statusCode).toBe(503);
     } finally {
       await Promise.all([detached.close(), unavailable.close()]);
+      control.close();
     }
   });
 });

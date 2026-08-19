@@ -763,6 +763,21 @@ export function readParentPinHash(db: Database.Database, parentId: string): stri
   return row === undefined || row.pin_hash === null ? undefined : row.pin_hash;
 }
 
+/**
+ * Адрес родителя по `id`. Нужен счётчику неудач PIN: считает он по учётной
+ * записи (`scope = 'email'`), а маршрут родителей знает только `parent_id`
+ * ребёнка, чью сводку открыли. Отключённый родитель отсеивается здесь же —
+ * его PIN всё равно уже ничего не подтверждает.
+ */
+export function readParentEmail(db: Database.Database, parentId: string): string | undefined {
+  const row = db
+    .prepare<[string], { email: string }>(
+      'SELECT email FROM parents WHERE id = ? AND disabled_at IS NULL',
+    )
+    .get(parentId);
+  return row?.email;
+}
+
 /* ─── Дети и устройства ─────────────────────────────────────────────────── */
 
 /**

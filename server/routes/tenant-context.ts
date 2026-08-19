@@ -22,8 +22,6 @@ import {
   type ResolvedTenant,
   type TenantOpener,
 } from '../auth.js';
-import type { ChildSummary } from '../control-db.js';
-import type { Tenant } from '../tenant-registry.js';
 
 /** Кто пришёл, к какому ребёнку и с какой базой. */
 export type TenantContext = ResolvedTenant;
@@ -100,53 +98,4 @@ export function createTenantContext(options: CreateTenantContextOptions): Tenant
       ...(context.allow === undefined ? {} : { allow: context.allow }),
       ...(context.childId === undefined ? {} : { childId: context.childId }),
     });
-}
-
-/**
- * Идентификатор ребёнка единственной базы. Он нужен, пока `buildServer` держит
- * одну базу и ещё не открывает управляющую (задача 15): маршруты уже спрашивают
- * ребёнка контекстом, а называть его в адресе всё равно чем-то надо.
- */
-export const SINGLE_TENANT_CHILD_ID = '00000000';
-
-/**
- * Разрешение для сервера с единственной базой — временная опора до задачи 15,
- * пока `buildServer` не открывает `control.db` и не собирает реестр.
- *
- * Предъявитель здесь один и тот же, детский: у беспарольного сервера никакого
- * другого и не было. Проверять он умеет ровно одно — что названный в адресе
- * ребёнок тот самый; чужой `id` отсюда отвечает так же, как из рабочего
- * разрешения, а не открывает единственную базу под чужим именем.
- */
-export function singleTenantContext(tenant: Tenant): TenantContextResolver {
-  const child: ChildSummary = {
-    id: tenant.childId,
-    parentId: tenant.childId,
-    name: 'Ученик',
-    status: 'ready',
-    createdAt: new Date(0).toISOString(),
-  };
-  return (_request, context = {}) => {
-    if (context.childId !== undefined && context.childId !== tenant.childId) {
-      throw new AuthError('no-child', `Ребёнок ${context.childId} не обслуживается`);
-    }
-    const allow = context.allow;
-    if (allow !== undefined && !allow.includes('browser')) {
-      throw new AuthError('forbidden', 'Предъявителю browser сюда нельзя');
-    }
-    return {
-      bearer: {
-        kind: 'browser',
-        child: {
-          childId: tenant.childId,
-          parentId: tenant.childId,
-          deviceId: 1,
-          kind: 'browser',
-          name: child.name,
-        },
-      },
-      child,
-      tenant,
-    };
-  };
 }

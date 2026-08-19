@@ -251,3 +251,14 @@ export function registerFamilyRoutes(app: FastifyInstance, options: FamilyRoutes
     return reply.send({ pinConfigured: true });
   });
 }
+
+/** Заглушка управления семьёй на сервере без управляющей базы или карты тем. */
+export function registerUnavailableFamily(app: FastifyInstance, reason: string): void {
+  const send = (_request: unknown, reply: FastifyReply): FastifyReply =>
+    reply.code(503).send({ error: `Управление семьёй недоступно: ${reason}` });
+  app.get('/api/family', send);
+  app.post('/api/family/children', send);
+  app.post('/api/family/children/:id/devices', send);
+  app.post('/api/family/devices/:id/revoke', send);
+  app.post('/api/family/pin', send);
+}
