@@ -19,6 +19,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type Database from 'better-sqlite3';
 import { syncDirectory } from './atomic-write.js';
+import { backupDatabase } from './backup.js';
 import { openDatabase } from './db.js';
 import {
   CHILDREN_DIR,
@@ -124,6 +125,16 @@ function prepareDatabase(path: string): void {
   }
 }
 
+export interface ProvisionChildOptions {
+  /**
+   * База, с которой снимается копия вместо создания пустой. Так переносится
+   * однопользовательская `edukator.db`: копия идёт через `VACUUM INTO`
+   * (`server/backup.ts`), оригинал остаётся нетронутым откатом, а схема
+   * догоняется тем же `openDatabase`, что и у пустой базы.
+   */
+  source?: string;
+}
+
 export interface ProvisionChildResult {
   path: string;
   /** `false`, если база уже была на месте и заведение только доводилось до конца. */
@@ -147,6 +158,7 @@ export function provisionChildDatabase(
   control: Database.Database,
   childId: string,
   dir: string = dataDir(),
+  options: ProvisionChildOptions = {},
 ): ProvisionChildResult {
   const child = readChild(control, childId);
   if (child === undefined) throw new Error(`Ребёнка ${childId} нет в управляющей базе`);
@@ -168,6 +180,10 @@ export function provisionChildDatabase(
 
     dropStaleTemporaries(root, childId);
     temp = `${target}.${randomBytes(8).toString('hex')}${TEMP_SUFFIX}`;
+    // Копия снимается до `prepareDatabase`: миграция обязана идти уже по
+    // перенесённым данным, иначе она пробежала бы по пустой базе, а прогресс
+    // приехал бы следом со схемой прошлой версии.
+    if (options.source !== undefined) backupDatabase(options.source, temp);
     prepareDatabase(temp);
     const handle = openSync(temp, 'r');
     try {

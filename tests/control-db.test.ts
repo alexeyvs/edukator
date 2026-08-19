@@ -26,9 +26,12 @@ import {
   clearLoginFailures,
   createChild,
   createParent,
+  disableParent,
+  findParentByEmail,
   hashToken,
   issueDeviceInvite,
   issueParentInvite,
+  listAllChildren,
   listChildren,
   listDevices,
   loginParent,
@@ -47,6 +50,7 @@ import {
   redeemParentInvite,
   reserveCodexCall,
   resolveChildDevice,
+  setParentPassword,
   setParentPin,
   resolveParentSession,
   retireChild,
@@ -1237,5 +1241,143 @@ describe('счётчики неудачных входов', () => {
     expect(LOGIN_EMAIL_FAILURE_LIMIT).toBe(5);
     expect(LOGIN_ADDRESS_FAILURE_LIMIT).toBe(20);
     expect(LOGIN_LOCKOUT_MS).toBe(15 * 60 * 1000);
+  });
+});
+
+describe('обслуживание родителей', () => {
+  const NOW = new Date('2026-08-19T10:00:00.000Z');
+  const PASSWORD = 'пароль-подлиннее';
+
+  function at(ms: number): Date {
+    return new Date(NOW.getTime() + ms);
+  }
+
+  it('находит родителя по адресу в любом регистре и не показывает хешей', () => {
+    const db = open();
+    const parentId = createParent(db, 'Mama@Example.COM', NOW);
+
+    const found = findParentByEmail(db, ' MAMA@example.com ');
+    expect(found).toEqual({
+      id: parentId,
+      email: 'mama@example.com',
+      hasPassword: false,
+      hasPin: false,
+      createdAt: NOW.toISOString(),
+    });
+    // Хеши наружу не выходят вовсе: скрипту они не нужны, а напечатать их
+    // проще всего именно из такой выборки.
+    expect(JSON.stringify(found)).not.toContain('scrypt');
+  });
+
+  it('отвечает «нет такого» и на неразобранный адрес, и на чужой', () => {
+    const db = open();
+    createParent(db, 'mama@example.com', NOW);
+
+    expect(findParentByEmail(db, 'не адрес')).toBeUndefined();
+    expect(findParentByEmail(db, '')).toBeUndefined();
+    expect(findParentByEmail(db, 'papa@example.com')).toBeUndefined();
+  });
+
+  it('показывает отключённого родителя, а не прячет его', () => {
+    const db = open();
+    const parentId = createParent(db, 'mama@example.com', NOW);
+    expect(disableParent(db, parentId, at(HOUR_MS))).toBe(true);
+
+    // Иначе повторное заведение упало бы на UNIQUE, а скрипт сказал бы
+    // «такого родителя нет» — про того, кто в базе есть.
+    expect(findParentByEmail(db, 'mama@example.com')).toMatchObject({
+      id: parentId,
+      disabledAt: at(HOUR_MS).toISOString(),
+    });
+  });
+
+  it('меняет пароль и гасит прежние сессии', () => {
+    const db = open();
+    const parentId = createParent(db, 'mama@example.com', NOW);
+    const invite = issueParentInvite(db, parentId, NOW);
+    const redeemed = redeemParentInvite(db, invite.token, PASSWORD, NOW);
+    expect(redeemed.ok).toBe(true);
+    if (!redeemed.ok) return;
+
+    setParentPassword(db, parentId, 'совсем-другой-пароль', at(HOUR_MS));
+
+    // Старая сессия и старый пароль обязаны перестать работать: иначе смена
+    // пароля после кражи ноутбука ничего бы не меняла.
+    expect(resolveParentSession(db, redeemed.session.token, at(2 * HOUR_MS))).toBeUndefined();
+    expect(loginParent(db, 'mama@example.com', PASSWORD, at(2 * HOUR_MS))).toEqual({
+      ok: false,
+      reason: 'bad-password',
+    });
+    const login = loginParent(db, 'mama@example.com', 'совсем-другой-пароль', at(2 * HOUR_MS));
+    expect(login.ok).toBe(true);
+    expect(findParentByEmail(db, 'mama@example.com')?.hasPassword).toBe(true);
+  });
+
+  it('гасит токен детского устройства сменой родительского пароля', () => {
+    const db = open();
+    const parentId = createParent(db, 'mama@example.com', NOW);
+    const childId = createChild(db, parentId, 'Сын', NOW);
+    markChildReady(db, childId);
+    const claimed = redeemDeviceInvite(
+      db,
+      issueDeviceInvite(db, childId, 'browser', 'ноутбук', NOW).token,
+      NOW,
+    );
+    expect(claimed.ok).toBe(true);
+    if (!claimed.ok) return;
+
+    setParentPassword(db, parentId, 'совсем-другой-пароль', at(HOUR_MS));
+
+    expect(resolveChildDevice(db, claimed.token, at(2 * HOUR_MS))).toBeUndefined();
+  });
+
+  it('отказывается ставить короткий, слишком длинный или чужой пароль', () => {
+    const db = open();
+    const parentId = createParent(db, 'mama@example.com', NOW);
+
+    expect(() => setParentPassword(db, parentId, 'к'.repeat(MIN_PASSWORD_LENGTH - 1), NOW))
+      .toThrow(/короче/u);
+    expect(() => setParentPassword(db, parentId, 'д'.repeat(1000), NOW)).toThrow(/длиннее/u);
+    expect(() => setParentPassword(db, 'нет-такого', PASSWORD, NOW)).toThrow(/нет в управляющей базе/u);
+    // Пароль отключённого не меняется: сначала его включают обратно.
+    disableParent(db, parentId, NOW);
+    expect(() => setParentPassword(db, parentId, PASSWORD, NOW)).toThrow(/отключён/u);
+  });
+
+  it('отключение необратимо для входа и повторно ничего не переписывает', () => {
+    const db = open();
+    const parentId = createParent(db, 'mama@example.com', NOW);
+    const invite = issueParentInvite(db, parentId, NOW);
+    const redeemed = redeemParentInvite(db, invite.token, PASSWORD, NOW);
+    expect(redeemed.ok).toBe(true);
+    if (!redeemed.ok) return;
+
+    expect(disableParent(db, parentId, at(HOUR_MS))).toBe(true);
+    expect(loginParent(db, 'mama@example.com', PASSWORD, at(2 * HOUR_MS))).toEqual({
+      ok: false,
+      reason: 'disabled',
+    });
+    expect(resolveParentSession(db, redeemed.session.token, at(2 * HOUR_MS))).toBeUndefined();
+
+    // Второе отключение — не ошибка, но и не новая отметка: она осталась от
+    // первого, и по ней разбирают, когда доступ закрыли.
+    expect(disableParent(db, parentId, at(DAY_MS))).toBe(false);
+    expect(findParentByEmail(db, 'mama@example.com')?.disabledAt).toBe(at(HOUR_MS).toISOString());
+  });
+
+  it('перечисляет всех детей всех родителей, включая выведенных', () => {
+    const db = open();
+    const mama = createParent(db, 'mama@example.com', NOW);
+    const papa = createParent(db, 'papa@example.com', NOW);
+    const ready = createChild(db, mama, 'Сын', NOW);
+    markChildReady(db, ready);
+    const provisioning = createChild(db, papa, 'Дочь', at(HOUR_MS));
+    const retired = createChild(db, mama, 'Племянник', at(2 * HOUR_MS));
+    markChildReady(db, retired);
+    retireChild(db, retired, at(3 * HOUR_MS));
+
+    // Снятию копии нужны все: выведенный ребёнок хранит прогресс так же, как
+    // обслуживаемый, а `listServiceableChildren` показывает только готовых.
+    expect(listAllChildren(db).map((child) => child.id)).toEqual([ready, provisioning, retired]);
   });
 });

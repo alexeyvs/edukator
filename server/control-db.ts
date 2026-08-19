@@ -778,6 +778,103 @@ export function readParentEmail(db: Database.Database, parentId: string): string
   return row?.email;
 }
 
+/** Родитель так, как его видит обслуживание: без единого хеша наружу. */
+export interface ParentRecord {
+  id: string;
+  email: string;
+  /** Пароль уже установлен по приглашению. Самого хеша здесь нет намеренно. */
+  hasPassword: boolean;
+  hasPin: boolean;
+  disabledAt?: string;
+  createdAt: string;
+}
+
+/**
+ * Родитель по адресу. Отключённый тоже возвращается: обслуживающий скрипт
+ * обязан сказать «он отключён», а не «такого нет» — иначе повторное заведение
+ * упало бы на `UNIQUE` без внятной причины.
+ *
+ * Неразобранный адрес — это `undefined`, а не исключение: для поиска «не адрес»
+ * и «нет такого» — один и тот же ответ.
+ */
+export function findParentByEmail(db: Database.Database, email: string): ParentRecord | undefined {
+  const normalized = normalizeEmail(email);
+  if (normalized === undefined) return undefined;
+  const row = db
+    .prepare<[string], {
+      id: string;
+      email: string;
+      password_hash: string | null;
+      pin_hash: string | null;
+      disabled_at: string | null;
+      created_at: string;
+    }>(
+      `SELECT id, email, password_hash, pin_hash, disabled_at, created_at
+         FROM parents WHERE email = ?`,
+    )
+    .get(normalized);
+  if (row === undefined) return undefined;
+  return {
+    id: row.id,
+    email: row.email,
+    hasPassword: row.password_hash !== null,
+    hasPin: row.pin_hash !== null,
+    ...(row.disabled_at === null ? {} : { disabledAt: row.disabled_at }),
+    createdAt: row.created_at,
+  };
+}
+
+/**
+ * Ставит родителю пароль в обход приглашения: почтового восстановления у нас
+ * нет, и забытый пароль меняет тот, у кого есть доступ к серверу.
+ *
+ * `credentials_changed_at` двигается, как и при погашении приглашения, и это не
+ * побочный эффект, а смысл: смена пароля гасит и родительские сессии, и токены
+ * детских устройств. Иначе смена пароля после кражи ноутбука ничего бы не
+ * меняла — украденная cookie продолжала бы работать.
+ */
+export function setParentPassword(
+  db: Database.Database,
+  parentId: string,
+  password: string,
+  now: Date = new Date(),
+): void {
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    throw new Error(`Пароль короче ${MIN_PASSWORD_LENGTH} знаков`);
+  }
+  if (password.length > MAX_SECRET_LENGTH) {
+    throw new Error(`Пароль длиннее ${MAX_SECRET_LENGTH} знаков`);
+  }
+  // Хеширование до записи: `scrypt` стоит десятки миллисекунд и под WAL всё это
+  // время держал бы запись в управляющей базе.
+  const passwordHash = hashSecret(password);
+  const updated = db
+    .prepare('UPDATE parents SET password_hash = ?, credentials_changed_at = ? WHERE id = ? AND disabled_at IS NULL')
+    .run(passwordHash, now.toISOString(), parentId);
+  if (updated.changes === 0) {
+    throw new Error(`Родителя ${parentId} нет в управляющей базе или он отключён`);
+  }
+}
+
+/**
+ * Отключает родителя. Ни сессии, ни устройства при этом не трогаются: их
+ * действительность проверяется выборкой через `parents`, и `disabled_at` гасит
+ * их той же строкой — вместе с детьми, чьи базы после этого не обслуживаются.
+ *
+ * `false` — «уже был отключён»; строка при этом не переписывается, чтобы отметка
+ * осталась от первого отключения.
+ */
+export function disableParent(
+  db: Database.Database,
+  parentId: string,
+  now: Date = new Date(),
+): boolean {
+  const updated = db
+    .prepare('UPDATE parents SET disabled_at = ? WHERE id = ? AND disabled_at IS NULL')
+    .run(now.toISOString(), parentId);
+  return updated.changes > 0;
+}
+
 /* ─── Дети и устройства ─────────────────────────────────────────────────── */
 
 /**
@@ -1009,6 +1106,23 @@ export function listServiceableChildren(db: Database.Database): ChildSummary[] {
       `SELECT id, parent_id, name, status, last_activity_at, retired_at, created_at
          FROM children
         WHERE status = 'ready' AND retired_at IS NULL
+        ORDER BY created_at, id`,
+    )
+    .all();
+  return rows.map(toChildSummary);
+}
+
+/**
+ * Все дети всех родителей, включая выведенных и незаведённых. Нужен снятию
+ * копии: выведенный ребёнок хранит прогресс ровно так же, как обслуживаемый, и
+ * бэкап, который его пропускает, обнаруживается только когда возвращать уже
+ * нечего.
+ */
+export function listAllChildren(db: Database.Database): ChildSummary[] {
+  const rows = db
+    .prepare<[], ChildRow>(
+      `SELECT id, parent_id, name, status, last_activity_at, retired_at, created_at
+         FROM children
         ORDER BY created_at, id`,
     )
     .all();

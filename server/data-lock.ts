@@ -39,6 +39,12 @@ export function dataLockPath(dir: string): string {
  */
 export const SERVER_LOCK_OWNER = 'сервер';
 export const PREFETCH_LOCK_OWNER = 'ручной прогрев';
+/**
+ * Перенос однопользовательской базы. Замок ему нужен не ради codex, а ради
+ * самого каталога: пока ребёнок заводится, его база перебирается из времянки в
+ * рабочее место, и живой сервер рядом обслуживал бы то, чего ещё нет.
+ */
+export const ADOPT_LOCK_OWNER = 'перенос однопользовательской базы';
 
 /** Запись в файле замка: кто, когда и с каким разовым знаком его взял. */
 export interface DataLockRecord {

@@ -178,6 +178,46 @@ describe('каталог данных', () => {
       expect(readChild(control, childId)?.status).toBe('failed');
     });
 
+    it('заводит базу копией указанной, а не пустой', () => {
+      // Так переносится однопользовательская `edukator.db`: копия идёт через
+      // `VACUUM INTO`, оригинал остаётся откатом.
+      const legacy = join(tempDir, 'старая.db');
+      const source = openDatabase(legacy);
+      try {
+        source.prepare('INSERT INTO topic_state (topic_id, mastery) VALUES (?, ?)').run('math.a', 0.3);
+      } finally {
+        source.close();
+      }
+
+      const childId = newChild();
+      const result = provisionChildDatabase(control, childId, tempDir, { source: legacy });
+
+      expect(result.created).toBe(true);
+      expect(readChild(control, childId)?.status).toBe('ready');
+      const db = openDatabase(result.path, { fileMustExist: true });
+      try {
+        expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+        expect(
+          db
+            .prepare<[string], { mastery: number }>('SELECT mastery FROM topic_state WHERE topic_id = ?')
+            .get('math.a')?.mastery,
+        ).toBe(0.3);
+      } finally {
+        db.close();
+      }
+      expect(readdirSync(join(tempDir, CHILDREN_DIR))).toEqual([`${childId}.db`]);
+    });
+
+    it('помечает ребёнка failed, если копировать нечего', () => {
+      const childId = newChild();
+
+      expect(() => provisionChildDatabase(control, childId, tempDir, { source: join(tempDir, 'нет.db') }))
+        .toThrow(/копировать нечего/u);
+      expect(readChild(control, childId)?.status).toBe('failed');
+      // Времянки после отказа не остаётся: следующая попытка начинает заново.
+      expect(readdirSync(join(tempDir, CHILDREN_DIR))).toEqual([]);
+    });
+
     it('отказывает неизвестному и выведенному ребёнку', () => {
       expect(() => provisionChildDatabase(control, 'a'.repeat(32), tempDir))
         .toThrow(/нет в управляющей базе/u);
