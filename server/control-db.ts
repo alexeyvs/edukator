@@ -1,4 +1,6 @@
+import { createHash, randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
+import { MAX_SECRET_LENGTH, hashSecret, verifySecret } from './secrets.js';
 
 /**
  * Версия схемы управляющей базы. Хранится в её собственном `PRAGMA user_version`
@@ -355,4 +357,370 @@ export function openControlDatabase(
     throw error;
   }
   return db;
+}
+
+/* ─── Родители, приглашения, сессии ─────────────────────────────────────── */
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Срок приглашения родителя. Ссылка уходит внешним каналом и живёт неделю:
+ * бессрочная лежала бы в переписке ровно до первого чужого чтения.
+ */
+export const PARENT_INVITE_TTL_MS = 7 * DAY_MS;
+
+/** Срок бездействия сессии: 30 дней без единого обращения гасят её. */
+export const PARENT_SESSION_IDLE_MS = 30 * DAY_MS;
+
+/**
+ * Абсолютный потолок сессии. Проверяется вместе со сроком бездействия: без него
+ * ежедневно открываемая вкладка держала бы вход вечно, и украденная cookie —
+ * тоже.
+ */
+export const PARENT_SESSION_MAX_MS = 90 * DAY_MS;
+
+/**
+ * Как часто сессия обновляет `last_seen_at`. Запись на каждый запрос — это
+ * запись в WAL на каждый опрос страницы: у одного родителя их сотни в час, и
+ * все они конкурируют с занятием ребёнка за ту же управляющую базу.
+ */
+export const SESSION_TOUCH_MS = 5 * 60 * 1000;
+
+/** Длина токена предъявителя: 256 бит случайности, перебору не поддаётся. */
+const TOKEN_BYTES = 32;
+
+/** Предел длины адреса по RFC 5321; всё длиннее — не адрес, а нагрузка. */
+export const MAX_EMAIL_LENGTH = 254;
+
+/**
+ * Нижняя граница пароля. Родителей заводит закрытый список, но короткий пароль
+ * сводит на нет и `scrypt`, и счётчики неудач: подбирается он не у нас.
+ */
+export const MIN_PASSWORD_LENGTH = 10;
+
+// Разбирать адрес полностью незачем: он служит только точным ключом входа.
+// Проверяется ровно то, без чего ключ не ключ, — одна собака и никаких пробелов.
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
+
+/** Причина отказа во входе. Наружу маршрут отдаёт один общий текст на все. */
+export type ParentAuthFailure =
+  | 'unknown-token'
+  | 'expired'
+  | 'used'
+  | 'disabled'
+  | 'unknown-email'
+  | 'no-password'
+  | 'bad-password'
+  | 'weak-password';
+
+/** Выданный предъявителю токен. Открытым он существует только здесь и в ответе. */
+export interface IssuedToken {
+  token: string;
+  expiresAt: string;
+}
+
+export type ParentAuthResult =
+  | { ok: true; parentId: string; session: IssuedToken }
+  | { ok: false; reason: ParentAuthFailure };
+
+export interface ParentPrincipal {
+  parentId: string;
+  email: string;
+}
+
+/** Токен предъявителя. Наружу уходит только он, в базу — только его отпечаток. */
+export function createBearerToken(): string {
+  return randomBytes(TOKEN_BYTES).toString('base64url');
+}
+
+/**
+ * Отпечаток токена для хранения. SHA-256 без соли и без KDF намеренно: токен
+ * и так 256 бит случайности, перебирать в нём нечего, а выборка идёт по
+ * равенству — значит, отпечаток обязан считаться одинаково при каждом входе.
+ */
+export function hashToken(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('base64url');
+}
+
+/**
+ * Приводит адрес к виду, в котором он лежит в базе. `undefined` — это «не
+ * адрес»: схема требует нижний регистр, а сравнение идёт точным совпадением.
+ */
+export function normalizeEmail(value: string): string | undefined {
+  const normalized = value.trim().toLowerCase();
+  if (normalized.length === 0 || normalized.length > MAX_EMAIL_LENGTH) return undefined;
+  return EMAIL_PATTERN.test(normalized) ? normalized : undefined;
+}
+
+/**
+ * Эталон для отказа с той же ценой, что и у верного адреса. Без него «нет
+ * такого родителя» отвечает мгновенно, а «неверный пароль» — через `scrypt`,
+ * и разница во времени превращает вход в справочник заведённых адресов.
+ */
+let dummyPasswordHash: string | undefined;
+
+function spendVerificationTime(): void {
+  dummyPasswordHash ??= hashSecret(randomBytes(24).toString('base64url'));
+  verifySecret(dummyPasswordHash, 'пароль, который никому не подойдёт');
+}
+
+/** Заводит родителя. Ни пароля, ни PIN у него ещё нет — они придут по приглашению. */
+export function createParent(db: Database.Database, email: string, now: Date = new Date()): string {
+  const normalized = normalizeEmail(email);
+  if (normalized === undefined) {
+    throw new Error(`Адрес родителя «${email}» не похож на электронную почту`);
+  }
+  const id = randomBytes(16).toString('hex');
+  try {
+    db.prepare('INSERT INTO parents (id, email, created_at) VALUES (?, ?, ?)').run(
+      id,
+      normalized,
+      now.toISOString(),
+    );
+  } catch (error) {
+    // Повторный запуск скрипта по тому же списку — обычное дело, и «UNIQUE
+    // constraint failed» ничего не говорит тому, кто его запустил.
+    if (error instanceof Error && /UNIQUE/i.test(error.message)) {
+      throw new Error(`Родитель с адресом ${normalized} уже заведён`);
+    }
+    throw error;
+  }
+  return id;
+}
+
+/** Выпускает приглашение. Открытый токен возвращается один раз и нигде не хранится. */
+export function issueParentInvite(
+  db: Database.Database,
+  parentId: string,
+  now: Date = new Date(),
+  ttlMs: number = PARENT_INVITE_TTL_MS,
+): IssuedToken {
+  const parent = db
+    .prepare<[string], { disabled_at: string | null }>('SELECT disabled_at FROM parents WHERE id = ?')
+    .get(parentId);
+  if (parent === undefined) throw new Error(`Родителя ${parentId} нет в управляющей базе`);
+  if (parent.disabled_at !== null) throw new Error(`Родитель ${parentId} отключён`);
+
+  const token = createBearerToken();
+  const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
+  db.prepare(
+    `INSERT INTO parent_invites (parent_id, token_hash, expires_at, created_at)
+     VALUES (?, ?, ?, ?)`,
+  ).run(parentId, hashToken(token), expiresAt, now.toISOString());
+  return { token, expiresAt };
+}
+
+interface InviteRow {
+  parent_id: string;
+  email: string;
+  used_at: string | null;
+  expires_at: string;
+  disabled_at: string | null;
+}
+
+function selectInvite(db: Database.Database, token: string): InviteRow | undefined {
+  return db
+    .prepare<[string], InviteRow>(
+      `SELECT i.parent_id, i.used_at, i.expires_at, p.email, p.disabled_at
+         FROM parent_invites i
+         JOIN parents p ON p.id = i.parent_id
+        WHERE i.token_hash = ?`,
+    )
+    .get(hashToken(token));
+}
+
+function inviteFailure(row: InviteRow | undefined, now: Date): ParentAuthFailure | undefined {
+  if (row === undefined) return 'unknown-token';
+  if (row.disabled_at !== null) return 'disabled';
+  if (row.used_at !== null) return 'used';
+  if (row.expires_at <= now.toISOString()) return 'expired';
+  return undefined;
+}
+
+/**
+ * Читает приглашение, **не** гася его: предпросмотр ссылки в мессенджере не
+ * должен сжигать единственный вход родителя.
+ */
+export function readParentInvite(
+  db: Database.Database,
+  token: string,
+  now: Date = new Date(),
+): { ok: true; parentId: string; email: string } | { ok: false; reason: ParentAuthFailure } {
+  const row = selectInvite(db, token);
+  const failure = inviteFailure(row, now);
+  if (failure !== undefined || row === undefined) {
+    return { ok: false, reason: failure ?? 'unknown-token' };
+  }
+  return { ok: true, parentId: row.parent_id, email: row.email };
+}
+
+/**
+ * Заводит сессию. `created_at` пишется явно, а не умолчанием схемы: по нему
+ * сессия сравнивается с отметкой смены пароля, и расхождение часов SQLite с
+ * нашими на секунду погасило бы только что выданный вход.
+ */
+function insertParentSession(db: Database.Database, parentId: string, now: Date): IssuedToken {
+  const token = createBearerToken();
+  const stamp = now.toISOString();
+  const expiresAt = new Date(now.getTime() + PARENT_SESSION_MAX_MS).toISOString();
+  db.prepare(
+    `INSERT INTO parent_sessions (parent_id, token_hash, last_seen_at, expires_at, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(parentId, hashToken(token), stamp, expiresAt, stamp);
+  return { token, expiresAt };
+}
+
+/**
+ * Гасит приглашение, ставит пароль и сразу выдаёт сессию: родитель пришёл по
+ * ссылке, и второй вход по только что заданному паролю ничего не проверяет.
+ *
+ * Пароль хешируется **до** транзакции: `scrypt` стоит десятки миллисекунд, и
+ * под WAL всё это время держал бы запись в управляющей базе.
+ */
+export function redeemParentInvite(
+  db: Database.Database,
+  token: string,
+  password: string,
+  now: Date = new Date(),
+): ParentAuthResult {
+  if (password.length < MIN_PASSWORD_LENGTH || password.length > MAX_SECRET_LENGTH) {
+    return { ok: false, reason: 'weak-password' };
+  }
+  // Дешёвый отказ до KDF — только на том, что транзакция не решает: нет такой
+  // ссылки, нет такого родителя. Погашенность и срок проверяет сам `UPDATE`,
+  // иначе решение принималось бы по снимку, устаревшему к моменту записи.
+  const known = selectInvite(db, token);
+  if (known === undefined) return { ok: false, reason: 'unknown-token' };
+  if (known.disabled_at !== null) return { ok: false, reason: 'disabled' };
+
+  const passwordHash = hashSecret(password);
+  const stamp = now.toISOString();
+  const tokenHash = hashToken(token);
+
+  return db.transaction((): ParentAuthResult => {
+    // Погашение и проверка условий — один `UPDATE`: между чтением выше и этой
+    // строкой то же приглашение мог погасить соседний запрос, и вторая сессия
+    // по одной ссылке — это второй пароль у того, кто ссылку перехватил.
+    const consumed = db
+      .prepare('UPDATE parent_invites SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?')
+      .run(stamp, tokenHash, stamp);
+    if (consumed.changes === 0) {
+      return { ok: false, reason: inviteFailure(selectInvite(db, token), now) ?? 'used' };
+    }
+
+    const row = selectInvite(db, token);
+    if (row === undefined) return { ok: false, reason: 'unknown-token' };
+    if (row.disabled_at !== null) return { ok: false, reason: 'disabled' };
+
+    db.prepare('UPDATE parents SET password_hash = ?, credentials_changed_at = ? WHERE id = ?').run(
+      passwordHash,
+      stamp,
+      row.parent_id,
+    );
+    return { ok: true, parentId: row.parent_id, session: insertParentSession(db, row.parent_id, now) };
+  }).immediate();
+}
+
+interface ParentCredentialsRow {
+  id: string;
+  password_hash: string | null;
+  disabled_at: string | null;
+}
+
+/** Вход по паролю. Любой отказ стоит одного `scrypt`: см. `spendVerificationTime`. */
+export function loginParent(
+  db: Database.Database,
+  email: string,
+  password: string,
+  now: Date = new Date(),
+): ParentAuthResult {
+  const normalized = normalizeEmail(email);
+  const row =
+    normalized === undefined
+      ? undefined
+      : db
+          .prepare<[string], ParentCredentialsRow>(
+            'SELECT id, password_hash, disabled_at FROM parents WHERE email = ?',
+          )
+          .get(normalized);
+  if (row === undefined) {
+    spendVerificationTime();
+    return { ok: false, reason: 'unknown-email' };
+  }
+  if (row.disabled_at !== null) {
+    spendVerificationTime();
+    return { ok: false, reason: 'disabled' };
+  }
+  if (row.password_hash === null) {
+    spendVerificationTime();
+    return { ok: false, reason: 'no-password' };
+  }
+  if (!verifySecret(row.password_hash, password)) {
+    return { ok: false, reason: 'bad-password' };
+  }
+  return { ok: true, parentId: row.id, session: insertParentSession(db, row.id, now) };
+}
+
+interface ParentSessionRow {
+  id: number;
+  parent_id: string;
+  email: string;
+  last_seen_at: string;
+  expires_at: string;
+  created_at: string;
+  disabled_at: string | null;
+  credentials_changed_at: string | null;
+}
+
+/**
+ * Разрешает cookie родителя в предъявителя. `undefined` — это отказ по любой
+ * причине: снаружи «нет такой сессии» и «сессия погасла» неразличимы.
+ */
+export function resolveParentSession(
+  db: Database.Database,
+  token: string,
+  now: Date = new Date(),
+): ParentPrincipal | undefined {
+  const row = db
+    .prepare<[string], ParentSessionRow>(
+      `SELECT s.id, s.parent_id, s.last_seen_at, s.expires_at, s.created_at,
+              p.email, p.disabled_at, p.credentials_changed_at
+         FROM parent_sessions s
+         JOIN parents p ON p.id = s.parent_id
+        WHERE s.token_hash = ? AND s.revoked_at IS NULL`,
+    )
+    .get(hashToken(token));
+  if (row === undefined) return undefined;
+  if (row.disabled_at !== null) return undefined;
+
+  const stamp = now.toISOString();
+  // Оба срока проверяются на каждом обращении: потолок гасит сессию даже у
+  // того, кто заходит ежедневно, а бездействие — забытую вкладку.
+  if (row.expires_at <= stamp) return undefined;
+  const lastSeen = Date.parse(row.last_seen_at);
+  if (!Number.isFinite(lastSeen) || now.getTime() - lastSeen >= PARENT_SESSION_IDLE_MS) {
+    return undefined;
+  }
+  // Смена пароля или PIN гасит всё, что было выдано до неё: иначе увод cookie
+  // не лечится ничем, кроме ручной чистки таблицы.
+  if (row.credentials_changed_at !== null && row.credentials_changed_at > row.created_at) {
+    return undefined;
+  }
+
+  if (now.getTime() - lastSeen >= SESSION_TOUCH_MS) {
+    db.prepare('UPDATE parent_sessions SET last_seen_at = ? WHERE id = ?').run(stamp, row.id);
+  }
+  return { parentId: row.parent_id, email: row.email };
+}
+
+/** Выход. Строка остаётся для разбора, но предъявителем уже не служит. */
+export function revokeParentSession(
+  db: Database.Database,
+  token: string,
+  now: Date = new Date(),
+): boolean {
+  const result = db
+    .prepare('UPDATE parent_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL')
+    .run(now.toISOString(), hashToken(token));
+  return result.changes > 0;
 }

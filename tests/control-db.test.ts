@@ -7,10 +7,29 @@ import BetterSqlite3 from 'better-sqlite3';
 import {
   CONTROL_SCHEMA_VERSION,
   CONTROL_TABLES,
+  MAX_EMAIL_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  PARENT_INVITE_TTL_MS,
+  PARENT_SESSION_IDLE_MS,
+  PARENT_SESSION_MAX_MS,
+  SESSION_TOUCH_MS,
+  createParent,
+  hashToken,
+  issueParentInvite,
+  loginParent,
   migrateControl,
+  normalizeEmail,
   openControlDatabase,
+  readParentInvite,
+  redeemParentInvite,
+  resolveParentSession,
+  revokeParentSession,
   validateControlSchema,
 } from '../server/control-db.js';
+import type { IssuedToken } from '../server/control-db.js';
+
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
 
 /** Формат, в котором отметки времени пишет код: сравнение по колонке — строковое. */
 const ISO_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -265,5 +284,261 @@ describe('ошибочные пути', () => {
     other.close();
 
     expect(() => open()).toThrow(/содержит объект «parents»/);
+  });
+});
+
+describe('родители, приглашения и сессии', () => {
+  const NOW = new Date('2026-08-19T10:00:00.000Z');
+  const PASSWORD = 'пароль-подлиннее';
+
+  function at(ms: number): Date {
+    return new Date(NOW.getTime() + ms);
+  }
+
+  /** Родитель с погашенным приглашением: с него начинается всё, кроме отказов. */
+  function parentWithPassword(db: Database): { parentId: string; session: IssuedToken } {
+    const parentId = createParent(db, 'Mama@Example.COM', NOW);
+    const invite = issueParentInvite(db, parentId, NOW);
+    const redeemed = redeemParentInvite(db, invite.token, PASSWORD, NOW);
+    if (!redeemed.ok) throw new Error(`приглашение не погасилось: ${redeemed.reason}`);
+    return { parentId, session: redeemed.session };
+  }
+
+  it('ведёт полный путь: приглашение → пароль → сессия', () => {
+    const db = open();
+    const { parentId, session } = parentWithPassword(db);
+
+    expect(session.expiresAt).toBe(at(PARENT_SESSION_MAX_MS).toISOString());
+    expect(resolveParentSession(db, session.token, at(HOUR_MS))).toEqual({
+      parentId,
+      email: 'mama@example.com',
+    });
+
+    // Пароль после погашения работает и сам по себе: вход даёт новую сессию.
+    const login = loginParent(db, ' MAMA@example.com ', PASSWORD, at(HOUR_MS));
+    expect(login.ok).toBe(true);
+    if (!login.ok) return;
+    expect(login.parentId).toBe(parentId);
+    expect(login.session.token).not.toBe(session.token);
+    expect(resolveParentSession(db, login.session.token, at(HOUR_MS))?.parentId).toBe(parentId);
+  });
+
+  it('хранит только отпечатки токенов', () => {
+    const db = open();
+    const parentId = createParent(db, 'papa@example.com', NOW);
+    const invite = issueParentInvite(db, parentId, NOW);
+    const redeemed = redeemParentInvite(db, invite.token, PASSWORD, NOW);
+    expect(redeemed.ok).toBe(true);
+    if (!redeemed.ok) return;
+
+    // 256 бит в base64url — 43 знака; открытым токен не лежит ни в одной строке.
+    expect(invite.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const dump = JSON.stringify([
+      db.prepare('SELECT * FROM parent_invites').all(),
+      db.prepare('SELECT * FROM parent_sessions').all(),
+      db.prepare('SELECT * FROM parents').all(),
+    ]);
+    expect(dump).not.toContain(invite.token);
+    expect(dump).not.toContain(redeemed.session.token);
+    expect(dump).not.toContain(PASSWORD);
+    expect(dump).toContain(hashToken(invite.token));
+  });
+
+  it('не гасит приглашение чтением, но гасит погашением', () => {
+    const db = open();
+    const parentId = createParent(db, 'mama@example.com', NOW);
+    const invite = issueParentInvite(db, parentId, NOW);
+
+    expect(readParentInvite(db, invite.token, NOW)).toEqual({
+      ok: true,
+      parentId,
+      email: 'mama@example.com',
+    });
+    // Второе чтение обязано быть таким же: предпросмотр ссылки в мессенджере
+    // не должен сжигать единственный вход родителя.
+    expect(readParentInvite(db, invite.token, NOW).ok).toBe(true);
+
+    expect(redeemParentInvite(db, invite.token, PASSWORD, NOW).ok).toBe(true);
+    expect(readParentInvite(db, invite.token, NOW)).toEqual({ ok: false, reason: 'used' });
+  });
+
+  it('два одновременных погашения дают одну сессию', () => {
+    const first = open();
+    const parentId = createParent(first, 'mama@example.com', NOW);
+    const invite = issueParentInvite(first, parentId, NOW);
+    const second = open();
+
+    const winner = redeemParentInvite(first, invite.token, PASSWORD, NOW);
+    const loser = redeemParentInvite(second, invite.token, 'другой-пароль-длинный', NOW);
+
+    expect(winner.ok).toBe(true);
+    expect(loser).toEqual({ ok: false, reason: 'used' });
+    expect(
+      first.prepare<[], { n: number }>('SELECT count(*) AS n FROM parent_sessions').get()?.n,
+    ).toBe(1);
+    // Пароль остался от победителя: проигравший не должен переписать чужой.
+    expect(loginParent(first, 'mama@example.com', PASSWORD, NOW).ok).toBe(true);
+    expect(loginParent(first, 'mama@example.com', 'другой-пароль-длинный', NOW)).toEqual({
+      ok: false,
+      reason: 'bad-password',
+    });
+  });
+
+  it('отказывает по протухшему, чужому и уже погашенному приглашению', () => {
+    const db = open();
+    const parentId = createParent(db, 'mama@example.com', NOW);
+    const stale = issueParentInvite(db, parentId, NOW);
+    const fresh = issueParentInvite(db, parentId, NOW);
+
+    expect(redeemParentInvite(db, 'нет такого токена', PASSWORD, NOW)).toEqual({
+      ok: false,
+      reason: 'unknown-token',
+    });
+    expect(redeemParentInvite(db, stale.token, PASSWORD, at(PARENT_INVITE_TTL_MS))).toEqual({
+      ok: false,
+      reason: 'expired',
+    });
+    expect(redeemParentInvite(db, fresh.token, 'короткий', NOW)).toEqual({
+      ok: false,
+      reason: 'weak-password',
+    });
+    // Отказ по паролю не должен сжигать ссылку: она ещё нужна.
+    expect(redeemParentInvite(db, fresh.token, PASSWORD, NOW).ok).toBe(true);
+    expect(redeemParentInvite(db, fresh.token, PASSWORD, NOW)).toEqual({
+      ok: false,
+      reason: 'used',
+    });
+  });
+
+  it('не выпускает приглашение отключённому и несуществующему родителю', () => {
+    const db = open();
+    const parentId = createParent(db, 'mama@example.com', NOW);
+    const invite = issueParentInvite(db, parentId, NOW);
+    db.prepare('UPDATE parents SET disabled_at = ? WHERE id = ?').run(NOW.toISOString(), parentId);
+
+    expect(() => issueParentInvite(db, parentId, NOW)).toThrow(/отключён/);
+    expect(() => issueParentInvite(db, 'нет такого', NOW)).toThrow(/нет в управляющей базе/);
+    // Выпущенное до отключения тоже перестаёт работать.
+    expect(redeemParentInvite(db, invite.token, PASSWORD, NOW)).toEqual({
+      ok: false,
+      reason: 'disabled',
+    });
+  });
+
+  it('различает причины отказа во входе по паролю', () => {
+    const db = open();
+    const withoutPassword = createParent(db, 'papa@example.com', NOW);
+    const { parentId } = parentWithPassword(db);
+
+    expect(loginParent(db, 'mama@example.com', 'не тот пароль', NOW)).toEqual({
+      ok: false,
+      reason: 'bad-password',
+    });
+    expect(loginParent(db, 'никого@example.com', PASSWORD, NOW)).toEqual({
+      ok: false,
+      reason: 'unknown-email',
+    });
+    expect(loginParent(db, 'не адрес', PASSWORD, NOW)).toEqual({
+      ok: false,
+      reason: 'unknown-email',
+    });
+    expect(loginParent(db, 'papa@example.com', PASSWORD, NOW)).toEqual({
+      ok: false,
+      reason: 'no-password',
+    });
+
+    db.prepare('UPDATE parents SET disabled_at = ? WHERE id = ?').run(NOW.toISOString(), parentId);
+    expect(loginParent(db, 'mama@example.com', PASSWORD, NOW)).toEqual({
+      ok: false,
+      reason: 'disabled',
+    });
+    expect(withoutPassword).not.toBe(parentId);
+  });
+
+  it('гасит сессию по бездействию', () => {
+    const db = open();
+    const { session } = parentWithPassword(db);
+
+    expect(resolveParentSession(db, session.token, at(PARENT_SESSION_IDLE_MS - HOUR_MS))).toBeDefined();
+    // Отметка обновилась предыдущим обращением, поэтому отсчёт идёт от него.
+    expect(
+      resolveParentSession(db, session.token, at(2 * PARENT_SESSION_IDLE_MS)),
+    ).toBeUndefined();
+  });
+
+  it('гасит сессию по абсолютному потолку даже при ежедневной активности', () => {
+    const db = open();
+    const { session } = parentWithPassword(db);
+
+    for (let day = 10; day <= 80; day += 10) {
+      expect(resolveParentSession(db, session.token, at(day * DAY_MS))).toBeDefined();
+    }
+    expect(resolveParentSession(db, session.token, at(89 * DAY_MS))).toBeDefined();
+    expect(resolveParentSession(db, session.token, at(91 * DAY_MS))).toBeUndefined();
+  });
+
+  it('пишет last_seen_at не чаще раза в пять минут', () => {
+    const db = open();
+    const { session } = parentWithPassword(db);
+    const lastSeen = (): string =>
+      db.prepare<[], { last_seen_at: string }>('SELECT last_seen_at FROM parent_sessions').get()
+        ?.last_seen_at ?? '';
+
+    expect(lastSeen()).toBe(NOW.toISOString());
+    resolveParentSession(db, session.token, at(SESSION_TOUCH_MS - 1000));
+    expect(lastSeen()).toBe(NOW.toISOString());
+
+    resolveParentSession(db, session.token, at(SESSION_TOUCH_MS));
+    expect(lastSeen()).toBe(at(SESSION_TOUCH_MS).toISOString());
+  });
+
+  it('гасит сессию выходом, отключением родителя и сменой пароля', () => {
+    const db = open();
+    const { parentId, session } = parentWithPassword(db);
+
+    expect(revokeParentSession(db, session.token, at(HOUR_MS))).toBe(true);
+    // Повторный выход ничего не меняет: строка уже отозвана.
+    expect(revokeParentSession(db, session.token, at(HOUR_MS))).toBe(false);
+    expect(resolveParentSession(db, session.token, at(HOUR_MS))).toBeUndefined();
+    expect(resolveParentSession(db, 'нет такого токена', at(HOUR_MS))).toBeUndefined();
+
+    const login = loginParent(db, 'mama@example.com', PASSWORD, at(HOUR_MS));
+    expect(login.ok).toBe(true);
+    if (!login.ok) return;
+    db.prepare('UPDATE parents SET disabled_at = ? WHERE id = ?').run(NOW.toISOString(), parentId);
+    expect(resolveParentSession(db, login.session.token, at(2 * HOUR_MS))).toBeUndefined();
+
+    // Смена пароля по новому приглашению гасит всё, что выдано до неё.
+    db.prepare('UPDATE parents SET disabled_at = NULL WHERE id = ?').run(parentId);
+    const invite = issueParentInvite(db, parentId, at(2 * HOUR_MS));
+    const changed = redeemParentInvite(db, invite.token, 'совсем-другой-пароль', at(3 * HOUR_MS));
+    expect(changed.ok).toBe(true);
+    if (!changed.ok) return;
+    expect(resolveParentSession(db, login.session.token, at(4 * HOUR_MS))).toBeUndefined();
+    // А выданная тем же погашением — работает: она не старше смены.
+    expect(resolveParentSession(db, changed.session.token, at(4 * HOUR_MS))?.parentId).toBe(parentId);
+  });
+
+  it('заводит родителя по адресу и не заводит его дважды', () => {
+    const db = open();
+    createParent(db, ' Mama@Example.com ', NOW);
+
+    expect(
+      db.prepare<[], { email: string; created_at: string }>('SELECT email, created_at FROM parents').get(),
+    ).toEqual({ email: 'mama@example.com', created_at: NOW.toISOString() });
+    expect(() => createParent(db, 'MAMA@example.com', NOW)).toThrow(/уже заведён/);
+    expect(() => createParent(db, 'не адрес', NOW)).toThrow(/не похож на электронную почту/);
+    expect(normalizeEmail('a@b.c')).toBe('a@b.c');
+    expect(normalizeEmail(`${'a'.repeat(MAX_EMAIL_LENGTH)}@b.c`)).toBeUndefined();
+    expect(normalizeEmail('два@адреса@example.com')).toBeUndefined();
+  });
+
+  it('держит калибровочные константы спеки: сроки приглашения и сессии', () => {
+    expect(PARENT_INVITE_TTL_MS).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(PARENT_SESSION_IDLE_MS).toBe(30 * 24 * 60 * 60 * 1000);
+    expect(PARENT_SESSION_MAX_MS).toBe(90 * 24 * 60 * 60 * 1000);
+    expect(SESSION_TOUCH_MS).toBe(5 * 60 * 1000);
+    expect(MIN_PASSWORD_LENGTH).toBe(10);
+    expect(MAX_EMAIL_LENGTH).toBe(254);
   });
 });
