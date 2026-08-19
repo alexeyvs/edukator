@@ -28,6 +28,12 @@ import { createQuotedRunner } from './codex/quota.js';
 import { WarmupDispatcher, type DispatcherWorkerOptions } from './codex/dispatcher.js';
 import { readPinPepper } from './parent-pin.js';
 import { controlDatabasePath, dataDir as defaultDataDir, ensureDataDir } from './data-dir.js';
+import {
+  acquireDataLock,
+  DataLockBusyError,
+  SERVER_LOCK_OWNER,
+  type DataLock,
+} from './data-lock.js';
 import { openControlDatabase, validateControlSchema } from './control-db.js';
 import { fileIdentity, TenantRegistry, type Tenant } from './tenant-registry.js';
 import type { DisputeCoordinatorOptions } from './dispute-coordinator.js';
@@ -169,6 +175,23 @@ export function buildServer(
         `интерфейс не собран в ${webDist}; выполните npm run build:web`,
       );
     }
+  }
+
+  // Замок берётся до первой базы и до единой строки маршрутов: чужой живой
+  // процесс на том же каталоге — это вторая пара слотов codex и второй прогрев,
+  // то есть ровно тот сценарий, ради которого прогрев сведён в один диспетчер.
+  // Занятость — обычная ошибка запуска вроде занятого порта и гасит сборку.
+  //
+  // Незаписываемый каталог — другое дело: он и есть та поломка, ради которой
+  // читают /api/health, и уронить сервер здесь значило бы отнять единственный
+  // способ узнать причину. Замка в этом случае просто нет — как нет и
+  // управляющей базы, без которой ни один запрос всё равно не проходит.
+  let lock: DataLock | undefined;
+  try {
+    lock = acquireDataLock(dataDir, SERVER_LOCK_OWNER);
+  } catch (error) {
+    if (error instanceof DataLockBusyError) throw error;
+    log(`замок каталога данных не взят: ${(error as Error).message}`);
   }
 
   const app = Fastify({ logger: false });
@@ -456,6 +479,13 @@ export function buildServer(
     }
   }
 
+  // Снятие замка регистрируется последним: пока базы закрываются, каталог ещё
+  // занят — иначе `prefetch` успел бы начать свою пару вызовов поверх
+  // недописанного WAL уходящего сервера.
+  app.addHook('onClose', async () => {
+    lock?.release();
+  });
+
   return app;
 }
 
@@ -522,20 +552,33 @@ if (isDirectRun) {
     process.exitCode = 1;
   }
 
+  // Сборка тоже перехватывается: занятый другим сервером каталог данных и
+  // несобранный интерфейс — обычные ошибки запуска, и стек в терминале вместо
+  // одной строки прячет от запустившего именно причину.
+  let app: FastifyInstance | undefined;
   if (port !== undefined) {
+    try {
+      app = buildServer(CURRICULUM_DIR, { dataDir: defaultDataDir() });
+    } catch (error) {
+      process.stderr.write(`edukator не поднялся: ${(error as Error).message}\n`);
+      process.exitCode = 1;
+    }
+  }
+
+  if (port !== undefined && app !== undefined) {
     const host = readHost(process.env.HOST);
-    const app = buildServer(CURRICULUM_DIR, { dataDir: defaultDataDir() });
-    closeOnSignals(app);
+    const listening = app;
+    closeOnSignals(listening);
     // Отказ прослушивания перехватывается, как и в обеих точках входа CLI: занятое
     // порт-число — обычная ошибка запуска, а необработанный отказ верхнеуровневого
     // `await` печатал бы стек `node:net` и уносил процесс мимо `app.close()`, то
     // есть оставлял бы базы незакрытыми, а WAL — непереселённым.
     try {
-      await app.listen({ host, port });
+      await listening.listen({ host, port });
       console.log(`edukator слушает http://${host}:${port}`);
     } catch (error) {
       process.stderr.write(`edukator не поднялся на порту ${port}: ${(error as Error).message}\n`);
-      await app.close();
+      await listening.close();
       process.exitCode = 1;
     }
   }

@@ -7,21 +7,39 @@
  * Это единственная точка, где codex зовётся по-настоящему ради заданий: тесты
  * его не вызывают никогда.
  *
+ * Кого греть, указывается всегда: баз у сервера столько, сколько детей, и
+ * умолчание грело бы очередь не того ученика, который сядет заниматься.
+ *
  * Запуск:
- *   npm run prefetch                                  # погреть ближайшие темы
- *   npm run prefetch -- --topics 12 --target 10       # шире и глубже
- *   npm run prefetch -- --target 10 --threshold 10    # добрать и уже тёплые темы
- *   npm run prefetch -- --export                      # выгрузить банк в посев
+ *   npm run prefetch -- --child <id>                  # погреть ближайшие темы ребёнка
+ *   npm run prefetch -- --all                         # всех готовых детей подряд
+ *   npm run prefetch -- --child <id> --topics 12 --target 10   # шире и глубже
+ *   npm run prefetch -- --child <id> --target 10 --threshold 10 # и уже тёплые темы
+ *   npm run prefetch -- --child <id> --export         # выгрузить банк в посев
  *
  * Тема доливается, только пока её остаток ниже порога (`--threshold`, по
  * умолчанию `REFILL_BELOW`), поэтому один `--target` глубже уже тёплые темы не
  * копает: поднимать надо оба.
+ *
+ * Прогрев берёт замок каталога данных и при живом сервере отказывается: предел
+ * одновременных вызовов codex процессный, и второй процесс на том же каталоге
+ * завёл бы вторую пару слотов — занятие ученика встало бы в очередь за
+ * прогревом (см. `server/data-lock.ts`).
  */
 import { existsSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDatabase, SUBJECTS, type Subject } from '../server/db.js';
 import { writeFileAtomic } from '../server/atomic-write.js';
+import {
+  childDatabasePath,
+  isChildServiceable,
+  listServiceableChildren,
+  openControlDatabase,
+  readChild,
+} from '../server/control-db.js';
+import { controlDatabasePath, dataDir as resolveDataDir } from '../server/data-dir.js';
+import { acquireDataLock, DataLockBusyError, PREFETCH_LOCK_OWNER } from '../server/data-lock.js';
 import { CURRICULUM_DIR, loadCurriculum, syncTopicState } from '../server/curriculum.js';
 import type { CodexRunner } from '../server/codex/client.js';
 import {
@@ -71,8 +89,9 @@ export interface PrefetchOptions {
   /** Откуда подгружать посев перед наполнением. */
   seedDir?: string;
   /**
-   * База, которую греем. Обязательна: единой базы у сервера больше нет, и
-   * умолчание грело бы не того ребёнка (см. `--db`).
+   * База, которую греем. Обязательна: единой базы у сервера больше нет. Из
+   * командной строки её не задают — путь собирает `prefetchChildren` по
+   * выбранному ребёнку, чтобы греть было нечего мимо реестра арендаторов.
    */
   dbPath?: string;
   curriculumDir?: string;
@@ -96,6 +115,24 @@ export interface PrefetchResult {
    * прогон.
    */
   exportFailed: Subject[];
+}
+
+export interface PrefetchChildrenOptions extends Omit<PrefetchOptions, 'dbPath'> {
+  /** Каталог данных; по умолчанию тот же, что у сервера (`EDUKATOR_DATA_DIR`). */
+  dataDir?: string;
+  /** Кого греть. Либо он, либо `allChildren` — умолчания нет намеренно. */
+  childId?: string;
+  /** Греть всех обслуживаемых детей подряд. */
+  allChildren?: boolean;
+}
+
+/** Итог прогрева одного ребёнка: тот же отчёт плюс его имя в реестре. */
+export interface ChildPrefetchResult extends PrefetchResult {
+  childId: string;
+}
+
+export interface PrefetchChildrenResult {
+  children: ChildPrefetchResult[];
 }
 
 export const DEFAULT_CYCLES = 1;
@@ -127,7 +164,7 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
   const log = options.log ?? defaultLog;
   const graph = loadCurriculum(options.curriculumDir ?? CURRICULUM_DIR);
   if (options.dbPath === undefined || options.dbPath.trim() === '') {
-    throw new Error('Укажите базу через --db: единой базы у сервера больше нет');
+    throw new Error('Прогрев не знает, какую базу греть: путь ребёнка не задан');
   }
   const db = openDatabase(options.dbPath);
 
@@ -244,7 +281,7 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
           continue;
         }
         // Пустой предмет не выгружается по той же причине: в базе может не быть
-        // ни одного его задания (чужая база в `--db`, ничего не давший цикл), а
+        // ни одного его задания (чужой ребёнок в `--child`, ничего не давший цикл), а
         // записав пустой файл, экспорт уничтожил бы ровно тот снимок, который
         // должен был обновить.
         if (topics.length === 0) {
@@ -277,6 +314,92 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
 }
 
 /**
+ * Греет очередь выбранных детей.
+ *
+ * Здесь и только здесь берётся замок каталога данных: греть можно лишь пока
+ * сервера нет. Предел одновременных вызовов codex живёт в памяти процесса
+ * (`server/codex/concurrency.ts`), так что запущенный руками прогрев поверх
+ * живого сервера — это вторая пара слотов, и ответ ученика встаёт в очередь за
+ * фоновой генерацией.
+ *
+ * Дети обходятся подряд, а не разом: у прогрева одна пара слотов на всех, и
+ * параллельный обход отличался бы от последовательного только тем, что первый
+ * ребёнок ждал бы дольше.
+ */
+export async function prefetchChildren(
+  options: PrefetchChildrenOptions = {},
+): Promise<PrefetchChildrenResult> {
+  const { dataDir: requestedDir, childId, allChildren, ...shared } = options;
+  const log = options.log ?? defaultLog;
+
+  // Ни того ни другого — самая опасная опечатка: молча греть первого попавшегося
+  // ребёнка прогрев права не имеет, очередь нужна тому, кто сядет заниматься.
+  if (childId === undefined && allChildren !== true) {
+    throw new Error('Укажите, кого греть: --child <id> или --all');
+  }
+  if (childId !== undefined && allChildren === true) {
+    throw new Error('--child и --all вместе не имеют смысла: выберите одно');
+  }
+  // Снимок посева один на репозиторий, а собирается он из банка одной базы:
+  // `--all --export` переписывал бы его каждым следующим ребёнком, и в файлах
+  // остался бы банк последнего.
+  if (allChildren === true && options.exportSeed === true) {
+    throw new Error('--export требует одного ребёнка: снимок посева собирается из одной базы');
+  }
+
+  const dir = resolveDataDir(requestedDir);
+  let lock;
+  try {
+    lock = acquireDataLock(dir, PREFETCH_LOCK_OWNER);
+  } catch (error) {
+    if (error instanceof DataLockBusyError) {
+      throw new Error(
+        `${error.message}. Ручной прогрев при живом сервере завёл бы вторую пару ` +
+          'слотов codex: остановите сервер и повторите',
+      );
+    }
+    throw error;
+  }
+
+  try {
+    const control = openControlDatabase(controlDatabasePath(dir));
+    let children: string[];
+    try {
+      if (childId === undefined) {
+        children = listServiceableChildren(control).map((child) => child.id);
+        if (children.length === 0) {
+          throw new Error(`В каталоге ${dir} нет ни одного готового ребёнка`);
+        }
+      } else {
+        const child = readChild(control, childId);
+        if (child === undefined) throw new Error(`Ребёнка ${childId} нет в управляющей базе`);
+        // Статус называется целиком: `provisioning` значит «база ещё не
+        // заведена», и греть по этому пути значило бы создать чужой файл рядом.
+        if (!isChildServiceable(child)) {
+          throw new Error(
+            `Ребёнок ${childId} не готов к прогреву: статус ${child.status}` +
+              (child.retiredAt === undefined ? '' : ', выведен'),
+          );
+        }
+        children = [child.id];
+      }
+    } finally {
+      control.close();
+    }
+
+    const results: ChildPrefetchResult[] = [];
+    for (const id of children) {
+      log(`прогрев ребёнка ${id}`);
+      const result = await prefetch({ ...shared, dbPath: childDatabasePath(dir, id) });
+      results.push({ childId: id, ...result });
+    }
+    return { children: results };
+  } finally {
+    lock.release();
+  }
+}
+
+/**
  * Счётчик из командной строки. Одного `/^\d+$/` мало: ему подходит и
  * «99999999999999999999», а это `1e20` настоящих вызовов codex по десять минут
  * каждый — от опечатки такой запуск неотличим до самого утра. Ноль тоже не
@@ -288,10 +411,10 @@ function isPositiveCount(value: string): boolean {
 }
 
 const NUMERIC_FLAGS = ['topics', 'target', 'threshold', 'batches', 'cycles'] as const;
-const TEXT_FLAGS = ['model', 'out', 'seed-dir', 'db', 'curriculum'] as const;
-const BOOLEAN_FLAGS = ['export'] as const;
+const TEXT_FLAGS = ['model', 'out', 'seed-dir', 'child', 'data-dir', 'curriculum'] as const;
+const BOOLEAN_FLAGS = ['export', 'all'] as const;
 
-export function parseArgs(argv: string[]): PrefetchOptions {
+export function parseArgs(argv: string[]): PrefetchChildrenOptions {
   const values = new Map<string, string>();
   const flags = new Set<string>();
   const numeric = new Set<string>(NUMERIC_FLAGS);
@@ -319,8 +442,8 @@ export function parseArgs(argv: string[]): PrefetchOptions {
     // Пустое значение молча доезжает до места применения и там значит совсем не
     // «не задано»: `--model ''` уходит в codex как `-m ''` (умолчание берётся по
     // `??`, а пустая строка не `undefined`), и каждый батч падает уже в модели с
-    // невнятной причиной. Так же `--db ''` превратился бы в путь до текущего
-    // каталога.
+    // невнятной причиной. Так же `--data-dir ''` превратился бы в путь до
+    // текущего каталога.
     if (text.has(name) && value.trim() === '') {
       throw new Error(`У флага ${flag} пустое значение`);
     }
@@ -345,7 +468,8 @@ export function parseArgs(argv: string[]): PrefetchOptions {
   const model = values.get('model');
   const outDir = path('out');
   const seedDir = path('seed-dir');
-  const dbPath = path('db');
+  const childId = values.get('child');
+  const dataDir = path('data-dir');
   const curriculumDir = path('curriculum');
 
   return {
@@ -358,7 +482,9 @@ export function parseArgs(argv: string[]): PrefetchOptions {
     ...(flags.has('export') ? { exportSeed: true } : {}),
     ...(outDir === undefined ? {} : { outDir }),
     ...(seedDir === undefined ? {} : { seedDir }),
-    ...(dbPath === undefined ? {} : { dbPath }),
+    ...(childId === undefined ? {} : { childId }),
+    ...(dataDir === undefined ? {} : { dataDir }),
+    ...(flags.has('all') ? { allChildren: true } : {}),
     ...(curriculumDir === undefined ? {} : { curriculumDir }),
   };
 }
@@ -395,25 +521,37 @@ export function prefetchFailed(result: PrefetchResult): boolean {
   );
 }
 
+/**
+ * Провалившийся обход: хотя бы один ребёнок не догрелся. Мягче нельзя —
+ * `--all` зовут перед занятием всей семьи, и «двое из трёх» здесь значит, что
+ * третий сядет за пустую очередь.
+ */
+export function prefetchChildrenFailed(result: PrefetchChildrenResult): boolean {
+  return result.children.some(prefetchFailed);
+}
+
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
-  const result = await prefetch(options);
+  const result = await prefetchChildren(options);
 
-  const stored = storedTotal(result);
-  // Итог выгрузки печатается всегда, когда её просили, — в том числе нулевой:
-  // пропуск предмета по осторожности («исходного файла не было, чужой снимок на
-  // месте») красит прогон, но без итоговой строки `--export` всё равно выглядел
-  // бы сработавшим, пока диагностику конкретного предмета не заметили в логе.
-  const exportSummary =
-    options.exportSeed === true
-      ? `, посев выгружен в ${result.exported.length} файл(ов)` +
-        (result.exportFailed.length === 0 ? '' : `, не выгружен: ${result.exportFailed.join(', ')}`)
-      : '';
-  process.stdout.write(
-    `prefetch: ${stored} новых задани(й) за ${result.cycles.length} цикл(ов)${exportSummary}\n`,
-  );
+  for (const child of result.children) {
+    const stored = storedTotal(child);
+    // Итог выгрузки печатается всегда, когда её просили, — в том числе нулевой:
+    // пропуск предмета по осторожности («исходного файла не было, чужой снимок на
+    // месте») красит прогон, но без итоговой строки `--export` всё равно выглядел
+    // бы сработавшим, пока диагностику конкретного предмета не заметили в логе.
+    const exportSummary =
+      options.exportSeed === true
+        ? `, посев выгружен в ${child.exported.length} файл(ов)` +
+          (child.exportFailed.length === 0 ? '' : `, не выгружен: ${child.exportFailed.join(', ')}`)
+        : '';
+    process.stdout.write(
+      `prefetch ${child.childId}: ${stored} новых задани(й) за ` +
+        `${child.cycles.length} цикл(ов)${exportSummary}\n`,
+    );
+  }
 
-  if (prefetchFailed(result)) {
+  if (prefetchChildrenFailed(result)) {
     process.stderr.write('prefetch: наполнение не удалось, подробности выше\n');
     process.exitCode = 1;
   }

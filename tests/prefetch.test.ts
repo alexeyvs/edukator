@@ -9,7 +9,22 @@ import { countAvailable } from '../server/codex/bank.js';
 import { CodexUnavailableError } from '../server/codex/client.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import type { ProduceRequest } from '../server/codex/worker.js';
-import { DEFAULT_CYCLES, parseArgs, prefetch, prefetchFailed } from '../scripts/prefetch.js';
+import {
+  DEFAULT_CYCLES,
+  parseArgs,
+  prefetch,
+  prefetchChildren,
+  prefetchChildrenFailed,
+  prefetchFailed,
+} from '../scripts/prefetch.js';
+import {
+  createChild,
+  createParent,
+  openControlDatabase,
+  type ChildStatus,
+} from '../server/control-db.js';
+import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
+import { acquireDataLock, dataLockPath, SERVER_LOCK_OWNER } from '../server/data-lock.js';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const tsxCli = join(projectRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
@@ -510,7 +525,16 @@ describe('prefetch', () => {
     it('падает на пустом значении текстового флага', () => {
       expect(() => parseArgs(['--model', ''])).toThrow(/пустое значение/u);
       expect(() => parseArgs(['--model', '  '])).toThrow(/пустое значение/u);
-      expect(() => parseArgs(['--db', ''])).toThrow(/пустое значение/u);
+      expect(() => parseArgs(['--data-dir', ''])).toThrow(/пустое значение/u);
+      expect(() => parseArgs(['--child', ' '])).toThrow(/пустое значение/u);
+    });
+
+    // Кого греть — единственное, чего у прогрева нет по умолчанию: баз столько,
+    // сколько детей, и молчаливый выбор грел бы очередь не тому ученику.
+    it('разбирает выбор ребёнка', () => {
+      expect(parseArgs(['--child', 'ребёнок-1'])).toMatchObject({ childId: 'ребёнок-1' });
+      expect(parseArgs(['--all'])).toMatchObject({ allChildren: true });
+      expect(() => parseArgs(['--all', '--all'])).toThrow(/указан дважды/u);
     });
 
     // Все четыре сразу: перепутанные местами `--curriculum` и `--seed-dir`
@@ -518,16 +542,16 @@ describe('prefetch', () => {
     it('превращает пути в абсолютные и кладёт каждый в своё поле', () => {
       const options = parseArgs([
         '--out', 'content/seed-bank',
-        '--db', 'edukator.db',
+        '--data-dir', 'data',
         '--curriculum', 'content/curriculum',
         '--seed-dir', 'content/seed-bank-2',
       ]);
 
       expect(options.outDir?.endsWith('/content/seed-bank')).toBe(true);
-      expect(options.dbPath?.endsWith('/edukator.db')).toBe(true);
+      expect(options.dataDir?.endsWith('/data')).toBe(true);
       expect(options.curriculumDir?.endsWith('/content/curriculum')).toBe(true);
       expect(options.seedDir?.endsWith('/content/seed-bank-2')).toBe(true);
-      for (const path of [options.outDir, options.dbPath, options.curriculumDir, options.seedDir]) {
+      for (const path of [options.outDir, options.dataDir, options.curriculumDir, options.seedDir]) {
         expect(path?.startsWith('/')).toBe(true);
       }
     });
@@ -554,32 +578,211 @@ describe('prefetch', () => {
     });
   });
 
+  describe('обход детей', () => {
+    let dataDir: string;
+
+    /** Заводит ребёнка; без `provision` его база не создаётся — он `provisioning`. */
+    function newChild(name: string, provision = true): string {
+      const control = openControlDatabase(controlDatabasePath(dataDir));
+      try {
+        const parentId = createParent(control, `${name}@example.com`);
+        const childId = createChild(control, parentId, name);
+        if (provision) provisionChildDatabase(control, childId, dataDir);
+        return childId;
+      } finally {
+        control.close();
+      }
+    }
+
+    function childStatus(childId: string): ChildStatus | undefined {
+      const control = openControlDatabase(controlDatabasePath(dataDir));
+      try {
+        return (
+          control.prepare('SELECT status FROM children WHERE id = ?').get(childId) as
+            | { status: ChildStatus }
+            | undefined
+        )?.status;
+      } finally {
+        control.close();
+      }
+    }
+
+    function sweep(patch: Record<string, unknown> = {}): ReturnType<typeof prefetchChildren> {
+      return prefetchChildren({
+        dataDir,
+        curriculumDir,
+        seedDir,
+        topics: 1,
+        log,
+        produce: (request: ProduceRequest) =>
+          Promise.resolve(Array.from({ length: 5 }, () => task(request.topic.id))),
+        ...patch,
+      });
+    }
+
+    beforeEach(() => {
+      dataDir = ensureDataDir(join(tempDir, 'данные'));
+    });
+
+    it('греет базу указанного ребёнка и снимает замок', async () => {
+      const childId = newChild('первый');
+
+      const result = await sweep({ childId });
+
+      expect(result.children.map((child) => child.childId)).toEqual([childId]);
+      expect(prefetchChildrenFailed(result)).toBe(false);
+      const db = openDatabase(join(dataDir, 'children', `${childId}.db`));
+      try {
+        const warmed = SUBJECTS.filter((subject) => countAvailable(db, `${subject}.a`) > 0);
+        expect(warmed).toHaveLength(1);
+      } finally {
+        db.close();
+      }
+      // Замок обязан уйти вместе с прогревом: иначе следующий запуск сервера
+      // упёрся бы в замок процесса, которого давно нет.
+      expect(existsSync(dataLockPath(dataDir))).toBe(false);
+    });
+
+    // Живой сервер держит ту же пару слотов codex: второй процесс сделал бы их
+    // четыре, и ответ ученику встал бы в очередь за прогревом. Замок пишется
+    // руками от чужого живого номера: свой процесс замок делит с собой же
+    // (см. `server/data-lock.ts`), а поднимать настоящий сервер тест не обязан.
+    it('отказывается при живом сервере и называет причину', async () => {
+      const childId = newChild('первый');
+      writeFileSync(
+        dataLockPath(dataDir),
+        JSON.stringify({
+          pid: process.ppid,
+          owner: SERVER_LOCK_OWNER,
+          since: '2026-08-19T10:00:00.000Z',
+          nonce: 'чужой',
+        }),
+        { flag: 'wx' },
+      );
+
+      await expect(sweep({ childId })).rejects.toThrow(/занят: сервер \(pid \d+\)/u);
+      await expect(sweep({ childId })).rejects.toThrow(/остановите сервер/u);
+
+      // Свободный замок работать не мешает: отказ обязан быть про сервер, а не
+      // про сам факт замка.
+      rmSync(dataLockPath(dataDir));
+      const result = await sweep({ childId });
+      expect(result.children).toHaveLength(1);
+    });
+
+    it('требует выбрать ребёнка', async () => {
+      await expect(sweep()).rejects.toThrow(/--child <id> или --all/u);
+      await expect(sweep({ childId: 'кто-то', allChildren: true })).rejects.toThrow(
+        /вместе не имеют смысла/u,
+      );
+      // Отказ до замка: иначе опечатка в аргументах оставляла бы каталог
+      // запертым до конца процесса.
+      expect(existsSync(dataLockPath(dataDir))).toBe(false);
+    });
+
+    it('греет всех готовых детей и не трогает незаведённого', async () => {
+      const first = newChild('первый');
+      const second = newChild('второй');
+      const pending = newChild('третий', false);
+      expect(childStatus(pending)).toBe('provisioning');
+
+      const result = await sweep({ allChildren: true });
+
+      expect(result.children.map((child) => child.childId).sort()).toEqual([first, second].sort());
+    });
+
+    it('отказывается греть ребёнка без базы и незнакомого', async () => {
+      const pending = newChild('третий', false);
+
+      await expect(sweep({ childId: pending })).rejects.toThrow(/статус provisioning/u);
+      await expect(sweep({ childId: 'нет-такого' })).rejects.toThrow(/нет в управляющей базе/u);
+      // Замок снимается и после отказа: `finally`, а не «в конце удачного пути».
+      expect(existsSync(dataLockPath(dataDir))).toBe(false);
+    });
+
+    it('отказывается выгружать посев на обходе всех', async () => {
+      newChild('первый');
+
+      await expect(sweep({ allChildren: true, exportSeed: true })).rejects.toThrow(
+        /--export требует одного ребёнка/u,
+      );
+    });
+
+    it('отказывается, когда готовых детей нет', async () => {
+      await expect(sweep({ allChildren: true })).rejects.toThrow(/нет ни одного готового ребёнка/u);
+    });
+  });
+
   describe('prefetch CLI', () => {
+    let cliDataDir: string;
+    let cliChildId: string;
+
+    beforeEach(() => {
+      cliDataDir = ensureDataDir(join(tempDir, 'cli-данные'));
+      const control = openControlDatabase(controlDatabasePath(cliDataDir));
+      try {
+        const parentId = createParent(control, 'cli@example.com');
+        cliChildId = createChild(control, parentId, 'Ученик');
+        provisionChildDatabase(control, cliChildId, cliDataDir);
+      } finally {
+        control.close();
+      }
+    });
+
+    function runCli(args: string[]): ReturnType<typeof spawnSync> {
+      return spawnSync(process.execPath, [tsxCli, prefetchCli, ...args], {
+        encoding: 'utf8',
+        // Пустой `PATH` — та же защита, что в остальных тестах: настоящий codex
+        // не зовёт ни один из них.
+        env: { ...process.env, PATH: '' },
+      });
+    }
+
     it('возвращает код 1, когда запрошенная выгрузка не состоялась', () => {
       const outDir = join(tempDir, 'cli-out');
       mkdirSync(outDir);
-      const result = spawnSync(
-        process.execPath,
-        [
-          tsxCli,
-          prefetchCli,
-          '--topics', '1',
-          '--cycles', '1',
-          '--export',
-          '--db', join(tempDir, 'cli.db'),
-          '--curriculum', curriculumDir,
-          '--seed-dir', seedDir,
-          '--out', outDir,
-        ],
-        {
-          encoding: 'utf8',
-          env: { ...process.env, PATH: '' },
-        },
-      );
+
+      const result = runCli([
+        '--topics', '1',
+        '--cycles', '1',
+        '--export',
+        '--data-dir', cliDataDir,
+        '--child', cliChildId,
+        '--curriculum', curriculumDir,
+        '--seed-dir', seedDir,
+        '--out', outDir,
+      ]);
 
       expect(result.status).toBe(1);
       expect(result.stdout).toMatch(/посев выгружен в 0 файл/u);
       expect(result.stderr).toMatch(/наполнение не удалось/u);
+    });
+
+    // Без выбора ребёнка запуск обязан кончиться до первого вызова модели:
+    // «погрел кого-то» тут хуже отказа.
+    it('возвращает код 1 без выбора ребёнка', () => {
+      const result = runCli(['--data-dir', cliDataDir, '--curriculum', curriculumDir]);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/--child <id> или --all/u);
+      expect(result.stdout).toBe('');
+    });
+
+    it('возвращает код 1 при живом сервере', () => {
+      const server = acquireDataLock(cliDataDir, SERVER_LOCK_OWNER);
+
+      try {
+        const result = runCli([
+          '--data-dir', cliDataDir,
+          '--child', cliChildId,
+          '--curriculum', curriculumDir,
+        ]);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toMatch(/занят: сервер/u);
+      } finally {
+        server.release();
+      }
     });
   });
 });

@@ -18,6 +18,7 @@ import { openDatabase } from '../server/db.js';
 import { loadCurriculum } from '../server/curriculum.js';
 import { controlDatabasePath } from '../server/data-dir.js';
 import { openControlDatabase } from '../server/control-db.js';
+import { acquireDataLock, dataLockPath, SERVER_LOCK_OWNER } from '../server/data-lock.js';
 import { childHeaders, startTenantServer, type TenantServer } from './server-harness.js';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -398,6 +399,45 @@ describe('GET /api/health', () => {
     it('принимает заданный адрес и убирает пробелы по краям', () => {
       expect(readHost(' 192.168.100.141 ')).toBe('192.168.100.141');
     });
+  });
+
+  // Замок каталога — то, чем сервер отбивается от второго процесса на тех же
+  // данных: у прогрева и второго сервера был бы свой предел вызовов codex.
+  it('держит замок каталога данных, пока жив', async () => {
+    const dir = join(tempDir, 'замок');
+    const locked = buildServer(undefined, { dataDir: dir, worker: false });
+    await locked.ready();
+
+    const record = JSON.parse(readFileSync(dataLockPath(dir), 'utf8')) as {
+      pid: number;
+      owner: string;
+    };
+    expect(record).toMatchObject({ pid: process.pid, owner: SERVER_LOCK_OWNER });
+
+    await locked.close();
+    // Снятие обязательно: иначе следующий запуск упирался бы в замок процесса,
+    // которого давно нет.
+    expect(existsSync(dataLockPath(dir))).toBe(false);
+  });
+
+  it('прямой CLI-запуск возвращает код 1 на занятом каталоге данных', () => {
+    const dir = join(tempDir, 'cli-занято');
+    const busy = acquireDataLock(dir, SERVER_LOCK_OWNER);
+
+    try {
+      const result = spawnSync(process.execPath, [tsxCli, serverCli], {
+        encoding: 'utf8',
+        env: { ...process.env, EDUKATOR_DATA_DIR: dir },
+      });
+
+      expect(result.status).toBe(1);
+      // Одна строка вместо стека: занятый каталог — такая же обычная ошибка
+      // запуска, как занятый порт, и причину читает человек в терминале.
+      expect(result.stderr).toMatch(/edukator не поднялся: Каталог данных .* занят: сервер/u);
+      expect(result.stderr).not.toMatch(/at .*data-lock/u);
+    } finally {
+      busy.release();
+    }
   });
 
   it('прямой CLI-запуск возвращает код 1 на битом PORT до открытия базы', () => {
