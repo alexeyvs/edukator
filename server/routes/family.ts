@@ -90,6 +90,10 @@ function readPinBody(body: unknown): string | undefined {
  */
 function deviceIdParam(params: unknown): number | undefined {
   const raw = (params as { id: string }).id;
+  // Сначала форма, потом число: `Number` принял бы и `0x4`, и `1e3`, и ` 12 `,
+  // то есть одно устройство адресовалось бы несколькими написаниями подряд. Тот
+  // же порядок у остальных разборщиков номеров в маршрутах.
+  if (!/^\d+$/u.test(raw)) return undefined;
   const id = Number(raw);
   return Number.isSafeInteger(id) && id > 0 ? id : undefined;
 }
@@ -178,6 +182,37 @@ export function registerFamilyRoutes(app: FastifyInstance, options: FamilyRoutes
     return reply.code(201).send({ child: withDevices(child) });
   });
 
+  app.post('/api/family/children/:id/provision', (request, reply) => {
+    const parent = requireParent(request, reply);
+    if (parent === undefined) return reply;
+
+    const childId = (request.params as { id: string }).id;
+    const child = readChild(control, childId);
+    // Повтор нужен как раз `failed`/`provisioning`, поэтому общий
+    // `authorizeChild` здесь не подходит: он намеренно допускает только
+    // обслуживаемого `ready`-ребёнка. Чужой и отсутствующий снаружи всё равно
+    // неразличимы.
+    if (child === undefined || child.parentId !== parent.parentId || child.retiredAt !== undefined) {
+      return fail(reply, new AuthError('no-child', 'Ребёнок не найден'));
+    }
+
+    try {
+      // Вызов идемпотентен: после потерянного успешного ответа `ready`-ребёнок
+      // с уже лежащей базой просто вернётся как есть, а оборванные состояния
+      // продолжатся с безопасной точки протокола заведения.
+      provisionChildDatabase(control, child.id, options.dataDir);
+    } catch (error) {
+      process.stderr.write(`база ребёнка ${child.id} повторно не заведена: ${(error as Error).message}\n`);
+      return reply.code(503).send({ error: 'База ребёнка не заведена, попробуйте позже' });
+    }
+
+    const provisioned = readChild(control, child.id);
+    if (provisioned === undefined) {
+      return reply.code(503).send({ error: 'База ребёнка не заведена, попробуйте позже' });
+    }
+    return reply.send({ child: withDevices(provisioned) });
+  });
+
   app.post('/api/family/children/:id/devices', (request, reply) => {
     const parent = requireParent(request, reply);
     if (parent === undefined) return reply;
@@ -258,6 +293,7 @@ export function registerUnavailableFamily(app: FastifyInstance, reason: string):
     reply.code(503).send({ error: `Управление семьёй недоступно: ${reason}` });
   app.get('/api/family', send);
   app.post('/api/family/children', send);
+  app.post('/api/family/children/:id/provision', send);
   app.post('/api/family/children/:id/devices', send);
   app.post('/api/family/devices/:id/revoke', send);
   app.post('/api/family/pin', send);

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -52,7 +52,19 @@ describe('каталог данных', () => {
       expect(dataDir('относительный')).toBe(resolve('относительный'));
     });
 
+    it('читает переменную окружения и не зависит от оболочки разработчика', () => {
+      // `dataDir(undefined)` — это как раз обращение к умолчанию параметра, то
+      // есть к `process.env`: без подмены тест краснел бы у всякого, у кого
+      // переменная задана в оболочке, и мимо самого чтения переменной.
+      vi.stubEnv('EDUKATOR_DATA_DIR', join(tempDir, 'из-окружения'));
+      expect(dataDir()).toBe(join(tempDir, 'из-окружения'));
+      vi.stubEnv('EDUKATOR_DATA_DIR', '');
+      expect(dataDir()).toBe(DEFAULT_DATA_DIR);
+      vi.unstubAllEnvs();
+    });
+
     it('пустое значение — это умолчание, а не текущий каталог', () => {
+      vi.stubEnv('EDUKATOR_DATA_DIR', '');
       // Пустая строка уходила бы в `resolve` и давала каталог запуска: базы
       // детей появлялись бы там, откуда сервер запустили, и следующий запуск из
       // другого места их бы не нашёл.
@@ -60,6 +72,7 @@ describe('каталог данных', () => {
         expect(dataDir(value)).toBe(DEFAULT_DATA_DIR);
       }
       expect(DEFAULT_DATA_DIR.endsWith(`${'/'}data`)).toBe(true);
+      vi.unstubAllEnvs();
     });
 
     it('управляющая база лежит в каталоге данных', () => {
@@ -166,6 +179,24 @@ describe('каталог данных', () => {
       }
     });
 
+    it('отказывается заводить пустую базу на месте пропавшей у ready-ребёнка', () => {
+      const childId = newChild();
+      const { path } = provisionChildDatabase(control, childId, tempDir);
+      expect(readChild(control, childId)?.status).toBe('ready');
+      // Файл пропал: снесли руками, потеряли диск, развернули каталог наполовину.
+      rmSync(path, { force: true });
+
+      expect(() => provisionChildDatabase(control, childId, tempDir))
+        .toThrow(/объявлена готовой, но файла/u);
+
+      // Пустой базы на её месте не появилось: она вернулась бы к ученику как
+      // успешное заведение, с нулевым прогрессом вместо потерянного.
+      expect(existsSync(path)).toBe(false);
+      // И `ready` не понижен: файл возвращают из копии, а `failed` пережил бы
+      // возврат и оставил бы исправную базу невыдаваемой.
+      expect(readChild(control, childId)?.status).toBe('ready');
+    });
+
     it('помечает ребёнка failed и не оставляет времянки, если базу создать нечем', () => {
       const childId = newChild();
       const root = join(tempDir, CHILDREN_DIR);
@@ -206,6 +237,22 @@ describe('каталог данных', () => {
         db.close();
       }
       expect(readdirSync(join(tempDir, CHILDREN_DIR))).toEqual([`${childId}.db`]);
+    });
+
+    // Ветка «база уже на месте» — это доведение прерванного заведения до конца,
+    // и переносу она не подходит: доказать, что лежащая база и есть копия
+    // исходной, нечем. Пройдя её молча, перенос отчитался бы успехом, ничего не
+    // перенеся, и сразу закрыл бы себе повтор пометкой `ready`.
+    it('не выдаёт готовую базу за перенесённую', () => {
+      const legacy = join(tempDir, 'старая.db');
+      openDatabase(legacy).close();
+
+      const childId = newChild();
+      // Обрыв между `rename` и переводом в `ready`: база уже на месте.
+      expect(provisionChildDatabase(control, childId, tempDir).created).toBe(true);
+
+      expect(() => provisionChildDatabase(control, childId, tempDir, { source: legacy }))
+        .toThrow(/уже лежит/u);
     });
 
     it('помечает ребёнка failed, если копировать нечего', () => {

@@ -591,6 +591,9 @@ test('родитель заводит ребёнка, выпускает ссы�
       await studentPage.goto(joinUrl);
       // Токен уходит из адресной строки сразу: он и есть весь секрет.
       await expect(studentPage).toHaveURL(`${harness.url}/`);
+      // GET страницы не гасит одноразовую ссылку: это мог быть предпросмотр
+      // мессенджера или антивирусный сканер. Погашение начинается только здесь.
+      await studentPage.getByRole('button', { name: 'Это мой компьютер' }).click();
 
       const mathRun = studentPage.locator('.plan-cards article').filter({ hasText: 'Математика' });
       await mathRun.getByRole('button', { name: 'Начать' }).click();
@@ -658,6 +661,39 @@ test('PIN нужен только с детской машины: неверны
       .getByRole('button', { name: 'Вернуть режим «По плану»' }).click();
     await expect(page.getByRole('region', { name: 'Компьютер заблокирован' }))
       .toContainText('Режим по плану');
+    harness.assertCodexNotCalled();
+  } finally {
+    await harness.close();
+  }
+});
+
+test('агентский токен открывает только gate/status и ничего больше', async ({ context, page }) => {
+  const harness = await startE2eHarness({ context });
+  try {
+    const agent = { authorization: `Bearer ${harness.agentToken()}` };
+
+    // Контроллер доступа: заголовок вместо cookie, ровно один маршрут.
+    const gate = await page.request.get(`${harness.url}/api/gate/status`, { headers: agent });
+    expect(gate.status()).toBe(200);
+    expect(await gate.json()).toMatchObject({ unlocked: false });
+
+    // Агент — не детская сессия: он лежит файлом на детской машине, и допуск
+    // его к обычным маршрутам означал бы, что этот файл умеет сдавать ответы.
+    for (const url of ['/api/profile', '/api/run/plan', `/api/parents/${harness.childId}`]) {
+      expect((await page.request.get(`${harness.url}${url}`, { headers: agent })).status()).toBe(403);
+    }
+    expect(
+      (await page.request.post(`${harness.url}/api/run/start`, {
+        headers: { ...agent, 'sec-fetch-site': 'same-origin' },
+        data: {},
+      })).status(),
+    ).toBe(403);
+
+    // Отозванное устройство перестаёт быть предъявителем на том же запросе.
+    harness.revokeAgent();
+    expect(
+      (await page.request.get(`${harness.url}/api/gate/status`, { headers: agent })).status(),
+    ).toBe(401);
     harness.assertCodexNotCalled();
   } finally {
     await harness.close();

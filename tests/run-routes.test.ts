@@ -72,13 +72,6 @@ describe('маршруты забега', () => {
       curriculumDir,
       seedDir,
       now: () => NOW,
-      background: (job): void => void job(),
-      integrityReview: async (items) => items.map((item) => ({
-        id: item.id,
-        decision: 'meaningful',
-        confidence: 0.99,
-        reason: 'Ответ осмысленный.',
-      })),
     });
     app = server.app;
     db = openDatabase(server.dbPath);
@@ -101,6 +94,15 @@ describe('маршруты забега', () => {
     });
     expect(response.statusCode).toBe(200);
     return (response.json() as { runId: number }).runId;
+  }
+
+  async function finishCompleted(runId: number) {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const response = await app.inject({ method: 'POST', url: `/api/run/${runId}/finish` });
+      if ((response.json() as { status?: string }).status !== 'checking') return response;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    throw new Error(`Проверка забега ${runId} не завершилась`);
   }
 
   it('проходит полный HTTP-цикл: план, старт, задание, ответ и финиш', async () => {
@@ -173,7 +175,7 @@ describe('маршруты забега', () => {
     expect(beyondTarget.statusCode).toBe(409);
     expect(beyondTarget.json()).toMatchObject({ code: 'run-complete' });
 
-    const finish = await app.inject({ method: 'POST', url: `/api/run/${runId}/finish` });
+    const finish = await finishCompleted(runId);
     expect(finish.statusCode).toBe(200);
     expect(finish.json()).toMatchObject({ runId, total: 12, correct: 12, xp: 300 });
     expect(db.prepare('SELECT finished_at, total, correct FROM runs WHERE id = ?').get(runId))
@@ -505,7 +507,7 @@ describe('маршруты забега', () => {
       expect(answer.statusCode).toBe(200);
     }
 
-    const finished = await app.inject({ method: 'POST', url: `/api/run/${runId}/finish` });
+    const finished = await finishCompleted(runId);
     expect(finished.statusCode).toBe(200);
     const plan = await app.inject({ method: 'GET', url: '/api/run/plan' });
     expect(plan.json()).toMatchObject({ gate: { completed: 1, remaining: 2 } });

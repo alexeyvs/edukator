@@ -57,7 +57,6 @@ describe('Learning API', () => {
   let app: FastifyInstance;
   let db: Database;
   let serial: number;
-  let integrityDecision: 'meaningful' | 'junk';
 
   beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), 'edukator-learning-routes-'));
@@ -67,7 +66,6 @@ describe('Learning API', () => {
     mkdirSync(seedDir);
     writeCurriculum(curriculumDir);
     serial = 0;
-    integrityDecision = 'meaningful';
     server = await startTenantServer({
       dataDir: join(tempDir, 'data'),
       curriculumDir,
@@ -78,17 +76,6 @@ describe('Learning API', () => {
       },
       background: (job): void => void job(),
       log: (): void => undefined,
-      integrityReview: async (items) => items.map((item) => {
-        const decision = integrityDecision === 'junk'
-          && item.attempts.some((attempt) => attempt.answer === 'Ff')
-          ? 'junk' : 'meaningful';
-        return {
-          id: item.id,
-          decision,
-          confidence: 0.99,
-          reason: decision === 'junk' ? 'Случайные буквы вместо числа.' : 'Видна попытка решения.',
-        };
-      }),
     });
     app = server.app;
     db = openDatabase(server.dbPath);
@@ -155,6 +142,17 @@ describe('Learning API', () => {
       attempts.push((response.json() as { attempt_id: number }).attempt_id);
     }
     return attempts;
+  }
+
+  async function finishLearningCompleted(runId: number) {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const response = await app.inject({
+        method: 'POST', url: `/api/learning/run/${runId}/finish`,
+      });
+      if ((response.json() as { status?: string }).status !== 'checking') return response;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    throw new Error(`Проверка lesson-run ${runId} не завершилась`);
   }
 
   it('показывает только готовую карточку и безопасно открывает материал', async () => {
@@ -335,9 +333,7 @@ describe('Learning API', () => {
       })).statusCode).toBe(200);
     }
 
-    const finish = await app.inject({
-      method: 'POST', url: `/api/learning/run/${lessonRunId}/finish`,
-    });
+    const finish = await finishLearningCompleted(lessonRunId);
     expect(finish.statusCode).toBe(200);
     expect(finish.json()).toMatchObject({ materialId, outcome: 'passed', total: 5, correct: 5 });
     expect(readStreak(db, NOW)).toEqual({ current: 0, best: 0, completedToday: false });
@@ -366,9 +362,7 @@ describe('Learning API', () => {
     const beforeSnapshots = db.prepare(
       "SELECT COUNT(*) AS count FROM forecast_snapshots WHERE subject = 'math'",
     ).get();
-    const finish = await app.inject({
-      method: 'POST', url: `/api/learning/run/${runId}/finish`,
-    });
+    const finish = await finishLearningCompleted(runId);
     expect(finish.statusCode).toBe(200);
     expect(finish.json()).toMatchObject({
       materialId, runId, total: 5, correct, xp, outcome,
@@ -392,9 +386,7 @@ describe('Learning API', () => {
       expect(restart.json()).toMatchObject({ materialId, resumed: false, progress: { total: 0 } });
     }
 
-    const repeated = await app.inject({
-      method: 'POST', url: `/api/learning/run/${runId}/finish`,
-    });
+    const repeated = await finishLearningCompleted(runId);
     expect(repeated.json()).toEqual(finish.json());
     expect(db.prepare(
       "SELECT COUNT(*) AS count FROM forecast_snapshots WHERE subject = 'math'",
@@ -419,9 +411,7 @@ describe('Learning API', () => {
     const masteryAfterFirst = db.prepare<[], { mastery: number; attempts: number }>(
       "SELECT mastery, attempts FROM topic_state WHERE topic_id = 'math.a'",
     ).get();
-    const firstFinish = await app.inject({
-      method: 'POST', url: `/api/learning/run/${firstRunId}/finish`,
-    });
+    const firstFinish = await finishLearningCompleted(firstRunId);
     expect(firstFinish.json()).toMatchObject({ outcome: 'failed', xp: 75 });
     expect((await app.inject({ method: 'GET', url: '/api/gate/status' })).json())
       .toMatchObject({ learning: { materialId, required: true, passed: false }, unlocked: false });
@@ -479,9 +469,7 @@ describe('Learning API', () => {
     const snapshotsBeforeRetryFinish = db.prepare(
       "SELECT COUNT(*) AS count FROM forecast_snapshots WHERE subject = 'math'",
     ).get();
-    const retryFinish = await app.inject({
-      method: 'POST', url: `/api/learning/run/${retryRunId}/finish`,
-    });
+    const retryFinish = await finishLearningCompleted(retryRunId);
     expect(retryFinish.json()).toMatchObject({
       outcome: 'passed', xp: 0,
       masteryBefore: masteryAfterFirst?.mastery, masteryAfter: masteryAfterFirst?.mastery,
@@ -491,9 +479,7 @@ describe('Learning API', () => {
       .toEqual(snapshotsBeforeRetryFinish);
     expect((await app.inject({ method: 'GET', url: '/api/gate/status' })).json())
       .toMatchObject({ learning: { materialId, required: true, passed: true }, unlocked: true });
-    expect((await app.inject({
-      method: 'POST', url: `/api/learning/run/${firstRunId}/finish`,
-    })).json()).toEqual(firstFinish.json());
+    expect((await finishLearningCompleted(firstRunId)).json()).toEqual(firstFinish.json());
   });
 
   it.each([
@@ -516,7 +502,7 @@ describe('Learning API', () => {
       }
       const firstRunId = await openAndStart(materialId);
       await answerFive(firstRunId, 3);
-      await app.inject({ method: 'POST', url: `/api/learning/run/${firstRunId}/finish` });
+      await finishLearningCompleted(firstRunId);
       const stableMastery = db.prepare<[], { mastery: number; attempts: number }>(
         "SELECT mastery, attempts FROM topic_state WHERE topic_id = 'math.a'",
       ).get();
@@ -556,9 +542,7 @@ describe('Learning API', () => {
       expect(db.prepare("SELECT mastery, attempts FROM topic_state WHERE topic_id = 'math.a'").get())
         .toEqual(stableMastery);
 
-      const finish = await app.inject({
-        method: 'POST', url: `/api/learning/run/${retryRunId}/finish`,
-      });
+      const finish = await finishLearningCompleted(retryRunId);
       expect(finish.json()).toMatchObject({
         materialId, correct: expectedCorrect, outcome, xp: 0, touchedTopics: [], required: true,
       });
@@ -590,9 +574,7 @@ describe('Learning API', () => {
     const runId = await openAndStart(materialId);
     await answerFive(runId, 3);
 
-    const finish = await app.inject({
-      method: 'POST', url: `/api/learning/run/${runId}/finish`,
-    });
+    const finish = await finishLearningCompleted(runId);
     expect(finish.json()).toMatchObject({ materialId, outcome: 'failed', required: false });
   });
 
@@ -652,9 +634,7 @@ describe('Learning API', () => {
       studentCorrect: false,
       note: 'Ответ остаётся ошибочным',
     }));
-    const finished = await app.inject({
-      method: 'POST', url: `/api/learning/run/${runId}/finish`,
-    });
+    const finished = await finishLearningCompleted(runId);
     expect(finished.json()).toMatchObject({ outcome: 'passed', correct: 4 });
     expect((await app.inject({ method: 'GET', url: '/api/gate/status' })).json())
       .toMatchObject({ learning: { materialId, required: true, passed: true }, unlocked: true });
@@ -690,9 +670,7 @@ describe('Learning API', () => {
     if (studentCorrect) expect(masteryAfterResolution).not.toBe(masteryBeforeResolution);
     else expect(masteryAfterResolution).toBe(masteryBeforeResolution);
 
-    const finish = await app.inject({
-      method: 'POST', url: `/api/learning/run/${runId}/finish`,
-    });
+    const finish = await finishLearningCompleted(runId);
     expect(finish.statusCode).toBe(200);
     expect(finish.json()).toMatchObject({ materialId, runId, correct, outcome });
   });

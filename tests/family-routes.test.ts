@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
@@ -8,9 +8,11 @@ import {
   MAX_CHILD_NAME_LENGTH,
   MAX_DEVICE_LABEL_LENGTH,
   childDatabasePath,
+  createChild,
   createParent,
   issueParentInvite,
   openControlDatabase,
+  readChild,
   readParentPinHash,
   redeemParentInvite,
   resolveChildDevice,
@@ -218,6 +220,47 @@ describe('маршруты семьи', () => {
       expect(second.statusCode).toBe(200);
       expect(second.json()).toMatchObject({ revoked: false });
     });
+
+    it('повторно заводит базу сорвавшегося ребёнка без дубликата', async () => {
+      const token = await parentSession('родитель@example.com');
+      const parent = control.prepare<[], { id: string }>('SELECT id FROM parents').get();
+      const childId = createChild(control, parent?.id ?? '', 'Марта', current);
+
+      // Имитируем временный отказ диска: каталог детей на первой попытке нельзя
+      // создать, но после устранения причины должна продолжиться та же строка.
+      const childrenDir = join(dir, 'children');
+      rmSync(childrenDir, { recursive: true });
+      writeFileSync(childrenDir, 'временно не каталог');
+      const failed = await post(
+        `/api/family/children/${childId}/provision`,
+        asParent(token),
+      );
+      expect(failed.statusCode).toBe(503);
+      expect(readChild(control, childId)?.status).toBe('failed');
+
+      rmSync(childrenDir);
+      ensureDataDir(dir);
+
+      const response = await post(
+        `/api/family/children/${childId}/provision`,
+        asParent(token),
+      );
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ child: { id: childId, status: 'ready' } });
+      expect(existsSync(childDatabasePath(dir, childId))).toBe(true);
+      expect(readChild(control, childId)?.status).toBe('ready');
+      expect((control.prepare<[], { count: number }>('SELECT count(*) AS count FROM children').get())?.count)
+        .toBe(1);
+
+      // Потерянный ответ не делает повтор опасным и не заводит второго ребёнка.
+      const repeated = await post(
+        `/api/family/children/${childId}/provision`,
+        asParent(token),
+      );
+      expect(repeated.statusCode).toBe(200);
+      expect(repeated.json()).toMatchObject({ child: { id: childId, status: 'ready' } });
+    });
   });
 
   describe('допуск', () => {
@@ -229,6 +272,7 @@ describe('маршруты семьи', () => {
       return [
         { method: 'GET', url: '/api/family' },
         { method: 'POST', url: '/api/family/children', payload: { name: 'Чужой' } },
+        { method: 'POST', url: `/api/family/children/${childId}/provision` },
         { method: 'POST', url: `/api/family/children/${childId}/devices`, payload: { kind: 'browser' } },
         { method: 'POST', url: `/api/family/devices/${deviceId}/revoke` },
         { method: 'POST', url: '/api/family/pin', payload: { pin: '111111' } },
@@ -328,10 +372,15 @@ describe('маршруты семьи', () => {
       const foreignDevice = await post(`/api/family/children/${childId}/devices`, asParent(second), {
         kind: 'browser',
       });
+      const foreignProvision = await post(
+        `/api/family/children/${childId}/provision`,
+        asParent(second),
+      );
       const foreignRevoke = await post(`/api/family/devices/${deviceId}/revoke`, asParent(second));
 
       expect((listed.json() as { children: unknown[] }).children).toEqual([]);
       expect(foreignDevice.statusCode).toBe(404);
+      expect(foreignProvision.statusCode).toBe(404);
       expect(foreignRevoke.statusCode).toBe(404);
       // Чужое устройство осталось действующим: отказ был отказом, а не тихим
       // успехом над соседней семьёй.
@@ -357,6 +406,17 @@ describe('маршруты семьи', () => {
 
       expect(foreign.statusCode).toBe(missing.statusCode);
       expect(foreign.json()).toEqual(missing.json());
+
+      const foreignProvision = await post(
+        `/api/family/children/${childId}/provision`,
+        asParent(second),
+      );
+      const missingProvision = await post(
+        '/api/family/children/00000000000000000000000000000000/provision',
+        asParent(second),
+      );
+      expect(foreignProvision.statusCode).toBe(missingProvision.statusCode);
+      expect(foreignProvision.json()).toEqual(missingProvision.json());
     });
   });
 
@@ -410,9 +470,12 @@ describe('маршруты семьи', () => {
     it('отвергает номер устройства, который не номер', async () => {
       const parent = await parentSession('родитель@example.com');
 
-      const response = await post('/api/family/devices/12abc/revoke', asParent(parent));
-
-      expect(response.statusCode).toBe(404);
+      // `Number` принял бы и шестнадцатеричное, и экспоненту, и число в
+      // пробелах: одно устройство адресовалось бы несколькими написаниями.
+      for (const raw of ['12abc', '0x4', '1e3', '%20%2012%20', '+4', '4.0']) {
+        const response = await post(`/api/family/devices/${raw}/revoke`, asParent(parent));
+        expect(response.statusCode).toBe(404);
+      }
     });
 
     it('отвергает PIN не из шести-двенадцати цифр', async () => {

@@ -57,62 +57,6 @@ describe('маршрут родителей', () => {
     setParentPin(server.control, server.parentId, hashParentPin(PARENT_PIN, PIN_PEPPER));
   });
 
-  it('по запросу раскрывает вопросы, ответы, эталон и время завершённого занятия', async () => {
-    const runId = Number(db.prepare(
-      `INSERT INTO runs
-        (subject, kind, topic_id, started_at, finished_at, summary, total, correct)
-       VALUES ('math', 'run', 'math.internal-secret', ?, ?, '{}', 1, 0)`,
-    ).run('2026-08-08T10:00:00.000Z', '2026-08-08T10:10:00.000Z').lastInsertRowid);
-    const taskId = Number(db.prepare(
-      `INSERT INTO task_bank
-        (topic_id, question, answer, hint, explain, difficulty, status)
-       VALUES ('math.internal-secret', 'Сколько будет 2 + 2?', '4', 'Сложи числа',
-               'Два плюс два равно четырём.', 1, 'used')`,
-    ).run().lastInsertRowid);
-    db.prepare(
-      `INSERT INTO attempts
-        (task_id, topic_id, run_id, answer, is_correct, hint_used, duration_ms, created_at)
-       VALUES (?, 'math.internal-secret', ?, '5', 0, 1, 12500, ?)`,
-    ).run(taskId, runId, '2026-08-08T10:05:00.000Z');
-
-    const response = await app.inject({
-      method: 'GET',
-      url: `/api/parents/${server.childId}/runs/${String(runId)}`,
-    });
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      runId,
-      kind: 'run',
-      subject: 'math',
-      activeMilliseconds: 12_500,
-      attempts: [{
-        number: 1,
-        topicTitle: 'Публичная тема math',
-        question: 'Сколько будет 2 + 2?',
-        studentAnswer: '5',
-        correctAnswer: '4',
-        explanation: 'Два плюс два равно четырём.',
-        hint: 'Сложи числа',
-        correct: false,
-        durationMilliseconds: 12_500,
-      }],
-    });
-    expect(response.body).not.toContain('internal-secret');
-  });
-
-  it('проверяет id и не раскрывает занятие вне недельной сводки', async () => {
-    expect((await app.inject({
-      method: 'GET',
-      url: `/api/parents/${server.childId}/runs/nope`,
-    })).statusCode).toBe(400);
-    const missing = await app.inject({
-      method: 'GET',
-      url: `/api/parents/${server.childId}/runs/999`,
-    });
-    expect(missing.statusCode).toBe(404);
-    expect(missing.json()).toEqual({ error: 'Занятие не найдено в текущей недельной сводке' });
-  });
-
   afterEach(async () => {
     db.close();
     await server.close();
@@ -264,7 +208,9 @@ describe('маршрут родителей', () => {
       error: 'Поле mode должно быть одним из: automatic, blocked, unlocked',
     });
 
-    for (const authorization of [undefined, 'Basic 123456', 'Bearer 999999']) {
+    // Непредъявленный PIN и неверный PIN закрыты одинаковым 401, но названы
+    // по-разному: первый — «приложите», второй — «не тот».
+    for (const authorization of [undefined, 'Basic 123456']) {
       const response = await app.inject({
         method: 'PUT',
         url: `/api/parents/${server.childId}/computer-access`,
@@ -272,8 +218,17 @@ describe('маршрут родителей', () => {
         payload: { mode: 'blocked' },
       });
       expect(response.statusCode).toBe(401);
-      expect(response.json()).toEqual({ error: 'Неверный PIN родителя' });
+      expect(response.json()).toEqual({ error: 'Нужен PIN родителя' });
     }
+
+    const wrong = await app.inject({
+      method: 'PUT',
+      url: `/api/parents/${server.childId}/computer-access`,
+      headers: { authorization: 'Bearer 999999' },
+      payload: { mode: 'blocked' },
+    });
+    expect(wrong.statusCode).toBe(401);
+    expect(wrong.json()).toEqual({ error: 'Неверный PIN родителя' });
   });
 
   describe('счётчик неудачных PIN', () => {
@@ -304,6 +259,23 @@ describe('маршрут родителей', () => {
       expect((await attempt(PARENT_PIN)).statusCode).toBe(200);
     });
 
+    // Иначе пауза на всю семью зарабатывается запросами, в которых PIN даже не
+    // называли: счётчик почты один на всех детей, а «PIN не приложили» бывает и
+    // у устаревшего клиента, и у того, кто просто спросил, нужен ли тут PIN.
+    it('не считает неудачей запрос, в котором PIN не предъявляли вовсе', async () => {
+      for (let index = 0; index < 5; index += 1) {
+        const response = await app.inject({
+          method: 'PUT',
+          url: `/api/parents/${server.childId}/computer-access`,
+          remoteAddress: '192.0.2.1',
+          payload: { mode: 'blocked' },
+        });
+        expect(response.statusCode).toBe(401);
+      }
+
+      expect((await attempt(PARENT_PIN)).statusCode).toBe(200);
+    });
+
     // Порог по адресу выше почтового намеренно: за одним адресом стоит вся
     // семья вместе с NAT, и общий порог означал бы, что ошибившийся брат
     // закрывает вход соседней семье.
@@ -324,6 +296,22 @@ describe('маршрут родителей', () => {
 
       expect((await attempt(PARENT_PIN)).statusCode).toBe(429);
       expect(neighbour.statusCode).toBe(200);
+    });
+
+    it('закрывает управление доступом, когда неудачу не удалось записать', async () => {
+      // Счётчик читается, но не пишется: так выглядит `SQLITE_BUSY` под самым
+      // подбором PIN. Обычный 401 на это значил бы, что попытки перестают
+      // считаться ровно тогда, когда их надо считать.
+      server.control.exec(
+        `CREATE TRIGGER login_attempts_readonly BEFORE INSERT ON login_attempts
+           BEGIN SELECT RAISE(ABORT, 'счётчик недоступен'); END;`,
+      );
+
+      const response = await attempt('000000');
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toEqual({ error: 'Управление доступом временно недоступно' });
+      expect(response.headers['retry-after']).toBeDefined();
     });
 
     it('верный PIN до предела гасит почтовый счётчик', async () => {
@@ -383,8 +371,6 @@ describe('маршрут родителей', () => {
     try {
       expect((await detached.inject({ method: 'GET', url: `/api/parents/${FAKE_CHILD_ID}` })).statusCode).toBe(503);
       expect((await unavailable.inject({ method: 'GET', url: `/api/parents/${FAKE_CHILD_ID}` })).statusCode).toBe(503);
-      expect((await detached.inject({ method: 'GET', url: `/api/parents/${FAKE_CHILD_ID}/runs/1` })).statusCode).toBe(503);
-      expect((await unavailable.inject({ method: 'GET', url: `/api/parents/${FAKE_CHILD_ID}/runs/1` })).statusCode).toBe(503);
       expect((await detached.inject({
         method: 'PUT', url: `/api/parents/${FAKE_CHILD_ID}/computer-access`, payload: { mode: 'blocked' },
       })).statusCode).toBe(503);

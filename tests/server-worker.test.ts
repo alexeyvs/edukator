@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { HOST } from '../server/index.js';
+import { dataLockPath } from '../server/data-lock.js';
 import { startTenantServer, type TenantServer } from './server-harness.js';
 import { openDatabase } from '../server/db.js';
 import { loadCurriculum } from '../server/curriculum.js';
@@ -203,6 +204,110 @@ describe('воркер рабочего сервера', () => {
     expect(readCodexQuota(server.control, server.childId).used).toBe(calls.length);
   });
 
+  // `onClose` в Fastify идут в обратном порядке регистрации, так что «снять
+  // замок последним» означает «зарегистрировать его хук первым». Обратный
+  // порядок освобождал бы каталог, пока уходящий сервер ещё держит открытые
+  // базы и незаконченный вызов модели, — и `prefetch` заводил бы вторую пару
+  // слотов codex поверх недописанного WAL.
+  it('держит замок каталога, пока не закончил закрываться', async () => {
+    // Держит **первый** вызов модели и отпускает остальные: обход обязан
+    // застрять ровно один раз, иначе закрытие не дождаться вовсе.
+    let releaseProduce: ((tasks: GeneratedTask[]) => void) | undefined;
+    let reachedProduce: (() => void) | undefined;
+    const producing = new Promise<void>((resolve) => {
+      reachedProduce = resolve;
+    });
+    const dataDir = join(tempDir, 'data');
+    server = await startTenantServer({
+      dataDir,
+      seedDir: join(tempDir, 'seed-bank'),
+      log: () => undefined,
+      worker: {
+        topics: 1,
+        produce: () => {
+          if (releaseProduce !== undefined) return Promise.resolve([]);
+          return new Promise<GeneratedTask[]>((done) => {
+            releaseProduce = done;
+            reachedProduce?.();
+          });
+        },
+        wait: (): Promise<void> => new Promise<void>(() => undefined),
+      },
+    });
+    app = server.app;
+    const lockPath = dataLockPath(dataDir);
+
+    await app.listen({ host: HOST, port: 0 });
+    await producing;
+
+    const closing = app.close();
+    // Закрытие ждёт застрявший обход: замок в этот момент обязан быть на месте.
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    const heldWhileClosing = existsSync(lockPath);
+    releaseProduce?.([]);
+    await closing;
+
+    expect(heldWhileClosing).toBe(true);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  // Контроллер доступа стучится в `gate/status` раз в двадцать секунд, а
+  // брошенный ребёнок в обход не попадает и в `#served` не появляется никогда:
+  // считая опрос агента возвращением, диспетчер срывал бы паузу каждые двадцать
+  // секунд, и получасовой отступ по недоступному codex не наступал бы вовсе.
+  it('будит прогрев по запросу браузера, но не по опросу агента', async () => {
+    let pauses = 0;
+    server = await startTenantServer({
+      dataDir: join(tempDir, 'data'),
+      seedDir: join(tempDir, 'seed-bank'),
+      log: () => undefined,
+      worker: {
+        topics: 1,
+        produce: () => Promise.resolve([]),
+        wait: (): Promise<void> => {
+          pauses += 1;
+          return new Promise<void>(() => undefined);
+        },
+      },
+    });
+    app = server.app;
+    const running = app;
+    // Оба ребёнка ни разу не заходили: отметки активности у них нет, в обход они
+    // не попадают, и будильник по ним не отфильтруется как «уже свой».
+    const byAgent = server.addChild('Агентский', 'agent');
+    const byBrowser = server.addChild('Браузерный', 'browser');
+    // Первого ребёнка помощник уже прогрел запросом. Отметка снимается, чтобы
+    // обход был пустым и мгновенным: иначе «пауза не наступила ещё раз» значило
+    // бы всего лишь «обход не успел закончиться».
+    server.control.prepare('UPDATE children SET last_activity_at = NULL').run();
+
+    await running.listen({ host: HOST, port: 0 });
+    await viWaitFor(() => pauses >= 1);
+    const afterStart = pauses;
+
+    const polled = await running.inject({
+      method: 'GET',
+      url: '/api/gate/status',
+      // Явная пустая cookie: помощник подставляет детскую во все запросы, а с ней
+      // предъявителем стал бы первый ребёнок, а не агент второго.
+      headers: { ...byAgent.headers, cookie: '' },
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    const afterAgent = pauses;
+
+    const visited = await running.inject({
+      method: 'GET',
+      url: '/api/gate/status',
+      headers: byBrowser.headers,
+    });
+    await viWaitFor(() => pauses > afterAgent);
+
+    expect(polled.statusCode).toBe(200);
+    expect(visited.statusCode).toBe(200);
+    expect(afterAgent).toBe(afterStart);
+    expect(pauses).toBeGreaterThan(afterAgent);
+  });
+
   it('при недоступном codex откладывает воркер, но оставляет обычное занятие рабочим', async () => {
     const logged: string[] = [];
     let firstDelay: number | undefined;
@@ -218,7 +323,10 @@ describe('воркер рабочего сервера', () => {
         topics: 1,
         produce: () => Promise.reject(new CodexUnavailableError('codex не найден')),
         wait: async (ms) => {
-          firstDelay = ms;
+          // Именно первая пауза: занятие ученика будит диспетчер, и второй
+          // заход поставил бы сюда уже удвоенный отступ — тест то краснел бы,
+          // то нет, в зависимости от того, кто успел раньше.
+          firstDelay ??= ms;
           reachedWait?.();
           await new Promise<void>(() => undefined);
         },

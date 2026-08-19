@@ -70,6 +70,8 @@ describe('реестр детских баз', () => {
   let seedDir: string;
   let control: Database;
   let log: string[];
+  /** Соединение последнего `failing`: по нему видно, закрыл ли его реестр. */
+  let lastSession: Database | undefined;
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'edukator-tenants-'));
@@ -79,6 +81,7 @@ describe('реестр детских баз', () => {
     writeFileSync(join(seedDir, 'math.json'), `${JSON.stringify(SEED, null, 2)}\n`);
     control = openControlDatabase(controlDatabasePath(tempDir));
     log = [];
+    lastSession = undefined;
   });
 
   afterEach(() => {
@@ -92,6 +95,29 @@ describe('реестр детских баз', () => {
     const childId = createChild(control, parentId, name);
     provisionChildDatabase(control, childId, tempDir);
     return childId;
+  }
+
+  /**
+   * Открытие, у которого одна выборка бросает, а остальное работает как обычно:
+   * так испорченная база отличается от отсутствующей — соединение живо, а часть
+   * работы по нему не идёт. Само соединение запоминается в `lastSession`:
+   * проверять, закрыл ли его реестр, больше не по чему.
+   */
+  function failing(pattern: RegExp): (path: string) => SessionDatabase | undefined {
+    return (path) => {
+      const opened = openSessionDatabase(path);
+      if (opened === undefined) return undefined;
+      lastSession = opened.db;
+      const prepare = opened.db.prepare.bind(opened.db);
+      Object.defineProperty(opened.db, 'prepare', {
+        configurable: true,
+        value: (sql: string) => {
+          if (pattern.test(sql)) throw new Error(`выборка не удалась: ${sql}`);
+          return prepare(sql);
+        },
+      });
+      return opened;
+    };
   }
 
   function registry(
@@ -387,6 +413,35 @@ describe('реестр детских баз', () => {
       expect(broken.size).toBe(0);
       // Реестр не испорчен отказом: следующий открывает ту же базу как обычно.
       expect(tenants.open(childId).childId).toBe(childId);
+
+      await tenants.closeAll();
+    });
+
+    // Соединение открыто, а посев или темы упали: без закрытия дескриптор жил бы
+    // до конца процесса и считался бы против потолка открытых баз, которого
+    // реестру уже нечем освободить — аренды-то нет.
+    it('закрывает соединение сорвавшегося открытия, а не бросает его', () => {
+      const childId = readyChild();
+      const broken = registry({ openSession: failing(/topic_state/u) });
+
+      expect(() => broken.open(childId)).toThrow();
+      expect(broken.size).toBe(0);
+      expect(lastSession?.open).toBe(false);
+    });
+
+    // Восстановление незакрытых споров — не условие занятия: оно уже в кеше,
+    // часть споров могла встать на разбор и держать соединение, а сам спор
+    // переспросится следующим нажатием кнопки. Пятисотка отсюда запрещала бы
+    // ребёнку заниматься вовсе.
+    it('оставляет аренду рабочей, когда незакрытые споры не восстановились', async () => {
+      const childId = readyChild();
+      const tenants = registry({ openSession: failing(/FROM disputes/u) });
+
+      const tenant = tenants.open(childId);
+
+      expect(tenant.childId).toBe(childId);
+      expect(tenants.size).toBe(1);
+      expect(log.some((line) => /споры ребёнка .* не восстановлены/u.test(line))).toBe(true);
 
       await tenants.closeAll();
     });

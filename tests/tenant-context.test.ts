@@ -27,6 +27,7 @@ import { registerProfileRoutes } from '../server/routes/profile.js';
 import { registerRunRoutes } from '../server/routes/run.js';
 import { registerSessionRoutes } from '../server/routes/session.js';
 import { registerTriageRoutes } from '../server/routes/triage.js';
+import { registerIntegrityRoutes } from '../server/routes/integrity.js';
 import { createTenantContext, failAuth } from '../server/routes/tenant-context.js';
 
 const NOW = new Date('2026-08-19T09:00:00.000Z');
@@ -69,6 +70,8 @@ describe('контекст арендатора', () => {
   let childId: string;
   let otherChildId: string;
   let headers: Record<BearerName, Record<string, string>>;
+  /** Всё, что маршруты действительно зарегистрировали: таблица ниже сверяется с этим. */
+  const registered: { method: string; url: string }[] = [];
 
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'edukator-tenant-context-'));
@@ -108,9 +111,17 @@ describe('контекст арендатора', () => {
 
     const context = createTenantContext({ control, tenants, now: () => NOW });
     app = Fastify();
+    registered.length = 0;
+    app.addHook('onRoute', (route) => {
+      for (const method of [route.method].flat()) {
+        if (method === 'HEAD' || method === 'OPTIONS') continue;
+        registered.push({ method, url: route.url });
+      }
+    });
     registerSessionRoutes(app, { context, graph: GRAPH, now: () => NOW, log: () => undefined });
     registerRunRoutes(app, { context, graph: GRAPH, now: () => NOW });
     registerTriageRoutes(app, { context, graph: GRAPH, now: () => NOW });
+    registerIntegrityRoutes(app, { context });
     registerBossRoutes(app, { context, graph: GRAPH, now: () => NOW });
     registerLearningRoutes(app, { context, graph: GRAPH, now: () => NOW });
     registerProfileRoutes(app, { context });
@@ -172,6 +183,105 @@ describe('контекст арендатора', () => {
       }
     }
 
+    // Поимённо каждый маршрут: три URL выше проверяли три строки матрицы, но
+    // `allow` передаёт **каждый** обработчик отдельно, и подмена его у одного
+    // модуля (скажем, `child` → `gate` во всех маршрутах босса) не меняла ни
+    // одного ожидания. Ожидание выписано руками — из `ROUTE_ACCESS` его выводить
+    // нельзя по той же причине.
+    const ROUTES: ReadonlyArray<{
+      method: 'GET' | 'POST' | 'PUT';
+      url: string;
+      allow: ReadonlyArray<'parent' | 'browser' | 'agent'>;
+      /** `GET`, который списывает задание: источник он подтверждает наравне с `POST`. */
+      mutating?: true;
+    }> = [
+      { method: 'GET', url: '/api/session/next', allow: ['browser'], mutating: true },
+      { method: 'POST', url: '/api/session/answer', allow: ['browser'] },
+      { method: 'POST', url: '/api/session/dispute', allow: ['browser'] },
+      { method: 'POST', url: '/api/session/retry/skip', allow: ['browser'] },
+      { method: 'GET', url: '/api/run/plan', allow: ['browser'] },
+      { method: 'POST', url: '/api/run/start', allow: ['browser'] },
+      { method: 'POST', url: '/api/run/:id/finish', allow: ['browser'] },
+      { method: 'POST', url: '/api/triage/start', allow: ['browser'] },
+      { method: 'GET', url: '/api/triage/:id/next', allow: ['browser'], mutating: true },
+      { method: 'GET', url: '/api/integrity/:runId', allow: ['browser'] },
+      { method: 'POST', url: '/api/integrity/:runId/retry/:itemId', allow: ['browser'] },
+      { method: 'GET', url: '/api/boss/topics', allow: ['browser'] },
+      { method: 'GET', url: '/api/boss/:id/state', allow: ['browser'] },
+      { method: 'GET', url: '/api/boss/:id/next', allow: ['browser'] },
+      { method: 'POST', url: '/api/boss/start', allow: ['browser'] },
+      { method: 'POST', url: '/api/boss/:id/answer', allow: ['browser'] },
+      { method: 'POST', url: '/api/boss/:id/concede', allow: ['browser'] },
+      { method: 'GET', url: '/api/learning/:id', allow: ['browser'] },
+      { method: 'POST', url: '/api/learning/:id/open', allow: ['browser'] },
+      { method: 'POST', url: '/api/learning/:id/test', allow: ['browser'] },
+      { method: 'POST', url: '/api/learning/run/:runId/finish', allow: ['browser'] },
+      { method: 'GET', url: '/api/profile', allow: ['browser'] },
+      { method: 'PUT', url: '/api/profile', allow: ['browser'] },
+      { method: 'GET', url: '/api/gate/status', allow: ['browser', 'agent'] },
+      { method: 'GET', url: '/api/parents/:childId', allow: ['parent', 'browser'] },
+      { method: 'GET', url: '/api/parents/:childId/runs/:runId', allow: ['parent', 'browser'] },
+      { method: 'PUT', url: '/api/parents/:childId/computer-access', allow: ['parent', 'browser'] },
+      { method: 'PUT', url: '/api/parents/:childId/runs/:runId/integrity/:itemId/approve', allow: ['parent', 'browser'] },
+    ];
+
+    /** Адрес с подставленными параметрами. Существование строк роли не играет: проверяется допуск. */
+    function fill(url: string): string {
+      return url.replace(':childId', childId).replace(':runId', '1').replace(':itemId', '1').replace(':id', '1');
+    }
+
+    it('перечисляет в таблице каждый зарегистрированный маршрут', () => {
+      // Новый маршрут без строки в таблице — маршрут, чей допуск никто не
+      // проверял: без этой сверки он молча проходил бы мимо всего теста.
+      const table = new Set(ROUTES.map((route) => `${route.method} ${route.url}`));
+      const actual = registered.map((route) => `${route.method} ${route.url}`).sort();
+      expect(actual.filter((route) => !table.has(route))).toEqual([]);
+      expect([...table].filter((route) => !actual.includes(route)).sort()).toEqual([]);
+    });
+
+    for (const route of ROUTES) {
+      for (const bearer of ['parent', 'browser', 'agent'] as const) {
+        const allowed = route.allow.includes(bearer);
+        it(`${route.method} ${route.url}: ${bearer} ${allowed ? 'проходит допуск' : 'получает 403'}`, async () => {
+          const response = await app.inject({
+            method: route.method,
+            url: fill(route.url),
+            headers: headers[bearer],
+            ...(route.method === 'GET' ? {} : { payload: {} }),
+          });
+          // Сравнивается именно 403: остальные коды маршрут выдаёт по своему
+          // состоянию (нет забега, нет задания), и «не 200» было бы верно и на
+          // пятисотке.
+          if (allowed) expect(response.statusCode).not.toBe(403);
+          else expect(response.statusCode).toBe(403);
+        });
+      }
+    }
+
+    // Детская cookie `SameSite=Lax` уезжает и на переходе с чужой страницы, а
+    // безопасный метод у выдачи только по названию: `takeTask` списывает
+    // задание безвозвратно. Поэтому подтверждение источника у таких `GET`
+    // требуется наравне с `POST`, и ожидание выписано руками, маршрут за
+    // маршрутом: разъезд флага с тем, что маршрут делает, иначе не заметить.
+    for (const route of ROUTES.filter((candidate) => candidate.method === 'GET')) {
+      const kind = route.mutating === true ? 'требует' : 'не требует';
+      it(`GET ${route.url} ${kind} подтверждения источника`, async () => {
+        const bearer = route.allow.includes('browser') ? 'browser' : 'parent';
+        // Ровно предъявитель, без `sec-fetch-site` и `origin`: источник не
+        // подтверждён ничем.
+        const blind = Object.fromEntries(
+          Object.entries(headers[bearer]).filter(([name]) => name !== 'sec-fetch-site'),
+        );
+        const response = await app.inject({ method: 'GET', url: fill(route.url), headers: blind });
+        if (route.mutating === true) {
+          expect(response.statusCode).toBe(403);
+          expect(response.json()).toEqual({ error: 'Запрос пришёл не со страницы приложения' });
+        } else {
+          expect(response.statusCode).not.toBe(403);
+        }
+      });
+    }
+
     it('не пускает никуда без предъявителя', async () => {
       for (const url of ['/api/profile', '/api/gate/status', `/api/parents/${childId}`]) {
         expect((await get(url, 'anonymous')).statusCode).toBe(401);
@@ -213,7 +323,9 @@ describe('контекст арендатора', () => {
     it('не даёт ребёнку без PIN менять доступ к компьютеру', async () => {
       const response = await put(url(childId), 'browser', { mode: 'unlocked' });
       expect(response.statusCode).toBe(401);
-      expect(response.json()).toEqual({ error: 'Неверный PIN родителя' });
+      // Неприложенный PIN закрыт тем же 401, что и неверный, но неудачной
+      // попыткой не считается: счёт по нему сажал бы всю семью в паузу.
+      expect(response.json()).toEqual({ error: 'Нужен PIN родителя' });
     });
 
     it('пускает ребёнка с верным PIN', async () => {

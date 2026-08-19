@@ -36,6 +36,9 @@ export const PARENT_COOKIE = '__Host-edu_parent';
 /** Имя cookie детского устройства. Тот же префикс и по той же причине. */
 export const CHILD_COOKIE = '__Host-edu_child';
 
+/** Явно выбранная роль браузера, когда в нём живы обе сессии. */
+export const ACTOR_COOKIE = '__Host-edu_actor';
+
 /**
  * Заголовок агентского токена. Схема `Bearer`, а не cookie: контроллер ходит из
  * Python, cookie ему не нужны, а заголовок к тому же не досылается браузером
@@ -55,6 +58,12 @@ export type Bearer =
   | { kind: 'parent'; parent: ParentPrincipal }
   | { kind: 'browser'; child: ChildPrincipal }
   | { kind: 'agent'; child: ChildPrincipal };
+
+/** Действительные браузерные предъявители без выбора приоритета между ними. */
+export interface BrowserPrincipals {
+  parent?: ParentPrincipal;
+  child?: ChildPrincipal;
+}
 
 /** Причина отказа допуска. По ней маршрут выбирает код и текст ответа. */
 export type AuthErrorCode =
@@ -113,11 +122,17 @@ export type RequestHeaders = Record<string, string | string[] | undefined>;
  * Одно значение заголовка. Массив склеивается, а не берётся первым элементом:
  * дважды присланный `Cookie` не должен молча терять половину, иначе
  * предъявитель зависел бы от того, как клиент разложил заголовок.
+ *
+ * Разделитель зависит от заголовка. `; ` — правило `Cookie` и только его: тем же
+ * швом сшитый `X-Forwarded-For` перестал бы разбираться `clientAddress`, который
+ * режет цепочку по запятой, — то есть счётчик перебора считал бы всю цепочку
+ * одним неразобранным адресом.
  */
 export function headerValue(headers: RequestHeaders, name: string): string | undefined {
-  const raw = headers[name.toLowerCase()];
+  const lowered = name.toLowerCase();
+  const raw = headers[lowered];
   if (raw === undefined) return undefined;
-  return Array.isArray(raw) ? raw.join('; ') : raw;
+  return Array.isArray(raw) ? raw.join(lowered === 'cookie' ? '; ' : ', ') : raw;
 }
 
 /**
@@ -169,12 +184,17 @@ export function resolveBearer(
   now: Date = new Date(),
 ): Bearer | undefined {
   const jar = parseCookies(headerValue(headers, 'cookie'));
+  const browser = resolveBrowserPrincipals(control, headers, now);
 
-  const childToken = jar.get(CHILD_COOKIE);
-  if (childToken !== undefined) {
-    const child = resolveChildDevice(control, childToken, now);
-    if (child !== undefined && child.kind === 'browser') return { kind: 'browser', child };
+  // Явный выбор действует только пока обе сессии действительно живы. Cookie
+  // предпочтения сама по себе прав не даёт: её значение всегда подтверждается
+  // серверными сессиями ниже.
+  if (browser.parent !== undefined && browser.child !== undefined) {
+    if (jar.get(ACTOR_COOKIE) === 'parent') return { kind: 'parent', parent: browser.parent };
+    return { kind: 'browser', child: browser.child };
   }
+
+  if (browser.child !== undefined) return { kind: 'browser', child: browser.child };
 
   const agentToken = readAgentToken(headers);
   if (agentToken !== undefined) {
@@ -185,13 +205,33 @@ export function resolveBearer(
   // Недействительная детская cookie родительскую сессию не отменяет: родитель
   // настраивает ребёнка с его же машины, и отозванное там устройство иначе
   // закрывало бы вход тому, кто его отозвал.
+  if (browser.parent !== undefined) return { kind: 'parent', parent: browser.parent };
+
+  return undefined;
+}
+
+/**
+ * Проверяет обе браузерные cookie независимо. Нужна `/api/auth/me`: выбор
+ * активной роли не должен скрывать вторую живую сессию от переключателя.
+ */
+export function resolveBrowserPrincipals(
+  control: Database.Database,
+  headers: RequestHeaders,
+  now: Date = new Date(),
+): BrowserPrincipals {
+  const jar = parseCookies(headerValue(headers, 'cookie'));
+  const result: BrowserPrincipals = {};
+  const childToken = jar.get(CHILD_COOKIE);
+  if (childToken !== undefined) {
+    const child = resolveChildDevice(control, childToken, now);
+    if (child !== undefined && child.kind === 'browser') result.child = child;
+  }
   const parentToken = jar.get(PARENT_COOKIE);
   if (parentToken !== undefined) {
     const parent = resolveParentSession(control, parentToken, now);
-    if (parent !== undefined) return { kind: 'parent', parent };
+    if (parent !== undefined) result.parent = parent;
   }
-
-  return undefined;
+  return result;
 }
 
 /** Меняет ли запрос состояние. От этого зависит проверка источника. */
@@ -233,15 +273,21 @@ export function isSameOrigin(headers: RequestHeaders): boolean {
 /**
  * Требует подтверждённый источник у изменяющего запроса. Отсутствие обоих
  * заголовков — тоже отказ: неизвестный источник и есть чужой.
+ *
+ * `mutating` поднимает до изменяющего и безопасный по методу запрос: `GET`
+ * `/api/session/next` списывает задание из банка безвозвратно, а детская cookie
+ * `SameSite=Lax` уезжает и на переходе с чужой страницы. Решает не метод, а то,
+ * что маршрут делает.
  */
-export function assertSameOrigin(method: string, headers: RequestHeaders): void {
-  if (!isMutating(method)) return;
+export function assertSameOrigin(
+  method: string,
+  headers: RequestHeaders,
+  mutating = false,
+): void {
+  if (!mutating && !isMutating(method)) return;
   if (isSameOrigin(headers)) return;
   throw new AuthError('cross-origin', `Изменяющий запрос ${method} без подтверждённого источника`);
 }
-
-/** Кого пускают по умолчанию. Агента приходится называть явно — см. `resolveTenant`. */
-export const DEFAULT_ALLOWED: readonly BearerKind[] = ['parent', 'browser'];
 
 /** Ребёнок предъявителя, если он детский. У родителя своего ребёнка нет. */
 function bearerChildId(bearer: Bearer): string | undefined {
@@ -291,9 +337,15 @@ export function authorizeChild(
   return child;
 }
 
-/** Реестр в том объёме, в каком его знает допуск: открыть базу по `id`. */
+/**
+ * Реестр в том объёме, в каком его знает допуск: открыть базу по `id`.
+ *
+ * Вид предъявителя передаётся вместе с `id` не ради самого открытия, а ради
+ * будильника прогрева: «ребёнок вернулся» — это только `browser`. Опрос агента
+ * активностью не считается ни в `children.last_activity_at`, ни здесь.
+ */
 export interface TenantOpener {
-  open(childId: string): Tenant;
+  open(childId: string, bearer: BearerKind): Tenant;
 }
 
 /** Итог разрешения: кто пришёл, к какому ребёнку и с какой базой. */
@@ -310,8 +362,17 @@ export interface ResolveTenantOptions {
   method: string;
   /** Ребёнок из адреса. У детских маршрутов его нет: там ребёнок — сам предъявитель. */
   childId?: string;
-  /** Кого пускать. Агента приходится называть явно: по умолчанию его нет. */
-  allow?: readonly BearerKind[];
+  /**
+   * Кого пускать. Поле обязательное намеренно: умолчание «родитель и браузер»
+   * означало бы, что забытый `allow` у нового маршрута открывает его молча и
+   * вширь, а не падает на сборке.
+   */
+  allow: readonly BearerKind[];
+  /**
+   * Маршрут меняет состояние независимо от метода: `GET`, списывающий задание,
+   * подтверждает источник наравне с `POST`.
+   */
+  mutating?: boolean;
   now?: Date;
 }
 
@@ -323,8 +384,8 @@ export interface ResolveTenantOptions {
  * пишет, и чужая страница не должна уметь заставить нас это сделать.
  */
 export function resolveTenant(options: ResolveTenantOptions): ResolvedTenant {
-  const allow = options.allow ?? DEFAULT_ALLOWED;
-  assertSameOrigin(options.method, options.headers);
+  const allow = options.allow;
+  assertSameOrigin(options.method, options.headers, options.mutating === true);
 
   const bearer = resolveBearer(options.control, options.headers, options.now ?? new Date());
   if (bearer === undefined) throw new AuthError('unauthenticated', 'Предъявитель не разобран');
@@ -333,7 +394,7 @@ export function resolveTenant(options: ResolveTenantOptions): ResolvedTenant {
   }
 
   const child = authorizeChild(options.control, bearer, options.childId);
-  return { bearer, child, tenant: openTenant(options.tenants, child.id) };
+  return { bearer, child, tenant: openTenant(options.tenants, child.id, bearer.kind) };
 }
 
 /**
@@ -341,9 +402,9 @@ export function resolveTenant(options: ResolveTenantOptions): ResolvedTenant {
  * `not-serviceable` здесь — гонка с выводом ребёнка между проверкой и
  * открытием, и снаружи она обязана выглядеть так же, как чужой `id`.
  */
-function openTenant(tenants: TenantOpener, childId: string): Tenant {
+function openTenant(tenants: TenantOpener, childId: string, bearer: BearerKind): Tenant {
   try {
-    return tenants.open(childId);
+    return tenants.open(childId, bearer);
   } catch (error) {
     if (!(error instanceof TenantError)) throw error;
     if (error.code === 'not-serviceable') {

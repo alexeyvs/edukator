@@ -37,10 +37,10 @@ import {
 import { openControlDatabase, validateControlSchema } from './control-db.js';
 import { fileIdentity, TenantRegistry, type Tenant } from './tenant-registry.js';
 import type { DisputeCoordinatorOptions } from './dispute-coordinator.js';
+import type { IntegrityCoordinatorOptions } from './integrity.js';
 import { createTenantContext } from './routes/tenant-context.js';
 import { redactTokenUrl, registerTokenPrivacy } from './routes/token-privacy.js';
-import type { TenantOpener } from './auth.js';
-import type { IntegrityCoordinatorOptions } from './integrity.js';
+import type { BearerKind, TenantOpener } from './auth.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -100,11 +100,11 @@ export type ServerOptions =
   worker?: false | DispatcherWorkerOptions;
   /** Подменяемый бюджет фонового воркера. */
   codexBudget?: CodexConcurrency;
-  /** Проверяющий осмысленность; по умолчанию — вызов codex. */
+  /** Подменяемая проверка осмысленности; по умолчанию — отдельный вызов codex. */
   integrityReview?: IntegrityCoordinatorOptions['review'];
-  /** Общий процессный бюджет проверки осмысленности. */
+  /** Подменяемый общий бюджет проверки осмысленности. */
   integrityBudget?: IntegrityCoordinatorOptions['budget'];
-  /** Первая пауза фонового повтора проверки. */
+  /** Первая пауза фонового повтора проверки осмысленности. */
   integrityRetryMs?: number;
   /** false оставляет статику Vite dev-серверу; строка подменяет каталог в тестах. */
   webDist?: string | false;
@@ -194,299 +194,330 @@ export function buildServer(
     log(`замок каталога данных не взят: ${(error as Error).message}`);
   }
 
-  const app = Fastify({ logger: false });
+  // Управляющая база объявляется снаружи сборки: если та сорвётся после
+  // взятия замка, закрыть соединение и снять замок обязан этот же вызов —
+  // `onClose` живёт на приложении, которого при отказе никто не получит.
+  let control: Database.Database | undefined;
 
-  registerErrorHandler(app);
-  registerTokenPrivacy(app);
-
-  let curriculum: CurriculumStatus = 'ok';
-  let graph: TopicGraph | undefined;
-
-  // Непрочитанная карта тем не должна мешать серверу подняться: иначе
-  // /api/health — единственное, что умеет назвать причину поломки — становится
-  // недоступен ровно в тот раз, когда он и нужен.
   try {
-    graph = loadCurriculum(curriculumDir);
-  } catch (error) {
-    curriculum = 'error';
-    log(`карта тем не загружена: ${(error as Error).message}`);
-  }
+    const app = Fastify({ logger: false });
 
-  /**
-   * Открывает управляющую базу. Каталог данных заводится здесь же: без него не
-   * открыть ни `control.db`, ни базу первого же ребёнка, а отдельный `mkdir` у
-   * каждого вызывающего рано или поздно забыли бы.
-   */
-  function tryOpenControl(): Database.Database | undefined {
-    try {
-      ensureDataDir(dataDir);
-      return openControlDatabase(controlPath);
-    } catch (error) {
-      log(`управляющая база недоступна: ${(error as Error).message}`);
-      return undefined;
-    }
-  }
-
-  const control = tryOpenControl();
-  // Отпечаток снимается один раз, после открытия: `openControlDatabase` заводит
-  // файл, если его нет, так что замер «до» здесь ничего не значил бы. Сверять с
-  // ним health обязан по той же причине, что и по детским базам: под WAL запись
-  // в подменённый файл проходит молча (см. `fileIdentity`).
-  const controlFile = control === undefined ? undefined : fileIdentity(controlPath);
-
-  let registry: TenantRegistry | undefined;
-
-  if (graph !== undefined && control !== undefined) {
-    const loaded = graph;
-    // Отдельная привязка, а не сам `control`: сужение типа не доживает до тела
-    // вложенной функции, а квота списывается именно оттуда.
-    const controlDb = control;
-    const budget = options.codexBudget ?? codexConcurrency;
-    const tenants = new TenantRegistry({
-      control,
-      dataDir,
-      graph: loaded,
-      log,
-      ...(options.maxOpenTenants === undefined ? {} : { maxOpen: options.maxOpenTenants }),
-      ...(options.seedDir === undefined ? {} : { seedDir: options.seedDir }),
-      ...(options.review === undefined ? {} : { review: options.review }),
-      ...(options.background === undefined ? {} : { background: options.background }),
-      disputeBudget: options.disputeBudget ?? disputeConcurrency,
-      ...(options.disputeRetryMs === undefined ? {} : { disputeRetryMs: options.disputeRetryMs }),
-      ...(options.integrityReview === undefined ? {} : { integrityReview: options.integrityReview }),
-      integrityBudget: options.integrityBudget ?? options.codexBudget ?? codexConcurrency,
-      ...(options.integrityRetryMs === undefined ? {} : { integrityRetryMs: options.integrityRetryMs }),
-      ...(options.now === undefined ? {} : { now: options.now }),
+    // Снятие замка регистрируется **первым**: `onClose` в Fastify выполняются в
+    // обратном порядке регистрации, так что первый зарегистрированный отработает
+    // последним — уже после закрытия арендаторов и управляющей базы. Обратный
+    // порядок освободил бы каталог, пока уходящий сервер ещё держит открытые базы
+    // и идущие вызовы codex, и `prefetch` завёл бы вторую пару слотов поверх
+    // недописанного WAL.
+    app.addHook('onClose', async () => {
+      lock?.release();
     });
-    registry = tenants;
 
-    // Отдельная привязка: сужение `options.worker` до настроек не доживает до
-    // тела вложенной функции, а обёртка квоты берёт `run` именно оттуда.
-    const workerSettings = options.worker === false ? undefined : options.worker ?? {};
+    registerErrorHandler(app);
+    registerTokenPrivacy(app);
 
-    // Прогрев на весь процесс один, а не на каждую открытую базу: бюджет codex
-    // процессный, и свой цикл у каждого ребёнка означал бы гонку за два слота, в
-    // которой занимающийся ученик стоит наравне с тем, кто ушёл спать. Порядок
-    // и фазы обхода — в `WarmupDispatcher`.
-    const dispatcher =
-      workerSettings === undefined
-        ? undefined
-        : new WarmupDispatcher({
-            control,
-            graph: loaded,
-            log,
-            budget,
-            // Отказ базы одного ребёнка обход не останавливает: причину уже
-            // назвал реестр, диспетчер просто идёт к следующему.
-            open: (childId: string) => {
-              try {
-                return tenants.open(childId).db;
-              } catch {
-                return undefined;
-              }
-            },
-            // Квота надевается на сам вызов модели, а не на бюджет: за одним
-            // слотом семафора прячется от двух вызовов (батч — генератор и
-            // проверяющий) до шести (персональный материал), и счёт по слотам
-            // превратил бы предел в кратный ему. Подменённый в тестах `run`
-            // обёртка оборачивает, а не теряет.
-            runFor: (childId: string) =>
-              createQuotedRunner({
-                control: controlDb,
-                childId,
-                ...(workerSettings.run === undefined ? {} : { run: workerSettings.run }),
-                ...(options.now === undefined ? {} : { now: options.now }),
-              }),
-            worker: workerSettings,
-            ...(options.now === undefined ? {} : { now: options.now }),
-          });
+    let curriculum: CurriculumStatus = 'ok';
+    let graph: TopicGraph | undefined;
+
+    // Непрочитанная карта тем не должна мешать серверу подняться: иначе
+    // /api/health — единственное, что умеет назвать причину поломки — становится
+    // недоступен ровно в тот раз, когда он и нужен.
+    try {
+      graph = loadCurriculum(curriculumDir);
+    } catch (error) {
+      curriculum = 'error';
+      log(`карта тем не загружена: ${(error as Error).message}`);
+    }
 
     /**
-     * Реестр в том виде, в каком его видит допуск. Обёртка нужна ради
-     * будильника диспетчера: вернувшийся ребёнок узнаётся по первому своему
-     * запросу, то есть внутри `open`, а не при старте сервера.
+     * Открывает управляющую базу. Каталог данных заводится здесь же: без него не
+     * открыть ни `control.db`, ни базу первого же ребёнка, а отдельный `mkdir` у
+     * каждого вызывающего рано или поздно забыли бы.
      */
-    const opener: TenantOpener = {
-      open(childId: string): Tenant {
-        const tenant = tenants.open(childId);
-        // Будильник только по новому в обходе ребёнку: вернувшийся после
-        // перерыва не должен досиживать чужую паузу, а занимающийся не должен
-        // будить диспетчер каждым своим запросом (см. `wake`).
-        dispatcher?.wake(childId);
-        return tenant;
-      },
-    };
-
-    const context = createTenantContext({
-      control,
-      tenants: opener,
-      ...(options.now === undefined ? {} : { now: options.now }),
-    });
-
-    registerAuthRoutes(app, {
-      control,
-      ...(options.now === undefined ? {} : { now: options.now }),
-      ...(options.trustedProxies === undefined ? {} : { trustedProxies: options.trustedProxies }),
-      ...(options.insecureCookies === undefined
-        ? { insecureCookies: process.env['EDUKATOR_INSECURE_COOKIES'] === '1' }
-        : { insecureCookies: options.insecureCookies }),
-    });
-    registerFamilyRoutes(app, {
-      control,
-      dataDir,
-      ...(pinPepper === undefined ? {} : { pinPepper }),
-      ...(options.now === undefined ? {} : { now: options.now }),
-    });
-    registerSessionRoutes(app, {
-      context,
-      graph: loaded,
-      log,
-      ...(options.now === undefined ? {} : { now: options.now }),
-      ...(options.seedDir === undefined ? {} : { seedDir: options.seedDir }),
-    });
-    registerRunRoutes(app, {
-      context,
-      graph: loaded,
-      ...(options.now === undefined ? {} : { now: options.now }),
-    });
-    registerTriageRoutes(app, {
-      context,
-      graph: loaded,
-      ...(options.now === undefined ? {} : { now: options.now }),
-    });
-    registerIntegrityRoutes(app, { context });
-    registerProfileRoutes(app, {
-      context,
-      ...(options.personaPath === undefined ? {} : { personaPath: options.personaPath }),
-    });
-    registerBossRoutes(app, {
-      context,
-      graph: loaded,
-      ...(options.now === undefined ? {} : { now: options.now }),
-    });
-    registerParentsRoutes(app, {
-      context,
-      graph: loaded,
-      control,
-      ...(pinPepper === undefined ? {} : { pinPepper }),
-      ...(options.trustedProxies === undefined ? {} : { trustedProxies: options.trustedProxies }),
-      ...(options.now === undefined ? {} : { now: options.now }),
-    });
-    registerLearningRoutes(app, {
-      context,
-      graph: loaded,
-      ...(options.now === undefined ? {} : { now: options.now }),
-    });
-    registerGateRoutes(app, {
-      context,
-      ...(options.now === undefined ? {} : { now: options.now }),
-    });
-
-    // Прогрев начинается с прослушиванием, а не со сборки: греть банк раньше,
-    // чем сервер вообще способен ответить ученику, незачем, а тесты маршрутов
-    // ходят через `inject` и фоновой генерации не поднимают вовсе.
-    app.addHook('onListen', async () => {
-      dispatcher?.start();
-    });
-    app.addHook('onClose', async () => {
-      await dispatcher?.stop();
-      // Сначала арендаторы, потом управляющая база: закрытие аренды дожидается
-      // её разбора спора, а он ходит и в `control.db` за квотой.
-      await tenants.closeAll();
-      control.close();
-    });
-  } else {
-    const reason = graph === undefined ? 'карта тем не загружена' : 'управляющая база недоступна';
-    registerUnavailableAuth(app, reason);
-    registerUnavailableFamily(app, reason);
-    registerUnavailableSession(app, reason);
-    registerUnavailableRun(app, reason);
-    registerUnavailableTriage(app, reason);
-    registerUnavailableIntegrity(app, reason);
-    registerUnavailableProfile(app, reason);
-    registerUnavailableBoss(app, reason);
-    registerUnavailableParents(app, reason);
-    registerUnavailableLearning(app, reason);
-    registerUnavailableGate(app, reason);
-    if (control !== undefined) {
-      app.addHook('onClose', async () => {
-        control.close();
-      });
-    }
-  }
-
-  /**
-   * Состояние управляющей базы. Проверяется подробно: без неё сервер не умеет
-   * разобрать ни одного предъявителя, то есть не работает вовсе, — и цена
-   * `quick_check` по одному маленькому файлу здесь оправдана.
-   */
-  function checkControl(): DatabaseStatus {
-    if (control === undefined || controlFile === undefined) return 'error';
-    try {
-      if (fileIdentity(controlPath) !== controlFile) {
-        throw new Error('файл заменён после старта, нужен перезапуск');
+    function tryOpenControl(): Database.Database | undefined {
+      try {
+        ensureDataDir(dataDir);
+        return openControlDatabase(controlPath);
+      } catch (error) {
+        log(`управляющая база недоступна: ${(error as Error).message}`);
+        return undefined;
       }
-      validateControlSchema(control);
-      return 'ok';
-    } catch (error) {
-      log(`управляющая база ${controlPath} недоступна: ${(error as Error).message}`);
-      return 'error';
-    }
-  }
-
-  // `status` выводится из проверки, а не из факта «маршрут ответил»: здоровье
-  // читают ровно тогда, когда что-то сломалось, и зелёный статус над
-  // «control: error» ввёл бы в заблуждение именно в этот момент.
-  //
-  // Детские базы обходятся **только открытые**. Открыть базу каждого ребёнка
-  // ради `quick_check` значило бы, что опрос здоровья заводит соединения,
-  // которых никто не просил, и платит за всех выведенных детей сразу; а
-  // ребёнок, к которому не обращались, сломаться с прошлого раза не мог.
-  app.get('/api/health', (_request, reply) => {
-    const control = checkControl();
-    const open = registry?.list() ?? [];
-    // Подмена файла базы под живым процессом ничем не проявляется сама: под WAL
-    // запись в отвязанный файл проходит без ошибки, а данные остаются там, где
-    // их уже никто не найдёт. Переоткрыть соединение здесь нельзя — у занятия
-    // могут идти транзакции, — поэтому ребёнок краснеет до перезапуска.
-    const detached = open.filter((tenant) => !tenant.available()).map((tenant) => tenant.childId);
-    if (detached.length > 0) {
-      log(`файл базы заменён после старта у детей: ${detached.join(', ')}; нужен перезапуск`);
     }
 
-    const status: DatabaseStatus =
-      control === 'ok' && curriculum === 'ok' && detached.length === 0 ? 'ok' : 'error';
+    control = tryOpenControl();
+    // Отпечаток снимается один раз, после открытия: `openControlDatabase` заводит
+    // файл, если его нет, так что замер «до» здесь ничего не значил бы. Сверять с
+    // ним health обязан по той же причине, что и по детским базам: под WAL запись
+    // в подменённый файл проходит молча (см. `fileIdentity`).
+    const controlFile = control === undefined ? undefined : fileIdentity(controlPath);
 
-    return reply
-      .code(status === 'ok' ? 200 : 503)
-      .send({
-        status,
-        version: readVersion(),
+    let registry: TenantRegistry | undefined;
+
+    if (graph !== undefined && control !== undefined) {
+      const loaded = graph;
+      // Отдельная привязка, а не сам `control`: сужение типа не доживает до тела
+      // вложенной функции, а квота списывается именно оттуда.
+      const controlDb = control;
+      const budget = options.codexBudget ?? codexConcurrency;
+      const tenants = new TenantRegistry({
         control,
-        curriculum,
-        children: { open: open.length, detached },
+        dataDir,
+        graph: loaded,
+        log,
+        ...(options.maxOpenTenants === undefined ? {} : { maxOpen: options.maxOpenTenants }),
+        ...(options.seedDir === undefined ? {} : { seedDir: options.seedDir }),
+        ...(options.review === undefined ? {} : { review: options.review }),
+        ...(options.background === undefined ? {} : { background: options.background }),
+        disputeBudget: options.disputeBudget ?? disputeConcurrency,
+        ...(options.disputeRetryMs === undefined ? {} : { disputeRetryMs: options.disputeRetryMs }),
+        ...(options.integrityReview === undefined ? {} : { integrityReview: options.integrityReview }),
+        integrityBudget: options.integrityBudget ?? options.codexBudget ?? codexConcurrency,
+        ...(options.integrityRetryMs === undefined ? {} : { integrityRetryMs: options.integrityRetryMs }),
+        ...(options.now === undefined ? {} : { now: options.now }),
       });
-  });
+      registry = tenants;
 
-  if (webDist !== false) {
-    void app.register(fastifyStatic, {
-      root: webDist,
-    });
-    // Страница у приложения одна: маршрутизацию внутри неё делает клиент, и
-    // серверу остаётся отдать по каждому её адресу тот же `index.html`.
-    for (const page of APP_PAGES) {
-      app.get(page, (_request, reply) => reply.sendFile('index.html'));
+      // Отдельная привязка: сужение `options.worker` до настроек не доживает до
+      // тела вложенной функции, а обёртка квоты берёт `run` именно оттуда.
+      const workerSettings = options.worker === false ? undefined : options.worker ?? {};
+
+      // Прогрев на весь процесс один, а не на каждую открытую базу: бюджет codex
+      // процессный, и свой цикл у каждого ребёнка означал бы гонку за два слота, в
+      // которой занимающийся ученик стоит наравне с тем, кто ушёл спать. Порядок
+      // и фазы обхода — в `WarmupDispatcher`.
+      const dispatcher =
+        workerSettings === undefined
+          ? undefined
+          : new WarmupDispatcher({
+              control,
+              graph: loaded,
+              log,
+              budget,
+              // Отказ базы одного ребёнка обход не останавливает: причину уже
+              // назвал реестр, диспетчер просто идёт к следующему.
+              open: (childId: string) => {
+                try {
+                  return tenants.open(childId).db;
+                } catch {
+                  return undefined;
+                }
+              },
+              // Квота надевается на сам вызов модели, а не на бюджет: за одним
+              // слотом семафора прячется от двух вызовов (батч — генератор и
+              // проверяющий) до шести (персональный материал), и счёт по слотам
+              // превратил бы предел в кратный ему. Подменённый в тестах `run`
+              // обёртка оборачивает, а не теряет.
+              runFor: (childId: string) =>
+                createQuotedRunner({
+                  control: controlDb,
+                  childId,
+                  ...(workerSettings.run === undefined ? {} : { run: workerSettings.run }),
+                  ...(options.now === undefined ? {} : { now: options.now }),
+                }),
+              worker: workerSettings,
+              ...(options.now === undefined ? {} : { now: options.now }),
+            });
+
+      /**
+       * Реестр в том виде, в каком его видит допуск. Обёртка нужна ради
+       * будильника диспетчера: вернувшийся ребёнок узнаётся по первому своему
+       * запросу, то есть внутри `open`, а не при старте сервера.
+       */
+      const opener: TenantOpener = {
+        open(childId: string, bearer: BearerKind): Tenant {
+          const tenant = tenants.open(childId);
+          // Будильник только по новому в обходе ребёнку: вернувшийся после
+          // перерыва не должен досиживать чужую паузу, а занимающийся не должен
+          // будить диспетчер каждым своим запросом (см. `wake`).
+          //
+          // И только по браузерному предъявителю. Агент опрашивает `gate/status`
+          // раз в двадцать секунд и активностью ребёнка не считается: брошенный
+          // ребёнок в обход не попадает, то есть в `#served` его нет никогда, и
+          // каждый его опрос срывал бы паузу — получасовой отступ по недоступному
+          // codex не наступал бы вовсе. Родитель за сводкой — тоже не ученик за
+          // экраном, и греть по его запросу нечего.
+          if (bearer === 'browser') dispatcher?.wake(childId);
+          return tenant;
+        },
+      };
+
+      const context = createTenantContext({
+        control,
+        tenants: opener,
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
+
+      registerAuthRoutes(app, {
+        control,
+        ...(options.now === undefined ? {} : { now: options.now }),
+        ...(options.trustedProxies === undefined ? {} : { trustedProxies: options.trustedProxies }),
+        ...(options.insecureCookies === undefined
+          ? { insecureCookies: process.env['EDUKATOR_INSECURE_COOKIES'] === '1' }
+          : { insecureCookies: options.insecureCookies }),
+      });
+      registerFamilyRoutes(app, {
+        control,
+        dataDir,
+        ...(pinPepper === undefined ? {} : { pinPepper }),
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
+      registerSessionRoutes(app, {
+        context,
+        graph: loaded,
+        log,
+        ...(options.now === undefined ? {} : { now: options.now }),
+        ...(options.seedDir === undefined ? {} : { seedDir: options.seedDir }),
+      });
+      registerRunRoutes(app, {
+        context,
+        graph: loaded,
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
+      registerTriageRoutes(app, {
+        context,
+        graph: loaded,
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
+      registerIntegrityRoutes(app, { context });
+      registerProfileRoutes(app, {
+        context,
+        ...(options.personaPath === undefined ? {} : { personaPath: options.personaPath }),
+      });
+      registerBossRoutes(app, {
+        context,
+        graph: loaded,
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
+      registerParentsRoutes(app, {
+        context,
+        graph: loaded,
+        control,
+        ...(pinPepper === undefined ? {} : { pinPepper }),
+        ...(options.trustedProxies === undefined ? {} : { trustedProxies: options.trustedProxies }),
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
+      registerLearningRoutes(app, {
+        context,
+        graph: loaded,
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
+      registerGateRoutes(app, {
+        context,
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
+
+      // Прогрев начинается с прослушиванием, а не со сборки: греть банк раньше,
+      // чем сервер вообще способен ответить ученику, незачем, а тесты маршрутов
+      // ходят через `inject` и фоновой генерации не поднимают вовсе.
+      app.addHook('onListen', async () => {
+        dispatcher?.start();
+      });
+      app.addHook('onClose', async () => {
+        await dispatcher?.stop();
+        // Порядок задан зависимостями, а не удобством. Диспетчер первым: его
+        // заход держит и базу ребёнка, и счётчик квоты в `control.db`. Потом
+        // арендаторы: закрытие аренды дожидается её разбора спора, а тот после
+        // ответа модели пишет вердикт в базу ребёнка. Управляющая база последней —
+        // на ней стоит разбор предъявителя у всего, что ещё могло не доехать.
+        await tenants.closeAll();
+        controlDb.close();
+      });
+    } else {
+      const reason = graph === undefined ? 'карта тем не загружена' : 'управляющая база недоступна';
+      registerUnavailableAuth(app, reason);
+      registerUnavailableFamily(app, reason);
+      registerUnavailableSession(app, reason);
+      registerUnavailableRun(app, reason);
+      registerUnavailableTriage(app, reason);
+      registerUnavailableIntegrity(app, reason);
+      registerUnavailableProfile(app, reason);
+      registerUnavailableBoss(app, reason);
+      registerUnavailableParents(app, reason);
+      registerUnavailableLearning(app, reason);
+      registerUnavailableGate(app, reason);
+      // Отдельная привязка по той же причине, что и у `controlDb` выше: сужение
+      // типа не доживает до тела хука.
+      const opened = control;
+      if (opened !== undefined) {
+        app.addHook('onClose', async () => {
+          opened.close();
+        });
+      }
     }
-  }
 
-  // Снятие замка регистрируется последним: пока базы закрываются, каталог ещё
-  // занят — иначе `prefetch` успел бы начать свою пару вызовов поверх
-  // недописанного WAL уходящего сервера.
-  app.addHook('onClose', async () => {
+    /**
+     * Состояние управляющей базы. Проверяется подробно: без неё сервер не умеет
+     * разобрать ни одного предъявителя, то есть не работает вовсе, — и цена
+     * `quick_check` по одному маленькому файлу здесь оправдана.
+     */
+    function checkControl(): DatabaseStatus {
+      if (control === undefined || controlFile === undefined) return 'error';
+      try {
+        if (fileIdentity(controlPath) !== controlFile) {
+          throw new Error('файл заменён после старта, нужен перезапуск');
+        }
+        validateControlSchema(control);
+        return 'ok';
+      } catch (error) {
+        log(`управляющая база ${controlPath} недоступна: ${(error as Error).message}`);
+        return 'error';
+      }
+    }
+
+    // `status` выводится из проверки, а не из факта «маршрут ответил»: здоровье
+    // читают ровно тогда, когда что-то сломалось, и зелёный статус над
+    // «control: error» ввёл бы в заблуждение именно в этот момент.
+    //
+    // Детские базы обходятся **только открытые**. Открыть базу каждого ребёнка
+    // ради `quick_check` значило бы, что опрос здоровья заводит соединения,
+    // которых никто не просил, и платит за всех выведенных детей сразу; а
+    // ребёнок, к которому не обращались, сломаться с прошлого раза не мог.
+    app.get('/api/health', (_request, reply) => {
+      const control = checkControl();
+      const open = registry?.list() ?? [];
+      // Подмена файла базы под живым процессом ничем не проявляется сама: под WAL
+      // запись в отвязанный файл проходит без ошибки, а данные остаются там, где
+      // их уже никто не найдёт. Переоткрыть соединение здесь нельзя — у занятия
+      // могут идти транзакции, — поэтому ребёнок краснеет до перезапуска.
+      const detached = open.filter((tenant) => !tenant.available()).map((tenant) => tenant.childId);
+      if (detached.length > 0) {
+        log(`файл базы заменён после старта у детей: ${detached.join(', ')}; нужен перезапуск`);
+      }
+
+      const status: DatabaseStatus =
+        control === 'ok' && curriculum === 'ok' && detached.length === 0 ? 'ok' : 'error';
+
+      return reply
+        .code(status === 'ok' ? 200 : 503)
+        .send({
+          status,
+          version: readVersion(),
+          control,
+          curriculum,
+          children: { open: open.length, detached },
+        });
+    });
+
+    if (webDist !== false) {
+      void app.register(fastifyStatic, {
+        root: webDist,
+      });
+      // Страница у приложения одна: маршрутизацию внутри неё делает клиент, и
+      // серверу остаётся отдать по каждому её адресу тот же `index.html`.
+      for (const page of APP_PAGES) {
+        app.get(page, (_request, reply) => reply.sendFile('index.html'));
+      }
+    }
+
+    return app;
+  } catch (error) {
+    // Сборка сорвалась уже после взятия замка: без уборки замок остался бы
+    // на диске с живым pid, а управляющая база — открытой. Внутри одного
+    // процесса это ещё и счётчик `heldLocks`, из-за которого следующая
+    // сборка на том же каталоге считала бы замок своим.
+    control?.close();
     lock?.release();
-  });
-
-  return app;
+    throw error;
+  }
 }
 
 /**

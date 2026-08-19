@@ -9,8 +9,9 @@
  * `npm run prefetch` — четыре вызова модели вместо двух, и занятие ученика
  * встаёт в очередь за прогревом.
  *
- * Замок файловый и берётся эксклюзивным созданием (`wx`): это единственная
- * атомарная операция, доступная и на локальном диске, и без демона. В файле
+ * Замок файловый и берётся `link` уже дописанной времянки: это единственная
+ * атомарная операция, доступная и на локальном диске, и без демона, а в отличие
+ * от `open(..., 'wx')` она не оставляет на месте замка пустого файла. В файле
  * лежит владелец — по нему замок переживший своего процесса отличается от
  * настоящего.
  *
@@ -20,7 +21,16 @@
  * маршрутов ровно этим и пользуются, поднимая рядом сервер с другим
  * проверяющим.
  */
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
+import {
+  closeSync,
+  fsyncSync,
+  linkSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeSync,
+} from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 
@@ -77,11 +87,12 @@ export class DataLockBusyError extends Error {
   readonly path: string;
   readonly holder: DataLockRecord | undefined;
 
-  constructor(dir: string, path: string, holder: DataLockRecord | undefined) {
+  constructor(dir: string, path: string, holder: DataLockRecord | undefined, detail?: string) {
     super(
-      holder === undefined
+      (holder === undefined
         ? `Каталог данных ${dir} занят: замок ${path} держит другой процесс`
-        : `Каталог данных ${dir} занят: ${holder.owner} (pid ${holder.pid}) с ${holder.since}`,
+        : `Каталог данных ${dir} занят: ${holder.owner} (pid ${holder.pid}) с ${holder.since}`) +
+        (detail === undefined ? '' : `; ${detail}`),
     );
     this.name = 'DataLockBusyError';
     this.path = path;
@@ -113,7 +124,13 @@ function readRecord(path: string): DataLockRecord | undefined {
   let raw: string;
   try {
     raw = readFileSync(path, 'utf8');
-  } catch {
+  } catch (error) {
+    // `undefined` здесь значит «замка нет», а из него следует «снять и взять».
+    // Поэтому нечитаемый файл обязан отличаться от отсутствующего: `EACCES` или
+    // `EMFILE` на чужом живом замке иначе давали бы разрешение его удалить —
+    // ровно тот второй процесс со своей парой слотов codex, ради которого замок
+    // и заведён.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     return undefined;
   }
   try {
@@ -139,28 +156,45 @@ function removeQuietly(path: string): void {
   }
 }
 
-/** Создаёт файл замка эксклюзивно; `EEXIST` означает чужой замок на месте. */
+/**
+ * Создаёт файл замка эксклюзивно; `EEXIST` означает чужой замок на месте.
+ *
+ * Запись собирается во времянке и въезжает на место одним `link`. Прямое
+ * `openSync(path, 'wx')` тоже атомарно, но оставляет файл пустым на всё время
+ * между созданием и `write` + `fsync`: соседний процесс, заглянувший в это
+ * окно, прочёл бы замок без владельца, счёл бы его нечитаемым — то есть
+ * брошенным, — снял бы и взял свой поверх живого.
+ */
 function writeExclusive(path: string, record: DataLockRecord): void {
-  const handle = openSync(path, 'wx');
+  const temp = `${path}.${randomBytes(8).toString('hex')}.tmp`;
+  const handle = openSync(temp, 'wx');
+  // Уборка накрывает и запись, и `link`: отказ `write`/`fsync` (кончилось место,
+  // отвалился диск) иначе оставлял бы времянку навсегда — подметать её в корне
+  // каталога данных некому, `dropStaleTemporaries` ходит только по `children/`.
   try {
-    writeSync(handle, `${JSON.stringify(record)}\n`);
-    // Замок читают из другого процесса, а его владелец может умереть в любой
-    // момент: без сброса на диск после обрыва питания остался бы файл без
-    // содержимого, то есть замок без владельца.
-    fsyncSync(handle);
+    try {
+      writeSync(handle, `${JSON.stringify(record)}\n`);
+      // Замок читают из другого процесса, а его владелец может умереть в любой
+      // момент: без сброса на диск после обрыва питания остался бы файл без
+      // содержимого, то есть замок без владельца.
+      fsyncSync(handle);
+    } finally {
+      closeSync(handle);
+    }
+    linkSync(temp, path);
   } finally {
-    closeSync(handle);
+    removeQuietly(temp);
   }
 }
 
 /**
  * Берёт замок каталога данных.
  *
- * Замок, переживший своего владельца (процесс убит `kill -9`, машина
- * перезагружена), снимается и берётся заново: иначе после каждого падения
- * сервер требовал бы ручного `rm`. Нечитаемая запись считается такой же
- * пережившей: замок, владельца которого назвать нечем, проверить нельзя, а
- * оставлять каталог заблокированным навсегда хуже.
+ * Замок после аварии не снимается автоматически. Проверка PID даёт полезную
+ * диагностику, но не атомарное право удалить файл: два процесса могли увидеть
+ * одну мёртвую запись, а затем один удалить уже новый живой замок другого.
+ * Поэтому любой существующий файл означает fail-closed; оператор сначала
+ * убеждается, что названного процесса нет, и удаляет `edukator.lock` вручную.
  */
 export function acquireDataLock(
   dir: string,
@@ -186,27 +220,55 @@ export function acquireDataLock(
     nonce,
   };
 
-  // Две попытки, не цикл: вторая идёт после снятия мёртвого замка, а третья
-  // означала бы, что кто-то живой берёт замок прямо сейчас, — и крутиться в
-  // ожидании него `prefetch` не должен, он обязан отказать внятно.
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      writeExclusive(path, record);
-      heldLocks.set(path, { count: 1, nonce });
-      return makeLock(path, nonce);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    }
-
-    const holder = readRecord(path);
-    // Наш собственный номер в файле, которого нет в `heldLocks`, — это брошенный
-    // замок: написать его мог только этот процесс, а он про него уже не помнит.
-    const foreign = holder !== undefined && holder.pid !== process.pid;
-    if (foreign && alive(holder.pid)) throw new DataLockBusyError(dir, path, holder);
-    removeQuietly(path);
+  try {
+    writeExclusive(path, record);
+    heldLocks.set(path, { count: 1, nonce });
+    return makeLock(path, nonce);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
   }
 
-  throw new DataLockBusyError(dir, path, readRecord(path));
+  const holder = readRecordOrBusy(dir, path);
+  const dead = holder === undefined || holder.pid === process.pid || !alive(holder.pid);
+  throw new DataLockBusyError(
+    dir,
+    path,
+    holder,
+    dead
+      ? `замок выглядит брошенным; убедитесь, что владельца нет, и удалите ${path} вручную`
+      : undefined,
+  );
+}
+
+/**
+ * Чтение замка там, где по нему принимают решение «снять чужой».
+ *
+ * Замок на месте, но прочитать его нечем (`EACCES` от чужого владельца,
+ * `EMFILE` на исчерпанных дескрипторах): назвать владельца невозможно, а значит
+ * невозможно и убедиться, что он мёртв. Ответ на это — занятость, а не поломка
+ * запуска: `buildServer` гасит старт только на `DataLockBusyError`, а всякий
+ * другой отказ считает незаписываемым каталогом и поднимается **без** замка —
+ * то есть рядом с живым владельцем, со второй парой слотов codex, ради которой
+ * замок и заведён.
+ */
+function readRecordOrBusy(dir: string, path: string): DataLockRecord | undefined {
+  try {
+    return readRecord(path);
+  } catch (error) {
+    throw new DataLockBusyError(dir, path, undefined, `замок не прочитан: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * То же чтение там, где отказ не должен подменять собой причину: описание
+ * занятого замка и снятие своего. Решения «снять чужой» на нём не принимают.
+ */
+function readRecordQuietly(path: string): DataLockRecord | undefined {
+  try {
+    return readRecord(path);
+  } catch {
+    return undefined;
+  }
 }
 
 function makeLock(path: string, nonce: string): DataLock {
@@ -221,7 +283,7 @@ function makeLock(path: string, nonce: string): DataLock {
       held.count -= 1;
       if (held.count > 0) return;
       heldLocks.delete(path);
-      const holder = readRecord(path);
+      const holder = readRecordQuietly(path);
       // Чужой замок не снимаем: наш могли убрать руками, а на его месте уже
       // стоит другой процесс.
       if (holder?.nonce !== nonce) return;

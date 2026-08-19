@@ -1065,6 +1065,14 @@ export function openDatabase(
       throw new Error(`База ${path}: WAL не включился, журнал остался «${String(journal)}»`);
     }
     db.pragma('foreign_keys = ON');
+    // Итог перечитывается по той же причине, что и у управляющей базы: установка
+    // прагмы ничего не возвращает, а на соединении внутри открытой транзакции
+    // SQLite молча оставил бы ключи выключенными — и `boss_tasks`,
+    // `learning_tasks` и `task_bank` держались бы ни на чём.
+    const foreignKeys = db.pragma('foreign_keys', { simple: true });
+    if (foreignKeys !== 1) {
+      throw new Error(`База ${path}: внешние ключи не включились (${String(foreignKeys)})`);
+    }
     migrate(db);
     validateSchema(db);
   } catch (error) {

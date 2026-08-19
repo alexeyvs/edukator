@@ -519,13 +519,16 @@ interface InviteRow {
   email: string;
   used_at: string | null;
   expires_at: string;
+  created_at: string;
   disabled_at: string | null;
+  credentials_changed_at: string | null;
 }
 
 function selectInvite(db: Database.Database, token: string): InviteRow | undefined {
   return db
     .prepare<[string], InviteRow>(
-      `SELECT i.parent_id, i.used_at, i.expires_at, p.email, p.disabled_at
+      `SELECT i.parent_id, i.used_at, i.expires_at, i.created_at,
+              p.email, p.disabled_at, p.credentials_changed_at
          FROM parent_invites i
          JOIN parents p ON p.id = i.parent_id
         WHERE i.token_hash = ?`,
@@ -533,10 +536,26 @@ function selectInvite(db: Database.Database, token: string): InviteRow | undefin
     .get(hashToken(token));
 }
 
+/**
+ * Условие «приглашение старше последней смены пароля» — то же и здесь, и в
+ * `UPDATE`, который приглашение гасит. Отдельной строкой SQL потому, что решать
+ * по снимку нельзя: между чтением и записью пароль мог смениться.
+ */
+const INVITE_AFTER_CREDENTIALS =
+  `created_at >= COALESCE(
+     (SELECT p.credentials_changed_at FROM parents p WHERE p.id = parent_invites.parent_id), '')`;
+
 function inviteFailure(row: InviteRow | undefined, now: Date): ParentAuthFailure | undefined {
   if (row === undefined) return 'unknown-token';
   if (row.disabled_at !== null) return 'disabled';
   if (row.used_at !== null) return 'used';
+  // Смена пароля гасит и невыкупленные приглашения. Приглашение — это право
+  // задать пароль заново, то есть полный вход; без этой строки утёкшая ссылка
+  // оставалась бы способом отобрать учётную запись ещё неделю, а единственное
+  // средство, которое от неё советуют, — смена пароля — ничего бы не меняло.
+  if (row.credentials_changed_at !== null && row.credentials_changed_at > row.created_at) {
+    return 'expired';
+  }
   if (row.expires_at <= now.toISOString()) return 'expired';
   return undefined;
 }
@@ -575,6 +594,33 @@ function insertParentSession(db: Database.Database, parentId: string, now: Date)
 }
 
 /**
+ * Гасит всё, что было выдано до смены пароля, явными записями в той же
+ * транзакции. Одной отметки `credentials_changed_at` недостаточно: SQLite и
+ * `Date` хранят миллисекунды, поэтому выданный и сменённый в одну миллисекунду
+ * секрет невозможно упорядочить сравнением строк.
+ */
+function invalidateParentArtifacts(db: Database.Database, parentId: string, stamp: string): void {
+  db.prepare(
+    `UPDATE parent_sessions SET revoked_at = ?
+      WHERE parent_id = ? AND revoked_at IS NULL`,
+  ).run(stamp, parentId);
+  db.prepare(
+    `UPDATE parent_invites SET expires_at = ?
+      WHERE parent_id = ? AND used_at IS NULL AND expires_at > ?`,
+  ).run(stamp, parentId, stamp);
+  db.prepare(
+    `UPDATE child_devices SET invite_expires_at = ?
+      WHERE claimed_at IS NULL AND revoked_at IS NULL AND invite_expires_at > ?
+        AND child_id IN (SELECT id FROM children WHERE parent_id = ?)`,
+  ).run(stamp, stamp, parentId);
+  db.prepare(
+    `UPDATE child_devices SET revoked_at = ?
+      WHERE claimed_at IS NOT NULL AND revoked_at IS NULL
+        AND child_id IN (SELECT id FROM children WHERE parent_id = ?)`,
+  ).run(stamp, parentId);
+}
+
+/**
  * Гасит приглашение, ставит пароль и сразу выдаёт сессию: родитель пришёл по
  * ссылке, и второй вход по только что заданному паролю ничего не проверяет.
  *
@@ -606,7 +652,11 @@ export function redeemParentInvite(
     // строкой то же приглашение мог погасить соседний запрос, и вторая сессия
     // по одной ссылке — это второй пароль у того, кто ссылку перехватил.
     const consumed = db
-      .prepare('UPDATE parent_invites SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?')
+      .prepare(
+        `UPDATE parent_invites SET used_at = ?
+          WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?
+            AND ${INVITE_AFTER_CREDENTIALS}`,
+      )
       .run(stamp, tokenHash, stamp);
     if (consumed.changes === 0) {
       return { ok: false, reason: inviteFailure(selectInvite(db, token), now) ?? 'used' };
@@ -621,6 +671,7 @@ export function redeemParentInvite(
       stamp,
       row.parent_id,
     );
+    invalidateParentArtifacts(db, row.parent_id, stamp);
     return { ok: true, parentId: row.parent_id, session: insertParentSession(db, row.parent_id, now) };
   }).immediate();
 }
@@ -659,10 +710,44 @@ export function loginParent(
     spendVerificationTime();
     return { ok: false, reason: 'no-password' };
   }
+  // `verifySecret` отвергает пустые и слишком длинные строки до KDF. Без
+  // отдельной траты времени известный адрес отвечал на них мгновенно, а
+  // неизвестный проходил через dummy-scrypt и выдавал существование аккаунта.
+  if (password.length === 0 || password.length > MAX_SECRET_LENGTH) {
+    spendVerificationTime();
+    return { ok: false, reason: 'bad-password' };
+  }
   if (!verifySecret(row.password_hash, password)) {
     return { ok: false, reason: 'bad-password' };
   }
   return { ok: true, parentId: row.id, session: insertParentSession(db, row.id, now) };
+}
+
+/**
+ * Повторно подтверждает уже известного родителя без выпуска новой сессии.
+ * Нужна повышению роли на общей детской машине: одна забытая cookie доказывает
+ * лишь, что родитель когда-то входил в этом браузере, но не что сейчас перед
+ * экраном именно он.
+ */
+export function verifyParentPassword(
+  db: Database.Database,
+  parentId: string,
+  password: string,
+): boolean {
+  const row = db
+    .prepare<[string], ParentCredentialsRow>(
+      'SELECT id, password_hash, disabled_at FROM parents WHERE id = ?',
+    )
+    .get(parentId);
+  if (row === undefined || row.disabled_at !== null || row.password_hash === null) {
+    spendVerificationTime();
+    return false;
+  }
+  if (password.length === 0 || password.length > MAX_SECRET_LENGTH) {
+    spendVerificationTime();
+    return false;
+  }
+  return verifySecret(row.password_hash, password);
 }
 
 interface ParentSessionRow {
@@ -848,12 +933,16 @@ export function setParentPassword(
   // Хеширование до записи: `scrypt` стоит десятки миллисекунд и под WAL всё это
   // время держал бы запись в управляющей базе.
   const passwordHash = hashSecret(password);
-  const updated = db
-    .prepare('UPDATE parents SET password_hash = ?, credentials_changed_at = ? WHERE id = ? AND disabled_at IS NULL')
-    .run(passwordHash, now.toISOString(), parentId);
-  if (updated.changes === 0) {
-    throw new Error(`Родителя ${parentId} нет в управляющей базе или он отключён`);
-  }
+  const stamp = now.toISOString();
+  db.transaction(() => {
+    const updated = db
+      .prepare('UPDATE parents SET password_hash = ?, credentials_changed_at = ? WHERE id = ? AND disabled_at IS NULL')
+      .run(passwordHash, stamp, parentId);
+    if (updated.changes === 0) {
+      throw new Error(`Родителя ${parentId} нет в управляющей базе или он отключён`);
+    }
+    invalidateParentArtifacts(db, parentId, stamp);
+  }).immediate();
 }
 
 /**
@@ -937,7 +1026,7 @@ export interface DeviceSummary {
 }
 
 /** Причина отказа детскому предъявителю. Наружу маршрут отдаёт один общий текст. */
-export type ChildAuthFailure = 'unknown-token' | 'expired' | 'used' | 'disabled' | 'retired';
+export type ChildAuthFailure = 'unknown-token' | 'expired' | 'used' | 'disabled' | 'retired' | 'revoked';
 
 export type DeviceClaimResult =
   | { ok: true; childId: string; deviceId: number; kind: DeviceKind; token: string }
@@ -1099,17 +1188,42 @@ export function isChildServiceable(child: ChildSummary | undefined): boolean {
  * Все обслуживаемые дети сервера, независимо от родителя. Порядок устойчив:
  * диспетчер воркера обходит детей по нему, и перестановка равных строк давала
  * бы разный порядок обхода на одинаковом состоянии.
+ *
+ * Отключённый родитель отсекается здесь же. У запроса нет предъявителя —
+ * диспетчер и `prefetch` приходят сами, — а `disabled_at` проверяется только на
+ * разрешении предъявителя, и без этого соединения фоновая генерация продолжала
+ * бы тратить суточную квоту модели на семью, которую только что отключили.
  */
 export function listServiceableChildren(db: Database.Database): ChildSummary[] {
   const rows = db
     .prepare<[], ChildRow>(
-      `SELECT id, parent_id, name, status, last_activity_at, retired_at, created_at
-         FROM children
-        WHERE status = 'ready' AND retired_at IS NULL
-        ORDER BY created_at, id`,
+      `SELECT c.id, c.parent_id, c.name, c.status, c.last_activity_at, c.retired_at, c.created_at
+         FROM children c
+         JOIN parents p ON p.id = c.parent_id
+        WHERE c.status = 'ready' AND c.retired_at IS NULL AND p.disabled_at IS NULL
+        ORDER BY c.created_at, c.id`,
     )
     .all();
   return rows.map(toChildSummary);
+}
+
+/**
+ * Отключён ли родитель этого ребёнка. Тот же отбор, что и у
+ * `listServiceableChildren`, но по одному имени: `prefetch --child` зовут именно
+ * так, а `npm run parent -- disable` — единственный рычаг «перестать обслуживать
+ * семью». Без этой проверки обойти его можно было бы именем ребёнка, продолжая
+ * тратить на отключённую семью вызовы модели и её суточную квоту.
+ */
+export function isChildParentDisabled(db: Database.Database, childId: string): boolean {
+  const row = db
+    .prepare<[string], { disabled: number }>(
+      `SELECT (p.disabled_at IS NOT NULL) AS disabled
+         FROM children c
+         JOIN parents p ON p.id = c.parent_id
+        WHERE c.id = ?`,
+    )
+    .get(childId);
+  return row !== undefined && row.disabled === 1;
 }
 
 /**
@@ -1176,15 +1290,18 @@ interface DeviceInviteRow {
   kind: DeviceKind;
   claimed_at: string | null;
   invite_expires_at: string;
+  created_at: string;
+  revoked_at: string | null;
   retired_at: string | null;
   disabled_at: string | null;
+  credentials_changed_at: string | null;
 }
 
 function selectDeviceInvite(db: Database.Database, token: string): DeviceInviteRow | undefined {
   return db
     .prepare<[string], DeviceInviteRow>(
-      `SELECT d.id, d.child_id, d.kind, d.claimed_at, d.invite_expires_at,
-              c.retired_at, p.disabled_at
+      `SELECT d.id, d.child_id, d.kind, d.claimed_at, d.invite_expires_at, d.created_at, d.revoked_at,
+              c.retired_at, p.disabled_at, p.credentials_changed_at
          FROM child_devices d
          JOIN children c ON c.id = d.child_id
          JOIN parents p ON p.id = c.parent_id
@@ -1193,6 +1310,13 @@ function selectDeviceInvite(db: Database.Database, token: string): DeviceInviteR
     .get(hashToken(token));
 }
 
+/** То же условие для приглашения устройства; текст один и там, где оно гасится. */
+const DEVICE_INVITE_AFTER_CREDENTIALS =
+  `created_at >= COALESCE(
+     (SELECT p.credentials_changed_at
+        FROM parents p JOIN children c ON c.parent_id = p.id
+       WHERE c.id = child_devices.child_id), '')`;
+
 function deviceInviteFailure(
   row: DeviceInviteRow | undefined,
   now: Date,
@@ -1200,7 +1324,19 @@ function deviceInviteFailure(
   if (row === undefined) return 'unknown-token';
   if (row.disabled_at !== null) return 'disabled';
   if (row.retired_at !== null) return 'retired';
+  // Отзыв проверяется раньше погашения: родитель, отозвавший утёкшую ссылку,
+  // обязан её этим и закрыть. Без этой строки погашение проходило бы успешно, а
+  // выданный им токен не разрешался бы никогда (`resolveChildDevice` отбирает
+  // по `revoked_at IS NULL`) — то есть ссылка «работала» бы у перехватившего.
+  if (row.revoked_at !== null) return 'revoked';
   if (row.claimed_at !== null) return 'used';
+  // Смена пароля гасит все выданные токены устройств (`resolveChildDevice`
+  // сверяет её с `claimed_at`), и невыкупленная ссылка обязана гаснуть вместе с
+  // ними: погашенная после смены, она поставила бы себе свежий `claimed_at` и
+  // пережила бы ровно то событие, которым её и снимали.
+  if (row.credentials_changed_at !== null && row.credentials_changed_at > row.created_at) {
+    return 'expired';
+  }
   if (row.invite_expires_at <= now.toISOString()) return 'expired';
   return undefined;
 }
@@ -1216,16 +1352,14 @@ export function redeemDeviceInvite(
   token: string,
   now: Date = new Date(),
 ): DeviceClaimResult {
-  const known = selectDeviceInvite(db, token);
-  if (known === undefined) return { ok: false, reason: 'unknown-token' };
-
   const deviceToken = createBearerToken();
   const stamp = now.toISOString();
   const inviteHash = hashToken(token);
 
   return db.transaction((): DeviceClaimResult => {
-    // Отключённый родитель и выведенный ребёнок проверяются под записью: между
-    // чтением выше и этой строкой их мог погасить соседний запрос.
+    // Все условия читаются под записью и только под ней: предпроверка снаружи
+    // транзакции ничего бы не сэкономила (токен уже сгенерирован) и разъехалась
+    // бы с состоянием, которое видит сам `UPDATE`.
     const before = selectDeviceInvite(db, token);
     const blocked = deviceInviteFailure(before, now);
     if (blocked !== undefined && blocked !== 'used' && blocked !== 'expired') {
@@ -1234,7 +1368,9 @@ export function redeemDeviceInvite(
     const consumed = db
       .prepare(
         `UPDATE child_devices SET claimed_at = ?, token_hash = ?
-          WHERE invite_hash = ? AND claimed_at IS NULL AND invite_expires_at > ?`,
+          WHERE invite_hash = ? AND claimed_at IS NULL AND revoked_at IS NULL
+            AND invite_expires_at > ?
+            AND ${DEVICE_INVITE_AFTER_CREDENTIALS}`,
       )
       .run(stamp, hashToken(deviceToken), inviteHash, stamp);
     if (consumed.changes === 0) {
@@ -1364,16 +1500,25 @@ export function resolveChildDevice(
   // Отметка активности глушится тем же сроком, что и `last_seen_at` сессии:
   // занятие бьёт в управляющую базу на каждом задании, а диспетчеру воркера
   // хватает свежести в минутах.
-  const lastActivity = row.last_activity_at === null ? undefined : Date.parse(row.last_activity_at);
-  if (
-    lastActivity === undefined ||
-    !Number.isFinite(lastActivity) ||
-    now.getTime() - lastActivity >= SESSION_TOUCH_MS
-  ) {
-    db.prepare('UPDATE children SET last_activity_at = ? WHERE id = ?').run(
-      now.toISOString(),
-      row.child_id,
-    );
+  //
+  // Отмечается **только браузер ученика**: агент опрашивает `gate/status`
+  // раз в двадцать секунд и сам по себе не значит, что за компьютером кто-то
+  // сидит. Считая его активностью, диспетчер держал бы каждого оснащённого
+  // контроллером ребёнка вечно «за экраном» — то есть приоритет обхода и окно
+  // заброшенности переставали бы что-либо означать.
+  if (row.kind === 'browser') {
+    const lastActivity =
+      row.last_activity_at === null ? undefined : Date.parse(row.last_activity_at);
+    if (
+      lastActivity === undefined ||
+      !Number.isFinite(lastActivity) ||
+      now.getTime() - lastActivity >= SESSION_TOUCH_MS
+    ) {
+      db.prepare('UPDATE children SET last_activity_at = ? WHERE id = ?').run(
+        now.toISOString(),
+        row.child_id,
+      );
+    }
   }
 
   return {
@@ -1616,6 +1761,14 @@ export function recordLoginFailure(
   try {
     return db
       .transaction((): LoginGate => {
+        // Остывшие строки убираются здесь же. Ключ по почте задаёт неизвестный
+        // клиент, ключ по адресу — сеть, и без уборки единственная таблица
+        // управляющей базы, которую растит кто угодно снаружи, растёт навсегда.
+        // На решение это не влияет: строка старше паузы и так начинает серию
+        // заново (`CASE WHEN last_failed_at <= ?`). Испорченная отметка под
+        // сравнение не попадает и остаётся — она означает неизвестное
+        // состояние счётчика, а не давнюю неудачу.
+        db.prepare('DELETE FROM login_attempts WHERE last_failed_at <= ?').run(stale);
         let retryAfterMs = 0;
         for (const entry of loginEntries(target)) {
           db.prepare(

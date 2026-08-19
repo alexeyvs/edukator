@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_FORWARDED_HOPS,
   DEFAULT_TRUSTED_PROXIES,
   MAX_ADDRESS_LENGTH,
   UNKNOWN_ADDRESS,
@@ -111,6 +112,24 @@ describe('clientAddress', () => {
     expect(
       clientAddress({ socketAddress: '127.0.0.1', forwardedFor: '::1', trusted: LOOPBACK }),
     ).toBe('127.0.0.1');
+  });
+
+  it('длинная цепочка режется справа: шаг доверенного прокси остаётся в окне', () => {
+    // Клиент дописывает столько шагов, что настоящий — тот, что приписал сам
+    // прокси, — уходит за предел. Срез с левого края оставил бы в окне только
+    // подложенное, и ключ счётчика перебора выбирал бы сам подбирающий.
+    const forged = Array.from({ length: MAX_FORWARDED_HOPS + 8 }, (_, index) => `198.51.100.${index + 1}`);
+    const chain = [...forged, '203.0.113.7'].join(', ');
+
+    expect(clientAddress({ socketAddress: '127.0.0.1', forwardedFor: chain, trusted: LOOPBACK })).toBe(
+      '203.0.113.7',
+    );
+  });
+
+  it('держит калибровочную константу длины цепочки', () => {
+    // Число вписано руками: собранное из самой константы ожидание её подмену
+    // не поймало бы.
+    expect(MAX_FORWARDED_HOPS).toBe(32);
   });
 
   it('неизвестный адрес сокета даёт общий ключ, а не пустой', () => {

@@ -45,6 +45,7 @@ export interface IssuedInvite {
 export interface FamilyApi {
   read(): Promise<Family>;
   addChild(name: string): Promise<FamilyChild>;
+  retryProvision(childId: string): Promise<FamilyChild>;
   issueDevice(childId: string, kind: DeviceKind, label: string): Promise<IssuedInvite>;
   revokeDevice(deviceId: number): Promise<{ revoked: boolean; device: FamilyDevice }>;
   setPin(pin: string): Promise<{ pinConfigured: boolean }>;
@@ -59,6 +60,14 @@ export const browserFamilyApi: FamilyApi = {
       'Не получилось завести ребёнка',
     );
     return created.child;
+  },
+  retryProvision: async (childId) => {
+    const provisioned = await requestJson<{ child: FamilyChild }>(
+      `/api/family/children/${encodeURIComponent(childId)}/provision`,
+      jsonRequest('POST'),
+      'Не получилось завести базу ребёнка',
+    );
+    return provisioned.child;
   },
   issueDevice: (childId, kind, label) => requestJson<IssuedInvite>(
     `/api/family/children/${encodeURIComponent(childId)}/devices`,

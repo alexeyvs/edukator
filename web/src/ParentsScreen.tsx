@@ -9,6 +9,7 @@ import {
   type ParentsRunAttempt,
   type ParentsRunDetail,
 } from './parents-api';
+import { isParentPin } from './pin-format';
 import { SUBJECT_NAMES, SUBJECTS } from './subject-meta';
 import { SafeFormula, SafeRichText } from './TaskPrompt';
 
@@ -97,6 +98,11 @@ function ComputerAccessPanel({
 }: {
   access: ParentsDashboard['computerAccess'];
   api: ParentsApi;
+  /**
+   * Спрашивать ли PIN. Вошедшему родителю — нет: он подтверждён паролем, и PIN
+   * значит ровно «за детской машиной сейчас родитель». Сервер здесь заодно: с
+   * родительской сессией он PIN не проверяет вовсе.
+   */
   pinRequired: boolean;
   pin: string;
   onPinChange: (pin: string) => void;
@@ -137,7 +143,7 @@ function ComputerAccessPanel({
     }
     : accessStatus(access);
   // Без PIN проверять нечего: вошедший родитель подтверждён паролем.
-  const pinValid = !pinRequired || /^\d{6,12}$/u.test(pin);
+  const pinValid = !pinRequired || isParentPin(pin);
   // PIN не настроен — управление закрыто только с детской машины.
   const canChange = !pinRequired || access.configured;
 
@@ -353,12 +359,14 @@ function AttemptMaterial({ attempt }: { attempt: ParentsRunAttempt }) {
 function RunAttempt({
   attempt,
   pin,
+  pinRequired,
   api,
   runId,
   onApproved,
 }: {
   attempt: ParentsRunAttempt;
   pin: string;
+  pinRequired: boolean;
   api: ParentsApi;
   runId: number;
   onApproved: () => Promise<void>;
@@ -367,14 +375,14 @@ function RunAttempt({
   const [approvalProblem, setApprovalProblem] = useState<string | null>(null);
   const prompt = attempt.instruction ?? attempt.question;
   const integrity = attempt.integrity;
-  const pinValid = /^\d{6,12}$/u.test(pin);
+  const pinValid = !pinRequired || isParentPin(pin);
 
   async function approve(): Promise<void> {
-    if (integrity === undefined || api.approveIntegrity === undefined || !pinValid || approving) return;
+    if (integrity === undefined || !pinValid || approving) return;
     setApproving(true);
     setApprovalProblem(null);
     try {
-      await api.approveIntegrity(runId, integrity.itemId, pin);
+      await api.approveIntegrity(runId, integrity.itemId, pinRequired ? pin : undefined);
       await onApproved();
     } catch (error) {
       setApprovalProblem(error instanceof Error ? error.message : 'Не получилось подтвердить ответ');
@@ -382,6 +390,7 @@ function RunAttempt({
       setApproving(false);
     }
   }
+
   return (
     <article className={`parents-attempt ${attempt.correct ? 'correct' : 'incorrect'}`}>
       <header>
@@ -425,7 +434,7 @@ function RunAttempt({
           {integrity.reviewedBy === 'parent' ? ' · подтверждено родителем' : integrity.reviewedBy === 'codex' ? ' · Codex' : ''}
         </small>}
         {integrity.status !== 'approved' && <div>
-          <button className="secondary" type="button" disabled={!pinValid || approving || api.approveIntegrity === undefined} onClick={() => void approve()}>
+          <button className="secondary" type="button" disabled={!pinValid || approving} onClick={() => void approve()}>
             {approving ? 'Подтверждаю…' : 'Ответ осмысленный'}
           </button>
           {!pinValid && <small>Введите PIN родителя в блоке доступа выше.</small>}
@@ -444,11 +453,13 @@ function RunAttempt({
 function RunDetail({
   detail,
   pin,
+  pinRequired,
   api,
   onApproved,
 }: {
   detail: ParentsRunDetail;
   pin: string;
+  pinRequired: boolean;
   api: ParentsApi;
   onApproved: () => Promise<void>;
 }) {
@@ -462,7 +473,15 @@ function RunDetail({
       {detail.attempts.length === 0
         ? <p className="parents-run-detail-empty">В этом занятии не сохранено ответов.</p>
         : <div className="parents-attempts">{detail.attempts.map((attempt) => (
-          <RunAttempt attempt={attempt} pin={pin} api={api} runId={detail.runId} onApproved={onApproved} key={attempt.number} />
+          <RunAttempt
+            attempt={attempt}
+            pin={pin}
+            pinRequired={pinRequired}
+            api={api}
+            runId={detail.runId}
+            onApproved={onApproved}
+            key={attempt.number}
+          />
         ))}</div>}
     </div>
   );
@@ -472,11 +491,13 @@ function ActivityItem({
   item,
   api,
   pin,
+  pinRequired,
   onDashboardChanged,
 }: {
   item: ParentsDashboard['activity'][number];
   api: ParentsApi;
   pin: string;
+  pinRequired: boolean;
   onDashboardChanged: () => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
@@ -505,13 +526,7 @@ function ActivityItem({
 
   return (
     <li className={`activity-${item.kind}${open ? ' open' : ''}`}>
-      <button
-        aria-controls={panelId}
-        aria-expanded={open}
-        className="parents-activity-toggle"
-        type="button"
-        onClick={toggle}
-      >
+      <button aria-controls={panelId} aria-expanded={open} className="parents-activity-toggle" type="button" onClick={toggle}>
         <span className="parents-activity-summary">
           <span><strong>{KIND_NAMES[item.kind]}</strong><small>{SUBJECT_NAMES[item.subject]}</small></span>
           <span>{item.correct} из {item.total} · {item.activeMinutes} мин
@@ -529,6 +544,7 @@ function ActivityItem({
         {detail !== null && <RunDetail
           detail={detail}
           pin={pin}
+          pinRequired={pinRequired}
           api={api}
           onApproved={async () => { await load(); await onDashboardChanged(); }}
         />}
@@ -541,11 +557,13 @@ function IntegrityReviewItem({
   item,
   api,
   pin,
+  pinRequired,
   onDashboardChanged,
 }: {
   item: NonNullable<ParentsDashboard['integrityReviews']>[number];
   api: ParentsApi;
   pin: string;
+  pinRequired: boolean;
   onDashboardChanged: () => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
@@ -556,9 +574,13 @@ function IntegrityReviewItem({
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
     setProblem(null);
-    try { setDetail(await api.readRun(item.runId)); }
-    catch (error) { setProblem(error instanceof Error ? error.message : 'Не получилось загрузить проверку'); }
-    finally { setLoading(false); }
+    try {
+      setDetail(await api.readRun(item.runId));
+    } catch (error) {
+      setProblem(error instanceof Error ? error.message : 'Не получилось загрузить проверку');
+    } finally {
+      setLoading(false);
+    }
   }, [api, item.runId]);
 
   return <li className={`parents-integrity-review${open ? ' open' : ''}`}>
@@ -578,10 +600,13 @@ function IntegrityReviewItem({
     </button>
     {open && <div className="parents-activity-detail" id={panelId}>
       {loading && <p role="status">Загружаю проверку ответов…</p>}
-      {problem !== null && <div className="parents-run-detail-problem" role="alert"><p>{problem}</p><button type="button" onClick={() => void load()}>Повторить</button></div>}
+      {problem !== null && <div className="parents-run-detail-problem" role="alert">
+        <p>{problem}</p><button type="button" onClick={() => void load()}>Повторить</button>
+      </div>}
       {detail !== null && <RunDetail
         detail={detail}
         pin={pin}
+        pinRequired={pinRequired}
         api={api}
         onApproved={async () => { await load(); await onDashboardChanged(); }}
       />}
@@ -681,11 +706,23 @@ export function ParentsScreen({
     return loaded.computerAccess;
   }, [api]);
 
+  // Возврат остаётся и в отказе, и в ожидании: родитель попал сюда из состава
+  // семьи, и экран из одной красной строки без выхода — тупик, из которого
+  // можно только перезагрузить страницу.
+  const back = home === undefined
+    ? <a className="parents-home" href="/">К плану дня</a>
+    : <button className="parents-home" type="button" onClick={home.onClick}>{home.label}</button>;
+
   if (problem !== null) {
-    return <main className="parents-state"><p role="alert">{problem}</p></main>;
+    return <main className="parents-state"><p role="alert">{problem}</p>{back}</main>;
   }
   if (dashboard === null) {
-    return <main className="parents-state" role="status"><p>Собираю сводку за неделю…</p></main>;
+    return (
+      <main className="parents-state" role="status">
+        <p>Собираю сводку за неделю…</p>
+        {back}
+      </main>
+    );
   }
 
   const days = windowDays(dashboard);
@@ -707,9 +744,7 @@ export function ParentsScreen({
             ))}
           </select>
         </label>}
-        {home === undefined
-          ? <a className="parents-home" href="/">К плану дня</a>
-          : <button className="parents-home" type="button" onClick={home.onClick}>{home.label}</button>}
+        {back}
       </header>
 
       <section className="parents-intro">
@@ -745,6 +780,7 @@ export function ParentsScreen({
             api={api}
             item={item}
             pin={pin}
+            pinRequired={pinRequired}
             onDashboardChanged={reloadDashboard}
             key={item.runId}
           />
@@ -803,7 +839,14 @@ export function ParentsScreen({
           {dashboard.activity.length === 0
             ? <p className="parents-empty">За эту неделю завершённых забегов пока нет.</p>
             : <ol className="parents-activity">{dashboard.activity.map((item) => (
-              <ActivityItem api={api} item={item} pin={pin} onDashboardChanged={reloadDashboard} key={item.runId} />
+              <ActivityItem
+                api={api}
+                item={item}
+                pin={pin}
+                pinRequired={pinRequired}
+                onDashboardChanged={reloadDashboard}
+                key={item.runId}
+              />
             ))}</ol>}
         </section>
       </div>

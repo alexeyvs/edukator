@@ -187,6 +187,25 @@ describe('квота вызовов codex в CodexRunner', () => {
     expect(readCodexQuota(control, otherId).used).toBe(0);
   });
 
+  it('берёт день из переданных часов, а не из системных', async () => {
+    // Часы прокидываются от `buildServer` до диспетчера; сорванная передача
+    // молча разводит резерв и чтение по разным московским суткам у полуночи, и
+    // суточный предел перестаёт действовать именно там, где он нужнее всего.
+    // Дата заведомо не сегодняшняя: на сегодняшней подменённые часы совпали бы
+    // с системными и подмену было бы не отличить.
+    const evening = new Date('2030-03-10T20:59:00.000Z');
+    const { run } = recorder([batch(1), batch(1)]);
+    const quoted = createQuotedRunner({ control, childId, run, now: () => evening });
+
+    await quoted({ prompt: 'p', schemaPath: '/s.json', outPath: '/o.json' });
+
+    // 20:59Z — это ещё 10 марта по Москве; 21:00Z было бы уже 11-м.
+    expect(readCodexQuota(control, childId, evening).used).toBe(1);
+    expect(
+      readCodexQuota(control, childId, new Date('2030-03-10T21:00:00.000Z')).used,
+    ).toBe(0);
+  });
+
   it('отказывается резервировать внутри транзакции управляющей базы', async () => {
     // Резерв внутри чужой транзакции перестал бы быть своей короткой записью, а
     // вызов модели ушёл бы под запись на все свои минуты.

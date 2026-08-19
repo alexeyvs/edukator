@@ -14,8 +14,9 @@ from .config import (
     ControllerConfig,
     clear_pending_login,
     config_path,
-    load_config,
     load_pending_login,
+    read_poll_settings,
+    read_previous_access,
     save_config,
     save_pending_login,
 )
@@ -72,22 +73,21 @@ def ask_server_access(
     Токен читается скрытым вводом: он равнозначен ключу от детского аккаунта,
     и эхо в терминале осталось бы и в истории сессии, и в записи экрана.
     """
-    try:
-        previous: ControllerConfig | None = load_config(target)
-    except ValueError:
-        # Первый вход или конфигурация без новых полей — спрашиваем всё заново.
-        previous = None
+    # Прежние значения читаются нестрого: строгий `load_config` отказывает на
+    # конфигурации без `agent_token` — то есть ровно на той, ради обновления
+    # которой этот `family:login` и запускают, — и прежний адрес, обещанный
+    # README именно для этого случая, не предлагался бы вовсе.
+    previous = read_previous_access(target)
+    default_url = previous.get("edukator_url", "")
+    previous_token = previous.get("agent_token", "")
 
-    default_url = previous.edukator_url if previous is not None else ""
     hint = f" [{default_url}]" if default_url else " (например https://edukator.example.com)"
     url = (ask(f"Адрес сервера Edukator{hint}: ").strip() or default_url).rstrip("/")
     if not url.startswith(("http://", "https://")):
         raise ValueError("Адрес сервера должен начинаться с http:// или https://")
 
-    keep = " (Enter — оставить прежний)" if previous is not None else ""
-    token = ask_secret(f"Агентский токен устройства{keep}, ввод скрыт: ").strip()
-    if not token and previous is not None:
-        token = previous.agent_token
+    keep = " (Enter — оставить прежний)" if previous_token else ""
+    token = ask_secret(f"Агентский токен устройства{keep}, ввод скрыт: ").strip() or previous_token
     if not token:
         raise ValueError(
             "Агентский токен не введён; выпустите устройству kind=agent в разделе «Семья»"
@@ -96,18 +96,26 @@ def ask_server_access(
 
 
 async def authenticate(target: Path) -> Any:
-    from pyfamilysafety import Authenticator, FamilySafety
+    from pyfamilysafety import Authenticator
 
     pending_token = load_pending_login(target)
     if pending_token is not None:
         print("Продолжаю ранее начатую настройку Microsoft Family Safety.")
+        auth = None
         try:
             auth = await Authenticator.create(token=pending_token, use_refresh_token=True)
-            save_pending_login(auth.refresh_token, target)
-            return auth
         except Exception as error:
             print(f"Сохранённая сессия больше не действует: {error}", file=sys.stderr)
             clear_pending_login(target)
+        if auth is not None:
+            # Запись обновлённого токена — уже не проверка сессии, и её отказ
+            # не повод объявлять сессию мёртвой: стерев pending, мы потеряли бы
+            # действующий refresh token из-за нехватки места на диске.
+            try:
+                save_pending_login(auth.refresh_token, target)
+            except OSError as error:
+                print(f"Сессия не сохранена: {error}", file=sys.stderr)
+            return auth
 
     print("Открываю вход Microsoft в браузере.")
     if not webbrowser.open(LOGIN_URL):
@@ -122,6 +130,35 @@ async def authenticate(target: Path) -> Any:
     # прежде чем обращаться к менее надёжному Family Safety aggregator.
     save_pending_login(auth.refresh_token, target)
     return auth
+
+
+def merged_config(
+    target: Path,
+    *,
+    refresh_token: str,
+    child_user_id: str,
+    agent_token: str,
+    edukator_url: str,
+) -> ControllerConfig:
+    """Новая конфигурация поверх прежней.
+
+    Настройки опроса переживают ротацию токена: собранная с нуля конфигурация
+    молча возвращала бы `poll_seconds`, `verify_seconds` и `block_days` к
+    умолчаниям при каждом повторном `family:login`.
+    """
+    # Настройки опроса читаются отдельно от строгого `load_config`: на прежней
+    # конфигурации, у которой ещё нет `agent_token` и `edukator_url`, он
+    # отказывает целиком — то есть ровно при обновлении, ради которого этот
+    # `family:login` и запускают, все три настройки молча вернулись бы к
+    # умолчаниям. Нет файла или он испорчен — читается пустота, и умолчания
+    # берутся честно.
+    return ControllerConfig(
+        refresh_token=refresh_token,
+        child_user_id=child_user_id,
+        agent_token=agent_token,
+        edukator_url=edukator_url,
+        **read_poll_settings(target),
+    )
 
 
 async def login(target: Path) -> None:
@@ -154,7 +191,8 @@ async def login(target: Path) -> None:
             raise RuntimeError("У выбранного участника нет устройства Windows")
         edukator_url, agent_token = ask_server_access(target)
         save_config(
-            ControllerConfig(
+            merged_config(
+                target,
                 refresh_token=auth.refresh_token,
                 child_user_id=child_user_id,
                 agent_token=agent_token,

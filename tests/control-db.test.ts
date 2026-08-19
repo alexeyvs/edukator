@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import BetterSqlite3 from 'better-sqlite3';
+import { MAX_SECRET_LENGTH } from '../server/secrets.js';
 import {
   CHILDREN_DIR,
   CODEX_DAILY_QUOTA,
@@ -32,6 +33,7 @@ import {
   issueDeviceInvite,
   issueParentInvite,
   listAllChildren,
+  listServiceableChildren,
   listChildren,
   listDevices,
   loginParent,
@@ -292,12 +294,38 @@ describe('ошибочные пути', () => {
     raw.close();
     expect(() => open()).toThrow(/отсутствуют children_parent/);
 
-    const relaxed = new BetterSqlite3(join(dir, 'relaxed.db'));
-    relaxed.exec(`
-      CREATE TABLE parents (id TEXT PRIMARY KEY, email TEXT, password_hash TEXT, pin_hash TEXT,
-        credentials_changed_at TEXT, disabled_at TEXT, created_at TEXT);
-    `);
-    expect(() => validateControlSchema(relaxed)).toThrow(/Схема управляющей базы повреждена/);
+    // Ослабленное ограничение проверяется на **целой** схеме: база, в которой
+    // не хватает и таблиц, покраснела бы на первой же из них, и проверка
+    // фрагментов CHECK не выполнилась бы ни разу.
+    const relaxedPath = join(dir, 'relaxed.db');
+    // Схема берётся с целой базы, а не с той, у которой выше уронили индекс:
+    // иначе отказ пришёл бы по индексу и про ограничение не сказал бы ничего.
+    const wholePath = join(dir, 'whole.db');
+    openControlDatabase(wholePath).close();
+    const source = new BetterSqlite3(wholePath);
+    const statements = source
+      .prepare<[], { sql: string | null }>(
+        "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'",
+      )
+      .all()
+      .map((row) => row.sql ?? '');
+    source.close();
+    // Текст ограничения вписан руками: собранный из самой константы, он молча
+    // остался бы верным и после её подмены.
+    const childIdCheck = "id NOT GLOB '*[^0-9a-f]*' AND length(id) BETWEEN 8 AND 64";
+    const relaxed = new BetterSqlite3(relaxedPath);
+    let relaxations = 0;
+    for (const statement of statements) {
+      // Снимаем ровно одно ограничение: `id` ребёнка перестаёт проверяться на
+      // разделитель пути. Всё остальное на месте — иначе отказ ничего не значит.
+      const weakened = statement.replace(childIdCheck, "id <> ''");
+      if (weakened !== statement) relaxations += 1;
+      relaxed.exec(weakened);
+    }
+    expect(relaxations).toBe(1);
+    expect(() => validateControlSchema(relaxed)).toThrow(
+      /children не содержит обязательные ограничения/,
+    );
     relaxed.close();
   });
 
@@ -307,13 +335,13 @@ describe('ошибочные пути', () => {
     raw.pragma('user_version = 0');
     raw.close();
 
-    // Версия 0 с чужим объектом — отказ; а версия из будущего прошлого (когда
-    // переходы появятся) не должна проходить молча.
+    // База новее приложения отвергается, а не мигрируется вслепую. Прежнее
+    // условие «если версий больше одной» было утверждением, которое при
+    // `CONTROL_SCHEMA_VERSION = 1` не выполнялось ни разу — то есть база
+    // `other.db` создавалась, настраивалась и закрывалась без единой проверки.
     const other = new BetterSqlite3(join(dir, 'other.db'));
-    other.pragma(`user_version = ${CONTROL_SCHEMA_VERSION - 1}`);
-    if (CONTROL_SCHEMA_VERSION > 1) {
-      expect(() => migrateControl(other)).toThrow(/не имеет перехода/);
-    }
+    other.pragma(`user_version = ${CONTROL_SCHEMA_VERSION + 1}`);
+    expect(() => migrateControl(other)).toThrow(/собрана более новой версией схемы/);
     other.close();
 
     expect(() => open()).toThrow(/содержит объект «parents»/);
@@ -375,6 +403,13 @@ describe('родители, приглашения и сессии', () => {
     expect(dump).not.toContain(redeemed.session.token);
     expect(dump).not.toContain(PASSWORD);
     expect(dump).toContain(hashToken(invite.token));
+  });
+
+  // Отпечаток вписан руками: ожидание, посчитанное тем же `hashToken`, сходится
+  // и с md5, и с любой другой подменой — то есть подмену алгоритма не ловит, а
+  // вместе с ней проходит мимо и укорочение отпечатка.
+  it('считает отпечаток токена именно SHA-256 в base64url', () => {
+    expect(hashToken('одноразовый-токен')).toBe('FXH5a8Jp2pRKGjB8MrKMs_HoB_AbLjLJvqcYxlQ9f1M');
   });
 
   it('не гасит приглашение чтением, но гасит погашением', () => {
@@ -486,6 +521,24 @@ describe('родители, приглашения и сессии', () => {
       reason: 'disabled',
     });
     expect(withoutPassword).not.toBe(parentId);
+  });
+
+  it('одинаково проводит дорогую ветку для пустого и слишком длинного пароля известного адреса', () => {
+    const db = open();
+    parentWithPassword(db);
+
+    expect(loginParent(db, 'mama@example.com', '', NOW)).toEqual({
+      ok: false,
+      reason: 'bad-password',
+    });
+    expect(loginParent(db, 'mama@example.com', 'x'.repeat(MAX_SECRET_LENGTH + 1), NOW)).toEqual({
+      ok: false,
+      reason: 'bad-password',
+    });
+    expect(loginParent(db, 'никого@example.com', 'x'.repeat(MAX_SECRET_LENGTH + 1), NOW)).toEqual({
+      ok: false,
+      reason: 'unknown-email',
+    });
   });
 
   it('гасит сессию по бездействию', () => {
@@ -792,6 +845,55 @@ describe('дети и устройства', () => {
     expect(
       db.prepare<[], { n: number }>('SELECT count(*) AS n FROM child_devices WHERE claimed_at IS NOT NULL').get()?.n,
     ).toBe(1);
+  });
+
+  it('отозванное непогашенное приглашение больше не гасится', () => {
+    const db = open();
+    const childId = readyChild(db, parentWithPassword(db));
+    const invite = issueDeviceInvite(db, childId, 'browser', '', NOW);
+    const pending = listDevices(db, childId).find((device) => device.claimedAt === undefined);
+
+    expect(revokeDevice(db, pending?.id ?? -1, at(HOUR_MS))).toBe(true);
+    // Родитель отозвал утёкшую ссылку — она обязана перестать работать. Иначе
+    // перехвативший её погашает приглашение (и запись становится «подключено»),
+    // а выданный ему токен не разрешается никогда: «работает и не работает»
+    // разом, вместо честного отказа.
+    expect(redeemDeviceInvite(db, invite.token, at(2 * HOUR_MS))).toEqual({
+      ok: false,
+      reason: 'revoked',
+    });
+    expect(
+      db
+        .prepare<[], { n: number }>(
+          'SELECT count(*) AS n FROM child_devices WHERE claimed_at IS NOT NULL',
+        )
+        .get()?.n,
+    ).toBe(0);
+  });
+
+  it('опрос агента не считается активностью ребёнка', () => {
+    const db = open();
+    const childId = readyChild(db, parentWithPassword(db));
+    const agent = claimedDevice(db, childId, 'agent');
+    const laptop = claimedDevice(db, childId);
+    db.prepare('UPDATE children SET last_activity_at = NULL WHERE id = ?').run(childId);
+
+    // Контроллер доступа опрашивает `gate/status` раз в двадцать секунд и сам
+    // по себе не значит, что за компьютером кто-то сидит: считая его
+    // активностью, диспетчер держал бы ребёнка вечно «за экраном».
+    expect(resolveChildDevice(db, agent.token, at(HOUR_MS))?.kind).toBe('agent');
+    expect(
+      db.prepare<[string], { at: string | null }>(
+        'SELECT last_activity_at AS at FROM children WHERE id = ?',
+      ).get(childId)?.at,
+    ).toBeNull();
+
+    expect(resolveChildDevice(db, laptop.token, at(HOUR_MS))?.kind).toBe('browser');
+    expect(
+      db.prepare<[string], { at: string | null }>(
+        'SELECT last_activity_at AS at FROM children WHERE id = ?',
+      ).get(childId)?.at,
+    ).toBe(at(HOUR_MS).toISOString());
   });
 
   it('отзыв устройства гасит только его', () => {
@@ -1122,6 +1224,41 @@ describe('счётчики неудачных входов', () => {
     ).toBe(1);
   });
 
+  it('убирает остывшие строки, а не копит их без предела', () => {
+    const db = open();
+    // Ключ по почте задаёт кто угодно снаружи: без уборки неудачные входы —
+    // единственная таблица управляющей базы, которую растит неаутентифицированный
+    // клиент, и растёт она навсегда.
+    for (let index = 0; index < 5; index += 1) {
+      recordLoginFailure(db, target({ email: `чужой${String(index)}@example.com` }), NOW);
+    }
+    const rows = (): number =>
+      db.prepare<[], { count: number }>('SELECT COUNT(*) AS count FROM login_attempts')
+        .get()?.count ?? 0;
+    expect(rows()).toBeGreaterThan(5);
+
+    const later = new Date(NOW.getTime() + LOGIN_LOCKOUT_MS + 1);
+    recordLoginFailure(db, target({ email: 'mama@example.com', address: '198.51.100.9' }), later);
+
+    // Остались только строки последней неудачи: остывшая строка и так начинает
+    // серию заново, так что решение от уборки не меняется.
+    expect(rows()).toBe(2);
+    expect(checkLoginGate(db, target({ email: 'mama@example.com' }), later).allowed).toBe(true);
+  });
+
+  it('не убирает строку с испорченной отметкой времени', () => {
+    const db = open();
+    failTimes(db, LOGIN_EMAIL_FAILURE_LIMIT);
+    // Непрочитанная отметка означает неизвестное состояние счётчика, а не
+    // давнюю неудачу: убрав её, уборка открыла бы вход тому, кого запретили.
+    db.prepare("UPDATE login_attempts SET last_failed_at = 'мусор' WHERE scope = 'email'").run();
+
+    const later = new Date(NOW.getTime() + LOGIN_LOCKOUT_MS * 10);
+    recordLoginFailure(db, target({ email: 'papa@example.com' }), later);
+
+    expect(checkLoginGate(db, target(), later)).toMatchObject({ reason: 'unavailable' });
+  });
+
   it('новая неудача внутри паузы её продлевает', () => {
     const db = open();
     failTimes(db, LOGIN_EMAIL_FAILURE_LIMIT);
@@ -1313,6 +1450,47 @@ describe('обслуживание родителей', () => {
     expect(findParentByEmail(db, 'mama@example.com')?.hasPassword).toBe(true);
   });
 
+  it('гасит сессию и оба вида приглашений даже в ту же миллисекунду', () => {
+    const db = open();
+    const parentId = createParent(db, 'mama@example.com', NOW);
+    const entered = redeemParentInvite(db, issueParentInvite(db, parentId, NOW).token, PASSWORD, NOW);
+    if (!entered.ok) throw new Error('начальный пароль не установлен');
+    const parentInvite = issueParentInvite(db, parentId, NOW);
+    const childId = createChild(db, parentId, 'Сын', NOW);
+    markChildReady(db, childId);
+    const deviceInvite = issueDeviceInvite(db, childId, 'browser', 'ноутбук', NOW);
+    const claimed = redeemDeviceInvite(
+      db,
+      issueDeviceInvite(db, childId, 'agent', 'контроллер', NOW).token,
+      NOW,
+    );
+    if (!claimed.ok) throw new Error('тестовое устройство не погашено');
+
+    setParentPassword(db, parentId, 'совсем-другой-пароль', NOW);
+
+    expect(resolveParentSession(db, entered.session.token, NOW)).toBeUndefined();
+    expect(readParentInvite(db, parentInvite.token, NOW)).toEqual({ ok: false, reason: 'expired' });
+    expect(redeemDeviceInvite(db, deviceInvite.token, NOW)).toEqual({ ok: false, reason: 'expired' });
+    expect(resolveChildDevice(db, claimed.token, NOW)).toBeUndefined();
+  });
+
+  it('при смене пароля по ссылке оставляет только новую сессию в ту же миллисекунду', () => {
+    const db = open();
+    const parentId = createParent(db, 'mama@example.com', NOW);
+    const first = redeemParentInvite(db, issueParentInvite(db, parentId, NOW).token, PASSWORD, NOW);
+    if (!first.ok) throw new Error('начальный пароль не установлен');
+    const changed = redeemParentInvite(
+      db,
+      issueParentInvite(db, parentId, NOW).token,
+      'совсем-другой-пароль',
+      NOW,
+    );
+    if (!changed.ok) throw new Error('пароль по второй ссылке не сменился');
+
+    expect(resolveParentSession(db, first.session.token, NOW)).toBeUndefined();
+    expect(resolveParentSession(db, changed.session.token, NOW)).toMatchObject({ parentId });
+  });
+
   it('гасит токен детского устройства сменой родительского пароля', () => {
     const db = open();
     const parentId = createParent(db, 'mama@example.com', NOW);
@@ -1329,6 +1507,64 @@ describe('обслуживание родителей', () => {
     setParentPassword(db, parentId, 'совсем-другой-пароль', at(HOUR_MS));
 
     expect(resolveChildDevice(db, claimed.token, at(2 * HOUR_MS))).toBeUndefined();
+  });
+
+  // Приглашение — это право задать пароль заново, то есть полный вход. Без
+  // этого утёкшая ссылка оставалась бы способом отобрать учётную запись ещё
+  // неделю, а средство, которое от неё советуют, — смена пароля — не помогало бы.
+  it('гасит невыкупленное приглашение сменой пароля', () => {
+    const db = open();
+    const parentId = createParent(db, 'mama@example.com', NOW);
+    const stale = issueParentInvite(db, parentId, NOW);
+    const first = redeemParentInvite(db, issueParentInvite(db, parentId, NOW).token, PASSWORD, NOW);
+    expect(first.ok).toBe(true);
+
+    setParentPassword(db, parentId, 'совсем-другой-пароль', at(HOUR_MS));
+
+    expect(readParentInvite(db, stale.token, at(2 * HOUR_MS)))
+      .toEqual({ ok: false, reason: 'expired' });
+    expect(redeemParentInvite(db, stale.token, 'третий-пароль-подлиннее', at(2 * HOUR_MS)))
+      .toEqual({ ok: false, reason: 'expired' });
+    // Пароль от погашенного приглашения не должен был смениться.
+    expect(loginParent(db, 'mama@example.com', 'третий-пароль-подлиннее', at(2 * HOUR_MS)))
+      .toEqual({ ok: false, reason: 'bad-password' });
+    expect(loginParent(db, 'mama@example.com', 'совсем-другой-пароль', at(2 * HOUR_MS)).ok).toBe(true);
+  });
+
+  it('оставляет в силе приглашение, выпущенное после смены пароля', () => {
+    const db = open();
+    const parentId = createParent(db, 'mama@example.com', NOW);
+    expect(redeemParentInvite(db, issueParentInvite(db, parentId, NOW).token, PASSWORD, NOW).ok)
+      .toBe(true);
+    setParentPassword(db, parentId, 'совсем-другой-пароль', at(HOUR_MS));
+
+    const fresh = issueParentInvite(db, parentId, at(2 * HOUR_MS));
+    expect(redeemParentInvite(db, fresh.token, 'третий-пароль-подлиннее', at(3 * HOUR_MS)).ok)
+      .toBe(true);
+  });
+
+  // Токен уже выданного устройства смена пароля гасит (`claimed_at` старше
+  // отметки). Невыкупленная ссылка обязана гаснуть вместе с ним: погашенная
+  // после смены, она поставила бы себе свежий `claimed_at` и пережила бы
+  // ровно то событие, которым её и снимали.
+  it('гасит невыкупленное приглашение устройства сменой пароля', () => {
+    const db = open();
+    const parentId = createParent(db, 'mama@example.com', NOW);
+    const childId = createChild(db, parentId, 'Сын', NOW);
+    markChildReady(db, childId);
+    const stale = issueDeviceInvite(db, childId, 'agent', 'контроллер', NOW);
+
+    setParentPassword(db, parentId, 'совсем-другой-пароль', at(HOUR_MS));
+
+    expect(redeemDeviceInvite(db, stale.token, at(2 * HOUR_MS)))
+      .toEqual({ ok: false, reason: 'expired' });
+
+    // Выпущенная после смены — работает: гаснет не всё подряд, а выданное до неё.
+    const fresh = issueDeviceInvite(db, childId, 'agent', 'контроллер', at(3 * HOUR_MS));
+    const claimed = redeemDeviceInvite(db, fresh.token, at(4 * HOUR_MS));
+    expect(claimed.ok).toBe(true);
+    if (!claimed.ok) return;
+    expect(resolveChildDevice(db, claimed.token, at(5 * HOUR_MS))).toMatchObject({ childId });
   });
 
   it('отказывается ставить короткий, слишком длинный или чужой пароль', () => {
@@ -1379,5 +1615,25 @@ describe('обслуживание родителей', () => {
     // Снятию копии нужны все: выведенный ребёнок хранит прогресс так же, как
     // обслуживаемый, а `listServiceableChildren` показывает только готовых.
     expect(listAllChildren(db).map((child) => child.id)).toEqual([ready, provisioning, retired]);
+  });
+
+  it('не отдаёт на обслуживание детей отключённого родителя', () => {
+    const db = open();
+    const mama = createParent(db, 'mama@example.com', NOW);
+    const papa = createParent(db, 'papa@example.com', NOW);
+    const mine = createChild(db, mama, 'Сын', NOW);
+    markChildReady(db, mine);
+    const other = createChild(db, papa, 'Дочь', at(HOUR_MS));
+    markChildReady(db, other);
+
+    expect(listServiceableChildren(db).map((child) => child.id)).toEqual([mine, other]);
+
+    // Диспетчер и `prefetch` приходят без предъявителя, то есть мимо всякой
+    // проверки `disabled_at`: не отсечь отключённую семью здесь значит и дальше
+    // тратить на неё суточную квоту модели.
+    disableParent(db, papa, at(2 * HOUR_MS));
+    expect(listServiceableChildren(db).map((child) => child.id)).toEqual([mine]);
+    // Снятию копии отключённый родитель не помеха: его прогресс никуда не делся.
+    expect(listAllChildren(db).map((child) => child.id)).toEqual([mine, other]);
   });
 });

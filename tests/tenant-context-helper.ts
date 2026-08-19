@@ -10,7 +10,7 @@ import { AuthError } from '../server/auth.js';
 import type { ChildSummary } from '../server/control-db.js';
 import type { TenantContextResolver } from '../server/routes/tenant-context.js';
 import type { Tenant } from '../server/tenant-registry.js';
-import { createIntegrityCoordinator, type IntegrityCoordinator } from '../server/integrity.js';
+import type { IntegrityCoordinator } from '../server/integrity.js';
 
 /**
  * Идентификатор ребёнка тестовой аренды. Вид настоящий (шестнадцатеричный, не
@@ -24,7 +24,7 @@ export interface FakeTenantOptions {
   available?: () => boolean;
   /** Координатор споров; нужен только маршруту занятия. */
   disputes?: DisputeCoordinator;
-  /** Координатор проверки осмысленности. */
+  /** Координатор проверки осмысленности; нужен только integrity-маршрутам. */
   integrity?: IntegrityCoordinator;
 }
 
@@ -34,7 +34,6 @@ export function fakeTenant(db: Database, options: FakeTenantOptions = {}): Tenan
   // Координатор заводится по требованию: он читает карту тем с диска, а нужен
   // одному маршруту из восьми.
   let disputes = options.disputes;
-  let integrity = options.integrity;
   return {
     childId: FAKE_CHILD_ID,
     path: ':memory:',
@@ -52,17 +51,12 @@ export function fakeTenant(db: Database, options: FakeTenantOptions = {}): Tenan
       });
       return disputes;
     },
-    get integrity(): IntegrityCoordinator {
-      integrity ??= createIntegrityCoordinator({
-        db,
-        graph: loadCurriculum(),
-        available,
-        background: () => undefined,
-        log: () => undefined,
-        review: () => Promise.reject(new Error('проверка ответа в этом тесте не вызывается')),
-        complete: () => ({}),
-      });
-      return integrity;
+    integrity: options.integrity ?? {
+      begin: () => ({ status: 'checking', flagged: 0 }),
+      status: () => null,
+      retry: () => { throw new Error('повтор integrity в этом тесте не вызывается'); },
+      approve: () => { throw new Error('подтверждение integrity в этом тесте не вызывается'); },
+      stop: () => Promise.resolve(),
     },
   };
 }
@@ -84,12 +78,11 @@ export function fakeContext(db: Database, options: FakeTenantOptions = {}): Tena
     status: 'ready',
     createdAt: new Date(0).toISOString(),
   };
-  return (_request, context = {}) => {
+  return (_request, context) => {
     if (context.childId !== undefined && context.childId !== tenant.childId) {
       throw new AuthError('no-child', `Ребёнок ${context.childId} не обслуживается`);
     }
-    const allow = context.allow;
-    if (allow !== undefined && !allow.includes('browser')) {
+    if (!context.allow.includes('browser')) {
       throw new AuthError('forbidden', 'Предъявителю browser сюда нельзя');
     }
     return {

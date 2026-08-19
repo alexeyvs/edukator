@@ -420,6 +420,24 @@ describe('GET /api/health', () => {
     expect(existsSync(dataLockPath(dir))).toBe(false);
   });
 
+  // Сборка умеет сорваться и после взятия замка. Приложения при этом не
+  // возвращается вовсе, а снятие замка и закрытие управляющей базы висят на его
+  // `onClose` — то есть без уборки прямо в `buildServer` каталог оставался бы
+  // занятым процессом, который в нём ничего не держит.
+  it('снимает замок каталога, когда сборка сорвалась после его взятия', () => {
+    const dir = join(tempDir, 'сорванная-сборка');
+
+    expect(() => buildServer(undefined, { dataDir: dir, worker: false, maxOpenTenants: 0 }))
+      .toThrow(/Потолок открытых баз/u);
+
+    expect(existsSync(dataLockPath(dir))).toBe(false);
+    // И замок берётся снова: счётчик замков процесса тоже обнулён, иначе
+    // следующая сборка считала бы чужой замок своим.
+    const next = acquireDataLock(dir, SERVER_LOCK_OWNER);
+    expect(existsSync(dataLockPath(dir))).toBe(true);
+    next.release();
+  });
+
   it('прямой CLI-запуск возвращает код 1 на занятом каталоге данных', () => {
     const dir = join(tempDir, 'cli-занято');
     const busy = acquireDataLock(dir, SERVER_LOCK_OWNER);

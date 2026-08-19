@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
+import BetterSqlite3 from 'better-sqlite3';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { openDatabase, SUBJECTS } from '../server/db.js';
 import { storeTasks } from '../server/codex/bank.js';
@@ -12,10 +13,10 @@ import {
   registerIntegrityRoutes,
   registerUnavailableIntegrity,
 } from '../server/routes/integrity.js';
-import { fakeContext } from './tenant-context-helper.js';
 import { hashParentPin } from '../server/parent-pin.js';
 import { setParentPin } from '../server/control-db.js';
 import { startTenantServer, type TenantServer } from './server-harness.js';
+import { fakeContext } from './tenant-context-helper.js';
 
 const NOW = new Date('2026-08-18T12:00:00.000Z');
 const PIN = '123456';
@@ -67,10 +68,10 @@ describe('HTTP-поток проверки осмысленности', () => {
       background: (job): void => void job(),
       integrityReview: async (items) => {
         reviewBatches.push(items.length);
-        return items.map((item, index) => {
+        return items.map((_item, index) => {
           const junk = index === items.length - 1;
           return {
-            id: item.id,
+            id: _item.id,
             decision: junk ? 'junk' : 'meaningful',
             confidence: 0.99,
             reason: junk ? 'Ответ не связан с числовым заданием.' : 'Ответ осмысленный.',
@@ -163,12 +164,14 @@ describe('HTTP-поток проверки осмысленности', () => {
     if (item === undefined) throw new Error('В родительской детализации нет отметки проверки');
 
     const denied = await app.inject({
-      method: 'PUT', url: `/api/parents/${server.childId}/runs/${runId}/integrity/${item.itemId}/approve`,
+      method: 'PUT',
+      url: `/api/parents/${server.childId}/runs/${runId}/integrity/${item.itemId}/approve`,
       headers: { authorization: 'Bearer 000000' },
     });
     expect(denied.statusCode).toBe(401);
     const approved = await app.inject({
-      method: 'PUT', url: `/api/parents/${server.childId}/runs/${runId}/integrity/${item.itemId}/approve`,
+      method: 'PUT',
+      url: `/api/parents/${server.childId}/runs/${runId}/integrity/${item.itemId}/approve`,
       headers: { authorization: `Bearer ${PIN}` },
     });
 
@@ -196,8 +199,9 @@ function coordinatorStub(
 describe('валидация HTTP-маршрутов проверки осмысленности', () => {
   it('отвергает некорректные идентификаторы, ответ и время', async () => {
     const app = Fastify();
+    const db = new BetterSqlite3(':memory:');
     registerIntegrityRoutes(app, {
-      context: fakeContext({} as Database, { integrity: coordinatorStub(null) }),
+      context: fakeContext(db, { integrity: coordinatorStub(null) }),
     });
     await app.ready();
     try {
@@ -230,6 +234,7 @@ describe('валидация HTTP-маршрутов проверки осмыс
       }
     } finally {
       await app.close();
+      db.close();
     }
   });
 
@@ -237,15 +242,17 @@ describe('валидация HTTP-маршрутов проверки осмыс
     const completed = { status: 'completed', result: { runId: 1, correct: 12 } } as const;
     const retry = vi.fn(() => completed);
     const success = Fastify();
+    const successDb = new BetterSqlite3(':memory:');
     registerIntegrityRoutes(success, {
-      context: fakeContext({} as Database, {
+      context: fakeContext(successDb, {
         integrity: coordinatorStub({ status: 'checking', flagged: 1 }, retry),
       }),
     });
     await success.ready();
     const conflict = Fastify();
+    const conflictDb = new BetterSqlite3(':memory:');
     registerIntegrityRoutes(conflict, {
-      context: fakeContext({} as Database, { integrity: coordinatorStub(null) }),
+      context: fakeContext(conflictDb, { integrity: coordinatorStub(null) }),
     });
     await conflict.ready();
     try {
@@ -266,13 +273,16 @@ describe('валидация HTTP-маршрутов проверки осмыс
     } finally {
       await success.close();
       await conflict.close();
+      successDb.close();
+      conflictDb.close();
     }
   });
 
   it('отдаёт 503 при отвязанной базе и в недоступном сервере', async () => {
     const detached = Fastify();
+    const db = new BetterSqlite3(':memory:');
     registerIntegrityRoutes(detached, {
-      context: fakeContext({} as Database, {
+      context: fakeContext(db, {
         integrity: coordinatorStub(null),
         available: () => false,
       }),
@@ -292,6 +302,7 @@ describe('валидация HTTP-маршрутов проверки осмыс
     } finally {
       await detached.close();
       await unavailable.close();
+      db.close();
     }
   });
 });

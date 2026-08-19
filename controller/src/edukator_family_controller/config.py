@@ -58,6 +58,85 @@ def _required_text(raw: dict[str, Any], key: str) -> str:
     return value.strip()
 
 
+def _read_raw(path: Path) -> dict[str, Any]:
+    """Конфигурация как объект, без единой проверки полей.
+
+    Нестрогое чтение нужно ровно там, где строгое отказывает по делу: на
+    конфигурации прошлой версии, которую этот запуск и обновляет.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def read_previous_access(path: Path) -> dict[str, str]:
+    """Прежние адрес сервера и агентский токен, какой бы неполной ни была конфигурация.
+
+    Читаются отдельно от строгого `load_config` по той же причине, что и
+    настройки опроса: обязательные поля прибавляются со временем, и на прежней
+    конфигурации (в ней нет `agent_token`) строгое чтение отказывает целиком.
+    Прежний адрес тогда не предлагался бы вовсе — а обещан он именно на
+    обновлении, ради которого `family:login` и перезапускают, — и Enter в ответ
+    на вопрос падал бы «адрес должен начинаться с http://», назвав виноватым
+    ввод вместо настоящей причины.
+    """
+    raw = _read_raw(path)
+    previous: dict[str, str] = {}
+    for key in ("edukator_url", "agent_token"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            previous[key] = value.strip()
+    return previous
+
+
+def read_poll_settings(path: Path) -> dict[str, Any]:
+    """Настройки опроса из конфигурации, какой бы неполной она ни была.
+
+    Нужна отдельно от `load_config` ради повторного `family:login`: обязательные
+    поля со временем прибавляются (так появились `agent_token` и
+    `edukator_url`), и строгое чтение на прежней конфигурации отказывает целиком
+    — то есть ровно при обновлении молча возвращает `poll_seconds`,
+    `verify_seconds` и `block_days` к умолчаниям. Здесь берётся только то, что
+    прочиталось: испорченное значение — не повод потерять два соседних.
+
+    Границы те же, что у `load_config`, и по той же причине, по которой
+    нечитаемое значение уходит в умолчание: сохранённый отсюда ноль пережил бы
+    весь вход в Microsoft, отчитался бы «Конфигурация сохранена» — а
+    `start:family` следом отказал бы «Интервалы опроса должны быть
+    положительными», и виноватым выглядел бы не тот шаг.
+    """
+    raw = _read_raw(path)
+    settings: dict[str, Any] = {}
+    limits = (
+        ("poll_seconds", float, lambda value: value > 0),
+        ("verify_seconds", float, lambda value: value > 0),
+        ("block_days", int, lambda value: value >= 1),
+    )
+    for key, cast, allowed in limits:
+        if key not in raw:
+            continue
+        try:
+            value = cast(raw[key])
+        except (TypeError, ValueError):
+            continue
+        if allowed(value):
+            settings[key] = value
+    return settings
+
+
+def _number(raw: dict[str, Any], key: str, default: Any, cast: Any) -> Any:
+    """Число из конфигурации. `null` и список дают `TypeError`, а не `ValueError`,
+    и без приведения он улетал бы трассировкой мимо всех `except ValueError`."""
+    if key not in raw:
+        return default
+    try:
+        return cast(raw[key])
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"Поле {key} должно быть числом") from error
+
+
 def load_config(path: Path | None = None) -> ControllerConfig:
     target = path or config_path()
     try:
@@ -79,9 +158,9 @@ def load_config(path: Path | None = None) -> ControllerConfig:
         # fail-closed вместо внятной жалобы на незаполненную конфигурацию.
         agent_token=_required_text(raw, "agent_token"),
         edukator_url=_required_text(raw, "edukator_url").rstrip("/"),
-        poll_seconds=float(raw.get("poll_seconds", 20)),
-        verify_seconds=float(raw.get("verify_seconds", 300)),
-        block_days=int(raw.get("block_days", 7)),
+        poll_seconds=_number(raw, "poll_seconds", 20.0, float),
+        verify_seconds=_number(raw, "verify_seconds", 300.0, float),
+        block_days=_number(raw, "block_days", 7, int),
     )
     if config.poll_seconds <= 0 or config.verify_seconds <= 0:
         raise ValueError("Интервалы опроса должны быть положительными")
@@ -92,8 +171,42 @@ def load_config(path: Path | None = None) -> ControllerConfig:
     return config
 
 
+def _sync_directory(directory: Path) -> None:
+    """
+    Досылает на диск сам факт переименования.
+
+    `fsync` дескриптора файла несёт содержимое, но не запись каталога: после
+    сбоя питания на месте новой конфигурации оказалась бы прежняя. Microsoft
+    выдаёт refresh token одноразовым и меняет его на каждом обновлении, так что
+    вернувшийся старый уже не примут — вместо опроса гейта родителя ждёт
+    повторный `family:login`.
+    """
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        # Не всякая файловая система умеет `fsync` каталога (сеть, некоторые
+        # образы). Отказ здесь не имеет права уронить сохранение: файл на месте.
+        pass
+    finally:
+        os.close(descriptor)
+
+
 def _save_private_json(payload: dict[str, Any], target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # `mode` у `mkdir` действует только на создаваемый последний каталог: уже
+    # существующий `~/.config/edukator` остался бы с чем был, а в нём лежат и
+    # refresh token, и агентский токен, и времянка `mkstemp` с предсказуемым
+    # именем.
+    try:
+        os.chmod(target.parent, 0o700)
+    except OSError:
+        # Каталог может быть чужим (общий `~/.config` под управлением системы):
+        # права файлов важнее, и они выставляются ниже независимо от этого.
+        pass
     encoded = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
     temporary: Path | None = None
@@ -107,6 +220,7 @@ def _save_private_json(payload: dict[str, Any], target: Path) -> None:
             os.fsync(output.fileno())
         os.replace(temporary, target)
         os.chmod(target, 0o600)
+        _sync_directory(target.parent)
     finally:
         if temporary is not None:
             try:

@@ -1,9 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import type { Database } from 'better-sqlite3';
 import {
+  createParent,
   findParentByEmail,
   loginParent,
   openControlDatabase,
@@ -11,7 +14,9 @@ import {
   readParentPinHash,
   redeemParentInvite,
   resolveParentSession,
+  setParentPassword,
 } from '../server/control-db.js';
+import { controlDatabasePath, ensureDataDir } from '../server/data-dir.js';
 import { verifyParentPin } from '../server/parent-pin.js';
 import { parseArgs, runParentCommand, type ParentArgs } from '../scripts/parent.js';
 
@@ -86,6 +91,49 @@ describe('скрипт обслуживания родителей', () => {
         .toThrow(/виден в списке процессов/u);
     });
 
+    it('не вписывает секрет в текст отказа', () => {
+      // Форма `--pin=1234` не совпадает ни с одним известным флагом, и текст
+      // отказа с флагом целиком уносил бы секрет в stderr и в лог запуска —
+      // третий канал утечки поверх `ps` и истории оболочки, ради закрытия
+      // которых секреты флагами и не принимаются.
+      for (const argv of [
+        ['pin', '--email', 'a@b.ru', '--pin=123456'],
+        ['password', '--email', 'a@b.ru', '--password=тайна'],
+      ]) {
+        let message = '';
+        try {
+          parseArgs(argv);
+        } catch (error) {
+          message = (error as Error).message;
+        }
+        expect(message).toMatch(/виден в списке процессов/u);
+        expect(message).not.toMatch(/123456|тайна/u);
+      }
+
+      // Обычный флаг в той же форме — не ошибка: значение отделяется от имени
+      // до всякой проверки, а не после неё.
+      expect(parseArgs(['create', '--email=mama@example.com'])).toEqual({
+        action: 'create',
+        email: 'mama@example.com',
+      });
+      expect(() => parseArgs(['create', '--email=', '--data-dir', 'данные']))
+        .toThrow(/пустое значение/u);
+    });
+
+    it('не вписывает в отказ и лишний позиционный аргумент', () => {
+      // Привыкший к флагам наберёт `parent password --email a@b тайна`, и
+      // названный значением лишний аргумент уносил бы пароль в stderr — ровно
+      // та утечка, ради закрытия которой секреты флагами и не принимаются.
+      let message = '';
+      try {
+        parseArgs(['password', '--email', 'a@b.ru', 'тайна']);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toMatch(/Аргумент №3/u);
+      expect(message).not.toMatch(/тайна/u);
+    });
+
     it('отвергает пустое, повторное, неизвестное и отсутствующее', () => {
       expect(() => parseArgs([])).toThrow(/Не указана команда/u);
       expect(() => parseArgs(['удалить', '--email', 'a@b.ru'])).toThrow(/Неизвестная команда/u);
@@ -96,7 +144,7 @@ describe('скрипт обслуживания родителей', () => {
         .toThrow(/дважды/u);
       expect(() => parseArgs(['create', '--email', 'a@b.ru', '--что-то', 'x']))
         .toThrow(/Неизвестный флаг/u);
-      expect(() => parseArgs(['create', 'a@b.ru'])).toThrow(/Непонятный аргумент/u);
+      expect(() => parseArgs(['create', 'a@b.ru'])).toThrow(/Аргумент №1 не похож на флаг/u);
     });
   });
 
@@ -198,6 +246,9 @@ describe('скрипт обслуживания родителей', () => {
 
     it('отказывается без pepper и на PIN не того вида', async () => {
       await run('create', 'mama@example.com');
+      // Переменная гасится явно: у разработчика с заданным в оболочке pepper
+      // ветка «pepper нет» иначе не проверялась бы вовсе.
+      vi.stubEnv('EDUKATOR_PIN_PEPPER', '');
 
       await expect(
         runParentCommand(
@@ -211,8 +262,26 @@ describe('скрипт обслуживания родителей', () => {
         ),
       ).rejects.toThrow(/EDUKATOR_PIN_PEPPER/u);
 
+      // Пустая переменная — тот же отказ, а не жалоба на длину: `??` ловит
+      // только незаданную, и `EDUKATOR_PIN_PEPPER=` доезжал бы до KDF.
+      vi.stubEnv('EDUKATOR_PIN_PEPPER', 'короткий');
+      await expect(
+        runParentCommand(
+          { action: 'pin', email: 'mama@example.com' },
+          {
+            control,
+            // PIN не спрашивается вовсе: отказ по настройке обязан случиться до
+            // двух вопросов, на которые всё равно нечем ответить.
+            readSecret: () => Promise.reject(new Error('PIN спрашивать было не нужно')),
+            out: (line) => printed.push(line),
+            now: () => NOW,
+          },
+        ),
+      ).rejects.toThrow(/EDUKATOR_PIN_PEPPER/u);
+
       await expect(run('pin', 'mama@example.com', ['12', '12'])).rejects.toThrow(/6-12 цифр/u);
       expect(findParentByEmail(control, 'mama@example.com')?.hasPin).toBe(false);
+      vi.unstubAllEnvs();
     });
   });
 
@@ -238,6 +307,136 @@ describe('скрипт обслуживания родителей', () => {
 
 /** Проверка среды: pepper теста обязан проходить порог, иначе тесты PIN пусты. */
 describe('настройка теста', () => {
+  describe('parent CLI', () => {
+    const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const parentCli = resolve(projectRoot, 'scripts/parent.ts');
+    const tsxCli = resolve(projectRoot, 'node_modules/tsx/dist/cli.mjs');
+
+    let cliRoot: string;
+
+    beforeEach(() => {
+      cliRoot = mkdtempSync(join(tmpdir(), 'edukator-parent-cli-'));
+    });
+
+    afterEach(() => {
+      rmSync(cliRoot, { recursive: true, force: true });
+    });
+
+    /** Заводит родителя с известным паролем в отдельном каталоге данных CLI. */
+    function seedCliParent(cliDir: string): void {
+      const cliControl = openControlDatabase(controlDatabasePath(cliDir));
+      try {
+        const parentId = createParent(cliControl, 'cli@example.com', NOW);
+        setParentPassword(cliControl, parentId, PASSWORD, NOW);
+      } finally {
+        cliControl.close();
+      }
+    }
+
+    it('меняет пароль по трубе: секрет и повтор читаются одним интерфейсом', () => {
+      const cliDir = ensureDataDir(join(cliRoot, 'данные'));
+      seedCliParent(cliDir);
+
+      // Ровно то, чем скрипт пользуются из скриптов заведения: две строки одним
+      // куском. Отдельный `readline` на вопрос забирал бы обе разом, отдавал
+      // первую и терял вторую — то есть документированный договор «секрет
+      // читается со стандартного ввода» работал бы только с живого терминала.
+      const result = spawnSync(
+        process.execPath,
+        [tsxCli, parentCli, 'password', '--email', 'cli@example.com', '--data-dir', cliDir],
+        {
+          encoding: 'utf8',
+          input: 'новый-длинный-пароль\nновый-длинный-пароль\n',
+          env: { ...process.env, PATH: '' },
+        },
+      );
+
+      expect(result.stderr).not.toMatch(/стандартный ввод закрыт/u);
+      expect(result.status).toBe(0);
+
+      const after = openControlDatabase(controlDatabasePath(cliDir));
+      try {
+        expect(loginParent(after, 'cli@example.com', 'новый-длинный-пароль', NOW).ok).toBe(true);
+        expect(loginParent(after, 'cli@example.com', PASSWORD, NOW).ok).toBe(false);
+      } finally {
+        after.close();
+      }
+    });
+
+    it('не сверяет пароль с потерянным повтором', () => {
+      const cliDir = ensureDataDir(join(cliRoot, 'данные'));
+      seedCliParent(cliDir);
+
+      const result = spawnSync(
+        process.execPath,
+        [tsxCli, parentCli, 'password', '--email', 'cli@example.com', '--data-dir', cliDir],
+        {
+          encoding: 'utf8',
+          input: 'новый-длинный-пароль\nопечатка-в-повторе\n',
+          env: { ...process.env, PATH: '' },
+        },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/не совпал с повтором/u);
+
+      const after = openControlDatabase(controlDatabasePath(cliDir));
+      try {
+        expect(loginParent(after, 'cli@example.com', PASSWORD, NOW).ok).toBe(true);
+      } finally {
+        after.close();
+      }
+    });
+
+    it('называет каталог, а не адрес, когда управляющей базы нет', () => {
+      const cliDir = join(cliRoot, 'не-тот-каталог');
+
+      const result = spawnSync(
+        process.execPath,
+        [tsxCli, parentCli, 'invite', '--email', 'cli@example.com', '--data-dir', cliDir],
+        { encoding: 'utf8', input: '', env: { ...process.env, PATH: '' } },
+      );
+
+      expect(result.status).toBe(1);
+      // «Родителя нет в управляющей базе» назвало бы виноватым адрес, хотя
+      // виноват каталог: пустая база завелась бы рядом с опечаткой.
+      expect(result.stderr).toMatch(/нет управляющей базы/u);
+      expect(existsSync(controlDatabasePath(cliDir))).toBe(false);
+    });
+
+    it('не считает смену пароля состоявшейся на закрытом вводе', () => {
+      const cliDir = ensureDataDir(join(cliRoot, 'данные'));
+      const cliControl = openControlDatabase(controlDatabasePath(cliDir));
+      try {
+        const parentId = createParent(cliControl, 'cli@example.com', NOW);
+        setParentPassword(cliControl, parentId, PASSWORD, NOW);
+      } finally {
+        cliControl.close();
+      }
+
+      // Пустой stdin: `readline.question` обратный вызов не зовёт никогда, и без
+      // разбора закрытия процесс выходил бы с кодом 0, не сменив ничего — в
+      // цепочке `&&` это читается как «пароль сменён».
+      const result = spawnSync(
+        process.execPath,
+        [tsxCli, parentCli, 'password', '--email', 'cli@example.com', '--data-dir', cliDir],
+        { encoding: 'utf8', input: '', env: { ...process.env, PATH: '' } },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/стандартный ввод закрыт/u);
+
+      const after = openControlDatabase(controlDatabasePath(cliDir));
+      try {
+        // Прежний пароль обязан работать: молчаливый выход 0 означал бы, что
+        // пароль «сменён» на несуществующий.
+        expect(loginParent(after, 'cli@example.com', PASSWORD, NOW).ok).toBe(true);
+      } finally {
+        after.close();
+      }
+    });
+  });
+
   it('pepper длиннее порога', () => {
     expect(PEPPER.length).toBeGreaterThanOrEqual(16);
   });

@@ -226,18 +226,40 @@ export function orderChildren(
  * значило бы морозить остальных.
  */
 export function everySweepFailed(sweep: SweepReport): boolean {
-  const attempts = sweep.children.flatMap((child) => [
-    ...child.cycles.flatMap(cycleAttempts),
-    // Не состоявшийся заход — тоже неудачная попытка: цикл, падающий на
-    // испорченном профиле, иначе крутился бы раз в минуту вечно. Исчерпанная
-    // квота и недоступная база сюда не идут: они не стоят ни одного вызова
-    // модели, и повторная проверка раз в минуту дешевле, чем получасовая
-    // заморозка прогрева остальным.
-    ...(child.skipped === 'error' ? [{ stored: 0, error: 'заход не состоялся' }] : []),
-  ]);
-  return attempts.length > 0 && attempts.every(
-    (attempt) => attempt.error !== undefined && attempt.stored === 0,
+  const attempts = sweep.children.flatMap((child) => {
+    // Исчерпавший квоту и недоступный ребёнок не участвуют неудачами — ни
+    // пропуском, ни тем, что успели попробовать до отказа. Квота кончается
+    // **посреди** захода, и его неудачные попытки лежат в `cycles` рядом с
+    // пометкой `skipped`: посчитав их, обход из одного наигравшегося ребёнка
+    // увёл бы в получасовой отступ прогрев всей семьи — ровно то, от чего
+    // диспетчер и переспрашивает квоту после недоступности.
+    // Удавшиеся попытки такого ребёнка, однако, считаются: квота кончается
+    // после них, и выкинув их вместе с пропуском, обход, в котором codex
+    // здоров и задания сложены, объявлял бы себя пустым — и уводил семью в
+    // получасовой отступ из-за одного соседа, у которого проверяющий забраковал
+    // батч. Успех в списке делает вердикт «всё упало» ложным, чего и надо.
+    if (child.skipped === 'quota' || child.skipped === 'unavailable') {
+      return child.cycles.flatMap(cycleAttempts).filter((attempt) => attempt.stored > 0);
+    }
+    return child.cycles.flatMap(cycleAttempts);
+  });
+  if (attempts.length > 0) {
+    return attempts.every((attempt) => attempt.error !== undefined && attempt.stored === 0);
+  }
+
+  // Ни одной фоновой подготовки за обход: паузу увеличивает только то, что до
+  // неё не дошёл **ни один** ребёнок. Не состоявшийся заход (испорченная база,
+  // упавший на профиле цикл) сам по себе — тоже неудачная попытка, иначе он
+  // крутился бы раз в минуту вечно; но решать за весь процесс он вправе только
+  // в одиночку. Сосед, у которого банк уже полон, попыток не даёт вовсе — и,
+  // считая обход провальным по одному испорченному ребёнку, диспетчер морозил
+  // бы прогрев всей семье на полчаса из-за чужого файла. Ученику за экраном при
+  // этом и податься некуда: его самого обход прошёл, в `#served` он есть, и
+  // будильник его запроса паузу не снимает.
+  const participants = sweep.children.filter(
+    (child) => child.skipped !== 'quota' && child.skipped !== 'unavailable',
   );
+  return participants.length > 0 && participants.every((child) => child.skipped === 'error');
 }
 
 /**
@@ -255,12 +277,31 @@ export class WarmupDispatcher {
   readonly #wait: (ms: number) => Promise<void>;
   /** С кого начинать следующий обход; переживает цикл. */
   #cursor: string | undefined;
-  /** Кто попал в последний обход: по нему `wake()` отличает нового от своего. */
+  /**
+   * До кого обход в самом деле дошёл: по нему `wake()` отличает нового от
+   * своего. Именно «дошёл», а не «стоял в очереди»: обход обрывается на
+   * `stop()` и на недоступном codex, и записанный заранее хвост очереди
+   * означал бы, что будильник ребёнка, до которого дело так и не дошло,
+   * проглатывается — а ждать ему при этом полный получасовой отступ.
+   */
   #served = new Set<string>();
   #stopped = false;
   #running: Promise<void> | undefined;
-  /** Будильник текущей паузы; `null` — паузы сейчас нет. */
+  /** Будильник текущей паузы; `null` — паузы сейчас нет (или идёт неснимаемая часть). */
   #alarm: (() => void) | null = null;
+  /**
+   * Прерыватель неснимаемой части паузы: её отменяет только `stop()`. Отдельно
+   * от `#alarm` именно поэтому — закрытие сервера не имеет права досиживать
+   * минуту, а будильник ребёнка не имеет права её снимать.
+   */
+  #halt: (() => void) | null = null;
+  /**
+   * Будильник, прозвонивший мимо паузы. Обход идёт минутами, и всё это время
+   * `#alarm` пуст: без флага запрос вернувшегося ребёнка, пришедший посреди
+   * обхода, пропадал бы, и ждать ему пришлось бы конец обхода **плюс** полный
+   * отступ — до получаса.
+   */
+  #woken = false;
 
   constructor(options: WarmupDispatcherOptions) {
     this.#options = options;
@@ -284,7 +325,7 @@ export class WarmupDispatcher {
     this.#cursor = order.next;
 
     const queue = [...order.atScreen, ...order.rest];
-    this.#served = new Set(queue.map((child) => child.id));
+    this.#served = new Set<string>();
 
     const reports = new Map<string, ChildSweepReport>();
     for (const child of queue) reports.set(child.id, { childId: child.id, cycles: [] });
@@ -297,26 +338,39 @@ export class WarmupDispatcher {
 
     const settings = this.#options.worker ?? {};
     const threshold = settings.threshold ?? REFILL_BELOW;
-    const phases: { prepareBoss: boolean; target: number; maxBatches: number }[] = [
+    const surplus = settings.target ?? QUEUE_TARGET;
+    // Порог у фазы свой и равен её же запасу: голодные темы `runWarmupCycle`
+    // отбирает по порогу, а не по запасу, и общий `REFILL_BELOW` на обеих фазах
+    // означал бы, что фаза излишков не видит ни одной темы — один батч
+    // (`TASK_BATCH_SIZE = 5`) уже поднимает тему выше порога 4, и до
+    // `QUEUE_TARGET` её не добивал бы никто.
+    const phases: { prepareBoss: boolean; target: number; threshold: number; maxBatches: number }[] = [
       // Фаза порога: всем поровну и по одному батчу на тему. Босса и материал
       // она не готовит — их закажет фаза излишков, и второй заказ за тот же
       // обход стоил бы вызовов модели на уже сделанное.
-      { prepareBoss: false, target: threshold, maxBatches: FLOOR_BATCHES_PER_TOPIC },
+      { prepareBoss: false, target: threshold, threshold, maxBatches: FLOOR_BATCHES_PER_TOPIC },
       {
         prepareBoss: true,
-        target: settings.target ?? QUEUE_TARGET,
+        target: surplus,
+        threshold: surplus,
         maxBatches: settings.maxBatches ?? MAX_BATCHES_PER_TOPIC,
       },
     ];
 
     for (const phase of phases) {
       for (const child of queue) {
+        // Остановка проверяется на каждом ребёнке, а не только в цикле обхода:
+        // `stop()` ждёт текущий заход, один заход тянется до `CODEX_TIMEOUT_MS`,
+        // и без этой строки закрытие сервера по SIGTERM досиживало бы обе фазы
+        // на всей семье — вместе с закрытием баз и снятием замка каталога.
+        if (this.#stopped) return sweep;
         const report = reports.get(child.id);
         if (report === undefined || report.skipped !== undefined) continue;
         if (sweep.codexUnavailable) return sweep;
+        this.#served.add(child.id);
         await this.#runChild(child.id, report, {
           target: phase.target,
-          threshold,
+          threshold: phase.threshold,
           maxBatches: phase.maxBatches,
           prepareBoss: phase.prepareBoss,
           prepareLearning: phase.prepareBoss,
@@ -348,6 +402,7 @@ export class WarmupDispatcher {
    */
   wake(childId?: string): void {
     if (childId !== undefined && this.#served.has(childId)) return;
+    this.#woken = true;
     this.#alarm?.();
   }
 
@@ -355,6 +410,7 @@ export class WarmupDispatcher {
   async stop(): Promise<void> {
     this.#stopped = true;
     this.#alarm?.();
+    this.#halt?.();
     await this.#running;
     this.#running = undefined;
   }
@@ -364,6 +420,11 @@ export class WarmupDispatcher {
 
     while (!this.#stopped) {
       let unavailable = false;
+      // Флаг гасится перед обходом, а не после паузы: он означает «будильник
+      // прозвонил после того, как этот обход начался». Иначе запрос, пришедший
+      // до самого первого обхода, съедал бы первую паузу — и второй обход шёл бы
+      // сразу за первым, ничего не изменившим.
+      this.#woken = false;
       try {
         const report = await this.sweep();
         unavailable = report.codexUnavailable;
@@ -389,16 +450,44 @@ export class WarmupDispatcher {
       failures = unavailable ? failures + 1 : 0;
       if (this.#stopped) break;
 
-      // Гонка паузы с будильником: после отказов codex пауза доходит до
-      // получаса, а вернувшийся ребёнок и `stop()` обязаны её прерывать, а не
-      // досиживать.
-      await Promise.race([
-        this.#wait(backoffDelay(failures)),
-        new Promise<void>((resolve) => {
-          this.#alarm = resolve;
-        }),
-      ]);
-      this.#alarm = null;
+      const delay = backoffDelay(failures);
+      // Здоровый обход будильник снимает целиком: греть некому только что
+      // появившемуся ребёнку незачем ждать минуту.
+      if (this.#woken && failures === 0) continue;
+
+      if (!this.#woken) {
+        // Гонка паузы с будильником: после отказов codex она доходит до
+        // получаса, а вернувшийся ребёнок и `stop()` обязаны её прерывать, а не
+        // досиживать.
+        await Promise.race([
+          this.#wait(delay),
+          new Promise<void>((resolve) => {
+            this.#alarm = resolve;
+          }),
+        ]);
+        this.#alarm = null;
+        if (this.#stopped) break;
+      }
+
+      // Будильник после неудачного обхода паузу укорачивает, но не отменяет.
+      // Отменяя, он отменял бы отступ вовсе, как только детей больше одного:
+      // обход обрывается на первом же недоступном codex, второй ребёнок в
+      // `#served` не попадает, его запрос снимает паузу — и следующий обход
+      // обрывается уже на нём, будя первого. Дети пингуют друг друга сколько
+      // угодно часто, а каждая попытка резервирует суточную квоту вызовов и не
+      // возвращает её: недоступная на десять минут модель выедала бы дневной
+      // предел обоим за пару минут. Досиживается обычная пауза между обходами,
+      // а не получасовой отступ: ребёнок, до которого оборвавшийся обход не
+      // дошёл, ждёт минуту.
+      if (this.#woken && failures > 0) {
+        await Promise.race([
+          this.#wait(Math.min(delay, IDLE_INTERVAL_MS)),
+          new Promise<void>((resolve) => {
+            this.#halt = resolve;
+          }),
+        ]);
+        this.#halt = null;
+      }
     }
   }
 

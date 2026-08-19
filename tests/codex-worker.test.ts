@@ -15,7 +15,9 @@ import {
   CodexUnavailableError,
   type CodexRequest,
 } from '../server/codex/client.js';
+import { CodexQuotaError } from '../server/codex/quota.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
+import type { BossPreparationReport } from '../server/boss-prep.js';
 import {
   everyRefillFailed,
   MAX_BATCHES_PER_TOPIC,
@@ -439,6 +441,29 @@ describe('воркер тёплой очереди', () => {
       expect(logged.join('\n')).toMatch(/codex недоступен.*codex не найден/u);
     });
 
+    it('называет исчерпанную квоту своим именем, а не недоступностью codex', async () => {
+      const graph = graphOf(WIDE);
+
+      const report = await runWarmupCycle({
+        db,
+        graph,
+        topics: 4,
+        concurrency: 1,
+        log,
+        produce: () =>
+          Promise.reject(
+            new CodexQuotaError('ребёнок-1', { used: 60, limit: 60, remaining: 0, day: '2026-08-19' }),
+          ),
+      });
+
+      // Заход обрывается тем же путём: повторять нечего до московской полуночи.
+      expect(report.codexUnavailable).toBe(true);
+      // Но в логе стоит расход, а не связь: «codex недоступен» отправило бы
+      // разбираться с правами и сетью вместо квоты ребёнка.
+      expect(logged.join('\n')).toMatch(/суточная квота codex исчерпана/u);
+      expect(logged.join('\n')).not.toMatch(/codex недоступен/u);
+    });
+
     it('отбивается от провала генерации по одной теме, не бросая остальные', async () => {
       const graph = graphOf(WIDE);
 
@@ -719,6 +744,48 @@ describe('воркер тёплой очереди', () => {
 
     it('не считает провалом цикл без голодных тем', () => {
       expect(everyRefillFailed(cycle([]))).toBe(false);
+    });
+
+    /** Отчёт подготовки босса: в попытки цикла он входит наравне с доливом. */
+    const boss = (patch: Partial<BossPreparationReport>): BossPreparationReport => ({
+      topicId: 'math.a',
+      batches: 1,
+      stored: 0,
+      ready: false,
+      recovered: false,
+      codexUnavailable: false,
+      ...patch,
+    });
+
+    it('считает попыткой цикла и подготовку босса', () => {
+      // Цикл, у которого вся работа — упавшая подготовка босса, обязан быть
+      // провалом: иначе диспетчер запускал бы его заново раз в минуту вечно, а
+      // `npm run prefetch` выходил бы нулём, ничего не подготовив.
+      expect(
+        everyRefillFailed({ ...cycle([]), bossPreparation: boss({ error: 'codex вышел с кодом 1' }) }),
+      ).toBe(true);
+      expect(everyRefillFailed({ ...cycle([]), bossPreparation: boss({ stored: 5, ready: true }) }))
+        .toBe(false);
+      // Удавшаяся подготовка вытаскивает цикл из провала: работа всё-таки была.
+      expect(
+        everyRefillFailed({
+          ...cycle([refill({ error: 'codex вышел с кодом 1' })]),
+          bossPreparation: boss({ stored: 5, ready: true }),
+        }),
+      ).toBe(false);
+    });
+
+    it('не считает попыткой подготовку босса, которой не за что было взяться', () => {
+      // Без темы отчёт означает «доступного босса нет»: считать его неудачей
+      // значило бы уводить в отступ цикл, которому просто нечего готовить.
+      const withoutTopic: BossPreparationReport = {
+        batches: 0,
+        stored: 0,
+        ready: false,
+        recovered: false,
+        codexUnavailable: false,
+      };
+      expect(everyRefillFailed({ ...cycle([]), bossPreparation: withoutTopic })).toBe(false);
     });
   });
 

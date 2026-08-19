@@ -78,6 +78,27 @@ describe('общий разбор ответа', () => {
     unsubscribe();
   });
 
+  it('разбирает 401 с не-JSON телом: за прокси отказ приходит страницей', async () => {
+    // Обратный прокси отвечает 401 страницей HTML. Разбор тела до проверки
+    // `ok` бросал бы на ней `SyntaxError` раньше, чем дошёл бы до
+    // `SignedOutError`, — и кончившаяся сессия показывала бы «не удалось
+    // загрузить» вместо экрана входа именно там, где прокси и стоит.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: vi.fn().mockRejectedValue(new SyntaxError('Unexpected token <')),
+    }));
+    const listener = vi.fn();
+    const unsubscribe = onSignedOut(listener);
+
+    const failure = await requestJson('/api/family', undefined, 'Не получилось загрузить семью')
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(SignedOutError);
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
   it('отписка снимает слушателя: закрытый экран не должен решать за открытый', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({}, { ok: false, status: 401 })));
     const listener = vi.fn();

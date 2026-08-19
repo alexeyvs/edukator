@@ -13,6 +13,7 @@ import { openDispute, submitAnswer } from '../server/session.js';
 import {
   DISPUTE_RETRY_MAX_MS,
   DISPUTE_RETRY_MS,
+  nextDisputeRetryDelay,
   DisputeCoordinator,
   type DisputeCoordinatorOptions,
 } from '../server/dispute-coordinator.js';
@@ -261,6 +262,37 @@ describe('координатор разбора споров', () => {
     expect(statusOf(first, id)).toBe('upheld');
   });
 
+  // Формула повтора закреплена отдельно, но сама по себе она ничего не значит:
+  // координатор в тестах гоняется с паузой в миллисекунду, и постоянная задержка
+  // на ней неотличима от растущей. Проверяется поэтому именно то, с какими
+  // числами координатор зовёт таймер.
+  it('растит паузу от повтора к повтору, а не зовёт таймер с той же', async () => {
+    const id = disputed(first);
+    const delays: number[] = [];
+    // Оригинал сохраняется до подмены: ожидание теста ходит мимо счётчика,
+    // иначе его собственные паузы легли бы в тот же список.
+    const timeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((handler: () => void, ms?: number) => {
+      delays.push(ms ?? 0);
+      return timeout(handler, ms);
+    }) as unknown as typeof globalThis.setTimeout;
+    try {
+      const disputes = coordinator(first, {
+        disputeRetryMs: 1,
+        review: (): Promise<DisputeReview> => Promise.reject(new Error('codex не найден')),
+      });
+      disputes.schedule(id);
+      for (let i = 0; i < 400 && delays.length < 3; i += 1) {
+        await new Promise((resolve) => timeout(resolve, 5));
+      }
+      await disputes.stop();
+    } finally {
+      globalThis.setTimeout = timeout;
+    }
+
+    expect(delays.slice(0, 3)).toEqual([1, 2, 4]);
+  });
+
   it('занятый бюджет откладывает разбор, а спор оставляет открытым', async () => {
     const id = disputed(first);
     const budget = new CodexConcurrency(1);
@@ -337,5 +369,15 @@ describe('координатор разбора споров', () => {
   it('держит калибровочные константы спеки', () => {
     expect(DISPUTE_RETRY_MAX_MS).toBe(15 * 60_000);
     expect(DISPUTE_RETRY_MS).toBe(1_000);
+  });
+
+  it('удваивает паузу между повторами и упирается в потолок', () => {
+    // Числа вписаны руками: координатор в тестах гоняется с `disputeRetryMs: 1`,
+    // и на такой паузе постоянная задержка неотличима от растущей — то есть
+    // потерянное удвоение проходило бы весь файл зелёным.
+    expect(nextDisputeRetryDelay(1_000)).toBe(2_000);
+    expect(nextDisputeRetryDelay(2_000)).toBe(4_000);
+    expect(nextDisputeRetryDelay(8 * 60_000)).toBe(15 * 60_000);
+    expect(nextDisputeRetryDelay(15 * 60_000)).toBe(15 * 60_000);
   });
 });

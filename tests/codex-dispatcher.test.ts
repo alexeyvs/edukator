@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
-import { openDatabase, writeProfile } from '../server/db.js';
+import { openDatabase, readProfile, writeProfile } from '../server/db.js';
 import {
   buildTopicGraph,
   syncTopicState,
@@ -20,6 +20,7 @@ import {
 } from '../server/control-db.js';
 import { countAvailable, storeTasks } from '../server/codex/bank.js';
 import { CodexRunError, CodexUnavailableError } from '../server/codex/client.js';
+import { CodexQuotaError, createQuotedRunner } from '../server/codex/quota.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import {
   ACTIVE_WINDOW_MS,
@@ -34,6 +35,7 @@ import {
   WarmupDispatcher,
   type SweepReport,
 } from '../server/codex/dispatcher.js';
+import { TASK_BATCH_SIZE } from '../server/codex/prompt.js';
 import {
   MAX_BATCHES_PER_TOPIC,
   QUEUE_TARGET,
@@ -319,11 +321,34 @@ describe('диспетчер прогрева', () => {
 
     it('доливает до запаса только в фазе излишков', async () => {
       const kid = addKid('Ученик');
-      await dispatcher({ produce: () => Promise.resolve(batchOf(2)) }).sweep();
+      // Батч ровно такой, каким его отдаёт настоящая генерация. Меньший батч
+      // (два задания) оставлял бы тему ниже `REFILL_BELOW` и после фазы порога,
+      // то есть проверял бы отбор голодных, а не сам долив: на боевом батче
+      // тема уходит выше порога с первого же захода, и фаза излишков обязана
+      // отбирать голодных по своему запасу, а не по общему порогу.
+      await dispatcher({ produce: () => Promise.resolve(batchOf(TASK_BATCH_SIZE)) }).sweep();
 
-      // Фаза порога кладёт по два задания на тему (один батч), фаза излишков
-      // добивает остальное: без второй фазы тема осталась бы на пороге.
-      expect(countAvailable(kid.db, 'math.a')).toBe(QUEUE_TARGET);
+      expect(TASK_BATCH_SIZE).toBeGreaterThan(REFILL_BELOW);
+      expect(countAvailable(kid.db, 'math.a')).toBeGreaterThanOrEqual(QUEUE_TARGET);
+    });
+
+    it('бросает обход на первом же ребёнке после остановки', async () => {
+      addKid('Первый');
+      addKid('Второй');
+      const served: string[] = [];
+      const worker = dispatcher({
+        cycle: (options) => {
+          served.push(readProfile(options.db).name);
+          // Остановка приходит посреди захода — так же, как SIGTERM приходит
+          // посреди генерации: следующий ребёнок начинаться уже не должен.
+          void worker.stop();
+          return Promise.resolve({ topics: [], refilled: [], codexUnavailable: false });
+        },
+      });
+
+      await worker.sweep();
+
+      expect(served).toEqual(['Первый']);
     });
   });
 
@@ -407,6 +432,83 @@ describe('диспетчер прогрева', () => {
       expect(served.every((name) => name === 'Второй')).toBe(true);
       expect(served.length).toBeGreaterThan(0);
       expect(logged.join('\n')).toMatch(/суточная квота ребёнка .* исчерпана/u);
+    });
+
+    // Квота может кончиться **посреди** обхода, и тогда `CodexQuotaError`
+    // приезжает уже из самого цикла. Предпроверка на входе её не видит: она
+    // спрашивала квоту, когда та ещё была. Без разбора этого случая один
+    // догоревший ребёнок уводил бы весь процесс в получасовой отступ.
+    it('исчерпание квоты посреди обхода не морозит остальных детей', async () => {
+      const spent = addKid('Догоревший');
+      const other = addKid('Второй');
+      const served: string[] = [];
+
+      const worker = new WarmupDispatcher({
+        control,
+        graph,
+        log,
+        now: () => NOW,
+        quotaLimit: 1,
+        open: (childId) => kids.find((kid) => kid.id === childId)?.db,
+        // Квота списывается настоящим обёрнутым бегунком: только так предел
+        // кончается там же, где его кончает рабочий код, — внутри цикла.
+        runFor: (childId) => createQuotedRunner({
+          control,
+          childId,
+          now: () => NOW,
+          limit: 1,
+          run: () => Promise.resolve('{}'),
+        }),
+        worker: {
+          produce: async (request) => {
+            served.push(request.profile.name);
+            // Первый ребёнок выбирает свой единственный слот сам, до отказа.
+            if (request.profile.name === 'Догоревший') {
+              reserveCodexCall(control, spent.id, NOW, 1);
+              throw new CodexQuotaError(spent.id, {
+                day: '2026-08-19',
+                used: 1,
+                limit: 1,
+                remaining: 0,
+              });
+            }
+            return batchOf(QUEUE_TARGET);
+          },
+        },
+      });
+      const report = await worker.sweep();
+
+      expect(report.codexUnavailable).toBe(false);
+      expect(report.children.find((child) => child.childId === spent.id)?.skipped).toBe('quota');
+      expect(report.children.find((child) => child.childId === other.id)?.skipped).toBeUndefined();
+      expect(served).toContain('Второй');
+    });
+
+    // Пропущенный в фазе порога ребёнок не должен получать второй полный заход
+    // в фазе излишков: это удвоенный расход модели на уже отказавшего и
+    // повторный заказ босса с персональным материалом.
+    it('пропущенного в первой фазе не обходит во второй', async () => {
+      const broken = addKid('Сломанный');
+      const attempts: string[] = [];
+
+      const worker = new WarmupDispatcher({
+        control,
+        graph,
+        log,
+        now: () => NOW,
+        // База не открывается: пропуск «unavailable» ставится уже после
+        // предпроверки квоты, и повторный заход отличим по второму `open`.
+        open: (childId) => {
+          attempts.push(childId);
+          return undefined;
+        },
+        worker: { produce: () => Promise.resolve(batchOf(QUEUE_TARGET)) },
+      });
+      const report = await worker.sweep();
+
+      expect(report.children.find((child) => child.childId === broken.id)?.skipped)
+        .toBe('unavailable');
+      expect(attempts).toEqual([broken.id]);
     });
   });
 
@@ -601,6 +703,44 @@ describe('диспетчер прогрева', () => {
       expect(sweeps).toBeGreaterThanOrEqual(4);
     });
 
+    // Обход идёт минутами, и всё это время паузы нет: без отметки будильник,
+    // прозвонивший в этот момент, пропадал бы, и вернувшийся ребёнок ждал бы
+    // конец обхода плюс полный отступ — до получаса.
+    it('не теряет будильник, прозвонивший посреди обхода', async () => {
+      addKid('Ученик');
+      let cycles = 0;
+      const delays: number[] = [];
+      let released: (() => void) | undefined;
+      // Сколько пауз успело начаться к первому заходу второго обхода. Замер
+      // изнутри, а не после `stop()`: после второго обхода пауза законна.
+      let pausesBeforeSecondSweep: number | undefined;
+      const worker = dispatcher({
+        cycle: async () => {
+          cycles += 1;
+          // Первый заход первого обхода задерживается: будильник звонит именно
+          // тогда, когда паузы нет и гасить нечего.
+          if (cycles === 1) await new Promise<void>((resolve) => { released = resolve; });
+          // Обход — это две фазы, то есть два захода: третий открывает второй обход.
+          if (cycles === 3) pausesBeforeSecondSweep = delays.length;
+          return { topics: [], refilled: [], codexUnavailable: false };
+        },
+        wait: (ms): Promise<void> => {
+          delays.push(ms);
+          return new Promise<void>(() => undefined);
+        },
+      });
+
+      worker.start();
+      await waitFor(() => released !== undefined);
+      worker.wake('чужой');
+      released?.();
+      await waitFor(() => pausesBeforeSecondSweep !== undefined);
+      await worker.stop();
+
+      // Пауза между обходами пропущена целиком: будильник её отменил.
+      expect(pausesBeforeSecondSweep).toBe(0);
+    });
+
     // Иначе занимающийся ученик будил бы диспетчер каждым своим запросом, и
     // получасовой отступ по недоступной модели не наступал бы никогда.
     it('не будит диспетчер ради ребёнка, который уже в обходе', async () => {
@@ -625,6 +765,80 @@ describe('диспетчер прогрева', () => {
 
       expect(afterKnown).toBe(2);
       expect(sweeps).toBeGreaterThan(afterKnown);
+    });
+
+    // Недоступный codex обрывает обход на том ребёнке, на котором случился: до
+    // остальных дело не дошло вовсе. Считая их обойдёнными, диспетчер глотал бы
+    // будильник севшего заниматься второго ребёнка — и тот ждал бы полный
+    // получасовой отступ с пустым банком. Но и снять паузу целиком будильник не
+    // вправе: обычная пауза между обходами остаётся неснимаемым полом.
+    it('будит диспетчер ради ребёнка, до которого оборвавшийся обход не дошёл, но не раньше обычной паузы', async () => {
+      const first = addKid('Первый');
+      const second = addKid('Второй');
+      let sweeps = 0;
+      const delays: number[] = [];
+      let release: (() => void) | undefined;
+      const worker = dispatcher({
+        cycle: (options) => {
+          sweeps += 1;
+          // Обрывается обход на первом же ребёнке: до второго очередь не дошла.
+          expect(options.db).toBe(first.db);
+          return Promise.resolve({ topics: [], refilled: [], codexUnavailable: true });
+        },
+        // Досиживаемая часть кончается только по команде теста: так видно, что
+        // будильник её не снял.
+        wait: (ms): Promise<void> => {
+          delays.push(ms);
+          return new Promise<void>((resolve) => { release = resolve; });
+        },
+      });
+
+      worker.start();
+      await waitFor(() => delays.length >= 1);
+      const afterFirst = sweeps;
+      worker.wake(second.id);
+      await waitFor(() => delays.length >= 2);
+      // Будильник прозвонил, а обход не начался: досиживается пауза.
+      expect(sweeps).toBe(afterFirst);
+      release?.();
+      await waitFor(() => sweeps > afterFirst);
+      await worker.stop();
+
+      expect(afterFirst).toBe(1);
+      // Досиживается обычная пауза между обходами, а не получасовой отступ.
+      expect(delays.slice(0, 2)).toEqual([BACKOFF_BASE_MS, IDLE_INTERVAL_MS]);
+      expect(sweeps).toBeGreaterThan(afterFirst);
+    });
+
+    // Два ребёнка за экранами и недоступный codex: обход обрывается на первом,
+    // второго будит его же запрос, а тот обрывается уже на втором и будит
+    // первого. Без неснимаемого пола эта пара крутила бы обходы сколько угодно
+    // часто — и каждый резервировал бы суточную квоту вызовов, не возвращая её.
+    it('не крутит обходы без паузы, когда дети будят друг друга при недоступном codex', async () => {
+      const first = addKid('Первый');
+      const second = addKid('Второй');
+      let sweeps = 0;
+      const delays: number[] = [];
+      const worker = dispatcher({
+        cycle: (options): Promise<CycleReport> => {
+          sweeps += 1;
+          // Каждый обход будит того, до кого он не дошёл.
+          worker.wake(options.db === first.db ? second.id : first.id);
+          return Promise.resolve({ topics: [], refilled: [], codexUnavailable: true });
+        },
+        wait: (ms): Promise<void> => {
+          delays.push(ms);
+          return new Promise<void>(() => undefined);
+        },
+      });
+
+      worker.start();
+      await waitFor(() => delays.length >= 1);
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      await worker.stop();
+
+      expect(sweeps).toBe(1);
+      expect(delays).toEqual([IDLE_INTERVAL_MS]);
     });
   });
 
@@ -671,6 +885,67 @@ describe('диспетчер прогрева', () => {
 
     it('не считает провалом обход без единой попытки', () => {
       expect(everySweepFailed(sweepOf([]))).toBe(false);
+    });
+
+    // Квота кончается посреди захода: неудачные попытки уже лежат в `cycles`, и
+    // пометка `skipped` приходит следом. Посчитав их, один наигравшийся ребёнок
+    // уводил бы в получасовой отступ прогрев всей семьи.
+    it('не считает провалом попытки ребёнка, у которого квота кончилась посреди захода', () => {
+      expect(everySweepFailed(sweepOf([
+        { childId: 'a', cycles: [cycleOf(0, 'суточная квота исчерпана')], skipped: 'quota' },
+      ]))).toBe(false);
+      expect(everySweepFailed(sweepOf([
+        { childId: 'a', cycles: [cycleOf(0, 'суточная квота исчерпана')], skipped: 'quota' },
+        { childId: 'b', cycles: [cycleOf(0, 'codex завершился с кодом 1')] },
+      ]))).toBe(true);
+    });
+
+    // Квота кончается **после** удавшихся батчей: они лежат в тех же `cycles`.
+    // Выкинув их вместе с пропуском, обход, в котором модель здорова и задания
+    // сложены, объявил бы себя пустым — и увёл бы всю семью в получасовой
+    // отступ из-за одного соседа с забракованным батчем.
+    it('не считает провалом обход, где наигравшийся ребёнок успел долить до квоты', () => {
+      expect(everySweepFailed(sweepOf([
+        {
+          childId: 'a',
+          cycles: [cycleOf(5), cycleOf(0, 'суточная квота исчерпана')],
+          skipped: 'quota',
+        },
+        { childId: 'b', cycles: [cycleOf(0, 'codex завершился с кодом 1')] },
+      ]))).toBe(false);
+    });
+
+    // Ребёнок с полным банком попыток не даёт вовсе, и решать за весь процесс
+    // оставался бы один испорченный сосед: получасовой отступ из-за чужого
+    // файла, снять который ученику за экраном нечем — его самого обход прошёл,
+    // и будильник его запроса паузу не снимает.
+    it('не считает провалом обход, где рядом с несостоявшимся заходом есть прошедший', () => {
+      expect(everySweepFailed(sweepOf([
+        { childId: 'a', cycles: [{ topics: [], refilled: [], codexUnavailable: false }] },
+        { childId: 'b', cycles: [], skipped: 'error' },
+      ]))).toBe(false);
+    });
+
+    it('считает провалом обход, в котором не состоялся ни один заход', () => {
+      expect(everySweepFailed(sweepOf([
+        { childId: 'a', cycles: [], skipped: 'error' },
+        { childId: 'b', cycles: [], skipped: 'error' },
+      ]))).toBe(true);
+      // Пропущенный по квоте сосед вердикт не меняет: он в счёт не идёт вовсе.
+      expect(everySweepFailed(sweepOf([
+        { childId: 'a', cycles: [], skipped: 'error' },
+        { childId: 'b', cycles: [], skipped: 'quota' },
+      ]))).toBe(true);
+    });
+
+    // Неудачные попытки соседа — это отказы самой модели, и полный банк
+    // третьего ребёнка их не оправдывает: молчащий codex обязан уводить в
+    // отступ, иначе прогрев ломился бы в него раз в минуту.
+    it('считает провалом обход, где попытки были и все упали', () => {
+      expect(everySweepFailed(sweepOf([
+        { childId: 'a', cycles: [{ topics: [], refilled: [], codexUnavailable: false }] },
+        { childId: 'b', cycles: [cycleOf(0, 'codex завершился с кодом 1')] },
+      ]))).toBe(true);
     });
   });
 

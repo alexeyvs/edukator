@@ -8,8 +8,9 @@ export default defineConfig({
       provider: 'v8',
       include: [
         'server/**/*.ts', 'scripts/**/*.ts',
-        'web/src/{home,profile,run,boss,parents}-api.ts',
-        'web/src/{BossScreen,ParentsScreen}.tsx', 'web/src/http.ts',
+        'web/src/{home,profile,run,boss,parents,auth,family}-api.ts',
+        'web/src/{BossScreen,ParentsScreen,App,LoginScreen,FamilyScreen,InviteScreen,JoinScreen}.tsx',
+        'web/src/http.ts',
       ],
       // Порог держится на ядре, занятии и генерации: все они детерминированы —
       // внешние процессы подменяются через `run`/`produce`/`review`, — и дефект
@@ -61,12 +62,13 @@ export default defineConfig({
           lines: 80,
         },
         // Многоарендность: `control-db` держит миграцию управляющей базы,
-        // `secrets` — хеши пароля и PIN, `auth` — разрешение предъявителя,
+        // `secrets` — хеши пароля и PIN, `parent-pin` — pepper и отказ без
+        // него, `auth` — разрешение предъявителя,
         // `tenant-registry` — открытие детской базы. Ошибка здесь пускает
         // одного арендатора в чужие данные, а не портит учебный план, и
         // `server/**` без поимённого порога оставила бы её на усмотрение
         // средней цифры по каталогу.
-        'server/{control-db,secrets,auth,tenant-registry}.ts': {
+        'server/{control-db,secrets,parent-pin,auth,tenant-registry}.ts': {
           statements: 80,
           branches: 80,
           functions: 80,
@@ -118,6 +120,21 @@ export default defineConfig({
           lines: 80,
         },
         'web/src/{BossScreen,ParentsScreen}.tsx': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        // Экраны и адаптеры входа: пароль, ссылки и состав семьи — весь
+        // клиентский путь многоарендности. Без своего порога он не попадал ни
+        // под один шаблон, и дефект в нём переживал полностью зелёный прогон.
+        'web/src/{auth,family}-api.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        'web/src/{App,LoginScreen,FamilyScreen,InviteScreen,JoinScreen}.tsx': {
           statements: 80,
           branches: 80,
           functions: 80,

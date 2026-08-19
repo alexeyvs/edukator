@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -13,7 +13,7 @@ import {
   openControlDatabase,
   readChild,
 } from '../server/control-db.js';
-import { controlDatabasePath, ensureDataDir } from '../server/data-dir.js';
+import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
 import { dataLockPath, SERVER_LOCK_OWNER } from '../server/data-lock.js';
 import { openDatabase, readProfile, writeProfile } from '../server/db.js';
 import { adoptSingleUser, legacyDatabasePath, parseArgs } from '../scripts/adopt-single-user.js';
@@ -213,6 +213,61 @@ describe('перенос однопользовательской базы', () 
     }
   });
 
+  it('продолжает перенос, оборванный между переносом файла и пометкой ready', () => {
+    const seeded = seedLegacy();
+    // Ровно то состояние, которое оставляет обрыв питания после `rename`:
+    // строка ребёнка ещё `provisioning`, а перенесённая база уже на месте.
+    // Отказ по «нечем доказать, что это копия исходной» здесь означал бы, что
+    // единственный документированно продолжаемый обрыв чинится только руками.
+    const control = openControlDatabase(controlDatabasePath(dataDir));
+    const parentId = createParent(control, 'mama@example.com', NOW);
+    const childId = createChild(control, parentId, 'Тимофей', NOW);
+    control.close();
+    const first = adopt();
+    expect(first.childId).toBe(childId);
+    const reopened = openControlDatabase(controlDatabasePath(dataDir));
+    reopened.prepare('UPDATE children SET status = ? WHERE id = ?').run('provisioning', childId);
+    reopened.close();
+
+    const result = adopt();
+
+    expect(result.childId).toBe(childId);
+    const after = openControl();
+    try {
+      expect(readChild(after, childId)?.status).toBe('ready');
+    } finally {
+      after.close();
+    }
+    // Прогресс на месте: продолжение не переписывает базу вчерашним снимком.
+    const child = openDatabase(result.path, { fileMustExist: true });
+    try {
+      expect(readProfile(child).name).toBe('Тимофей');
+      expect(
+        child.prepare('SELECT COUNT(*) AS count FROM runs WHERE id = ?').get(seeded.runId),
+      ).toEqual({ count: 1 });
+    } finally {
+      child.close();
+    }
+  });
+
+  it('не принимает за прерванный перенос пустую базу ребёнка того же имени', () => {
+    // Детей заводит и экран семьи, и его заведение тоже идёт через `rename` до
+    // пометки `ready`. Совпади имя — и продолжение приняло бы за перенос пустую
+    // заведённую базу: отчиталось бы успехом, оставило прогресс в оригинале, а
+    // повторный запуск упёрся бы в отказ по `ready` навсегда.
+    seedLegacy();
+    const control = openControlDatabase(controlDatabasePath(dataDir));
+    const parentId = createParent(control, 'mama@example.com', NOW);
+    const childId = createChild(control, parentId, 'Тимофей', NOW);
+    provisionChildDatabase(control, childId, dataDir);
+    control.prepare('UPDATE children SET status = ? WHERE id = ?').run('provisioning', childId);
+    control.close();
+
+    expect(() => adopt()).toThrow(/прогресса в ней меньше/u);
+    // Оригинал на месте: отказ до всякой записи в него.
+    expect(existsSync(source)).toBe(true);
+  });
+
   it('отказывается переносить несуществующую базу', () => {
     expect(() => adopt({ source: join(dir, 'нет.db') })).toThrow(/переносить нечего/u);
     // Отказ до первой записи: управляющая база даже не заводится, так что
@@ -284,10 +339,18 @@ describe('перенос однопользовательской базы', () 
 
   describe('прежний путь базы', () => {
     it('берёт EDUKATOR_DB, а пустое значение считает незаданным', () => {
+      // Переменная подменяется, а не читается из оболочки: `legacyDatabasePath()`
+      // без аргумента идёт как раз в `process.env`, и у разработчика с заданной
+      // `EDUKATOR_DB` тест краснел бы мимо кода.
+      vi.stubEnv('EDUKATOR_DB', '/tmp/из-окружения.db');
+      expect(legacyDatabasePath()).toBe('/tmp/из-окружения.db');
+
       expect(legacyDatabasePath('/tmp/старая.db')).toBe('/tmp/старая.db');
       // Пустая строка уходила бы в `resolve` и давала каталог запуска.
+      vi.stubEnv('EDUKATOR_DB', '');
       expect(legacyDatabasePath('')).toBe(legacyDatabasePath(undefined));
       expect(legacyDatabasePath(undefined).endsWith('edukator.db')).toBe(true);
+      vi.unstubAllEnvs();
     });
   });
 });

@@ -121,7 +121,17 @@ export function agentHeaders(token: string): Record<string, string> {
 export async function startTenantServer(options: TenantServerOptions): Promise<TenantServer> {
   const { curriculumDir, email, childName, ...serverOptions } = options;
   const dataDir = ensureDataDir(options.dataDir);
-  const app = buildServer(curriculumDir, serverOptions);
+  const app = buildServer(curriculumDir, {
+    ...serverOptions,
+    // Маршрутные тесты проверяют HTTP и доменную логику, а не внешний Codex.
+    // Специальные integrity-тесты передают свой reviewer и перекрывают этот.
+    integrityReview: serverOptions.integrityReview ?? (async (items) => items.map((item) => ({
+      id: item.id,
+      decision: 'meaningful' as const,
+      confidence: 0.99,
+      reason: 'Тестовый осмысленный ответ.',
+    }))),
+  });
   await app.ready();
 
   const control = openControlDatabase(controlDatabasePath(dataDir));

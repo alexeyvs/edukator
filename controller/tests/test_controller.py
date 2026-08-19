@@ -3,33 +3,49 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
 import os
 from pathlib import Path
+import socket
 import tempfile
+import stat
 import threading
+import time
 from typing import Any, Iterator
 import unittest
+from unittest import mock
+from urllib.error import HTTPError
 
+from edukator_family_controller import gate as gate_module
 from edukator_family_controller.config import (
     ControllerConfig,
     clear_pending_login,
     load_config,
     load_pending_login,
     pending_login_path,
+    read_poll_settings,
+    read_previous_access,
     save_config,
     save_pending_login,
 )
 from edukator_family_controller.gate import (
+    MAX_GATE_BODY,
     ComputerAccessOverride,
     GateState,
+    GateTokenRejected,
     LearningGateState,
     fetch_gate,
     parse_gate,
 )
 from edukator_family_controller.family import MicrosoftFamilyClient
-from edukator_family_controller.login import ask_server_access, update_family_with_retry
+from edukator_family_controller.login import (
+    ask_server_access,
+    merged_config,
+    update_family_with_retry,
+)
 from edukator_family_controller.main import (
     BLOCK_RENEW_SECONDS,
     ReconcileState,
@@ -467,6 +483,42 @@ class _GateStubHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
+def dripping_headers_stub() -> Iterator[Any]:
+    """Собеседник, который бесконечно тянет заголовки, не доходя до тела.
+
+    `100 Continue` раз в четверть сокетного срока: каждая строка обновляет
+    сокетный таймаут, и без общего срока `getresponse()` не вернулся бы никогда.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    stop = threading.Event()
+
+    def serve() -> None:
+        try:
+            connection, _ = listener.accept()
+        except OSError:
+            return
+        try:
+            while not stop.is_set():
+                connection.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+                stop.wait(0.02)
+        except OSError:
+            pass
+        finally:
+            connection.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{listener.getsockname()[1]}"
+    finally:
+        stop.set()
+        listener.close()
+        thread.join(timeout=5)
+
+
+@contextmanager
 def gate_stub(
     *,
     status: int = 200,
@@ -490,6 +542,21 @@ def gate_stub(
         thread.join(timeout=5)
 
 
+@contextmanager
+def environment(**values: str) -> Iterator[None]:
+    """Переменные окружения на время теста, с восстановлением прежних."""
+    previous = {name: os.environ.get(name) for name in values}
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 class AgentTokenTests(unittest.IsolatedAsyncioTestCase):
     async def test_sends_agent_token_in_authorization_header(self) -> None:
         with gate_stub() as stub:
@@ -500,6 +567,71 @@ class AgentTokenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(path, "/api/gate/status")
         self.assertEqual(headers["Authorization"], f"Bearer {AGENT_TOKEN}")
 
+    async def test_loop_sends_the_agent_token_and_never_the_refresh_token(self) -> None:
+        # Прямой вызов `fetch_gate` проверяет только сборку заголовка: токен в
+        # него кладёт сам тест. Здесь заголовок собирает `run_controller` — и
+        # перепутанное поле конфигурации означало бы, что ключ от детского
+        # аккаунта Microsoft уезжает на сервер Edukator в открытом виде.
+        family = FakeFamily(blocked=True)
+
+        async def stop_after_first_poll(_: float) -> None:
+            raise asyncio.CancelledError
+
+        with gate_stub() as stub:
+            with self.assertRaises(asyncio.CancelledError):
+                await run_controller(
+                    ControllerConfig("refresh-token-secret", "child", AGENT_TOKEN, stub.url),
+                    family,
+                    sleep=stop_after_first_poll,
+                    log=lambda _: None,
+                )
+
+        _, headers = stub.requests[0]
+        self.assertEqual(headers["Authorization"], f"Bearer {AGENT_TOKEN}")
+        self.assertNotIn("refresh-token-secret", "\n".join(headers.values()))
+
+    async def test_oversized_body_is_refused_instead_of_being_read_whole(self) -> None:
+        # На указанном адресе может оказаться что угодно: `json.load` читает
+        # поток до конца, и бесконечная выдача чужой службы съела бы память.
+        huge = dict(UNLOCKED_PAYLOAD, day="2026-08-12", override="x" * (MAX_GATE_BODY + 1))
+        with gate_stub(payload=huge) as stub:
+            with self.assertRaisesRegex(RuntimeError, "длиннее"):
+                await fetch_gate(stub.url, AGENT_TOKEN)
+
+    async def test_stalled_read_gives_up_instead_of_hanging_the_loop(self) -> None:
+        # `timeout` у `urlopen` действует на отдельную операцию с сокетом:
+        # собеседник, отдающий по байту раз в четыре секунды, продлевает чтение
+        # бесконечно. Зависший здесь запрос оставил бы `run_controller` ждать
+        # навечно — ни аварийная блокировка, ни истечение доступа не сработали
+        # бы, и контроллер завис бы **открытым**.
+        def stall(_url: str, _token: str, _timeout: float) -> GateState:
+            time.sleep(0.5)
+            return UNLOCKED
+
+        original = gate_module._fetch_gate
+        gate_module._fetch_gate = stall
+        try:
+            with self.assertRaisesRegex(RuntimeError, "не ответил"):
+                await fetch_gate("http://127.0.0.1:1", AGENT_TOKEN, timeout=0.05)
+        finally:
+            gate_module._fetch_gate = original
+
+    def test_stalled_headers_end_the_worker_thread_instead_of_wedging_it(self) -> None:
+        # Тело — не единственное, что читается с сокета: статус и заголовки идут
+        # до него, и их сокетный таймаут обновляется каждой строкой. Брошенный
+        # `asyncio.wait_for` освобождает только ждущего, а поток остаётся на
+        # сокете навсегда — пара таких за сутки опроса выедает пул `to_thread`,
+        # и контроллер перестаёт замечать выздоровевший сервер, держа компьютер
+        # закрытым. Проверяется поэтому сам `_fetch_gate`, а не `fetch_gate`:
+        # снаружи срок держит `wait_for`, и он зелёный в любом случае.
+        with dripping_headers_stub() as url:
+            started = time.monotonic()
+            with self.assertRaises(RuntimeError):
+                gate_module._fetch_gate(url, AGENT_TOKEN, 0.2)
+            spent = time.monotonic() - started
+
+        self.assertLess(spent, 0.2 * gate_module.GATE_DEADLINE_FACTOR + 2)
+
     async def test_rejected_token_names_the_reason_without_printing_it(self) -> None:
         with gate_stub(status=401, payload={"error": "нет доступа"}) as stub:
             with self.assertRaises(RuntimeError) as failure:
@@ -508,6 +640,41 @@ class AgentTokenTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("агентский токен", str(failure.exception))
         self.assertNotIn(AGENT_TOKEN, str(failure.exception))
 
+    async def test_forbidden_named_the_same_way_as_a_wrong_token(self) -> None:
+        # Отозванное устройство сервер закрывает 401, а 403 достаётся живому
+        # агенту, чьё устройство перестало быть агентским. Разбирая только 401,
+        # контроллер отвечал бы «HTTP 403» — и родитель не узнал бы, что дело в
+        # самом токене, а не в недоступном сервере.
+        with gate_stub(status=403, payload={"error": "Доступ закрыт"}) as stub:
+            with self.assertRaises(RuntimeError) as failure:
+                await fetch_gate(stub.url, AGENT_TOKEN)
+
+        self.assertIn("агентский токен", str(failure.exception))
+        self.assertIn("новую ссылку", str(failure.exception))
+        self.assertNotIn(AGENT_TOKEN, str(failure.exception))
+
+    async def test_refused_answer_is_closed_instead_of_being_left_open(self) -> None:
+        # `HTTPError` — открытый ответ, и бросает его сам `open`, то есть до
+        # `with`. Отозванный токен даёт 401 на каждом опросе, а ошибка живёт
+        # причиной у `RuntimeError` весь отступ: без закрытия это дескриптор на
+        # опрос, и контроллер упирается в их предел, оставив компьютер как есть.
+        body = io.BytesIO('{"error": "нет доступа"}'.encode())
+        error = HTTPError(f"{EDUKATOR_URL}/api/gate/status", 401, "Unauthorized", Message(), body)
+
+        class RefusingOpener:
+            def open(self, request: Any, timeout: float | None = None) -> Any:
+                raise error
+
+        original = gate_module._OPENER
+        gate_module._OPENER = RefusingOpener()
+        try:
+            with self.assertRaisesRegex(GateTokenRejected, "агентский токен"):
+                await fetch_gate(EDUKATOR_URL, AGENT_TOKEN)
+        finally:
+            gate_module._OPENER = original
+
+        self.assertTrue(body.closed)
+
     async def test_does_not_follow_redirect_with_the_token(self) -> None:
         with gate_stub() as elsewhere:
             with gate_stub(status=302, location=f"{elsewhere.url}/api/gate/status") as stub:
@@ -515,6 +682,25 @@ class AgentTokenTests(unittest.IsolatedAsyncioTestCase):
                     await fetch_gate(stub.url, AGENT_TOKEN)
 
             self.assertEqual(elsewhere.requests, [])
+            self.assertEqual(len(stub.requests), 1)
+
+    async def test_does_not_hand_the_token_to_a_configured_proxy(self) -> None:
+        # `_RefuseRedirect` закрывает увод токена через `Location`, но через
+        # `http_proxy` его уносил бы умолчательный `ProxyHandler`: адрес
+        # Edukator домашний и по документации простой http, а `no_proxy` его не
+        # исключает — прокси получил бы `Authorization: Bearer` открытым текстом.
+        with gate_stub() as proxy:
+            with gate_stub() as stub:
+                original = gate_module._OPENER
+                with environment(http_proxy=proxy.url, no_proxy="", NO_PROXY=""):
+                    gate_module._OPENER = gate_module._build_opener()
+                    try:
+                        gate = await fetch_gate(stub.url, AGENT_TOKEN)
+                    finally:
+                        gate_module._OPENER = original
+
+            self.assertTrue(gate.unlocked)
+            self.assertEqual(proxy.requests, [])
             self.assertEqual(len(stub.requests), 1)
 
     async def test_rejected_token_fails_closed_and_stays_out_of_the_log(self) -> None:
@@ -539,6 +725,37 @@ class AgentTokenTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("агентский токен", joined)
         self.assertNotIn(AGENT_TOKEN, joined)
 
+    async def test_revoked_token_closes_previously_unlocked_access(self) -> None:
+        family = FakeFamily(blocked=True)
+        reads = 0
+        sleeps = 0
+
+        async def reader(_: str, __: str) -> GateState:
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return UNLOCKED
+            raise GateTokenRejected("Edukator не принял агентский токен (HTTP 401)")
+
+        async def poll_once_then_stop(_: float) -> None:
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps == 2:
+                raise asyncio.CancelledError
+
+        with self.assertRaises(asyncio.CancelledError):
+            await run_controller(
+                ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
+                family,
+                gate_reader=reader,
+                sleep=poll_once_then_stop,
+                wall_clock=lambda: datetime(2026, 8, 12, 12, tzinfo=timezone.utc),
+                log=lambda _: None,
+            )
+
+        self.assertEqual(family.actions, [False, True])
+        self.assertTrue(family.blocked)
+
 
 class ConfigTests(unittest.TestCase):
     def test_round_trip_uses_owner_only_permissions(self) -> None:
@@ -550,6 +767,28 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(load_config(path), expected)
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
             self.assertEqual(json.loads(path.read_text())["refresh_token"], "secret")
+
+    def test_saved_config_syncs_the_directory_and_not_just_the_file(self) -> None:
+        # `fsync` файла несёт содержимое, но не запись каталога: после сбоя
+        # питания вернулась бы прежняя конфигурация, а refresh token Microsoft
+        # одноразовый — вернувшийся старый уже не примут, и вместо опроса гейта
+        # родителя ждёт повторный `family:login`.
+        synced: list[bool] = []
+        real_fsync = os.fsync
+
+        def recording(descriptor: int) -> None:
+            synced.append(stat.S_ISDIR(os.fstat(descriptor).st_mode))
+            real_fsync(descriptor)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "конфигурация" / "family.json"
+            with mock.patch("edukator_family_controller.config.os.fsync", recording):
+                save_config(ControllerConfig("secret", "child-id", AGENT_TOKEN, EDUKATOR_URL), path)
+
+            self.assertEqual(load_config(path).agent_token, AGENT_TOKEN)
+
+        self.assertIn(True, synced)
+        self.assertIn(False, synced)
 
     def test_rejects_invalid_intervals(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -634,6 +873,218 @@ class ServerAccessPromptTests(unittest.TestCase):
 
             self.assertEqual(url, EDUKATOR_URL)
             self.assertEqual(token, AGENT_TOKEN)
+
+    def test_offers_previous_address_when_config_predates_new_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "family.json"
+            # Конфигурация прошлой версии: `agent_token` в ней ещё нет, и
+            # строгое чтение отказывает целиком — то есть ровно на обновлении,
+            # где README обещает прежний адрес. Без нестрогого чтения Enter в
+            # ответ на вопрос падал бы «адрес должен начинаться с http://»
+            # после всего входа Microsoft, назвав виноватым ввод.
+            path.write_text(
+                json.dumps({
+                    "refresh_token": "старый",
+                    "child_user_id": "child-id",
+                    "edukator_url": EDUKATOR_URL,
+                }),
+                encoding="utf-8",
+            )
+            prompts: list[str] = []
+
+            url, token = ask_server_access(
+                path,
+                ask=lambda prompt: prompts.append(prompt) or "",
+                ask_secret=lambda _: AGENT_TOKEN,
+            )
+
+            self.assertEqual(url, EDUKATOR_URL)
+            self.assertEqual(token, AGENT_TOKEN)
+            self.assertIn(EDUKATOR_URL, prompts[0])
+
+    def test_does_not_promise_a_previous_token_that_does_not_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "family.json"
+            path.write_text(
+                json.dumps({
+                    "refresh_token": "старый",
+                    "child_user_id": "child-id",
+                    "edukator_url": EDUKATOR_URL,
+                }),
+                encoding="utf-8",
+            )
+            secret_prompts: list[str] = []
+
+            # Прежнего агентского токена в такой конфигурации нет: «Enter —
+            # оставить прежний» отправлял бы нажимать Enter в пустоту.
+            with self.assertRaisesRegex(ValueError, "токен"):
+                ask_server_access(
+                    path,
+                    ask=lambda _: "",
+                    ask_secret=lambda prompt: secret_prompts.append(prompt) or "",
+                )
+
+            self.assertNotIn("прежний", " ".join(secret_prompts))
+
+    def test_previous_access_ignores_junk_without_losing_the_neighbour(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "family.json"
+            path.write_text(
+                json.dumps({"edukator_url": "   ", "agent_token": AGENT_TOKEN}),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(read_previous_access(path), {"agent_token": AGENT_TOKEN})
+            self.assertEqual(read_previous_access(Path(directory) / "нет.json"), {})
+
+    def test_rotation_keeps_tuned_intervals(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "family.json"
+            tuned = ControllerConfig(
+                "secret",
+                "child-id",
+                AGENT_TOKEN,
+                EDUKATOR_URL,
+                poll_seconds=45.0,
+                verify_seconds=600.0,
+                block_days=14,
+            )
+            save_config(tuned, path)
+
+            # Повторный family:login меняет токены, но не настройки опроса:
+            # собранная с нуля конфигурация молча вернула бы их к умолчаниям.
+            updated = merged_config(
+                path,
+                refresh_token="новый",
+                child_user_id="child-id",
+                agent_token="новый-агент",
+                edukator_url=EDUKATOR_URL,
+            )
+
+            self.assertEqual(updated.refresh_token, "новый")
+            self.assertEqual(updated.agent_token, "новый-агент")
+            self.assertEqual(updated.poll_seconds, 45.0)
+            self.assertEqual(updated.verify_seconds, 600.0)
+            self.assertEqual(updated.block_days, 14)
+
+    def test_rotation_keeps_tuned_intervals_when_config_predates_new_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "family.json"
+            # Конфигурация прошлой версии: `agent_token` и `edukator_url` в ней
+            # ещё не обязательны, потому этот `family:login` и запускают.
+            # Строгий `load_config` на ней отказывает целиком — и все три
+            # настройки молча вернулись бы к умолчаниям.
+            path.write_text(
+                json.dumps({
+                    "refresh_token": "старый",
+                    "child_user_id": "child-id",
+                    "poll_seconds": 45,
+                    "verify_seconds": 600,
+                    "block_days": 14,
+                }),
+                encoding="utf-8",
+            )
+
+            updated = merged_config(
+                path,
+                refresh_token="новый",
+                child_user_id="child-id",
+                agent_token=AGENT_TOKEN,
+                edukator_url=EDUKATOR_URL,
+            )
+
+            self.assertEqual(updated.poll_seconds, 45.0)
+            self.assertEqual(updated.verify_seconds, 600.0)
+            self.assertEqual(updated.block_days, 14)
+            self.assertEqual(updated.agent_token, AGENT_TOKEN)
+
+    def test_unreadable_settings_fall_back_to_defaults_one_by_one(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "family.json"
+            path.write_text(
+                json.dumps({"poll_seconds": None, "verify_seconds": 600}),
+                encoding="utf-8",
+            )
+
+            # Испорченное значение не должно уносить с собой соседнее.
+            self.assertEqual(read_poll_settings(path), {"verify_seconds": 600.0})
+            self.assertEqual(read_poll_settings(Path(directory) / "нет.json"), {})
+
+    def test_out_of_range_settings_fall_back_to_defaults_instead_of_being_saved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "family.json"
+            path.write_text(
+                json.dumps({"poll_seconds": 0, "verify_seconds": -1, "block_days": 0}),
+                encoding="utf-8",
+            )
+
+            # Иначе значение вне границ переживает весь вход в Microsoft, вход
+            # отчитывается «Конфигурация сохранена» и стирает начатую сессию — а
+            # `start:family` следом отказывает «Интервалы опроса должны быть
+            # положительными», и виноватым выглядит не тот шаг.
+            self.assertEqual(read_poll_settings(path), {})
+
+            updated = merged_config(
+                path,
+                refresh_token="secret",
+                child_user_id="child-id",
+                agent_token=AGENT_TOKEN,
+                edukator_url=EDUKATOR_URL,
+            )
+            self.assertEqual(updated.poll_seconds, 20.0)
+            self.assertEqual(updated.verify_seconds, 300.0)
+            self.assertEqual(updated.block_days, 7)
+
+    def test_config_directory_is_private_even_when_it_already_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "конфиг"
+            home.mkdir(mode=0o755)
+            path = home / "family.json"
+
+            save_config(
+                ControllerConfig("secret", "child-id", AGENT_TOKEN, EDUKATOR_URL), path
+            )
+
+            # В каталоге лежат refresh token, агентский токен и времянка
+            # `mkstemp` с предсказуемым именем: `mkdir(mode=...)` уже
+            # существующий каталог не трогает вовсе.
+            self.assertEqual(home.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_non_numeric_interval_is_named_instead_of_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "family.json"
+            # `None` и список дают `TypeError`, а не `ValueError`: без приведения
+            # он улетал бы трассировкой мимо всех `except ValueError`.
+            path.write_text(
+                json.dumps({
+                    "refresh_token": "secret",
+                    "child_user_id": "child-id",
+                    "agent_token": AGENT_TOKEN,
+                    "edukator_url": EDUKATOR_URL,
+                    "poll_seconds": None,
+                }),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "poll_seconds"):
+                load_config(path)
+
+    def test_first_login_needs_no_previous_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "family.json"
+
+            updated = merged_config(
+                path,
+                refresh_token="secret",
+                child_user_id="child-id",
+                agent_token=AGENT_TOKEN,
+                edukator_url=EDUKATOR_URL,
+            )
+
+            self.assertEqual(
+                updated, ControllerConfig("secret", "child-id", AGENT_TOKEN, EDUKATOR_URL)
+            )
 
     def test_rejects_address_without_scheme_and_empty_token(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

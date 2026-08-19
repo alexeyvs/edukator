@@ -22,6 +22,7 @@ import {
   AUTH_STATUS,
   AuthError,
   AGENT_HEADER,
+  ACTOR_COOKIE,
   CHILD_COOKIE,
   PARENT_COOKIE,
   assertSameOrigin,
@@ -34,6 +35,7 @@ import {
   resolveBearer,
   resolveTenant,
   type Bearer,
+  type BearerKind,
   type RequestHeaders,
   type TenantOpener,
 } from '../server/auth.js';
@@ -54,6 +56,8 @@ function topic(id: string): Topic {
 const GRAPH: TopicGraph = buildTopicGraph([topic('math.a')]);
 
 const HOST = 'edukator.local:3000';
+/** Допуск, при котором проверяется всё, кроме самого допуска: он проверяется отдельно. */
+const ALLOW_ALL: readonly BearerKind[] = ['parent', 'browser', 'agent'];
 
 /** Заголовки своей же страницы: изменяющий запрос без них не проходит. */
 const SAME_ORIGIN: RequestHeaders = {
@@ -115,13 +119,16 @@ describe('разрешение предъявителя и аренды', () => 
   }
 
   /** Реестр, считающий открытия: изоляция обязана отказывать **до** открытия базы. */
-  function counting(): TenantOpener & { opened: string[] } {
+  function counting(): TenantOpener & { opened: string[]; kinds: BearerKind[] } {
     const tenants = new TenantRegistry({ control, dataDir: tempDir, graph: GRAPH, log: () => {} });
     const opened: string[] = [];
+    const kinds: BearerKind[] = [];
     return {
       opened,
-      open(childId: string): Tenant {
+      kinds,
+      open(childId: string, bearer: BearerKind): Tenant {
         opened.push(childId);
+        kinds.push(bearer);
         return tenants.open(childId);
       },
     };
@@ -131,6 +138,15 @@ describe('разрешение предъявителя и аренды', () => 
     it('склеивает повторённый заголовок, а не теряет половину', () => {
       expect(headerValue({ cookie: ['a=1', 'b=2'] }, 'Cookie')).toBe('a=1; b=2');
       expect(headerValue({}, 'cookie')).toBeUndefined();
+    });
+
+    // `; ` — шов `Cookie` и только его. Сшитый им `X-Forwarded-For` не
+    // разбирается `clientAddress` (тот режет цепочку по запятой), и вся цепочка
+    // становится одним неразобранным адресом — то есть ключом счётчика перебора,
+    // который клиент меняет по своему желанию.
+    it('склеивает всё, кроме cookie, запятой', () => {
+      expect(headerValue({ 'x-forwarded-for': ['203.0.113.7', '198.51.100.4'] }, 'X-Forwarded-For'))
+        .toBe('203.0.113.7, 198.51.100.4');
     });
 
     it('разбирает cookie и оставляет первую из одноимённых', () => {
@@ -179,6 +195,21 @@ describe('разрешение предъявителя и аренды', () => 
       );
 
       expect(bearer?.kind).toBe('browser');
+    });
+
+    it('выбирает родителя только по явной preference-cookie при двух сессиях', () => {
+      const alpha = family('alpha');
+
+      const bearer = resolveBearer(
+        control,
+        cookies(
+          [PARENT_COOKIE, alpha.parentToken],
+          [CHILD_COOKIE, alpha.childToken],
+          [ACTOR_COOKIE, 'parent'],
+        ),
+      );
+
+      expect(bearer?.kind).toBe('parent');
     });
 
     it('разбирает агентский токен заголовком', () => {
@@ -268,6 +299,7 @@ describe('разрешение предъявителя и аренды', () => 
 
       const error = catchAuth(() =>
         resolveTenant({
+          allow: ALLOW_ALL,
           control,
           tenants,
           method: 'POST',
@@ -339,6 +371,7 @@ describe('разрешение предъявителя и аренды', () => 
         tenants,
         method: 'POST',
         headers: cookies([CHILD_COOKIE, alpha.childToken]),
+        allow: ALLOW_ALL,
       });
       const byParent = resolveTenant({
         control,
@@ -346,12 +379,47 @@ describe('разрешение предъявителя и аренды', () => 
         method: 'GET',
         headers: cookies([PARENT_COOKIE, alpha.parentToken]),
         childId: alpha.childId,
+        allow: ALLOW_ALL,
       });
 
       expect(byChild.bearer.kind).toBe('browser');
       expect(byParent.bearer.kind).toBe('parent');
       expect(byChild.tenant).toBe(byParent.tenant);
       expect(tenants.opened).toEqual([alpha.childId, alpha.childId]);
+    });
+
+    // Вид предъявителя доезжает до реестра ради будильника прогрева: «ребёнок
+    // вернулся» — это только `browser`, а опрос агента раз в двадцать секунд
+    // активностью не считается (см. `resolveChildDevice`).
+    it('называет реестру вид предъявителя, а не только ребёнка', () => {
+      const alpha = family('alpha');
+      const tenants = counting();
+      const agent = deviceToken(alpha.childId, 'agent');
+
+      resolveTenant({
+        control,
+        tenants,
+        method: 'GET',
+        headers: cookies([CHILD_COOKIE, alpha.childToken]),
+        allow: ALLOW_ALL,
+      });
+      resolveTenant({
+        control,
+        tenants,
+        method: 'GET',
+        headers: { ...SAME_ORIGIN, [AGENT_HEADER]: `Bearer ${agent}` },
+        allow: ALLOW_ALL,
+      });
+      resolveTenant({
+        control,
+        tenants,
+        method: 'GET',
+        headers: cookies([PARENT_COOKIE, alpha.parentToken]),
+        childId: alpha.childId,
+        allow: ALLOW_ALL,
+      });
+
+      expect(tenants.kinds).toEqual(['browser', 'agent', 'parent']);
     });
 
     it('родитель A → ребёнок B и ребёнок A → ребёнок B отказываются, база не открывается', () => {
@@ -361,6 +429,7 @@ describe('разрешение предъявителя и аренды', () => 
 
       const byParent = catchAuth(() =>
         resolveTenant({
+          allow: ALLOW_ALL,
           control,
           tenants,
           method: 'GET',
@@ -370,6 +439,7 @@ describe('разрешение предъявителя и аренды', () => 
       );
       const byChild = catchAuth(() =>
         resolveTenant({
+          allow: ALLOW_ALL,
           control,
           tenants,
           method: 'GET',
@@ -388,7 +458,7 @@ describe('разрешение предъявителя и аренды', () => 
       const tenants = counting();
 
       const error = catchAuth(() =>
-        resolveTenant({ control, tenants, method: 'GET', headers: SAME_ORIGIN }),
+        resolveTenant({ control, tenants, method: 'GET', headers: SAME_ORIGIN, allow: ALLOW_ALL }),
       );
 
       expect(error.code).toBe('unauthenticated');
@@ -403,7 +473,7 @@ describe('разрешение предъявителя и аренды', () => 
       const tenants = counting();
 
       const closed = catchAuth(() =>
-        resolveTenant({ control, tenants, method: 'GET', headers }),
+        resolveTenant({ control, tenants, method: 'GET', headers, allow: ['parent', 'browser'] }),
       );
       const open = resolveTenant({
         control,
@@ -431,13 +501,13 @@ describe('разрешение предъявителя и аренды', () => 
       });
 
       const raced = catchAuth(() =>
-        resolveTenant({ control, tenants: failing('not-serviceable'), method: 'GET', headers }),
+        resolveTenant({ control, tenants: failing('not-serviceable'), method: 'GET', headers, allow: ALLOW_ALL }),
       );
       const busy = catchAuth(() =>
-        resolveTenant({ control, tenants: failing('too-many-open'), method: 'GET', headers }),
+        resolveTenant({ control, tenants: failing('too-many-open'), method: 'GET', headers, allow: ALLOW_ALL }),
       );
       const broken = catchAuth(() =>
-        resolveTenant({ control, tenants: failing('unavailable'), method: 'GET', headers }),
+        resolveTenant({ control, tenants: failing('unavailable'), method: 'GET', headers, allow: ALLOW_ALL }),
       );
 
       expect(raced.code).toBe('no-child');
@@ -456,6 +526,7 @@ describe('разрешение предъявителя и аренды', () => 
 
       expect(() =>
         resolveTenant({
+          allow: ALLOW_ALL,
           control,
           tenants,
           method: 'GET',

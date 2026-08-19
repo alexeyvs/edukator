@@ -9,7 +9,14 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': 'http://localhost:3000',
+      // `changeOrigin` выписан руками и именно `false`: строкой-сокращением
+      // (`'/api': 'http://localhost:3000'`) Vite включает его сам, подменяя
+      // `Host` на адрес цели. Изменяющий запрос сверяет `Origin` с `Host`
+      // (`isSameOrigin`), и подменённый `Host` разводил бы их всегда — в dev
+      // каждый вход, выход и ответ ученика получал бы 403 «запрос пришёл не со
+      // страницы приложения». `npm start` и e2e одноисточниковые и этого не
+      // ловят.
+      '/api': { target: 'http://localhost:3000', changeOrigin: false },
     },
   },
   build: {

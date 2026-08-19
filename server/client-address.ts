@@ -26,8 +26,12 @@ export const DEFAULT_TRUSTED_PROXIES: readonly string[] = ['127.0.0.1', '::1'];
 /**
  * Длина цепочки `X-Forwarded-For`, дальше которой разбирать нечего. Заголовок
  * приходит снаружи, и без предела он служит способом занять процессор.
+ *
+ * Обрезается **правый** край: разбор идёт справа налево, и шаг, дописанный
+ * доверенным прокси, всегда последний. Срезав хвост, мы оставили бы в окне
+ * ровно ту часть цепочки, которую написал сам клиент.
  */
-const MAX_FORWARDED_HOPS = 32;
+export const MAX_FORWARDED_HOPS = 32;
 
 const IPV4_MAPPED_PREFIX = '::ffff:';
 
@@ -99,7 +103,7 @@ export function clientAddress(options: ClientAddressOptions): string {
   if (socket === undefined) return UNKNOWN_ADDRESS;
   if (!options.trusted.has(socket)) return socket;
 
-  const chain = (options.forwardedFor ?? '').split(',').slice(0, MAX_FORWARDED_HOPS);
+  const chain = (options.forwardedFor ?? '').split(',').slice(-MAX_FORWARDED_HOPS);
   for (let index = chain.length - 1; index >= 0; index -= 1) {
     const part = chain[index] ?? '';
     if (part.trim().length === 0) continue;

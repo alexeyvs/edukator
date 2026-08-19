@@ -28,9 +28,17 @@ export type TenantContext = ResolvedTenant;
 
 /** Что маршрут знает про допуск: кого пускать и какой ребёнок назван в адресе. */
 export interface TenantContextOptions {
-  allow?: readonly BearerKind[];
+  /** Кого пускать. Обязательно: маршрут без строки матрицы — не маршрут по умолчанию. */
+  allow: readonly BearerKind[];
   /** Ребёнок из адреса; у детских маршрутов его нет — там ребёнок сам предъявитель. */
   childId?: string;
+  /**
+   * Маршрут меняет состояние, хотя метод у него безопасный. Ставится там, где
+   * `GET` списывает задание из банка: детская cookie `SameSite=Lax` уезжает и
+   * на переходе с чужой страницы, так что без подтверждённого источника такой
+   * адрес — способ сжечь задание чужими руками.
+   */
+  mutating?: boolean;
 }
 
 /**
@@ -39,7 +47,7 @@ export interface TenantContextOptions {
  */
 export type TenantContextResolver = (
   request: FastifyRequest,
-  options?: TenantContextOptions,
+  options: TenantContextOptions,
 ) => TenantContext;
 
 /**
@@ -88,14 +96,15 @@ export interface CreateTenantContextOptions {
 /** Рабочее разрешение: предъявитель из заголовков, ребёнок из управляющей базы. */
 export function createTenantContext(options: CreateTenantContextOptions): TenantContextResolver {
   const now = options.now ?? ((): Date => new Date());
-  return (request, context = {}) =>
+  return (request, context) =>
     resolveTenant({
       control: options.control,
       tenants: options.tenants,
       headers: request.headers,
       method: request.method,
       now: now(),
-      ...(context.allow === undefined ? {} : { allow: context.allow }),
+      allow: context.allow,
       ...(context.childId === undefined ? {} : { childId: context.childId }),
+      ...(context.mutating === undefined ? {} : { mutating: context.mutating }),
     });
 }

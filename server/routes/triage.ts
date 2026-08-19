@@ -94,7 +94,9 @@ export function registerTriageRoutes(app: FastifyInstance, options: TriageRoutes
 
   app.get<{ Params: { id: string } }>('/api/triage/:id/next', (request, reply) => {
     try {
-      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      // Выдача триажа списывает задание из банка ровно так же, как обычная:
+      // источник подтверждается несмотря на безопасный метод.
+      const context = options.context(request, { allow: ROUTE_ACCESS.child, mutating: true });
       const db = context.tenant.db;
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;

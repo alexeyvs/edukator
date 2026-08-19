@@ -275,6 +275,44 @@ describe('readParentsDashboard', () => {
     });
   });
 
+  it('не выдумывает необязательные поля у минимальной попытки integrity', () => {
+    const { db, graph } = setup();
+    const runId = run(
+      db, 'math', 'math.fractions', 'run',
+      '2026-08-08T09:00:00.000Z', '2026-08-08T09:20:00.000Z', 1, 0,
+    );
+    const taskId = task(db, 'math.fractions');
+    const attemptId = Number(db.prepare(
+      `INSERT INTO attempts
+        (task_id, topic_id, run_id, answer, is_correct, hint_used, duration_ms, created_at)
+       VALUES (?, 'math.fractions', ?, 'нет', 0, 0, 1000, '2026-08-08T09:05:00.000Z')`,
+    ).run(taskId, runId).lastInsertRowid);
+    db.prepare(
+      `INSERT INTO integrity_reviews (run_id, status, created_at, updated_at)
+       VALUES (?, 'screening', ?, ?)`,
+    ).run(runId, NOW.toISOString(), NOW.toISOString());
+    db.prepare(
+      `INSERT INTO integrity_items
+        (run_id, task_id, attempt_id, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'pending', ?, ?)`,
+    ).run(runId, taskId, attemptId, NOW.toISOString(), NOW.toISOString());
+
+    const detail = readParentsRunDetail(db, graph, runId, NOW);
+    expect(detail).toMatchObject({ integrityStatus: 'screening' });
+    expect(detail?.attempts[0]).toEqual(expect.objectContaining({
+      question: 'q', explanation: '', integrity: { itemId: 1, status: 'pending' },
+    }));
+    expect(detail?.attempts[0]).not.toHaveProperty('instruction');
+    expect(detail?.attempts[0]).not.toHaveProperty('material');
+    expect(detail?.attempts[0]).not.toHaveProperty('materialFormat');
+  });
+
+  it('отвергает неразобранные часы снимка', () => {
+    const { db, graph } = setup();
+    expect(() => readParentsDashboard(db, graph, new Date(Number.NaN)))
+      .toThrow(/некорректное now/u);
+  });
+
   it('не раскрывает незавершённые и вышедшие из недельного окна занятия', () => {
     const { db, graph } = setup();
     const old = run(

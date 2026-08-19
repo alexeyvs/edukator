@@ -23,6 +23,26 @@ export class SignedOutError extends Error {
   }
 }
 
+/**
+ * Отказ, у которого сохранён код. Экрану одноразовой ссылки нужно отличать
+ * «ссылку уже погасили» (404 — новая, повторять нечего) от «запрос не доехал»
+ * (обрыв сети, 503 неготового сервера): в первом случае просить новую ссылку
+ * правильно, во втором — это совет выбросить работающую одноразовую ссылку,
+ * которую сервер не тронул.
+ */
+export class HttpError extends Error {
+  readonly status: number;
+
+  readonly code: string | undefined;
+
+  constructor(failure: HttpFailure) {
+    super(failure.message);
+    this.name = 'HttpError';
+    this.status = failure.status;
+    this.code = failure.code;
+  }
+}
+
 type SignedOutListener = () => void;
 
 const signedOutListeners = new Set<SignedOutListener>();
@@ -48,6 +68,15 @@ export interface RequestPolicy {
   signedOutOn401?: boolean;
 }
 
+/** Тело отказа, если оно вообще JSON. Не-JSON — не поломка клиента, а чужой ответ. */
+async function readErrorBody(response: Response): Promise<unknown> {
+  try {
+    return await response.json() as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Общий разбор JSON и безопасной ошибки для всех browser API. */
 export async function requestJson<T>(
   url: string,
@@ -57,8 +86,14 @@ export async function requestJson<T>(
   policy: RequestPolicy = {},
 ): Promise<T> {
   const response = init === undefined ? await fetch(url) : await fetch(url, init);
-  const body = await response.json() as unknown;
   if (!response.ok) {
+    // Тело отказа разбирается защищённо: отказать мог не сервер. Обратный прокси
+    // отвечает 401 и 502 страницей HTML, и `json()` бросал бы на ней
+    // `SyntaxError` раньше, чем разбор дошёл бы до `SignedOutError`, — то есть
+    // кончившаяся сессия за прокси показывала бы «не удалось загрузить» вместо
+    // экрана входа. Удачный ответ, наоборот, обязан быть JSON: там не-JSON
+    // означает не чужой ответ, а разъехавшийся контракт.
+    const body = await readErrorBody(response);
     const record = typeof body === 'object' && body !== null ? body as Record<string, unknown> : {};
     const serverMessage = typeof record['error'] === 'string' ? record['error'] : undefined;
     const code = typeof record['code'] === 'string' ? record['code'] : undefined;
@@ -72,7 +107,16 @@ export async function requestJson<T>(
       ...(code === undefined ? {} : { code }),
     });
   }
-  return body as T;
+  try {
+    return await response.json() as T;
+  } catch {
+    // Удачный ответ обязан быть JSON: не-JSON здесь означает не чужой ответ, а
+    // разъехавшийся контракт. Но `SyntaxError` браузера — строка на языке
+    // браузера («Unexpected end of JSON input»), а вызывающие рисуют
+    // `error.message` как есть, и вместо русского объяснения операции ученик
+    // видел бы английский текст разборщика.
+    throw errorFactory({ status: response.status, message: fallback });
+  }
 }
 
 export function jsonRequest(method: 'POST' | 'PUT', body?: unknown): RequestInit {

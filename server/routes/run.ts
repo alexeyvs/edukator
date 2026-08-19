@@ -8,7 +8,13 @@ import type { TopicGraph } from '../curriculum.js';
 import { SUBJECTS, type Subject } from '../db.js';
 import { forecastFor } from '../forecast.js';
 import { readTopicStates } from '../mastery.js';
-import { assertRunReadyForIntegrity, finishRun, runProgress, startRun, type RunProgress } from '../run.js';
+import {
+  assertRunReadyForIntegrity,
+  finishRun,
+  runProgress,
+  startRun,
+  type RunProgress,
+} from '../run.js';
 import { planFromDatabase } from '../scheduler.js';
 import { SessionError } from '../session-error.js';
 import { readStreak } from '../streak.js';

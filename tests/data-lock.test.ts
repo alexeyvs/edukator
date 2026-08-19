@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -37,6 +46,20 @@ describe('замок каталога данных', () => {
 
     lock.release();
     expect(existsSync(lock.path)).toBe(false);
+  });
+
+  // Замок въезжает на место дописанным: `open(..., 'wx')` оставлял бы на его
+  // месте пустой файл на всё время записи и `fsync`, а пустой замок соседний
+  // процесс считает нечитаемым, то есть брошенным, — и снимает с живого.
+  it('не показывает пустого замка и не оставляет времянок', () => {
+    const lock = acquireDataLock(dataDir, 'сервер');
+
+    expect(readFileSync(lock.path, 'utf8').trim().length).toBeGreaterThan(0);
+    expect(holder().nonce.length).toBeGreaterThan(0);
+    expect(readdirSync(dataDir)).toEqual([DATA_LOCK_FILE]);
+
+    lock.release();
+    expect(readdirSync(dataDir)).toEqual([]);
   });
 
   // Чужой процесс — единственное, от чего замок защищает: предел вызовов codex
@@ -86,9 +109,7 @@ describe('замок каталога данных', () => {
     second.release();
   });
 
-  // Иначе после `kill -9` или перезагрузки каталог оставался бы заперт до
-  // ручного `rm`, а сервер молча не поднимался бы.
-  it('перехватывает замок мёртвого чужого владельца', () => {
+  it('не перехватывает замок мёртвого владельца неатомарным снятием', () => {
     mkdirSync(dataDir, { recursive: true });
     writeFileSync(
       dataLockPath(dataDir),
@@ -96,26 +117,69 @@ describe('замок каталога данных', () => {
       { flag: 'wx' },
     );
 
-    const lock = acquireDataLock(dataDir, 'prefetch', { alive: () => false });
-
-    expect(holder()).toMatchObject({ pid: process.pid, owner: 'prefetch' });
-    lock.release();
+    expect(() => acquireDataLock(dataDir, 'prefetch', { alive: () => false }))
+      .toThrow(/выглядит брошенным.*удалите/u);
+    expect(holder()).toMatchObject({ pid: 4242, owner: 'сервер', nonce: 'aa' });
   });
 
-  // Обрыв между созданием файла и записью в него оставляет замок без владельца.
-  // Проверить его нечем, и вечно запертый каталог хуже перехвата.
-  it('перехватывает замок с нечитаемой записью', () => {
+  it('не снимает замок с повреждённой записью', () => {
     mkdirSync(dataDir, { recursive: true });
     writeFileSync(dataLockPath(dataDir), 'не json', { flag: 'wx' });
 
-    const lock = acquireDataLock(dataDir, 'сервер', {
+    expect(() => acquireDataLock(dataDir, 'сервер', {
       alive: (): boolean => {
         throw new Error('живость нечитаемого владельца не спрашивается');
       },
-    });
+    })).toThrow(/выглядит брошенным.*удалите/u);
+    expect(readFileSync(dataLockPath(dataDir), 'utf8')).toBe('не json');
+  });
 
-    expect(holder()).toMatchObject({ owner: 'сервер' });
-    lock.release();
+  // Нечитаемая **запись** (не json) и нечитаемый **файл** — разные вещи:
+  // первую проверить нечем, а второй проверить просто не дали, и разрешить по
+  // нему снять чужой живой замок значило бы завести в каталоге второй бюджет
+  // codex — ровно то, от чего замок и стоит.
+  it('не снимает замок, файл которого не удалось прочитать', () => {
+    // Замок чужого процесса: свой этот же вызов вернул бы по счётчику ссылок,
+    // не читая файла вовсе.
+    mkdirSync(dataDir, { recursive: true });
+    const path = dataLockPath(dataDir);
+    writeFileSync(
+      path,
+      JSON.stringify({ pid: 1, owner: 'сервер', since: '2026-08-19T10:00:00.000Z', nonce: 'чужой' }),
+      { flag: 'wx' },
+    );
+    // Права снимаются с самого файла: удалить его каталог позволяет по-прежнему,
+    // а прочитать — уже нет. Так же выглядят `EACCES` на чужом файле и `EMFILE`
+    // при исчерпанных дескрипторах.
+    chmodSync(path, 0o000);
+    let readable = true;
+    try {
+      readFileSync(path, 'utf8');
+    } catch {
+      readable = false;
+    }
+    // Под root права не действуют: проверять там нечего.
+    if (readable) return;
+
+    // Класс отказа важен не меньше текста: `buildServer` гасит запуск только на
+    // `DataLockBusyError`, а всякую другую ошибку считает незаписываемым
+    // каталогом и поднимается **без** замка — то есть рядом с живым владельцем,
+    // со второй парой слотов codex.
+    expect(() => acquireDataLock(dataDir, 'ручной прогрев', {
+      alive: (): boolean => {
+        throw new Error('живость владельца нечитаемого замка не спрашивается');
+      },
+    })).toThrow(DataLockBusyError);
+    expect(() => acquireDataLock(dataDir, 'ручной прогрев', {
+      alive: (): boolean => {
+        throw new Error('живость владельца нечитаемого замка не спрашивается');
+      },
+    })).toThrow(/EACCES/u);
+    // И, главное, чужой замок остался на месте: снять его — значит пустить в
+    // каталог второй процесс со своей парой слотов codex.
+    expect(existsSync(path)).toBe(true);
+
+    chmodSync(path, 0o600);
   });
 
   // Замок могли убрать руками, а на его место встать другой процесс: снять его
@@ -143,6 +207,21 @@ describe('замок каталога данных', () => {
 
     expect(holder()).toMatchObject({ owner: 'prefetch' });
     other.release();
+  });
+
+  it('не снимает забытый замок со своим же номером процесса', () => {
+    mkdirSync(dataDir, { recursive: true });
+    // Наш собственный pid в файле, о котором процесс уже не помнит, — это
+    // брошенный замок: написать его мог только он сам. Считая такой замок
+    // чужим и живым (`processAlive(process.pid)` всегда истинно), сервер
+    // отказывался бы стартовать на свободном каталоге до ручного `rm`.
+    writeFileSync(
+      dataLockPath(dataDir),
+      JSON.stringify({ pid: process.pid, owner: 'сервер', since: new Date(0).toISOString(), nonce: 'чужой' }),
+    );
+
+    expect(() => acquireDataLock(dataDir, 'prefetch')).toThrow(/выглядит брошенным.*удалите/u);
+    expect(holder()).toMatchObject({ pid: process.pid, owner: 'сервер', nonce: 'чужой' });
   });
 
   describe('живость владельца', () => {

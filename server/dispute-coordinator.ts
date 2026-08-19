@@ -49,6 +49,16 @@ export interface DisputeCoordinatorOptions {
   disputeRetryMs?: number;
 }
 
+/**
+ * Пауза перед следующим повтором: удваивается с каждым отказом и упирается в
+ * потолок. Вынесена наружу, чтобы проверяться литералами: тесты гоняют
+ * координатор с `disputeRetryMs: 1`, и на такой паузе постоянная задержка
+ * неотличима от растущей.
+ */
+export function nextDisputeRetryDelay(delay: number): number {
+  return Math.min(delay * 2, DISPUTE_RETRY_MAX_MS);
+}
+
 function defaultLog(message: string): void {
   process.stderr.write(`${message}\n`);
 }
@@ -169,7 +179,7 @@ export class DisputeCoordinator {
   #scheduleRetry(id: number): void {
     if (this.#stopped || !this.#available() || this.#retryTimers.has(id)) return;
     const delay = this.#retryDelays.get(id) ?? this.#retryMs;
-    this.#retryDelays.set(id, Math.min(delay * 2, DISPUTE_RETRY_MAX_MS));
+    this.#retryDelays.set(id, nextDisputeRetryDelay(delay));
     const timer = setTimeout(() => {
       this.#retryTimers.delete(id);
       this.schedule(id);

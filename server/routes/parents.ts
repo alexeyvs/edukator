@@ -34,6 +34,7 @@ import {
 } from '../control-db.js';
 import { clientAddress, readTrustedProxies } from '../client-address.js';
 import { headerValue, type Bearer } from '../auth.js';
+import { integrityPublicJson } from './integrity.js';
 import {
   ROUTE_ACCESS,
   childIdParam,
@@ -41,7 +42,6 @@ import {
   type TenantContext,
   type TenantContextResolver,
 } from './tenant-context.js';
-import { integrityPublicJson } from './integrity.js';
 
 type ComputerAccessMode = ComputerAccessOverrideMode | 'automatic';
 
@@ -135,6 +135,7 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
     };
   }
 
+  /** Проверяет PIN только для действия с детской машины; родитель уже вошёл паролем. */
   function authorizeChange(
     context: TenantContext,
     request: FastifyRequest,

@@ -5,10 +5,26 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime
+from http.client import HTTPConnection, HTTPSConnection
 import json
+import socket
+import threading
+from time import monotonic
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import (
+    HTTPHandler,
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    OpenerDirector,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
+
+
+class GateTokenRejected(RuntimeError):
+    """Edukator rejected the controller's agent credential."""
 
 
 @dataclass(frozen=True)
@@ -152,6 +168,75 @@ def parse_gate(raw: Any) -> GateState:
     )
 
 
+# Общий срок текущего запроса. Поточная переменная, а не аргумент, потому что
+# соединение заводит urllib внутри `open`: подсунуть ему число можно только так.
+# Каждый `_fetch_gate` идёт своим `asyncio.to_thread`, так что чужого срока в
+# ней не окажется.
+_DEADLINE = threading.local()
+
+
+class _DeadlineConnection:
+    """Соединение, закрывающееся по общему сроку запроса.
+
+    Сокетный `timeout` отмеряет **отдельную** операцию, а не запрос целиком, и
+    статус со строками заголовков читается до всякого тела: собеседник,
+    отдающий бесконечную череду `100 Continue` (или заголовки по строке) чуть
+    чаще, чем раз в `timeout`, держит `getresponse()` сколько угодно долго.
+    Снаружи такой поток не отменить — брошенный `asyncio.wait_for` освобождает
+    только ждущего, — и пара таких за сутки опроса съедает пул `to_thread`
+    целиком: каждый следующий `fetch_gate` отваливается по сроку, ни разу не
+    сходив на сервер, то есть контроллер перестаёт замечать и выздоровевший
+    сервер. Срок здесь тот же, что у `_read_body` и у `fetch_gate`: разъехавшись,
+    они дали бы либо поток, переживающий свой запрос, либо отказ раньше срока.
+    """
+
+    def _abort(self) -> None:
+        """Обрывает чтение из чужого потока.
+
+        Одного `close()` мало: `makefile` держит свою ссылку на сокет, и закрытие
+        соединения при живом читателе фактический дескриптор не трогает —
+        `getresponse()` продолжал бы читать заголовки как ни в чём не бывало.
+        `shutdown` же обрывает сам обмен, и читающий получает конец потока.
+        """
+        opened = self.sock  # type: ignore[attr-defined]
+        if opened is not None:
+            try:
+                opened.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                # Собеседник уже отвалился сам: обрывать нечего.
+                pass
+
+    def getresponse(self) -> Any:
+        deadline = getattr(_DEADLINE, "value", None)
+        if deadline is None:
+            return super().getresponse()  # type: ignore[misc]
+        watchdog = threading.Timer(max(0.0, deadline - monotonic()), self._abort)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            return super().getresponse()  # type: ignore[misc]
+        finally:
+            watchdog.cancel()
+
+
+class _DeadlineHTTPConnection(_DeadlineConnection, HTTPConnection):
+    pass
+
+
+class _DeadlineHTTPSConnection(_DeadlineConnection, HTTPSConnection):
+    pass
+
+
+class _DeadlineHTTPHandler(HTTPHandler):
+    def http_open(self, req: Any) -> Any:
+        return self.do_open(_DeadlineHTTPConnection, req)
+
+
+class _DeadlineHTTPSHandler(HTTPSHandler):
+    def https_open(self, req: Any) -> Any:
+        return self.do_open(_DeadlineHTTPSConnection, req, context=self._context)
+
+
 class _RefuseRedirect(HTTPRedirectHandler):
     """Запрещает переходы: urllib унёс бы агентский токен на чужой адрес."""
 
@@ -159,7 +244,63 @@ class _RefuseRedirect(HTTPRedirectHandler):
         return None
 
 
-_OPENER = build_opener(_RefuseRedirect)
+def _build_opener() -> OpenerDirector:
+    """Открыватель, который несёт агентский токен ровно на указанный адрес.
+
+    `ProxyHandler({})` выписан руками: без него `build_opener` ставит
+    умолчательный, а тот читает `http_proxy`/`https_proxy` и системные настройки
+    macOS. Адрес Edukator — домашний, по документации простой http, и `no_proxy`
+    его не исключает, так что настроенный прокси получал бы
+    `Authorization: Bearer <агентский токен>` открытым текстом. Запрет переходов
+    рядом закрывает ровно ту же дыру с другой стороны.
+    """
+    return build_opener(
+        ProxyHandler({}),
+        _RefuseRedirect,
+        _DeadlineHTTPHandler,
+        _DeadlineHTTPSHandler,
+    )
+
+
+_OPENER = _build_opener()
+
+
+# Ответ `gate/status` — десяток полей. Предел стоит не от сервера, а от того,
+# что на его адресе может оказаться что угодно: `json.load` читает поток до
+# конца, и бесконечная выдача чужой службы съела бы память контроллера.
+MAX_GATE_BODY = 64 * 1024
+
+
+# Во сколько раз общий срок больше сокетного. `timeout` у `urlopen` действует на
+# **отдельную** операцию с сокетом, а не на запрос целиком: собеседник, отдающий
+# по байту раз в четыре секунды, продлевает чтение бесконечно.
+GATE_DEADLINE_FACTOR = 3
+
+
+def _read_body(response: Any, deadline: float) -> bytes:
+    """Тело ответа с общим сроком на чтение.
+
+    `response.read(n)` возвращается только с полными `n` байтами или концом
+    потока, а сокетный `timeout` отмеряется каждой отдельной порции: собеседник,
+    отдающий по байту раз в четыре секунды, держит один такой вызов сколько
+    угодно долго. Срок поэтому проверяется между порциями, а не вокруг всего
+    чтения: снаружи его отменить нечем — поток `asyncio.to_thread` не
+    прерывается, и брошенный `wait_for`-ом он остаётся висеть на сокете. Пара
+    таких за сутки опроса — и рабочих потоков не остаётся вовсе: каждый
+    следующий `fetch_gate` отваливается по сроку, ни разу не сходив на сервер,
+    то есть контроллер перестаёт замечать и выздоровевший сервер.
+    """
+    chunks: list[bytes] = []
+    size = 0
+    while size <= MAX_GATE_BODY:
+        if monotonic() >= deadline:
+            raise RuntimeError("Edukator не дочитан за отведённый срок")
+        chunk = response.read1(MAX_GATE_BODY + 1 - size)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
 
 
 def _fetch_gate(url: str, token: str, timeout: float) -> GateState:
@@ -169,14 +310,24 @@ def _fetch_gate(url: str, token: str, timeout: float) -> GateState:
         headers={"Authorization": f"Bearer {token}"},
         method="GET",
     )
+    deadline = monotonic() + timeout * GATE_DEADLINE_FACTOR
+    _DEADLINE.value = deadline
     try:
         with _OPENER.open(request, timeout=timeout) as response:
-            return parse_gate(json.load(response))
+            payload = _read_body(response, deadline)
+            if len(payload) > MAX_GATE_BODY:
+                raise RuntimeError(f"Ответ Edukator длиннее {MAX_GATE_BODY} байт")
+            return parse_gate(json.loads(payload))
     except HTTPError as error:
+        # `HTTPError` — это ещё и открытый ответ: `_OPENER.open` бросает его до
+        # входа в `with`, так что сокет никто не закроет, а сама ошибка живёт
+        # причиной у `RuntimeError` весь отступ (до пяти минут). Отозванный токен
+        # даёт 401 на каждом опросе — то есть по дескриптору на опрос.
+        error.close()
         if error.code in (401, 403):
             # Отозванное или подменённое устройство: причина названа прямо,
             # но сам токен в текст не попадает — его читают в логах.
-            raise RuntimeError(
+            raise GateTokenRejected(
                 f"Edukator не принял агентский токен (HTTP {error.code}); "
                 "выпустите устройству новую ссылку"
             ) from error
@@ -185,7 +336,30 @@ def _fetch_gate(url: str, token: str, timeout: float) -> GateState:
         raise RuntimeError(f"Edukator недоступен: {error.reason}") from error
     except (OSError, json.JSONDecodeError, ValueError) as error:
         raise RuntimeError(f"Ответ Edukator не принят: {error}") from error
+    finally:
+        _DEADLINE.value = None
 
 
 async def fetch_gate(url: str, token: str, timeout: float = 5.0) -> GateState:
-    return await asyncio.to_thread(_fetch_gate, url, token, timeout)
+    """Состояние доступа с общим сроком на весь запрос.
+
+    Без него зависшее чтение оставляло бы `run_controller` ждать навечно: ни
+    ветка аварийной блокировки, ни `fail_closed_after_access_expiry` не
+    выполнились бы ни разу, и выданный доступ дожил бы до своего конца —
+    контроллер завис бы **открытым**, то есть потерял бы единственное свойство,
+    ради которого он и написан.
+
+    Ждущего он, однако, только освобождает: поток `asyncio.to_thread` брошенный
+    `wait_for` не прерывает. Заканчивает поток тот же срок, отмеренный **внутри**
+    (`_read_body`), и держится он на одном числе с этим: разъехавшись, они дали
+    бы либо поток, переживающий свой запрос, либо отказ раньше срока.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_fetch_gate, url, token, timeout),
+            timeout=timeout * GATE_DEADLINE_FACTOR,
+        )
+    except asyncio.TimeoutError as error:
+        raise RuntimeError(
+            f"Edukator не ответил за {timeout * GATE_DEADLINE_FACTOR:.0f} с"
+        ) from error

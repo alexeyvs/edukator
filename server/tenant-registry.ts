@@ -181,9 +181,13 @@ export interface TenantRegistryOptions {
   disputeBudget?: DisputeCoordinatorOptions['disputeBudget'];
   /** Пауза перед автоматическим повтором незакрытого спора. */
   disputeRetryMs?: number;
+  /** Проверяющий осмысленность; по умолчанию — отдельный вызов codex. */
   integrityReview?: IntegrityCoordinatorOptions['review'];
+  /** Общий процессный бюджет проверки осмысленности. */
   integrityBudget?: IntegrityCoordinatorOptions['budget'];
+  /** Первая пауза фонового повтора проверки. */
   integrityRetryMs?: number;
+  /** Часы проверок; обычно совпадают с часами HTTP-маршрутов. */
   now?: () => Date;
 }
 
@@ -371,7 +375,18 @@ export class TenantRegistry {
     // сервера: спор переживает процесс в SQLite, а база второго ребёнка
     // открывается только по первому его обращению — и до него незакрытый спор
     // остался бы без исполнителя навсегда.
-    disputes.restore();
+    //
+    // Отказ восстановления аренду не отменяет: она уже в кеше, часть споров
+    // могла встать на разбор и держать соединение, так что закрыть базу отсюда
+    // нельзя, а пятисотка наружу запретила бы ребёнку заниматься из-за спора,
+    // который и без того переспросится следующим нажатием кнопки.
+    try {
+      disputes.restore();
+    } catch (error) {
+      this.#log(
+        `незакрытые споры ребёнка ${childId} не восстановлены: ${(error as Error).message}`,
+      );
+    }
     return tenant;
   }
 

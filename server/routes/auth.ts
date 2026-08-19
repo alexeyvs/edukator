@@ -24,19 +24,23 @@ import {
   redeemDeviceInvite,
   redeemParentInvite,
   revokeParentSession,
+  verifyParentPassword,
   type LoginTarget,
 } from '../control-db.js';
 import {
   AUTH_MESSAGE,
   AUTH_STATUS,
+  ACTOR_COOKIE,
   CHILD_COOKIE,
   PARENT_COOKIE,
   headerValue,
   isSameOrigin,
   parseCookies,
   resolveBearer,
+  resolveBrowserPrincipals,
 } from '../auth.js';
 import { clientAddress, readTrustedProxies } from '../client-address.js';
+import { MAX_SECRET_LENGTH } from '../secrets.js';
 
 /**
  * Срок детской cookie. Десять лет — это не «навсегда по невнимательности»:
@@ -112,10 +116,30 @@ export function serializeCookie(
   return parts.join('; ');
 }
 
-/** Что читает вход из тела запроса. Лишние поля — повод отказать, а не молчать. */
+/** Выбор роли — HttpOnly cookie, а не доверенный параметр каждого запроса. */
+function serializeActorCookie(value: 'parent' | 'child', secure: boolean): string {
+  const parts = [
+    `${ACTOR_COOKIE}=${value}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Strict',
+    `Max-Age=${CHILD_COOKIE_MAX_AGE_SECONDS}`,
+  ];
+  if (secure) parts.push('Secure');
+  return parts.join('; ');
+}
+
+/**
+ * Что читает вход из тела запроса. Лишние поля — повод отказать, а не молчать:
+ * тело входа собирает наш же клиент, и появление в нём третьего поля означает не
+ * «клиент стал богаче», а что запрос пришёл не оттуда, откуда мы думаем. Так же
+ * строг `readMode` в родительских маршрутах.
+ */
 function readLoginBody(body: unknown): { email: string; password: string } | undefined {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined;
   const fields = body as Record<string, unknown>;
+  const names = Object.keys(fields);
+  if (names.length !== 2) return undefined;
   const email = fields['email'];
   const password = fields['password'];
   if (typeof email !== 'string' || typeof password !== 'string') return undefined;
@@ -126,6 +150,22 @@ function readPasswordBody(body: unknown): string | undefined {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined;
   const password = (body as Record<string, unknown>)['password'];
   return typeof password === 'string' ? password : undefined;
+}
+
+type PersonaRequest = { kind: 'child' } | { kind: 'parent'; password: string };
+
+function readPersonaBody(body: unknown): PersonaRequest | undefined {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined;
+  const fields = body as Record<string, unknown>;
+  if (fields['kind'] === 'child' && Object.keys(fields).length === 1) return { kind: 'child' };
+  if (
+    fields['kind'] === 'parent'
+    && typeof fields['password'] === 'string'
+    && Object.keys(fields).length === 2
+  ) {
+    return { kind: 'parent', password: fields['password'] };
+  }
+  return undefined;
 }
 
 /**
@@ -198,7 +238,18 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
 
     const result = email === undefined ? undefined : loginParent(control, email, body.password, now());
     if (result === undefined || !result.ok) {
-      recordLoginFailure(control, target, now());
+      // Незаписанная неудача — та же недоступность счётчика, что и на входе в
+      // маршрут: `recordLoginFailure` возвращает её `reason === 'unavailable'`,
+      // и молча отдать на неё обычный 401 значило бы не считать попытки ровно
+      // тогда, когда их считать и нужно, — счётчик обязан быть fail-closed на
+      // обоих концах.
+      const counted = recordLoginFailure(control, target, now());
+      if (counted.reason === 'unavailable') {
+        const retryAfter = Math.max(1, Math.ceil(counted.retryAfterMs / 1000));
+        return reply.header('retry-after', retryAfter).code(503).send({
+          error: 'Вход временно недоступен',
+        });
+      }
       return reply.code(401).send({ error: LOGIN_REJECTED });
     }
     clearLoginFailures(control, target);
@@ -245,12 +296,14 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
 
     const result = redeemParentInvite(control, token, password, now());
     if (!result.ok) {
-      // Про короткий пароль сказать можно и нужно: это свойство присланного, а
+      // Про негодный пароль сказать можно и нужно: это свойство присланного, а
       // не признак существования ссылки, и молчание здесь оставило бы родителя
-      // гадать, почему приглашение «не работает».
+      // гадать, почему приглашение «не работает». Названы обе границы:
+      // `weak-password` означает и слишком короткий, и слишком длинный, и текст
+      // про одну только длину отправлял бы удлинять пароль, который уже длинен.
       if (result.reason === 'weak-password') {
         return reply.code(400).send({
-          error: `Пароль короче ${MIN_PASSWORD_LENGTH} знаков`,
+          error: `Пароль должен быть от ${MIN_PASSWORD_LENGTH} до ${MAX_SECRET_LENGTH} знаков`,
         });
       }
       return reply.code(404).send({ error: LINK_REJECTED });
@@ -277,13 +330,78 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
     // Имени ребёнка здесь нет намеренно: устройство спрашивает его у `me` тем
     // же запросом, каким проверяет, что cookie действительно приняли.
     return reply
-      .header('set-cookie', serializeCookie('child', claim.token, { secure }))
+      // Погашение ссылки — явный выбор режима ученика. Без второй cookie
+      // ранее выбранный родитель оставался активным, хотя экран подтверждения
+      // обещает сразу перейти к ученику.
+      .header('set-cookie', [
+        serializeCookie('child', claim.token, { secure }),
+        serializeActorCookie('child', secure),
+      ])
       .send({ kind: 'child', childId: claim.childId });
+  });
+
+  app.post('/api/auth/persona', (request, reply) => {
+    const blocked = crossOrigin(request, reply);
+    if (blocked !== undefined) return blocked;
+
+    const persona = readPersonaBody(request.body);
+    if (persona === undefined) {
+      return reply.code(400).send({ error: 'Для родителя нужны kind и password, для ученика — kind' });
+    }
+    const browser = resolveBrowserPrincipals(control, request.headers, now());
+    // Переключатель существует только между двумя уже действительными
+    // сессиями. Значение тела и preference-cookie новых прав не создают.
+    if (browser.parent === undefined || browser.child === undefined) {
+      return reply.code(409).send({ error: 'Переключение недоступно' });
+    }
+    if (persona.kind === 'parent') {
+      const target: LoginTarget = {
+        kind: 'password',
+        email: browser.parent.email,
+        address: address(request),
+      };
+      const gate = checkLoginGate(control, target, now());
+      if (!gate.allowed) {
+        const retryAfter = Math.max(1, Math.ceil(gate.retryAfterMs / 1000));
+        return reply.header('retry-after', retryAfter).code(gate.reason === 'unavailable' ? 503 : 429).send({
+          error: gate.reason === 'unavailable'
+            ? 'Вход временно недоступен'
+            : 'Слишком много неудачных попыток входа, повторите позже',
+        });
+      }
+      if (!verifyParentPassword(control, browser.parent.parentId, persona.password)) {
+        const counted = recordLoginFailure(control, target, now());
+        if (counted.reason === 'unavailable') {
+          const retryAfter = Math.max(1, Math.ceil(counted.retryAfterMs / 1000));
+          return reply.header('retry-after', retryAfter).code(503).send({ error: 'Вход временно недоступен' });
+        }
+        return reply.code(401).send({ error: LOGIN_REJECTED });
+      }
+      clearLoginFailures(control, target);
+    }
+    return reply
+      .header('set-cookie', serializeActorCookie(persona.kind, secure))
+      .send({
+        kind: 'both',
+        active: persona.kind,
+        parent: { email: browser.parent.email },
+        child: { childId: browser.child.childId, name: browser.child.name },
+      });
   });
 
   // `me` отвечает 200 и на «никого нет»: 401 здесь заставил бы клиент считать
   // ошибкой обычное состояние незалогиненной страницы входа.
   app.get('/api/auth/me', (request, reply) => {
+    const browser = resolveBrowserPrincipals(control, request.headers, now());
+    if (browser.parent !== undefined && browser.child !== undefined) {
+      const selected = parseCookies(request.headers.cookie).get(ACTOR_COOKIE);
+      return reply.send({
+        kind: 'both',
+        active: selected === 'parent' ? 'parent' : 'child',
+        parent: { email: browser.parent.email },
+        child: { childId: browser.child.childId, name: browser.child.name },
+      });
+    }
     const bearer = resolveBearer(control, request.headers, now());
     if (bearer === undefined) return reply.send({ kind: 'anonymous' });
     if (bearer.kind === 'parent') {
@@ -315,5 +433,6 @@ export function registerUnavailableAuth(app: FastifyInstance, reason: string): v
   app.get('/api/auth/parent/invite/:token', send);
   app.post('/api/auth/parent/invite/:token', send);
   app.post('/api/auth/child/claim/:token', send);
+  app.post('/api/auth/persona', send);
   app.get('/api/auth/me', send);
 }

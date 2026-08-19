@@ -564,6 +564,30 @@ describe('родительский дашборд', () => {
     await waitFor(() => expect(api.read).toHaveBeenCalledOnce());
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
+  it('оставляет возврат к семье и на отказе, и на ожидании', async () => {
+    const api = parentsApi();
+    let release: (() => void) | undefined;
+    vi.mocked(api.read).mockImplementation(() => new Promise((_, fail) => {
+      release = () => fail(new Error('Дашборд временно недоступен'));
+    }));
+    const onClick = vi.fn();
+    render(
+      <ParentsScreen childId="c-1" api={api} home={{ label: 'К составу семьи', onClick }} />,
+    );
+
+    // Родитель попал сюда из состава семьи: экран без выхода — тупик, из
+    // которого можно только перезагрузить страницу.
+    fireEvent.click(await screen.findByRole('button', { name: 'К составу семьи' }));
+    await act(async () => {
+      release?.();
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Дашборд временно недоступен');
+    fireEvent.click(screen.getByRole('button', { name: 'К составу семьи' }));
+    expect(onClick).toHaveBeenCalledTimes(2);
+  });
+
   it('не спрашивает PIN у вошедшего родителя и меняет режим без него', async () => {
     const api = parentsApi({
       ...DASHBOARD,

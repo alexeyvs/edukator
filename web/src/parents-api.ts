@@ -141,6 +141,11 @@ export function parentsApiFor(childId: string): ParentsApi {
       },
       'Не получилось изменить режим доступа',
       ({ status, message }) => new ComputerAccessError(message, status),
+      // 401 здесь значит разное в зависимости от того, был ли предъявлен PIN.
+      // С PIN это «не тот PIN», и выкидывать за него со сводки нельзя. Без PIN
+      // (родительская сессия его не предъявляет вовсе) 401 может означать
+      // только «сессии больше нет» — и тогда нужен экран входа, а не красная
+      // строка под кнопкой. См. `http.ts`.
       { signedOutOn401: pin === undefined },
     ),
     approveIntegrity: (runId, itemId, pin) => requestJson<IntegrityStatusResponse>(

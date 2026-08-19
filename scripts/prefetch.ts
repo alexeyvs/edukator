@@ -25,6 +25,12 @@
  * одновременных вызовов codex процессный, и второй процесс на том же каталоге
  * завёл бы вторую пару слотов — занятие ученика встало бы в очередь за
  * прогревом (см. `server/data-lock.ts`).
+ *
+ * Суточная квота на нём та же, что у сервера, и списывается в ту же
+ * `control.db`: предел в 60 вызовов на ребёнка стоит на расходе за московские
+ * сутки, а не на способе запуска. Не считай прогрев квотой, `--all --cycles 3`
+ * тратил бы её незаметно и оставлял бы диспетчеру полный счётчик на те же
+ * сутки — то есть предела не было бы вовсе.
  */
 import { existsSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -33,15 +39,19 @@ import { openDatabase, SUBJECTS, type Subject } from '../server/db.js';
 import { writeFileAtomic } from '../server/atomic-write.js';
 import {
   childDatabasePath,
+  CODEX_DAILY_QUOTA,
+  isChildParentDisabled,
   isChildServiceable,
   listServiceableChildren,
   openControlDatabase,
   readChild,
+  readCodexQuota,
 } from '../server/control-db.js';
 import { controlDatabasePath, dataDir as resolveDataDir } from '../server/data-dir.js';
 import { acquireDataLock, DataLockBusyError, PREFETCH_LOCK_OWNER } from '../server/data-lock.js';
 import { CURRICULUM_DIR, loadCurriculum, syncTopicState } from '../server/curriculum.js';
 import type { CodexRunner } from '../server/codex/client.js';
+import { createQuotedRunner } from '../server/codex/quota.js';
 import {
   collectSeedTasks,
   formatSeedBank,
@@ -99,6 +109,14 @@ export interface PrefetchOptions {
   produce?: TaskProducer;
   /** Подменяемый вызов codex. */
   run?: CodexRunner;
+  /**
+   * Спрашивается ровно тогда, когда цикл отчитался недоступностью codex:
+   * `CodexQuotaError` наследует `CodexUnavailableError`, и по самому отчёту
+   * «модель не отвечает» неотличимо от «ребёнок выбрал суточную квоту».
+   * Различает их только счётчик в `control.db`, которого у прогрева одной базы
+   * нет, — поэтому вопрос задаёт обход (`prefetchChildren`).
+   */
+  quotaExhausted?: () => boolean;
   log?: WorkerLog;
 }
 
@@ -115,6 +133,12 @@ export interface PrefetchResult {
    * прогон.
    */
   exportFailed: Subject[];
+  /**
+   * Прогон упёрся в суточную квоту ребёнка. Не отказ: квота — предел расхода, а
+   * не поломка, и `&&`-цепочка с ночным `--all` не должна разваливаться из-за
+   * ребёнка, который сегодня уже назанимался.
+   */
+  quotaExhausted: boolean;
 }
 
 export interface PrefetchChildrenOptions extends Omit<PrefetchOptions, 'dbPath'> {
@@ -131,8 +155,19 @@ export interface ChildPrefetchResult extends PrefetchResult {
   childId: string;
 }
 
+/** Ребёнок, чей прогрев сорвался целиком: до отчёта дело не дошло. */
+export interface ChildPrefetchFailure {
+  childId: string;
+  reason: string;
+}
+
 export interface PrefetchChildrenResult {
   children: ChildPrefetchResult[];
+  /**
+   * Дети, чей заход не состоялся вовсе (базы нет, файл испорчен). Отдельно от
+   * `children`: там лежат отчёты, а здесь причина, по которой отчёта нет.
+   */
+  failed: ChildPrefetchFailure[];
 }
 
 export const DEFAULT_CYCLES = 1;
@@ -166,7 +201,10 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
   if (options.dbPath === undefined || options.dbPath.trim() === '') {
     throw new Error('Прогрев не знает, какую базу греть: путь ребёнка не задан');
   }
-  const db = openDatabase(options.dbPath);
+  // `fileMustExist` обязателен: без него отсутствующий файл не отказ, а пустая
+  // база со свежей схемой. Прогрев наполнил бы её, отчитался успехом и скрыл
+  // потерю прогресса ребёнка — ровно то, ради чего его и запускали.
+  const db = openDatabase(options.dbPath, { fileMustExist: true });
 
   try {
     syncTopicState(db, graph);
@@ -197,6 +235,7 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
     const missingSeed = new Set<string>(seeded.missing);
 
     const reports: CycleReport[] = [];
+    let quotaExhausted = false;
     for (let cycle = 1; cycle <= cycles; cycle += 1) {
       const report = await runWarmupCycle({
         db,
@@ -221,7 +260,17 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
       // Дальше пойдут те же темы с тем же результатом: codex не вернётся между
       // циклами, а ждать его тут, в ручном запуске, незачем.
       if (report.codexUnavailable) {
-        log('цикл пополнения прерван: codex недоступен');
+        // Квота переспрашивается ровно так же, как у диспетчера: она приезжает
+        // той же недоступностью, но означает не поломку, а исчерпанный дневной
+        // расход одного ребёнка. Назвав её «codex недоступен», обход и врал бы о
+        // причине, и возвращал бы единицу на здоровом прогреве всей остальной
+        // семьи.
+        quotaExhausted = options.quotaExhausted?.() === true;
+        log(
+          quotaExhausted
+            ? 'цикл пополнения прерван: суточная квота codex исчерпана'
+            : 'цикл пополнения прерван: codex недоступен',
+        );
         break;
       }
       // Та же остановка по второму признаку, что и у воркера: просроченная
@@ -307,7 +356,7 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
       }
     }
 
-    return { cycles: reports, seeded, exported, exportFailed };
+    return { cycles: reports, seeded, exported, exportFailed, quotaExhausted };
   } finally {
     db.close();
   }
@@ -362,9 +411,22 @@ export async function prefetchChildren(
   }
 
   try {
-    const control = openControlDatabase(controlDatabasePath(dir));
-    let children: string[];
+    const controlPath = controlDatabasePath(dir);
+    // Опечатка в `--data-dir` иначе тиха вдвойне: замок уже создал каталог, а
+    // `openControlDatabase` завёл бы рядом пустую управляющую базу и отчитался
+    // «нет ни одного готового ребёнка» — то есть назвал бы пустым сервер, а не
+    // каталог, которого нет.
+    if (!existsSync(controlPath)) {
+      throw new Error(
+        `В каталоге ${dir} нет управляющей базы: проверьте --data-dir или EDUKATOR_DATA_DIR`,
+      );
+    }
+    // Соединение живёт до конца обхода: на нём же считается суточная квота
+    // каждого ребёнка, и закрыть его сразу после выбора детей значило бы греть
+    // мимо счётчика.
+    const control = openControlDatabase(controlPath, { fileMustExist: true });
     try {
+      let children: string[];
       if (childId === undefined) {
         children = listServiceableChildren(control).map((child) => child.id);
         if (children.length === 0) {
@@ -381,19 +443,57 @@ export async function prefetchChildren(
               (child.retiredAt === undefined ? '' : ', выведен'),
           );
         }
+        // Отключённого родителя `--all` отсекает выборкой, а по имени ребёнка
+        // его не видно вовсе: `isChildServiceable` смотрит только на саму
+        // строку. Без этой проверки `npm run parent -- disable` обходился бы
+        // одним `--child`, а суточная квота отключённой семьи тратилась бы
+        // дальше.
+        if (isChildParentDisabled(control, childId)) {
+          throw new Error(`Ребёнок ${childId} не обслуживается: родитель отключён`);
+        }
         children = [child.id];
       }
+
+      const results: ChildPrefetchResult[] = [];
+      const failed: ChildPrefetchFailure[] = [];
+      for (const id of children) {
+        log(`прогрев ребёнка ${id}`);
+        // Отказ одного ребёнка не отменяет прогрев остальных — как и у копии
+        // каталога. Вылет отсюда наружу оставил бы холодной очередь всех
+        // следующих детей и потерял бы уже готовые отчёты предыдущих: `--all`
+        // зовут перед занятием всей семьи, и пропавшая база одного из них не
+        // повод посадить остальных за пустой банк. В код возврата отказ всё
+        // равно попадает — через `prefetchChildrenFailed`.
+        try {
+          const result = await prefetch({
+            ...shared,
+            dbPath: childDatabasePath(dir, id),
+            // Квота надевается ровно там же, где у сервера, — на сам вызов
+            // модели, а не на бюджет: за одним слотом семафора прячется от двух
+            // вызовов до шести. Подменённый в тестах `run` обёртка оборачивает,
+            // а не теряет. Своя квота у каждого ребёнка, поэтому исчерпавший её
+            // обрывает свой заход, а не обход.
+            run: createQuotedRunner({
+              control,
+              childId: id,
+              ...(shared.run === undefined ? {} : { run: shared.run }),
+            }),
+            // Тот же счётчик, что списывает обёртка: спрошенный после отказа, он
+            // и отличает исчерпанную квоту от недоступной модели.
+            quotaExhausted: () =>
+              readCodexQuota(control, id, new Date(), CODEX_DAILY_QUOTA).remaining <= 0,
+          });
+          results.push({ childId: id, ...result });
+        } catch (error) {
+          const reason = (error as Error).message;
+          log(`ребёнок ${id} не прогрет: ${reason}`);
+          failed.push({ childId: id, reason });
+        }
+      }
+      return { children: results, failed };
     } finally {
       control.close();
     }
-
-    const results: ChildPrefetchResult[] = [];
-    for (const id of children) {
-      log(`прогрев ребёнка ${id}`);
-      const result = await prefetch({ ...shared, dbPath: childDatabasePath(dir, id) });
-      results.push({ childId: id, ...result });
-    }
-    return { children: results };
   } finally {
     lock.release();
   }
@@ -514,6 +614,12 @@ function storedTotal(result: PrefetchResult): number {
  * самую `&&`-цепочку, ради которой признак и заведён.
  */
 export function prefetchFailed(result: PrefetchResult): boolean {
+  // Исчерпанная квота из признака выключает весь прогон целиком — как
+  // `everySweepFailed` выключает ребёнка с `skipped='quota'`. Заход обрывается
+  // ею **посреди** работы, так что рядом с ней в отчёте лежат и неудачные
+  // попытки, и нулевой итог: посчитав их, ночной `--all` возвращал бы единицу
+  // каждый раз, когда ученик днём выбрал свои шестьдесят вызовов.
+  if (result.quotaExhausted) return result.exportFailed.length > 0;
   return (
     result.exportFailed.length > 0 ||
     result.cycles.some((cycle) => cycle.codexUnavailable) ||
@@ -527,7 +633,7 @@ export function prefetchFailed(result: PrefetchResult): boolean {
  * третий сядет за пустую очередь.
  */
 export function prefetchChildrenFailed(result: PrefetchChildrenResult): boolean {
-  return result.children.some(prefetchFailed);
+  return result.failed.length > 0 || result.children.some(prefetchFailed);
 }
 
 async function main(): Promise<void> {
@@ -545,10 +651,17 @@ async function main(): Promise<void> {
         ? `, посев выгружен в ${child.exported.length} файл(ов)` +
           (child.exportFailed.length === 0 ? '' : `, не выгружен: ${child.exportFailed.join(', ')}`)
         : '';
+    // Исчерпанная квота называется в итоге, а не только в логе: без неё
+    // «0 новых заданий» при нулевом коде возврата читается как «всё уже тёплое».
+    const quotaSummary = child.quotaExhausted ? ', суточная квота исчерпана' : '';
     process.stdout.write(
       `prefetch ${child.childId}: ${stored} новых задани(й) за ` +
-        `${child.cycles.length} цикл(ов)${exportSummary}\n`,
+        `${child.cycles.length} цикл(ов)${quotaSummary}${exportSummary}\n`,
     );
+  }
+
+  for (const child of result.failed) {
+    process.stderr.write(`prefetch ${child.childId}: не прогрет — ${child.reason}\n`);
   }
 
   if (prefetchChildrenFailed(result)) {

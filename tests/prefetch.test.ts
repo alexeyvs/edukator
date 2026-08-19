@@ -18,9 +18,14 @@ import {
   prefetchFailed,
 } from '../scripts/prefetch.js';
 import {
+  CODEX_DAILY_QUOTA,
+  childDatabasePath,
   createChild,
   createParent,
+  disableParent,
   openControlDatabase,
+  readCodexQuota,
+  reserveCodexCall,
   type ChildStatus,
 } from '../server/control-db.js';
 import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
@@ -87,6 +92,9 @@ describe('prefetch', () => {
     mkdirSync(seedDir);
     writeCurriculum(curriculumDir);
     dbPath = join(tempDir, 'test.db');
+    // База заводится заранее, как её заводит появление ребёнка: сам прогрев
+    // отсутствующий файл считает отказом, а не поводом создать пустую базу.
+    openDatabase(dbPath).close();
     logged.length = 0;
   });
 
@@ -670,6 +678,72 @@ describe('prefetch', () => {
       expect(result.children).toHaveLength(1);
     });
 
+    // Квота стоит на расходе ребёнка за московские сутки, а не на способе
+    // запуска: считай её только сервер, `npm run prefetch -- --all --cycles 3`
+    // тратил бы модель незаметно и оставлял бы диспетчеру полный счётчик на те
+    // же сутки — то есть предела не было бы вовсе.
+    it('списывает суточную квоту ребёнка на свои вызовы модели', async () => {
+      const childId = newChild('первый');
+      let calls = 0;
+
+      // Неудачный вызов списывается наравне с удачным — иначе зацикливание на
+      // ошибках обходит саму защиту.
+      const result = await prefetchChildren({
+        dataDir,
+        childId,
+        curriculumDir,
+        seedDir,
+        topics: 1,
+        log,
+        run: () => {
+          calls += 1;
+          return Promise.reject(new Error('модель не ответила'));
+        },
+      });
+
+      expect(calls).toBeGreaterThan(0);
+      expect(prefetchChildrenFailed(result)).toBe(true);
+      const control = openControlDatabase(controlDatabasePath(dataDir));
+      try {
+        expect(readCodexQuota(control, childId).used).toBe(calls);
+      } finally {
+        control.close();
+      }
+    });
+
+    it('не зовёт модель, когда суточная квота ребёнка исчерпана', async () => {
+      const childId = newChild('первый');
+      const control = openControlDatabase(controlDatabasePath(dataDir));
+      try {
+        for (let i = 0; i < CODEX_DAILY_QUOTA; i += 1) reserveCodexCall(control, childId);
+      } finally {
+        control.close();
+      }
+
+      const result = await prefetchChildren({
+        dataDir,
+        childId,
+        curriculumDir,
+        seedDir,
+        topics: 1,
+        log,
+        run: () => Promise.reject(new Error('прогрев зовёт модель мимо исчерпанной квоты')),
+      });
+
+      // Исчерпанная квота неотличима от недоступной модели: заход обрывается,
+      // а обход остальных детей идёт дальше.
+      expect(result.children[0]?.cycles[0]?.codexUnavailable).toBe(true);
+      // Но названа она своим именем и провалом обхода не считается: квота —
+      // предел расхода, а не поломка, и ночной `--all` в `&&`-цепочке не имеет
+      // права разваливаться из-за ребёнка, который днём назанимался на все
+      // шестьдесят вызовов.
+      expect(result.children[0]?.quotaExhausted).toBe(true);
+      expect(prefetchFailed(result.children[0]!)).toBe(false);
+      expect(prefetchChildrenFailed(result)).toBe(false);
+      expect(logged.some((line) => /суточная квота codex исчерпана/u.test(line))).toBe(true);
+      expect(logged.every((line) => !/codex недоступен/u.test(line))).toBe(true);
+    });
+
     it('требует выбрать ребёнка', async () => {
       await expect(sweep()).rejects.toThrow(/--child <id> или --all/u);
       await expect(sweep({ childId: 'кто-то', allChildren: true })).rejects.toThrow(
@@ -691,6 +765,59 @@ describe('prefetch', () => {
       expect(result.children.map((child) => child.childId).sort()).toEqual([first, second].sort());
     });
 
+    it('провалившимся считает обход, где не догрелся хотя бы один', async () => {
+      const first = newChild('первый');
+      const second = newChild('второй');
+
+      // Один ребёнок не догрелся, второй догрелся: `--all` зовут перед занятием
+      // всей семьи, и «двое из трёх» значит, что третий сядет за пустую очередь.
+      // Проверка «все провалились» здесь дала бы `false` и код возврата 0.
+      // Недоступность обрывает обход того ребёнка, на котором случилась, и
+      // прогрев идёт к следующему: первый остаётся ни с чем, второй догревается.
+      let calls = 0;
+      const result = await sweep({
+        allChildren: true,
+        produce: (request: ProduceRequest) => {
+          calls += 1;
+          return calls === 1
+            ? Promise.reject(new CodexUnavailableError('codex не найден'))
+            : Promise.resolve(Array.from({ length: 5 }, () => task(request.topic.id)));
+        },
+      });
+
+      // Кто из двоих окажется первым, решает `ORDER BY created_at, id`: секунда
+      // у них одна, а `id` случайный, поэтому проверяется не имя, а расклад —
+      // ровно один не догрелся, ровно один догрелся.
+      expect(result.children.map((child) => child.childId).sort()).toEqual([first, second].sort());
+      const unavailable = result.children
+        .filter((child) => child.cycles.some((cycle) => cycle.codexUnavailable));
+      expect(unavailable).toHaveLength(1);
+      expect(prefetchChildrenFailed(result)).toBe(true);
+    });
+
+    // `npm run parent -- disable` — единственный рычаг «перестать обслуживать
+    // семью», и `--all` отсекает такого ребёнка выборкой. Обойти рычаг именем
+    // ребёнка нельзя: иначе отключённая семья продолжала бы тратить настоящие
+    // вызовы модели и свою суточную квоту.
+    it('отказывается греть ребёнка отключённого родителя и по имени, и в обходе', async () => {
+      const disabled = newChild('первый');
+      const active = newChild('второй');
+      const control = openControlDatabase(controlDatabasePath(dataDir));
+      try {
+        const row = control.prepare('SELECT parent_id FROM children WHERE id = ?')
+          .get(disabled) as { parent_id: string };
+        expect(disableParent(control, row.parent_id)).toBe(true);
+      } finally {
+        control.close();
+      }
+
+      await expect(sweep({ childId: disabled })).rejects.toThrow(/родитель отключён/u);
+      const result = await sweep({ allChildren: true });
+      expect(result.children.map((child) => child.childId)).toEqual([active]);
+      // Замок снимается и после отказа.
+      expect(existsSync(dataLockPath(dataDir))).toBe(false);
+    });
+
     it('отказывается греть ребёнка без базы и незнакомого', async () => {
       const pending = newChild('третий', false);
 
@@ -698,6 +825,36 @@ describe('prefetch', () => {
       await expect(sweep({ childId: 'нет-такого' })).rejects.toThrow(/нет в управляющей базе/u);
       // Замок снимается и после отказа: `finally`, а не «в конце удачного пути».
       expect(existsSync(dataLockPath(dataDir))).toBe(false);
+    });
+
+    it('не отменяет прогрев остальных из-за одного ребёнка без базы', async () => {
+      const first = newChild('первый');
+      const broken = newChild('второй');
+      const third = newChild('третий');
+      // База пропала у `ready`-ребёнка: ровно тот случай, который отдельно
+      // разбирает и снятие копии. Прогрев открывает её с `fileMustExist`, так
+      // что заход бросает — и без изоляции уносил бы с собой и отчёт первого,
+      // и очередь третьего.
+      rmSync(childDatabasePath(dataDir, broken));
+
+      const result = await sweep({ allChildren: true });
+
+      // Порядок обхода задан `ORDER BY created_at, id`, а `id` случайный: имена
+      // сравниваются множеством, иначе тест краснел бы от совпавшей секунды.
+      expect(result.children.map((child) => child.childId).sort()).toEqual([first, third].sort());
+      expect(result.failed.map((child) => child.childId)).toEqual([broken]);
+      // Отказ не растворяется: код возврата обязан его назвать.
+      expect(prefetchChildrenFailed(result)).toBe(true);
+      // Файл не воскрешён: `fileMustExist` не даёт завести пустую базу поверх потерянной.
+      expect(existsSync(childDatabasePath(dataDir, broken))).toBe(false);
+      for (const id of [first, third]) {
+        const db = openDatabase(childDatabasePath(dataDir, id));
+        try {
+          expect(SUBJECTS.some((subject) => countAvailable(db, `${subject}.a`) > 0)).toBe(true);
+        } finally {
+          db.close();
+        }
+      }
     });
 
     it('отказывается выгружать посев на обходе всех', async () => {
@@ -708,7 +865,19 @@ describe('prefetch', () => {
       );
     });
 
+    it('называет виноватым каталог, а не сервер, когда управляющей базы нет', async () => {
+      // Замок каталога создаёт сам каталог, поэтому опечатка в `--data-dir`
+      // выглядела бы обжитым, но пустым сервером: без этой проверки рядом
+      // заводилась бы пустая управляющая база и прогрев отчитывался бы
+      // «нет ни одного готового ребёнка».
+      await expect(sweep({ allChildren: true })).rejects.toThrow(/нет управляющей базы/u);
+      expect(existsSync(controlDatabasePath(dataDir))).toBe(false);
+    });
+
     it('отказывается, когда готовых детей нет', async () => {
+      // Управляющая база есть, детей в ней нет: это уже про сервер, а не про каталог.
+      openControlDatabase(controlDatabasePath(dataDir)).close();
+
       await expect(sweep({ allChildren: true })).rejects.toThrow(/нет ни одного готового ребёнка/u);
     });
   });

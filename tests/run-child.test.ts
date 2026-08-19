@@ -16,6 +16,10 @@ afterEach(() => {
 });
 
 function processExists(pid: number): boolean {
+  // Нуль и отрицательное число `kill` адресует группе, а не процессу, причём
+  // нуль — группе самого вызывающего. Пустой файл pid, прочитанный гонкой, даёт
+  // ровно нуль, и без этой проверки уборка снимала бы весь прогон тестов.
+  if (!Number.isInteger(pid) || pid <= 0) throw new Error(`не номер процесса: ${pid}`);
   try {
     process.kill(pid, 0);
     return true;
@@ -25,16 +29,30 @@ function processExists(pid: number): boolean {
   }
 }
 
-async function waitUntilExists(path: string): Promise<boolean> {
+/**
+ * Ждёт не появления файла, а разборчивого номера в нём: `> "$1"` создаёт файл
+ * пустым ещё до записи, так что «файл есть» и «номер прочитан» — разные события,
+ * и `Number('')` между ними даёт 0. Ноль отсюда не выходит: он означает, что
+ * потомок так и не назвался.
+ */
+async function waitUntilPid(path: string): Promise<number> {
   for (let attempt = 0; attempt < 250; attempt += 1) {
-    if (existsSync(path)) return true;
+    if (existsSync(path)) {
+      const pid = Number(readFileSync(path, 'utf8').trim());
+      if (Number.isInteger(pid) && pid > 0) return pid;
+    }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  return false;
+  return 0;
 }
 
 async function waitUntilDead(pid: number): Promise<boolean> {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  // Срок щедрый намеренно: возврат происходит сразу, как только процесса не
+  // стало, так что на удачном пути это ничего не стоит, а секунды хватало не
+  // всегда — под `npm run coverage` (сборка веба плюс инструментирование)
+  // группа успевала исчезнуть позже, и обязательный предкоммитный прогон
+  // краснел мимо кода.
+  for (let attempt = 0; attempt < 500; attempt += 1) {
     if (!processExists(pid)) return true;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -76,10 +94,14 @@ describe('runChild', () => {
         runChild({ bin, args: [pidPath], label: 'дерево', timeoutMs: 1_000 }),
       ).rejects.toThrow(/превышен срок/);
 
-      const survivor = Number(readFileSync(pidPath, 'utf8'));
-      expect(Number.isInteger(survivor)).toBe(true);
+      const survivor = await waitUntilPid(pidPath);
+      expect(survivor).toBeGreaterThan(0);
       expect(await waitUntilDead(survivor)).toBe(true);
     },
+    // Собственный срок обязателен: `waitUntilDead` ждёт до десяти секунд, и на
+    // умолчании vitest в пять этот тест краснел бы от загрузки машины, а не от
+    // кода — то есть ровно на обязательном предкоммитном прогоне всего набора.
+    20_000,
   );
 
   // Внук, успевший завести свою сессию, из группы уходит: SIGKILL по `-pid` его
@@ -118,12 +140,8 @@ describe('runChild', () => {
       expect(Date.now() - started).toBeLessThan(10_000);
 
       // Уборка: снять беглеца больше некому — он в своей сессии.
-      if (existsSync(pidPath)) {
-        const escaped = Number(readFileSync(pidPath, 'utf8'));
-        if (Number.isInteger(escaped) && processExists(escaped)) {
-          process.kill(escaped, 'SIGKILL');
-        }
-      }
+      const escaped = await waitUntilPid(pidPath);
+      if (escaped > 0 && processExists(escaped)) process.kill(escaped, 'SIGKILL');
     },
     // Отказ приходит через срок плюс обе отсрочки; умолчание vitest в пять
     // секунд слишком близко к этой сумме, чтобы краснеть от загрузки машины.
@@ -152,7 +170,7 @@ describe('runChild', () => {
       writeFileSync(
         parentPath,
         [
-          "import { existsSync } from 'node:fs';",
+          "import { existsSync, readFileSync } from 'node:fs';",
           `import { runChild } from ${JSON.stringify(runChildModule)};`,
           `const pidPath = ${JSON.stringify(pidPath)};`,
           `void runChild({ bin: ${JSON.stringify(bin)}, args: [pidPath],`,
@@ -163,7 +181,11 @@ describe('runChild', () => {
           'let waited = 0;',
           'const timer = setInterval(() => {',
           '  waited += 1;',
-          '  if (!existsSync(pidPath)) { if (waited > 250) process.exit(2); return; }',
+          // Ждать надо номер, а не файл: `> "$1"` создаёт его пустым до записи,
+          // и сигнал, посланный в этот зазор, снял бы потомка безымянным — тест
+          // краснел бы «потомок не назвался» вместо проверки уборки.
+          "  const seen = existsSync(pidPath) && readFileSync(pidPath, 'utf8').trim() !== '';",
+          '  if (!seen) { if (waited > 250) process.exit(2); return; }',
           '  clearInterval(timer);',
           // Своей смертью, а не выходом: `exit` на сигнал Node не зовёт, и
           // проверять надо именно этот путь.
@@ -178,8 +200,8 @@ describe('runChild', () => {
       // Код 2 — родитель не дождался запуска потомка; всё остальное значит, что
       // сигнал до него дошёл.
       expect(parent.status).not.toBe(2);
-      const child = Number(readFileSync(pidPath, 'utf8'));
-      expect(Number.isInteger(child)).toBe(true);
+      const child = await waitUntilPid(pidPath);
+      expect(child).toBeGreaterThan(0);
       const dead = await waitUntilDead(child);
       // Провал этой проверки означает ровно то, что потомок остался жив: снять
       // его надо здесь, иначе красный набор оставляет процесс в системе навсегда
@@ -187,6 +209,9 @@ describe('runChild', () => {
       if (!dead) process.kill(-child, 'SIGKILL');
       expect(dead).toBe(true);
     },
+    // Здесь к десяти секундам `waitUntilDead` добавляются запуск tsx и до пяти
+    // секунд ожидания самого потомка в родителе-подопытном.
+    30_000,
   );
 
   // Та же уборка, но в ветке сервера: на SIGINT у него висит своё закрытие базы,
@@ -210,8 +235,8 @@ describe('runChild', () => {
       process.on('SIGINT', other);
       try {
         const pending = runChild({ bin, args: [pidPath], label: 'сон', timeoutMs: 60_000 });
-        expect(await waitUntilExists(pidPath)).toBe(true);
-        const child = Number(readFileSync(pidPath, 'utf8'));
+        const child = await waitUntilPid(pidPath);
+        expect(child).toBeGreaterThan(0);
 
         process.emit('SIGINT', 'SIGINT');
 
@@ -223,5 +248,9 @@ describe('runChild', () => {
         process.off('SIGINT', other);
       }
     },
+    // Собственный срок обязателен: `waitUntilDead` ждёт до десяти секунд, и на
+    // умолчании vitest в пять этот тест краснел бы от загрузки машины, а не от
+    // кода — то есть ровно на обязательном предкоммитном прогоне всего набора.
+    20_000,
   );
 });

@@ -17,7 +17,7 @@ import {
   openControlDatabase,
 } from '../server/control-db.js';
 import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
-import { CHILD_COOKIE, PARENT_COOKIE } from '../server/auth.js';
+import { ACTOR_COOKIE, CHILD_COOKIE, PARENT_COOKIE } from '../server/auth.js';
 import { CHILD_COOKIE_MAX_AGE_SECONDS, registerAuthRoutes } from '../server/routes/auth.js';
 
 const NOW = new Date('2026-08-19T09:00:00.000Z');
@@ -188,6 +188,33 @@ describe('маршруты входа', () => {
       expect(cookie).toContain(`Max-Age=${CHILD_COOKIE_MAX_AGE_SECONDS}`);
     });
 
+    it('погашение детской ссылки переключает ранее выбранного родителя на ученика', async () => {
+      const parentId = await parentWithPassword();
+      const parentToken = cookieValue(setCookie((await login()).headers));
+      const device = deviceInvite(parentId, 'browser');
+
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/auth/child/claim/${device.token}`,
+        headers: {
+          ...SAME_ORIGIN,
+          cookie: `${PARENT_COOKIE}=${parentToken}; ${ACTOR_COOKIE}=parent`,
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const raw = response.headers['set-cookie'];
+      expect(Array.isArray(raw)).toBe(true);
+      const cookies = Array.isArray(raw) ? raw.map(String) : [];
+      const childCookie = cookies.find((cookie) => cookie.startsWith(`${CHILD_COOKIE}=`));
+      expect(childCookie).toBeDefined();
+      expect(cookies).toContainEqual(expect.stringContaining(`${ACTOR_COOKIE}=child`));
+      const childToken = cookieValue(childCookie ?? '');
+      expect((await me({
+        cookie: `${PARENT_COOKIE}=${parentToken}; ${CHILD_COOKIE}=${childToken}; ${ACTOR_COOKIE}=child`,
+      })).json()).toMatchObject({ kind: 'both', active: 'child' });
+    });
+
     it('агентское устройство получает токен телом и не получает cookie', async () => {
       const parentId = await parentWithPassword();
       const device = deviceInvite(parentId, 'agent');
@@ -265,6 +292,65 @@ describe('маршруты входа', () => {
       expect(body).not.toContain(childToken);
     });
 
+    it('сообщает обе сессии и переключает роль только явным POST', async () => {
+      const parentId = await parentWithPassword();
+      const parentToken = cookieValue(setCookie((await login()).headers));
+      const browser = deviceInvite(parentId, 'browser');
+      const childToken = cookieValue(setCookie((await app.inject({
+        method: 'POST',
+        url: `/api/auth/child/claim/${browser.token}`,
+        headers: SAME_ORIGIN,
+      })).headers));
+      const cookie = `${PARENT_COOKIE}=${parentToken}; ${CHILD_COOKIE}=${childToken}`;
+
+      expect((await me({ cookie })).json()).toEqual({
+        kind: 'both',
+        active: 'child',
+        parent: { email: 'родитель@example.com' },
+        child: { childId: browser.childId, name: 'Ученик' },
+      });
+
+      const switched = await app.inject({
+        method: 'POST',
+        url: '/api/auth/persona',
+        headers: { ...SAME_ORIGIN, cookie },
+        payload: { kind: 'parent', password: PASSWORD },
+      });
+      expect(switched.statusCode).toBe(200);
+      expect(setCookie(switched.headers)).toContain(`${ACTOR_COOKIE}=parent`);
+      expect(switched.json()).toMatchObject({ kind: 'both', active: 'parent' });
+      expect((await me({ cookie: `${cookie}; ${ACTOR_COOKIE}=parent` })).json())
+        .toMatchObject({ kind: 'both', active: 'parent' });
+    });
+
+    it('не повышает детскую роль до родительской без свежего пароля', async () => {
+      const parentId = await parentWithPassword();
+      const parentToken = cookieValue(setCookie((await login()).headers));
+      const browser = deviceInvite(parentId, 'browser');
+      const childToken = cookieValue(setCookie((await app.inject({
+        method: 'POST',
+        url: `/api/auth/child/claim/${browser.token}`,
+        headers: SAME_ORIGIN,
+      })).headers));
+      const cookie = `${PARENT_COOKIE}=${parentToken}; ${CHILD_COOKIE}=${childToken}`;
+
+      const missing = await app.inject({
+        method: 'POST', url: '/api/auth/persona', headers: { ...SAME_ORIGIN, cookie }, payload: { kind: 'parent' },
+      });
+      const wrong = await app.inject({
+        method: 'POST',
+        url: '/api/auth/persona',
+        headers: { ...SAME_ORIGIN, cookie },
+        payload: { kind: 'parent', password: 'неверный-пароль' },
+      });
+
+      expect(missing.statusCode).toBe(400);
+      expect(wrong.statusCode).toBe(401);
+      expect(missing.headers['set-cookie']).toBeUndefined();
+      expect(wrong.headers['set-cookie']).toBeUndefined();
+      expect((await me({ cookie })).json()).toMatchObject({ kind: 'both', active: 'child' });
+    });
+
     it('снимает Secure только явным выключателем', async () => {
       const insecure = Fastify();
       // Ни `now`, ни списка прокси: заодно проверяется, что умолчания живые.
@@ -317,6 +403,23 @@ describe('маршруты входа', () => {
       expect(response.headers['set-cookie']).toBeUndefined();
     });
 
+    it('закрывает вход, когда неудачу не удалось записать', async () => {
+      await parentWithPassword();
+      // Счётчик читается, но не пишется: так выглядит `SQLITE_BUSY` под самым
+      // перебором, ради которого счётчик и заведён. Отдать на это обычный 401
+      // значило бы не считать попытки ровно тогда, когда их надо считать.
+      control.exec(
+        `CREATE TRIGGER login_attempts_readonly BEFORE INSERT ON login_attempts
+           BEGIN SELECT RAISE(ABORT, 'счётчик недоступен'); END;`,
+      );
+
+      const response = await login(EMAIL, 'неверный пароль');
+
+      expect(response.statusCode).toBe(503);
+      expect(response.headers['set-cookie']).toBeUndefined();
+      expect(response.headers['retry-after']).toBeDefined();
+    });
+
     it('требует тела объектом на входе и на приглашении', async () => {
       const invite = parentInvite('третий@example.com');
 
@@ -355,6 +458,23 @@ describe('маршруты входа', () => {
       expect(response.statusCode).toBe(400);
     });
 
+    // Тело входа собирает наш же клиент, и третье поле в нём значит не «клиент
+    // стал богаче», а что запрос пришёл не оттуда, откуда мы думаем. Так же
+    // строг `readMode` в родительских маршрутах.
+    it('отказывает телу входа с лишним полем', async () => {
+      await parentWithPassword();
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/auth/parent/login',
+        headers: SAME_ORIGIN,
+        payload: { email: EMAIL, password: PASSWORD, pin: '123456' },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.headers['set-cookie']).toBeUndefined();
+    });
+
     it('не пускает изменяющий запрос без подтверждённого источника', async () => {
       await parentWithPassword();
 
@@ -384,9 +504,10 @@ describe('маршруты входа', () => {
           payload: { password: PASSWORD },
         }),
         app.inject({ method: 'POST', url: `/api/auth/child/claim/${device.token}`, headers: foreign }),
+        app.inject({ method: 'POST', url: '/api/auth/persona', headers: foreign, payload: { kind: 'parent' } }),
       ]);
 
-      expect(responses.map((response) => response.statusCode)).toEqual([403, 403, 403]);
+      expect(responses.map((response) => response.statusCode)).toEqual([403, 403, 403, 403]);
       // Ни одна ссылка не должна сгореть на отказе по источнику.
       expect((await app.inject({
         method: 'POST',

@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { InviteScreen } from './InviteScreen';
 import type { AuthApi } from './auth-api';
+import { HttpError } from './http';
 import './test-setup';
 
 afterEach(cleanup);
@@ -16,6 +17,7 @@ function authApi(overrides: Partial<AuthApi> = {}): AuthApi {
     readInvite: vi.fn().mockResolvedValue({ email: 'parent@example.org' }),
     redeemInvite: vi.fn().mockResolvedValue({ kind: 'parent', email: 'parent@example.org' }),
     claimDevice: vi.fn().mockResolvedValue({ kind: 'child', childId: 'c-1' }),
+    switchPersona: vi.fn().mockResolvedValue({ kind: 'anonymous' }),
     ...overrides,
   };
 }
@@ -35,9 +37,10 @@ describe('приглашение родителя', () => {
     fill('длинный-пароль', 'длинный-пароль');
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить пароль и войти' }));
 
-    await waitFor(() => expect(onSignedIn).toHaveBeenCalledWith({
-      kind: 'parent', email: 'parent@example.org',
-    }));
+    // Наружу уходит только факт «пароль поставлен»: кто предъявитель, решает
+    // `me`, а не этот ответ — ссылку открывают и в браузере ученика.
+    await waitFor(() => expect(onSignedIn).toHaveBeenCalledOnce());
+    expect(onSignedIn).toHaveBeenCalledWith();
     expect(api.redeemInvite).toHaveBeenCalledWith('tok', 'длинный-пароль');
   });
 
@@ -58,18 +61,39 @@ describe('приглашение родителя', () => {
 
   it('честно говорит про протухшую ссылку и не предлагает пароль', async () => {
     const api = authApi({
-      readInvite: vi.fn().mockRejectedValue(new Error('Ссылка недействительна или уже использована')),
+      readInvite: vi.fn().mockRejectedValue(new HttpError({
+        status: 404,
+        message: 'Ссылка недействительна или уже использована',
+      })),
     });
     render(<InviteScreen api={api} token="tok" onSignedIn={vi.fn()} />);
 
     expect(await screen.findByRole('alert'))
       .toHaveTextContent('Ссылка недействительна или уже использована');
     expect(screen.queryByLabelText('Пароль')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Ссылка не работает' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Повторить' })).not.toBeInTheDocument();
   });
 
-  it('показывает отказ сервера при погашении уже использованной ссылки', async () => {
+  it('не зовёт за новой ссылкой, когда чтение просто не доехало', async () => {
+    const readInvite = vi.fn()
+      .mockRejectedValueOnce(new Error('Не получилось проверить ссылку'))
+      .mockResolvedValueOnce({ email: 'parent@example.org' });
+    const api = authApi({ readInvite });
+    render(<InviteScreen api={api} token="tok" onSignedIn={vi.fn()} />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Не получилось проверить ссылку');
+    expect(screen.queryByRole('heading', { name: 'Ссылка не работает' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Повторить' }));
+
+    expect(await screen.findByText('Учётная запись: parent@example.org')).toBeInTheDocument();
+    expect(readInvite).toHaveBeenCalledTimes(2);
+  });
+
+  it('оставляет форму, когда пароль до сервера просто не доехал', async () => {
     const api = authApi({
-      redeemInvite: vi.fn().mockRejectedValue(new Error('Ссылка недействительна или уже использована')),
+      redeemInvite: vi.fn().mockRejectedValue(new Error('Failed to fetch')),
     });
     const onSignedIn = vi.fn();
     render(<InviteScreen api={api} token="tok" onSignedIn={onSignedIn} />);
@@ -78,8 +102,47 @@ describe('приглашение родителя', () => {
     fill('длинный-пароль', 'длинный-пароль');
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить пароль и войти' }));
 
-    expect(await screen.findByRole('alert'))
-      .toHaveTextContent('Ссылка недействительна или уже использована');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Failed to fetch');
+    // Ссылку это не сожгло: пароль вводят тут же ещё раз, а не идут за новой.
+    expect(screen.getByLabelText('Пароль')).toBeInTheDocument();
     expect(onSignedIn).not.toHaveBeenCalled();
+  });
+
+  it('зовёт за новой ссылкой, когда погашение ответило 404', async () => {
+    const api = authApi({
+      redeemInvite: vi.fn().mockRejectedValue(new HttpError({
+        status: 404,
+        message: 'Ссылка недействительна или уже использована',
+      })),
+    });
+    const onSignedIn = vi.fn();
+    render(<InviteScreen api={api} token="tok" onSignedIn={onSignedIn} />);
+    await screen.findByText('Учётная запись: parent@example.org');
+
+    fill('длинный-пароль', 'длинный-пароль');
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить пароль и войти' }));
+
+    // Приглашение погашено или просрочено: форма пароля здесь — предложение
+    // подбирать пароль к мёртвой ссылке, и родитель остаётся на ней навсегда.
+    expect(await screen.findByRole('heading', { name: 'Ссылка не работает' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('Пароль')).not.toBeInTheDocument();
+    expect(onSignedIn).not.toHaveBeenCalled();
+  });
+
+  it('оставляет короткий пароль на форме: 400 про ссылку ничего не значит', async () => {
+    const api = authApi({
+      redeemInvite: vi.fn().mockRejectedValue(new HttpError({
+        status: 400,
+        message: 'Пароль должен быть от 10 до 256 знаков',
+      })),
+    });
+    render(<InviteScreen api={api} token="tok" onSignedIn={vi.fn()} />);
+    await screen.findByText('Учётная запись: parent@example.org');
+
+    fill('длинный-пароль', 'длинный-пароль');
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить пароль и войти' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('от 10 до 256 знаков');
+    expect(screen.getByLabelText('Пароль')).toBeInTheDocument();
   });
 });

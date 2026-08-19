@@ -10,10 +10,12 @@
  * уносит снимок без незакрытого журнала, то есть тихо теряет последние занятия.
  *
  * Протокол тот же, что у обычного заведения ребёнка: `provisioning` → база в
- * рабочем месте → `ready`. Оборванный перенос продолжается повторным запуском,
- * и отказ стоит только на уже `ready`-ребёнке: он означает «база на месте и,
- * возможно, в ней уже занимались», и повторный перенос затёр бы её вчерашним
- * снимком.
+ * рабочем месте → `ready`. Оборванный перенос продолжается повторным запуском
+ * с любого места — в том числе после обрыва между `rename` и `ready`, когда
+ * база уже лежит на рабочем месте: копировать её заново незачем, повтор лишь
+ * догоняет схему и ставит пометку. Отказ стоит только на уже `ready`-ребёнке:
+ * он означает «база на месте и, возможно, в ней уже занимались», и повторный
+ * перенос затёр бы её вчерашним снимком.
  *
  * Запуск:
  *   npm run adopt -- --email родитель@example.com --name Тимофей
@@ -22,10 +24,12 @@
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import Database from 'better-sqlite3';
 import {
   createChild,
   createParent,
   findParentByEmail,
+  childDatabasePath,
   listChildren,
   openControlDatabase,
   type ChildSummary,
@@ -88,6 +92,21 @@ function findChildByName(
   return listChildren(control, parentId).find((child) => child.name === trimmed);
 }
 
+/**
+ * Сколько прогресса лежит в базе. Соединение голое и `readonly`: оригинал
+ * перенос не трогает, а `openDatabase` завёл бы на нём WAL и прогнал миграцию.
+ */
+function progressOf(path: string): { runs: number; attempts: number } {
+  const db = new Database(path, { readonly: true, fileMustExist: true });
+  try {
+    const count = (table: 'runs' | 'attempts'): number =>
+      (db.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n;
+    return { runs: count('runs'), attempts: count('attempts') };
+  } finally {
+    db.close();
+  }
+}
+
 export function adoptSingleUser(options: AdoptOptions): AdoptResult {
   const source = resolve(options.source ?? legacyDatabasePath());
   if (!existsSync(source)) {
@@ -126,8 +145,46 @@ export function adoptSingleUser(options: AdoptOptions): AdoptResult {
           : `продолжается перенос ребёнка ${options.name} (${childId}, статус ${existing.status})`,
       );
 
-      const result = provisionChildDatabase(control, childId, dir, { source });
-      log(`база перенесена в ${result.path}, оригинал ${source} не тронут`);
+      // Обрыв между `rename` и переводом в `ready` оставляет на месте целую
+      // перенесённую базу при статусе `provisioning`/`failed`. С `source`
+      // заведение такой файл принять отказывается — доказать, что это копия
+      // исходной, а не заведённая рядом пустая, ему нечем, — и повторный
+      // запуск упирался бы в отказ навсегда, хотя именно этот случай спека
+      // называет продолжаемым. Доказательство даёт не файл, а реестр: строка
+      // ребёнка уже была, каталог держит замок, а `ready` отсеян выше, — то
+      // есть файл мог появиться только от прерванного переноса этого же
+      // ребёнка. Поэтому продолжение идёт **без** `source`: копировать заново
+      // нечего, остаётся догнать схему и пометить `ready`.
+      const target = childDatabasePath(dir, childId);
+      const resuming = existing !== undefined && existsSync(target);
+      if (resuming) {
+        // «Строка была, файл на месте» — ещё не доказательство, что файл наш:
+        // детей заводит и экран семьи (`POST /api/family/children`), и его
+        // заведение тоже проходит через `rename` до пометки `ready`. Совпади имя
+        // — и продолжение приняло бы за перенос **пустую** заведённую базу:
+        // перенос отчитался бы успехом, прогресс за сорок часов остался бы в
+        // оригинале, а повторный запуск упёрся бы в отказ по `ready` навсегда.
+        // Доказательство даёт содержимое: перенесённая копия несёт прогресс
+        // оригинала целиком, заведённая рядом пустая — нет.
+        const carried = progressOf(target);
+        const original = progressOf(source);
+        if (carried.runs < original.runs || carried.attempts < original.attempts) {
+          throw new Error(
+            `База ${target} уже на месте, но прогресса в ней меньше, чем в ${source} ` +
+              `(забегов ${String(carried.runs)} против ${String(original.runs)}, ` +
+              `попыток ${String(carried.attempts)} против ${String(original.attempts)}): ` +
+              'это не прерванный перенос. Заведите ребёнка под другим именем ' +
+              'либо разберитесь с базой на месте вручную',
+          );
+        }
+        log(`база уже на месте (${target}): перенос продолжается без копирования`);
+      }
+      const result = provisionChildDatabase(control, childId, dir, resuming ? {} : { source });
+      log(
+        resuming
+          ? `перенос завершён, база ${result.path} принята как есть`
+          : `база перенесена в ${result.path}, оригинал ${source} не тронут`,
+      );
       return { parentId, childId, path: result.path, parentCreated, childCreated };
     } finally {
       control.close();

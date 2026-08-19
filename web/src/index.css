@@ -3077,6 +3077,13 @@ input:focus-visible {
   color: #738079;
 }
 
+/* Кнопки на экране, где семья ещё не загрузилась: повторить и выйти. */
+.family-retry {
+  display: flex;
+  gap: .5rem;
+  justify-content: center;
+}
+
 .parents-switch {
   display: grid;
   gap: .25rem;

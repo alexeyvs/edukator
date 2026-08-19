@@ -126,7 +126,10 @@ export function registerSessionRoutes(
 
   app.get('/api/session/next', (request, reply) => {
     try {
-      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      // `mutating` при `GET` — не описка: выдача списывает задание из банка
+      // безвозвратно, и без подтверждённого источника чужая страница жгла бы
+      // банк переходом на этот адрес.
+      const context = options.context(request, { allow: ROUTE_ACCESS.child, mutating: true });
       const db = context.tenant.db;
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;

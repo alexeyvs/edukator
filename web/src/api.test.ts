@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { browserHomeApi } from './home-api';
 import { browserBossApi } from './boss-api';
 import { browserProfileApi } from './profile-api';
-import { parentsApiFor, type ComputerAccessError } from './parents-api';
+import { ComputerAccessError, parentsApiFor } from './parents-api';
+import { onSignedOut, SignedOutError } from './http';
 import { browserAuthApi } from './auth-api';
 import { browserFamilyApi } from './family-api';
 import { browserRunApi, RunApiError } from './run-api';
@@ -232,6 +233,28 @@ describe('браузерные API-адаптеры', () => {
     } satisfies Partial<ComputerAccessError>);
   });
 
+  it('без PIN считает 401 потерей сессии, а с PIN — неподошедшим PIN', async () => {
+    const listener = vi.fn();
+    const unsubscribe = onSignedOut(listener);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      response({ error: 'Неверный PIN родителя' }, { ok: false, status: 401 }),
+    ));
+
+    // С PIN 401 значит «не тот PIN»: выкидывать за опечатку со сводки нельзя.
+    await expect(
+      parentsApiFor('c-1').changeComputerAccess('unlocked', '000000'),
+    ).rejects.toBeInstanceOf(ComputerAccessError);
+    expect(listener).not.toHaveBeenCalled();
+
+    // Родительская сессия PIN не предъявляет вовсе, и 401 у неё может значить
+    // только «сессии больше нет» — тогда нужен экран входа, а не красная строка.
+    await expect(
+      parentsApiFor('c-1').changeComputerAccess('unlocked', undefined),
+    ).rejects.toBeInstanceOf(SignedOutError);
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
   it('не маскирует не-JSON ответ как успешный контракт', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
@@ -239,7 +262,9 @@ describe('браузерные API-адаптеры', () => {
       json: vi.fn().mockRejectedValue(new SyntaxError('not json')),
     }));
 
-    await expect(browserRunApi.next(1)).rejects.toThrow('not json');
+    // Отказ остаётся отказом, но называется по-русски и по делу: `SyntaxError`
+    // браузера — строка на его языке, а экраны рисуют `error.message` как есть.
+    await expect(browserRunApi.next(1)).rejects.toThrow('Сервер не смог обработать запрос');
   });
   it('собирает адреса входа, ссылок и состава семьи', async () => {
     const fetch = vi.fn().mockResolvedValue(response({ kind: 'anonymous', child: {} }));
@@ -251,6 +276,7 @@ describe('браузерные API-адаптеры', () => {
     await browserAuthApi.readInvite('t o k');
     await browserAuthApi.redeemInvite('tok', 'длинный-пароль');
     await browserAuthApi.claimDevice('tok');
+    await browserAuthApi.switchPersona('parent', 'длинный-пароль');
     await browserFamilyApi.read();
     await browserFamilyApi.addChild('Марта');
     await browserFamilyApi.issueDevice('c-1', 'agent', 'Ноутбук');
@@ -271,6 +297,9 @@ describe('браузерные API-адаптеры', () => {
         method: 'POST', body: '{"password":"длинный-пароль"}',
       })],
       ['/api/auth/child/claim/tok', { method: 'POST' }],
+      ['/api/auth/persona', expect.objectContaining({
+        method: 'POST', body: '{"kind":"parent","password":"длинный-пароль"}',
+      })],
       ['/api/family'],
       ['/api/family/children', expect.objectContaining({ method: 'POST', body: '{"name":"Марта"}' })],
       ['/api/family/children/c-1/devices', expect.objectContaining({

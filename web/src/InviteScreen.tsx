@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { browserAuthApi, type AuthApi, type Principal } from './auth-api';
+import { browserAuthApi, type AuthApi } from './auth-api';
+import { HttpError } from './http';
 
 /** Тот же предел, что и на сервере: короткий пароль отвергнет и он. */
 export const MIN_PASSWORD_LENGTH = 10;
@@ -7,7 +8,13 @@ export const MIN_PASSWORD_LENGTH = 10;
 export interface InviteScreenProps {
   token: string;
   api?: AuthApi;
-  onSignedIn: (principal: Principal) => void;
+  /**
+   * Пароль поставлен, cookie родителя выдана. Кто предъявитель на самом деле,
+   * решает не этот ответ: ссылку могли открыть в браузере ученика, а при двух
+   * живых cookie `/api/auth/me` возвращает обе сессии и активную роль. Поэтому
+   * наружу уходит только факт.
+   */
+  onSignedIn: () => void;
 }
 
 /**
@@ -22,18 +29,26 @@ export function InviteScreen({ token, api = browserAuthApi, onSignedIn }: Invite
   const [problem, setProblem] = useState<string | null>(null);
   const [broken, setBroken] = useState(false);
   const [pending, setPending] = useState(false);
+  // Новый заход за чтением приглашения после сорвавшегося: сам эффект зависит
+  // только от токена, и без счётчика первая неудача осталась бы окончательной.
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let active = true;
+    setProblem(null);
     api.readInvite(token)
       .then((invite) => { if (active) setEmail(invite.email); })
       .catch((error: unknown) => {
         if (!active) return;
-        setBroken(true);
+        // Чтение приглашения ничего не гасит, поэтому «ссылка мертва» здесь
+        // говорит только 404. Обрыв сети и 503 неготового сервера привели бы
+        // родителя к «попросите новую» — то есть заставили бы выбросить живое
+        // приглашение и звать того, кто его выпускает, из командной строки.
+        setBroken(error instanceof HttpError && error.status === 404);
         setProblem(error instanceof Error ? error.message : 'Ссылка недействительна или уже использована');
       });
     return () => { active = false; };
-  }, [api, token]);
+  }, [api, attempt, token]);
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -49,8 +64,14 @@ export function InviteScreen({ token, api = browserAuthApi, onSignedIn }: Invite
     setPending(true);
     setProblem(null);
     try {
-      onSignedIn(await api.redeemInvite(token, password));
+      await api.redeemInvite(token, password);
+      onSignedIn();
     } catch (error: unknown) {
+      // 404 — «ссылки больше нет»: погашение идёт одним `UPDATE ... WHERE` и
+      // либо состоялось, либо не тронуло ничего, так что повторять пароль здесь
+      // уже некуда — надо просить новую. 400 (`weak-password`) и обрыв сети
+      // остаются на форме: первое — свойство пароля, второе ссылку не жжёт.
+      if (error instanceof HttpError && error.status === 404) setBroken(true);
       setProblem(error instanceof Error ? error.message : 'Ссылка недействительна или уже использована');
     } finally {
       setPending(false);
@@ -64,7 +85,23 @@ export function InviteScreen({ token, api = browserAuthApi, onSignedIn }: Invite
         <div className="auth-card">
           <h1>Ссылка не работает</h1>
           <p className="auth-message error" role="alert">{problem}</p>
-          <p>Попросите новую ссылку — приглашение живёт 48 часов и гасится после первого пароля.</p>
+          <p>Попросите новую ссылку — приглашение живёт неделю и гасится после первого пароля.</p>
+        </div>
+      </main>
+    );
+  }
+
+  // Приглашение не прочиталось, но и не погашено: форму пароля показывать не по
+  // чему (адреса нет), а звать за новой ссылкой — значит выбросить живую.
+  if (problem !== null && email === null) {
+    return (
+      <main className="auth-shell">
+        <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+        <div className="auth-card">
+          <h1>Не удалось проверить ссылку</h1>
+          <p className="auth-message error" role="alert">{problem}</p>
+          <p>Приглашение это не погасило — попробуйте ещё раз.</p>
+          <button type="button" onClick={() => setAttempt((value) => value + 1)}>Повторить</button>
         </div>
       </main>
     );

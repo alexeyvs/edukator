@@ -14,7 +14,7 @@ from typing import Awaitable, Callable, Protocol
 
 from .config import ControllerConfig, config_path, load_config, save_config
 from .family import MicrosoftFamilyClient
-from .gate import GateState, fetch_gate
+from .gate import GateState, GateTokenRejected, fetch_gate
 
 
 class FamilyClient(Protocol):
@@ -242,7 +242,20 @@ async def run_controller(
                 raise
             except Exception as error:  # сеть и закрытый API должны восстанавливаться
                 try:
-                    if state.last_gate_desired_blocked is None:
+                    if isinstance(error, GateTokenRejected):
+                        await ensure_fail_closed(
+                            family,
+                            state,
+                            clock(),
+                            log,
+                            "Edukator отклонил агентский токен",
+                        )
+                        # Отзыв учётных данных — не временная недоступность.
+                        # Он отменяет прежнее разрешение немедленно и оставляет
+                        # локальный blocked intent до следующего валидного gate.
+                        state.last_gate_desired_blocked = True
+                        state.access_expires_at = None
+                    elif state.last_gate_desired_blocked is None:
                         await ensure_fail_closed(
                             family,
                             state,

@@ -16,6 +16,7 @@ function authApi(overrides: Partial<AuthApi> = {}): AuthApi {
     readInvite: vi.fn().mockResolvedValue({ email: 'parent@example.org' }),
     redeemInvite: vi.fn().mockResolvedValue({ kind: 'parent', email: 'parent@example.org' }),
     claimDevice: vi.fn().mockResolvedValue({ kind: 'child', childId: 'c-1' }),
+    switchPersona: vi.fn().mockResolvedValue({ kind: 'anonymous' }),
     ...overrides,
   };
 }

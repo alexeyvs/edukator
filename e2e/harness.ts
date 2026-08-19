@@ -19,6 +19,7 @@ import {
   listServiceableChildren,
   openControlDatabase,
   redeemDeviceInvite,
+  revokeDevice,
   redeemParentInvite,
   resolveChildDevice,
   setParentPin,
@@ -103,6 +104,14 @@ export interface E2eHarness {
    */
   seedChild(childId: string, seed?: SeedChildOptions): void;
   assertCodexNotCalled(): void;
+  /**
+   * Постоянный токен агентского устройства: его выпуск и погашение идут тем же
+   * путём, каким их проходит контроллер доступа. Заголовком `Authorization` он
+   * открывает ровно `GET /api/gate/status` и ничего больше.
+   */
+  agentToken(): string;
+  /** Отзывает агентское устройство: токен обязан перестать работать на том же запросе. */
+  revokeAgent(): void;
   waitForLearningMaterial(topicId: string): Promise<number>;
   prepareBoss(topicId: string): Promise<void>;
   seedParentsDashboard(): void;
@@ -367,6 +376,11 @@ export async function startE2eHarness(
   // токена, а без неё диспетчер держит ребёнка спящим и не готовит ему ни
   // босса, ни персональный разбор — сценарий ждал бы их до срока.
   resolveChildDevice(control, claimed.token, NOW);
+  // Агентское устройство заводится тем же путём, что и детское: сценарий
+  // проверяет шов «ссылка → погашение → Bearer», а не подложенную строку.
+  const agentInvite = issueDeviceInvite(control, childId, 'agent', 'Контроллер', NOW);
+  const claimedAgent = redeemDeviceInvite(control, agentInvite.token, NOW);
+  if (!claimedAgent.ok) throw new Error('E2E: агентское устройство не погашено');
   const tokens: Record<E2eSide, string> = {
     parent: redeemedParent.session.token,
     child: claimed.token,
@@ -441,8 +455,22 @@ export async function startE2eHarness(
         const cookie = cookieFor(side);
         return `${cookie.name}=${cookie.value}`;
       },
+      agentToken(): string {
+        if (!claimedAgent.ok) throw new Error('E2E: агентское устройство не погашено');
+        return claimedAgent.token;
+      },
+      revokeAgent(): void {
+        if (!claimedAgent.ok) throw new Error('E2E: агентское устройство не погашено');
+        if (!revokeDevice(control, claimedAgent.deviceId, NOW)) {
+          throw new Error('E2E: агентское устройство не отозвано');
+        }
+      },
       seedChild(id: string, seed: SeedChildOptions = {}): void {
-        const childDb = openDatabase(childDatabasePath(dataDir, id));
+        // `fileMustExist` намеренно: сценарий сеет ребёнка, заведённого
+        // маршрутом семьи, и ровно этим проверяет, что маршрут действительно
+        // создал базу. Без него сорвавшееся заведение заводило бы базу здесь и
+        // забег шёл бы зелёным по базе, которую создал сам тест.
+        const childDb = openDatabase(childDatabasePath(dataDir, id), { fileMustExist: true });
         try {
           seedChildDatabase(childDb, graph, seed);
         } finally {

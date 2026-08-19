@@ -25,6 +25,7 @@ import { readProfile, type Profile } from '../db.js';
 import { activeTopics } from '../scheduler.js';
 import { countAvailable, recentQuestions, storeTasks } from './bank.js';
 import { CodexUnavailableError, type CodexRunner } from './client.js';
+import { CodexQuotaError } from './quota.js';
 import { generateTaskBatch } from './generate.js';
 import { taskPromptText, type GeneratedTask } from './task-schema.js';
 import { validateTaskBatch } from './validate.js';
@@ -389,9 +390,17 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
         unavailable = true;
         // Тема названа: в отчёт цикла она не попадает, а искать по логу «на чём
         // всё встало» приходится именно её.
+        //
+        // Исчерпанная квота обрывает заход тем же путём, что и недоступная
+        // модель, но называется своим именем: «codex недоступен» отправило бы
+        // разбираться со связью и правами вместо того, чтобы посмотреть расход
+        // ребёнка, а различить эти два случая по логу больше нечем.
         log(
-          `воркер: codex недоступен на теме «${topic.id}» (${(error as Error).message}), ` +
-            'пополнение отложено',
+          error instanceof CodexQuotaError
+            ? `воркер: суточная квота codex исчерпана на теме «${topic.id}» ` +
+              `(${error.message}), пополнение отложено до московской полуночи`
+            : `воркер: codex недоступен на теме «${topic.id}» (${(error as Error).message}), ` +
+              'пополнение отложено',
         );
         return;
       }
