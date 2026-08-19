@@ -18,7 +18,12 @@ import {
   PARENT_SESSION_IDLE_MS,
   PARENT_SESSION_MAX_MS,
   SESSION_TOUCH_MS,
+  LOGIN_ADDRESS_FAILURE_LIMIT,
+  LOGIN_EMAIL_FAILURE_LIMIT,
+  LOGIN_LOCKOUT_MS,
+  checkLoginGate,
   childDatabasePath,
+  clearLoginFailures,
   createChild,
   createParent,
   hashToken,
@@ -35,6 +40,7 @@ import {
   readChild,
   readCodexQuota,
   readParentInvite,
+  recordLoginFailure,
   redeemDeviceInvite,
   redeemParentInvite,
   reserveCodexCall,
@@ -45,7 +51,8 @@ import {
   revokeParentSession,
   validateControlSchema,
 } from '../server/control-db.js';
-import type { IssuedToken } from '../server/control-db.js';
+import type { IssuedToken, LoginGate, LoginTarget } from '../server/control-db.js';
+import { UNKNOWN_ADDRESS } from '../server/client-address.js';
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -973,5 +980,185 @@ describe('суточная квота codex', () => {
 
   it('держит калибровочные константы спеки: суточная квота вызовов', () => {
     expect(CODEX_DAILY_QUOTA).toBe(60);
+  });
+});
+
+describe('счётчики неудачных входов', () => {
+  const NOW = new Date('2026-08-19T12:00:00.000Z');
+  const EMAIL = 'mama@example.com';
+  const ADDRESS = '203.0.113.7';
+
+  function target(overrides: Partial<LoginTarget> = {}): LoginTarget {
+    return { kind: 'password', email: EMAIL, address: ADDRESS, ...overrides };
+  }
+
+  function failTimes(db: Database, times: number, over: Partial<LoginTarget> = {}): LoginGate {
+    let gate: LoginGate = { allowed: true, retryAfterMs: 0 };
+    for (let index = 0; index < times; index += 1) {
+      gate = recordLoginFailure(db, target(over), NOW);
+    }
+    return gate;
+  }
+
+  it('пускает, пока серии нет', () => {
+    const db = open();
+
+    expect(checkLoginGate(db, target(), NOW)).toEqual({ allowed: true, retryAfterMs: 0 });
+    expect(failTimes(db, LOGIN_EMAIL_FAILURE_LIMIT - 1)).toEqual({ allowed: true, retryAfterMs: 0 });
+    expect(checkLoginGate(db, target(), NOW).allowed).toBe(true);
+  });
+
+  it('серия неудач приводит к паузе, а верный пароль после неё проходит', () => {
+    const db = open();
+
+    const locked = failTimes(db, LOGIN_EMAIL_FAILURE_LIMIT);
+    expect(locked).toEqual({
+      allowed: false,
+      reason: 'locked',
+      retryAfterMs: LOGIN_LOCKOUT_MS,
+    });
+    expect(checkLoginGate(db, target(), NOW).allowed).toBe(false);
+
+    // Внутри паузы остаток убывает, но вход закрыт.
+    const midway = new Date(NOW.getTime() + LOGIN_LOCKOUT_MS / 2);
+    expect(checkLoginGate(db, target(), midway)).toMatchObject({
+      allowed: false,
+      retryAfterMs: LOGIN_LOCKOUT_MS / 2,
+    });
+
+    // После паузы счётчик остыл: тот, кто просто забыл пароль, снова входит.
+    const after = new Date(NOW.getTime() + LOGIN_LOCKOUT_MS);
+    expect(checkLoginGate(db, target(), after)).toEqual({ allowed: true, retryAfterMs: 0 });
+
+    // И считается заново, а не продолжает старую серию.
+    expect(recordLoginFailure(db, target(), after)).toEqual({ allowed: true, retryAfterMs: 0 });
+    expect(
+      db
+        .prepare<[], { failures: number }>(
+          "SELECT failures FROM login_attempts WHERE scope = 'email'",
+        )
+        .get()?.failures,
+    ).toBe(1);
+  });
+
+  it('новая неудача внутри паузы её продлевает', () => {
+    const db = open();
+    failTimes(db, LOGIN_EMAIL_FAILURE_LIMIT);
+
+    // Подбирающий не должен пересиживать запрет, продолжая долбить.
+    const midway = new Date(NOW.getTime() + LOGIN_LOCKOUT_MS / 2);
+    expect(recordLoginFailure(db, target(), midway).retryAfterMs).toBe(LOGIN_LOCKOUT_MS);
+    expect(checkLoginGate(db, target(), new Date(NOW.getTime() + LOGIN_LOCKOUT_MS)).allowed).toBe(
+      false,
+    );
+  });
+
+  it('счётчики по почте и по адресу независимы', () => {
+    const db = open();
+
+    // Серия по одному адресу почты не закрывает вход другому с той же машины.
+    failTimes(db, LOGIN_EMAIL_FAILURE_LIMIT);
+    expect(checkLoginGate(db, target({ email: 'papa@example.com' }), NOW).allowed).toBe(true);
+    // Почтовый счётчик, наоборот, не обходится сменой машины: он на почту и есть.
+    expect(checkLoginGate(db, target({ address: '198.51.100.1' }), NOW).allowed).toBe(false);
+
+    // Порог по адресу выше почтового: за ним стоит вся семья вместе с NAT.
+    for (let index = 0; index < LOGIN_ADDRESS_FAILURE_LIMIT; index += 1) {
+      recordLoginFailure(db, target({ email: `сосед${index}@example.com` }), NOW);
+    }
+    expect(checkLoginGate(db, target({ email: 'papa@example.com' }), NOW)).toMatchObject({
+      allowed: false,
+      reason: 'locked',
+    });
+  });
+
+  it('счётчики пароля и PIN раздельные', () => {
+    const db = open();
+
+    failTimes(db, LOGIN_EMAIL_FAILURE_LIMIT, { kind: 'pin' });
+
+    expect(checkLoginGate(db, target({ kind: 'pin' }), NOW).allowed).toBe(false);
+    // Забытый PIN не должен закрывать вход паролем: это разные секреты.
+    expect(checkLoginGate(db, target({ kind: 'password' }), NOW).allowed).toBe(true);
+  });
+
+  it('верный секрет гасит почтовый счётчик и не трогает адресный', () => {
+    const db = open();
+    failTimes(db, LOGIN_EMAIL_FAILURE_LIMIT - 1);
+
+    clearLoginFailures(db, target());
+
+    expect(
+      db.prepare<[], { count: number }>("SELECT count(*) AS count FROM login_attempts WHERE scope = 'email'").get()
+        ?.count,
+    ).toBe(0);
+    // Адресный остаётся: знание одного пароля не повод обнулять общий счёт.
+    expect(
+      db.prepare<[], { failures: number }>("SELECT failures FROM login_attempts WHERE scope = 'address'").get()
+        ?.failures,
+    ).toBe(LOGIN_EMAIL_FAILURE_LIMIT - 1);
+  });
+
+  it('считает попытки без почты и с несуществующим ящиком', () => {
+    const db = open();
+
+    // Вход по PIN идёт без почты, но адрес у него есть, и перебор по нему считается.
+    failTimes(db, LOGIN_ADDRESS_FAILURE_LIMIT, { kind: 'pin', email: undefined });
+    expect(checkLoginGate(db, target({ kind: 'pin', email: undefined }), NOW).allowed).toBe(false);
+
+    // Пустой адрес не повод не считать: общее ведро вместо обхода счётчика.
+    expect(recordLoginFailure(db, target({ address: '   ' }), NOW).allowed).toBe(true);
+    expect(
+      db
+        .prepare<[string], { failures: number }>(
+          "SELECT failures FROM login_attempts WHERE scope = 'address' AND key = ?",
+        )
+        .get(UNKNOWN_ADDRESS)?.failures,
+    ).toBe(1);
+  });
+
+  it('приводит почту к одному ключу независимо от регистра и пробелов', () => {
+    const db = open();
+
+    failTimes(db, LOGIN_EMAIL_FAILURE_LIMIT - 1);
+    // Иначе `Mama@Example.com ` начинал бы серию заново на каждой попытке.
+    expect(recordLoginFailure(db, target({ email: ' Mama@Example.COM ' }), NOW)).toMatchObject({
+      allowed: false,
+      reason: 'locked',
+    });
+  });
+
+  it('fail-closed: нечитаемый счётчик не пускает вход', () => {
+    const db = open();
+
+    db.exec('DROP TABLE login_attempts');
+
+    expect(checkLoginGate(db, target(), NOW)).toEqual({
+      allowed: false,
+      reason: 'unavailable',
+      retryAfterMs: LOGIN_LOCKOUT_MS,
+    });
+    // Незаписанная неудача — та же недоступность защиты, а не разрешение.
+    expect(recordLoginFailure(db, target(), NOW)).toMatchObject({
+      allowed: false,
+      reason: 'unavailable',
+    });
+  });
+
+  it('fail-closed: испорченная отметка времени не считается давней', () => {
+    const db = open();
+    failTimes(db, 1);
+    db.prepare("UPDATE login_attempts SET last_failed_at = 'позавчера'").run();
+
+    expect(checkLoginGate(db, target(), NOW)).toMatchObject({
+      allowed: false,
+      reason: 'unavailable',
+    });
+  });
+
+  it('держит калибровочные константы спеки: пороги и пауза', () => {
+    expect(LOGIN_EMAIL_FAILURE_LIMIT).toBe(5);
+    expect(LOGIN_ADDRESS_FAILURE_LIMIT).toBe(20);
+    expect(LOGIN_LOCKOUT_MS).toBe(15 * 60 * 1000);
   });
 });

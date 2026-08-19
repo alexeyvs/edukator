@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { relative, resolve } from 'node:path';
 import Database from 'better-sqlite3';
+import { MAX_ADDRESS_LENGTH, UNKNOWN_ADDRESS } from './client-address.js';
 import { moscowDate } from './moscow-time.js';
 import { MAX_SECRET_LENGTH, hashSecret, verifySecret } from './secrets.js';
 
@@ -1277,4 +1278,191 @@ export function readCodexQuota(
 ): CodexQuotaState {
   requireQuotaLimit(limit);
   return quotaState(db, childId, moscowDate(now), limit);
+}
+
+/* ─── Защита от перебора ────────────────────────────────────────────────── */
+
+/**
+ * Порог неудач по адресу электронной почты. Пять попыток — это опечатка и
+ * перебор раскладки, а не подбор: словарь на десять тысяч слов через такой
+ * порог занимает годы. Число задано спекой; меняете его — меняйте и её.
+ */
+export const LOGIN_EMAIL_FAILURE_LIMIT = 5;
+
+/**
+ * Порог неудач по адресу клиента. Он выше почтового намеренно: за одним
+ * адресом стоит вся семья вместе с NAT, и общий порог в пять означал бы, что
+ * ошибившийся брат закрывает вход всем остальным.
+ */
+export const LOGIN_ADDRESS_FAILURE_LIMIT = 20;
+
+/**
+ * Пауза после серии неудач. Она же срок жизни счётчика: неудача старше паузы
+ * счётчик не наращивает, а начинает заново — иначе редкие опечатки за месяц
+ * складывались бы в запрет входа на ровном месте.
+ */
+export const LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
+
+/** Что именно проверяется: пароль родителя или его PIN. Счётчики раздельные. */
+export type LoginKind = 'password' | 'pin';
+
+export type LoginScope = 'email' | 'address';
+
+/** Кого считаем. Адрес есть всегда, почта — только там, где вход по ней идёт. */
+export interface LoginTarget {
+  kind: LoginKind;
+  email?: string | undefined;
+  address: string;
+}
+
+/**
+ * Итог проверки. `unavailable` — не «пока нельзя», а «счётчик не читается»:
+ * снаружи это тот же отказ, но по нему видно, что сервер сломан, а не занят.
+ */
+export interface LoginGate {
+  allowed: boolean;
+  reason?: 'locked' | 'unavailable';
+  retryAfterMs: number;
+}
+
+const LOGIN_FAILURE_LIMIT: Record<LoginScope, number> = {
+  email: LOGIN_EMAIL_FAILURE_LIMIT,
+  address: LOGIN_ADDRESS_FAILURE_LIMIT,
+};
+
+interface LoginEntry {
+  scope: LoginScope;
+  key: string;
+}
+
+/**
+ * Ключи счётчиков одной попытки. Почта берётся приведённой, но **не**
+ * проверенной на вид адреса: перебор идёт и по несуществующим ящиках, и такие
+ * попытки обязаны считаться тоже. Обрезка по длине — чтобы ключом не служила
+ * присланная снаружи строка любого размера.
+ */
+function loginEntries(target: LoginTarget): LoginEntry[] {
+  const entries: LoginEntry[] = [];
+  const email = (target.email ?? '').trim().toLowerCase().slice(0, MAX_EMAIL_LENGTH);
+  if (email.length > 0) entries.push({ scope: 'email', key: email });
+  const address = target.address.trim().toLowerCase().slice(0, MAX_ADDRESS_LENGTH);
+  // Пустой адрес — не повод не считать: без ключа попытка обошла бы счётчик.
+  entries.push({ scope: 'address', key: address.length > 0 ? address : UNKNOWN_ADDRESS });
+  return entries;
+}
+
+interface LoginAttemptRow {
+  failures: number;
+  last_failed_at: string;
+}
+
+function selectLoginAttempt(
+  db: Database.Database,
+  kind: LoginKind,
+  entry: LoginEntry,
+): LoginAttemptRow | undefined {
+  return db
+    .prepare<[LoginScope, LoginKind, string], LoginAttemptRow>(
+      'SELECT failures, last_failed_at FROM login_attempts WHERE scope = ? AND kind = ? AND key = ?',
+    )
+    .get(entry.scope, kind, entry.key);
+}
+
+/** Сколько паузы осталось этой строке. Ноль и меньше — счётчик уже остыл. */
+function lockoutLeftMs(row: LoginAttemptRow, scope: LoginScope, now: Date): number | undefined {
+  const last = Date.parse(row.last_failed_at);
+  // Испорченная отметка — неизвестное состояние счётчика, а не «давняя неудача».
+  if (!Number.isFinite(last)) return undefined;
+  if (row.failures < LOGIN_FAILURE_LIMIT[scope]) return 0;
+  return LOGIN_LOCKOUT_MS - (now.getTime() - last);
+}
+
+const COUNTER_BROKEN: LoginGate = {
+  allowed: false,
+  reason: 'unavailable',
+  retryAfterMs: LOGIN_LOCKOUT_MS,
+};
+
+/**
+ * Пускать ли попытку входа. Проверяется **до** сверки секрета: смысл паузы в
+ * том, чтобы подбирающий не получал ни ответа, ни `scrypt` на каждый запрос.
+ *
+ * Fail-closed: любая беда с чтением счётчика — отказ. Открытый вход при
+ * недоступной защите ровно тот случай, ради которого её и заводили.
+ */
+export function checkLoginGate(
+  db: Database.Database,
+  target: LoginTarget,
+  now: Date = new Date(),
+): LoginGate {
+  try {
+    let retryAfterMs = 0;
+    for (const entry of loginEntries(target)) {
+      const row = selectLoginAttempt(db, target.kind, entry);
+      if (row === undefined) continue;
+      const left = lockoutLeftMs(row, entry.scope, now);
+      if (left === undefined) return COUNTER_BROKEN;
+      if (left > 0) retryAfterMs = Math.max(retryAfterMs, left);
+    }
+    return retryAfterMs > 0 ? { allowed: false, reason: 'locked', retryAfterMs } : { allowed: true, retryAfterMs: 0 };
+  } catch {
+    return COUNTER_BROKEN;
+  }
+}
+
+/**
+ * Отмечает неудачу по обоим ключам и возвращает состояние, получившееся после
+ * неё. Строка старше паузы начинается заново; новая неудача внутри паузы её
+ * продлевает — подбирающий не должен пересиживать запрет, продолжая долбить.
+ */
+export function recordLoginFailure(
+  db: Database.Database,
+  target: LoginTarget,
+  now: Date = new Date(),
+): LoginGate {
+  const stamp = now.toISOString();
+  const stale = new Date(now.getTime() - LOGIN_LOCKOUT_MS).toISOString();
+  try {
+    return db
+      .transaction((): LoginGate => {
+        let retryAfterMs = 0;
+        for (const entry of loginEntries(target)) {
+          db.prepare(
+            `INSERT INTO login_attempts (scope, kind, key, failures, first_failed_at, last_failed_at)
+                  VALUES (?, ?, ?, 1, ?, ?)
+               ON CONFLICT (scope, kind, key) DO UPDATE SET
+                  failures        = CASE WHEN last_failed_at <= ? THEN 1 ELSE failures + 1 END,
+                  first_failed_at = CASE WHEN last_failed_at <= ? THEN ? ELSE first_failed_at END,
+                  last_failed_at  = ?`,
+          ).run(entry.scope, target.kind, entry.key, stamp, stamp, stale, stale, stamp, stamp);
+          const row = selectLoginAttempt(db, target.kind, entry);
+          const left = row === undefined ? undefined : lockoutLeftMs(row, entry.scope, now);
+          if (left === undefined) return COUNTER_BROKEN;
+          if (left > 0) retryAfterMs = Math.max(retryAfterMs, left);
+        }
+        return retryAfterMs > 0
+          ? { allowed: false, reason: 'locked', retryAfterMs }
+          : { allowed: true, retryAfterMs: 0 };
+      })
+      .immediate();
+  } catch {
+    // Незаписанная неудача — та же недоступность счётчика: вход не пускаем.
+    return COUNTER_BROKEN;
+  }
+}
+
+/**
+ * Гасит почтовый счётчик после верного секрета. Счётчик по адресу остаётся:
+ * за ним стоит и тот, кто подбирает, а знание одного пароля не повод обнулять
+ * ему общий счёт. Сам по себе он остынет через паузу.
+ */
+export function clearLoginFailures(db: Database.Database, target: LoginTarget): void {
+  for (const entry of loginEntries(target)) {
+    if (entry.scope !== 'email') continue;
+    db.prepare('DELETE FROM login_attempts WHERE scope = ? AND kind = ? AND key = ?').run(
+      entry.scope,
+      target.kind,
+      entry.key,
+    );
+  }
 }
