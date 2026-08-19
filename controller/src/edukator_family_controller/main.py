@@ -200,7 +200,7 @@ async def run_controller(
     config: ControllerConfig,
     family: FamilyClient,
     *,
-    gate_reader: Callable[[str], Awaitable[GateState]] = fetch_gate,
+    gate_reader: Callable[[str, str], Awaitable[GateState]] = fetch_gate,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     clock: Callable[[], float] = time.monotonic,
     wall_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
@@ -213,7 +213,7 @@ async def run_controller(
     try:
         while True:
             try:
-                gate = await gate_reader(config.edukator_url)
+                gate = await gate_reader(config.edukator_url, config.agent_token)
                 state.last_gate_desired_blocked = not gate.unlocked
                 await reconcile(
                     gate,

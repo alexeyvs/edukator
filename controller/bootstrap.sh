@@ -23,6 +23,8 @@ if [[ -z "$python_bin" ]] || ! "$python_bin" -c \
 fi
 
 "$python_bin" -m venv "$venv_dir"
-"$venv_dir/bin/python" -m pip install --disable-pip-version-check -e "$controller_dir"
+# Тестовая зависимость ставится сразу: гейт `npm run family:test` живёт в этом
+# же окружении, а второй установки после первой ошибки никто не помнит.
+"$venv_dir/bin/python" -m pip install --disable-pip-version-check -e "$controller_dir[test]"
 
 echo "Контроллер установлен в $venv_dir"

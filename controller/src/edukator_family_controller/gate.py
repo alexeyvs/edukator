@@ -8,7 +8,7 @@ from datetime import date, datetime
 import json
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 @dataclass(frozen=True)
@@ -152,11 +152,34 @@ def parse_gate(raw: Any) -> GateState:
     )
 
 
-def _fetch_gate(url: str, timeout: float) -> GateState:
+class _RefuseRedirect(HTTPRedirectHandler):
+    """Запрещает переходы: urllib унёс бы агентский токен на чужой адрес."""
+
+    def redirect_request(self, *_arguments: Any, **_keywords: Any) -> None:
+        return None
+
+
+_OPENER = build_opener(_RefuseRedirect)
+
+
+def _fetch_gate(url: str, token: str, timeout: float) -> GateState:
+    request = Request(
+        f"{url}/api/gate/status",
+        # Ровно тот заголовок, который разбирает `readAgentToken` на сервере.
+        headers={"Authorization": f"Bearer {token}"},
+        method="GET",
+    )
     try:
-        with urlopen(f"{url}/api/gate/status", timeout=timeout) as response:
+        with _OPENER.open(request, timeout=timeout) as response:
             return parse_gate(json.load(response))
     except HTTPError as error:
+        if error.code in (401, 403):
+            # Отозванное или подменённое устройство: причина названа прямо,
+            # но сам токен в текст не попадает — его читают в логах.
+            raise RuntimeError(
+                f"Edukator не принял агентский токен (HTTP {error.code}); "
+                "выпустите устройству новую ссылку"
+            ) from error
         raise RuntimeError(f"Edukator ответил HTTP {error.code}") from error
     except URLError as error:
         raise RuntimeError(f"Edukator недоступен: {error.reason}") from error
@@ -164,5 +187,5 @@ def _fetch_gate(url: str, timeout: float) -> GateState:
         raise RuntimeError(f"Ответ Edukator не принят: {error}") from error
 
 
-async def fetch_gate(url: str, timeout: float = 5.0) -> GateState:
-    return await asyncio.to_thread(_fetch_gate, url, timeout)
+async def fetch_gate(url: str, token: str, timeout: float = 5.0) -> GateState:
+    return await asyncio.to_thread(_fetch_gate, url, token, timeout)

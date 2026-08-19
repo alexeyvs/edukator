@@ -15,6 +15,7 @@
     "family:setup": "bash controller/bootstrap.sh",
     "family:login": "controller/.venv/bin/edukator-family-login",
     "family:controller": "controller/.venv/bin/edukator-family-controller",
+    "family:test": "controller/.venv/bin/python -m pytest controller/tests",
     "extract-toc": "tsx scripts/extract-toc.ts",
     "build-curriculum": "tsx scripts/build-curriculum.ts",
     "prefetch": "tsx scripts/prefetch.ts",

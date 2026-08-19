@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
 import tempfile
+import threading
+from typing import Any, Iterator
 import unittest
 
 from edukator_family_controller.config import (
@@ -21,10 +25,11 @@ from edukator_family_controller.gate import (
     ComputerAccessOverride,
     GateState,
     LearningGateState,
+    fetch_gate,
     parse_gate,
 )
 from edukator_family_controller.family import MicrosoftFamilyClient
-from edukator_family_controller.login import update_family_with_retry
+from edukator_family_controller.login import ask_server_access, update_family_with_retry
 from edukator_family_controller.main import (
     BLOCK_RENEW_SECONDS,
     ReconcileState,
@@ -34,6 +39,9 @@ from edukator_family_controller.main import (
     run_controller,
 )
 
+
+AGENT_TOKEN = "agent-secret-token"
+EDUKATOR_URL = "http://127.0.0.1:3000"
 
 LOCKED = GateState(
     day="2026-08-12",
@@ -426,11 +434,117 @@ class GateContractTests(unittest.TestCase):
                 parse_gate(payload)
 
 
+UNLOCKED_PAYLOAD = {
+    "day": "2026-08-12",
+    "required": 3,
+    "completed": 3,
+    "remaining": 0,
+    "learning": {"materialId": 7, "required": True, "passed": True},
+    "automaticUnlocked": True,
+    "override": None,
+    "unlocked": True,
+}
+
+
+class _GateStubHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802 — имя задано BaseHTTPRequestHandler
+        server: Any = self.server
+        server.requests.append((self.path, dict(self.headers)))
+        if server.location is not None:
+            self.send_response(server.status)
+            self.send_header("Location", server.location)
+            self.end_headers()
+            return
+        body = json.dumps(server.payload).encode("utf-8")
+        self.send_response(server.status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_arguments: Any) -> None:
+        """Тишина: журнал http.server иначе засоряет вывод тестов."""
+
+
+@contextmanager
+def gate_stub(
+    *,
+    status: int = 200,
+    payload: Any = None,
+    location: str | None = None,
+) -> Iterator[Any]:
+    """Локальный сервер gate/status: тесты не выходят за пределы машины."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _GateStubHandler)
+    server.status = status
+    server.payload = UNLOCKED_PAYLOAD if payload is None else payload
+    server.location = location
+    server.requests = []
+    server.url = f"http://127.0.0.1:{server.server_address[1]}"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+class AgentTokenTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sends_agent_token_in_authorization_header(self) -> None:
+        with gate_stub() as stub:
+            gate = await fetch_gate(stub.url, AGENT_TOKEN)
+
+        self.assertTrue(gate.unlocked)
+        path, headers = stub.requests[0]
+        self.assertEqual(path, "/api/gate/status")
+        self.assertEqual(headers["Authorization"], f"Bearer {AGENT_TOKEN}")
+
+    async def test_rejected_token_names_the_reason_without_printing_it(self) -> None:
+        with gate_stub(status=401, payload={"error": "нет доступа"}) as stub:
+            with self.assertRaises(RuntimeError) as failure:
+                await fetch_gate(stub.url, AGENT_TOKEN)
+
+        self.assertIn("агентский токен", str(failure.exception))
+        self.assertNotIn(AGENT_TOKEN, str(failure.exception))
+
+    async def test_does_not_follow_redirect_with_the_token(self) -> None:
+        with gate_stub() as elsewhere:
+            with gate_stub(status=302, location=f"{elsewhere.url}/api/gate/status") as stub:
+                with self.assertRaisesRegex(RuntimeError, "HTTP 302"):
+                    await fetch_gate(stub.url, AGENT_TOKEN)
+
+            self.assertEqual(elsewhere.requests, [])
+            self.assertEqual(len(stub.requests), 1)
+
+    async def test_rejected_token_fails_closed_and_stays_out_of_the_log(self) -> None:
+        family = FakeFamily(blocked=False)
+        logs: list[str] = []
+
+        async def stop_after_backoff(_: float) -> None:
+            raise asyncio.CancelledError
+
+        with gate_stub(status=401, payload={"error": "нет доступа"}) as stub:
+            with self.assertRaises(asyncio.CancelledError):
+                await run_controller(
+                    ControllerConfig("refresh", "child", AGENT_TOKEN, stub.url),
+                    family,
+                    sleep=stop_after_backoff,
+                    log=logs.append,
+                )
+
+        self.assertEqual(family.actions, [True])
+        self.assertTrue(family.blocked)
+        joined = "\n".join(logs)
+        self.assertIn("агентский токен", joined)
+        self.assertNotIn(AGENT_TOKEN, joined)
+
+
 class ConfigTests(unittest.TestCase):
     def test_round_trip_uses_owner_only_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "family.json"
-            expected = ControllerConfig("secret", "child-id")
+            expected = ControllerConfig("secret", "child-id", AGENT_TOKEN, EDUKATOR_URL)
             save_config(expected, path)
 
             self.assertEqual(load_config(path), expected)
@@ -445,12 +559,42 @@ class ConfigTests(unittest.TestCase):
                     {
                         "refresh_token": "secret",
                         "child_user_id": "child-id",
+                        "agent_token": AGENT_TOKEN,
+                        "edukator_url": EDUKATOR_URL,
                         "poll_seconds": 0,
                     }
                 )
             )
             with self.assertRaisesRegex(ValueError, "Интервалы"):
                 load_config(path)
+
+    def test_requires_server_address_and_agent_token(self) -> None:
+        complete = {
+            "refresh_token": "secret",
+            "child_user_id": "child-id",
+            "agent_token": AGENT_TOKEN,
+            "edukator_url": EDUKATOR_URL,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "family.json"
+            for missing in ("agent_token", "edukator_url"):
+                payload = {key: value for key, value in complete.items() if key != missing}
+                path.write_text(json.dumps(payload))
+                with self.subTest(missing=missing):
+                    with self.assertRaisesRegex(ValueError, missing):
+                        load_config(path)
+
+    def test_agent_token_is_saved_but_never_shown(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "family.json"
+            config = ControllerConfig("secret", "child-id", AGENT_TOKEN, EDUKATOR_URL)
+            save_config(config, path)
+
+            self.assertEqual(json.loads(path.read_text())["agent_token"], AGENT_TOKEN)
+            shown = repr(load_config(path))
+            self.assertNotIn(AGENT_TOKEN, shown)
+            self.assertNotIn("secret", shown)
+            self.assertIn("child-id", shown)
 
     def test_pending_login_is_private_and_can_be_resumed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -461,6 +605,47 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(os.stat(pending_login_path(path)).st_mode & 0o777, 0o600)
             clear_pending_login(path)
             self.assertIsNone(load_pending_login(path))
+
+
+class ServerAccessPromptTests(unittest.TestCase):
+    def test_asks_for_address_and_hidden_token_on_first_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "family.json"
+            visible: list[str] = []
+
+            url, token = ask_server_access(
+                path,
+                ask=lambda prompt: visible.append(prompt) or "https://edu.example.com/",
+                ask_secret=lambda _: AGENT_TOKEN,
+            )
+
+            self.assertEqual(url, "https://edu.example.com")
+            self.assertEqual(token, AGENT_TOKEN)
+            # Токен спрашивают только скрытым вводом: подсказки открытого ввода
+            # о нём даже не упоминают.
+            self.assertNotIn("токен", " ".join(visible).lower())
+
+    def test_keeps_previous_values_on_empty_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "family.json"
+            save_config(ControllerConfig("secret", "child-id", AGENT_TOKEN, EDUKATOR_URL), path)
+
+            url, token = ask_server_access(path, ask=lambda _: "", ask_secret=lambda _: "  ")
+
+            self.assertEqual(url, EDUKATOR_URL)
+            self.assertEqual(token, AGENT_TOKEN)
+
+    def test_rejects_address_without_scheme_and_empty_token(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "family.json"
+            with self.assertRaisesRegex(ValueError, "http://"):
+                ask_server_access(path, ask=lambda _: "edu.example.com", ask_secret=lambda _: "t")
+            with self.assertRaisesRegex(ValueError, "токен"):
+                ask_server_access(
+                    path,
+                    ask=lambda _: "https://edu.example.com",
+                    ask_secret=lambda _: "",
+                )
 
 
 class FlakyRoster:
@@ -910,10 +1095,12 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
                 ControllerConfig(
                     "refresh",
                     "child",
+                    AGENT_TOKEN,
+                    EDUKATOR_URL,
                     poll_seconds=2 * BLOCK_RENEW_SECONDS,
                 ),
                 family,
-                gate_reader=lambda _: self._gate(LOCKED),
+                gate_reader=lambda *_: self._gate(LOCKED),
                 sleep=sleep_through_one_renewal,
                 clock=lambda: monotonic,
                 log=lambda _: None,
@@ -932,9 +1119,9 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(asyncio.CancelledError):
             await run_controller(
-                ControllerConfig("refresh", "child", poll_seconds=60),
+                ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL, poll_seconds=60),
                 family,
-                gate_reader=lambda _: self._gate(LOCKED),
+                gate_reader=lambda *_: self._gate(LOCKED),
                 sleep=record_then_stop,
                 clock=lambda: 100,
                 log=lambda _: None,
@@ -1021,7 +1208,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
     async def test_unavailable_edukator_on_startup_verifies_safe_block(self) -> None:
         family = FakeFamily(blocked=True)
 
-        async def failing_reader(_: str) -> GateState:
+        async def failing_reader(_: str, __: str) -> GateState:
             raise RuntimeError("нет связи")
 
         async def stop_after_backoff(_: float) -> None:
@@ -1029,7 +1216,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(asyncio.CancelledError):
             await run_controller(
-                ControllerConfig("refresh", "child"),
+                ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
                 family,
                 gate_reader=failing_reader,
                 sleep=stop_after_backoff,
@@ -1044,7 +1231,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         family = FakeFamily(blocked=False)
         logs: list[str] = []
 
-        async def invalid_reader(_: str) -> GateState:
+        async def invalid_reader(_: str, __: str) -> GateState:
             raise ValueError("invalid gate payload")
 
         async def stop_after_backoff(_: float) -> None:
@@ -1052,7 +1239,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(asyncio.CancelledError):
             await run_controller(
-                ControllerConfig("refresh", "child"),
+                ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
                 family,
                 gate_reader=invalid_reader,
                 sleep=stop_after_backoff,
@@ -1071,9 +1258,9 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(asyncio.CancelledError):
             await run_controller(
-                ControllerConfig("refresh", "child"),
+                ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
                 family,
-                gate_reader=lambda _: self._gate(LOCKED),
+                gate_reader=lambda *_: self._gate(LOCKED),
                 sleep=stop_after_backoff,
                 log=logs.append,
             )
@@ -1088,7 +1275,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         reads = 0
         sleeps = 0
 
-        async def reader(_: str) -> GateState:
+        async def reader(_: str, __: str) -> GateState:
             nonlocal reads
             reads += 1
             if reads == 1:
@@ -1103,7 +1290,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(asyncio.CancelledError):
             await run_controller(
-                ControllerConfig("refresh", "child"),
+                ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
                 family,
                 gate_reader=reader,
                 sleep=recover_then_stop,
@@ -1122,7 +1309,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         reads = 0
         blocked_during_sleeps: list[bool] = []
 
-        async def reader(_: str) -> GateState:
+        async def reader(_: str, __: str) -> GateState:
             nonlocal reads
             reads += 1
             if reads == 1:
@@ -1136,7 +1323,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(asyncio.CancelledError):
             await run_controller(
-                ControllerConfig("refresh", "child"),
+                ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
                 family,
                 gate_reader=reader,
                 sleep=outage_then_stop,
@@ -1156,9 +1343,9 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(asyncio.CancelledError):
             await run_controller(
-                ControllerConfig("refresh", "child"),
+                ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
                 family,
-                gate_reader=lambda _: self._gate(UNLOCKED),
+                gate_reader=lambda *_: self._gate(UNLOCKED),
                 sleep=stop_after_poll,
                 wall_clock=lambda: datetime(
                     2026, 8, 12, 20, tzinfo=timezone.utc
@@ -1174,7 +1361,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         reads = 0
         sleeps = 0
 
-        async def recovering_reader(_: str) -> GateState:
+        async def recovering_reader(_: str, __: str) -> GateState:
             nonlocal reads
             reads += 1
             if reads == 1:
@@ -1189,7 +1376,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(asyncio.CancelledError):
             await run_controller(
-                ControllerConfig("refresh", "child"),
+                ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
                 family,
                 gate_reader=recovering_reader,
                 sleep=retry_then_stop,
@@ -1228,7 +1415,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         reads = 0
         sleeps = 0
 
-        async def reader(_: str) -> GateState:
+        async def reader(_: str, __: str) -> GateState:
             nonlocal reads
             reads += 1
             if reads == 1:
@@ -1246,7 +1433,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         logs: list[str] = []
         with self.assertRaises(asyncio.CancelledError):
             await run_controller(
-                ControllerConfig("refresh", "child"),
+                ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
                 family,
                 gate_reader=reader,
                 sleep=advance_or_stop,
@@ -1273,7 +1460,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
                 reads = 0
                 delays: list[float] = []
 
-                async def reader(_: str) -> GateState:
+                async def reader(_: str, __: str) -> GateState:
                     nonlocal reads
                     reads += 1
                     if reads == 1:
@@ -1289,7 +1476,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
                 with self.assertRaises(asyncio.CancelledError):
                     await run_controller(
-                        ControllerConfig("refresh", "child"),
+                        ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
                         family,
                         gate_reader=reader,
                         sleep=reach_midnight_then_stop,
@@ -1307,7 +1494,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         reads = 0
         action_counts: list[int] = []
 
-        async def reader(_: str) -> GateState:
+        async def reader(_: str, __: str) -> GateState:
             nonlocal reads
             reads += 1
             if reads == 1:
@@ -1327,7 +1514,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(asyncio.CancelledError):
             await run_controller(
-                ControllerConfig("refresh", "child"),
+                ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
                 family,
                 gate_reader=reader,
                 sleep=expire_remove_then_stop,
@@ -1349,7 +1536,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         reads = 0
         sleeps = 0
 
-        async def reader(_: str) -> GateState:
+        async def reader(_: str, __: str) -> GateState:
             nonlocal reads
             reads += 1
             if reads == 1:
@@ -1371,7 +1558,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(asyncio.CancelledError):
             await run_controller(
-                ControllerConfig("refresh", "child"),
+                ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
                 family,
                 gate_reader=reader,
                 sleep=advance_to_renewal,
@@ -1413,7 +1600,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
                 reads = 0
                 blocked_during_sleeps: list[bool] = []
 
-                async def reader(_: str) -> GateState:
+                async def reader(_: str, __: str) -> GateState:
                     nonlocal reads
                     reads += 1
                     if reads == 1:
@@ -1432,7 +1619,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
                 with self.assertRaises(asyncio.CancelledError):
                     await run_controller(
-                        ControllerConfig("refresh", "child"),
+                        ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
                         family,
                         gate_reader=reader,
                         sleep=recover_then_stop,
@@ -1451,7 +1638,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         reads = 0
         delays: list[float] = []
 
-        async def reader(_: str) -> GateState:
+        async def reader(_: str, __: str) -> GateState:
             nonlocal reads
             reads += 1
             if reads == 1:
@@ -1467,7 +1654,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(asyncio.CancelledError):
             await run_controller(
-                ControllerConfig("refresh", "child"),
+                ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
                 family,
                 gate_reader=reader,
                 sleep=reach_expiry_then_stop,
@@ -1505,7 +1692,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         reads = 0
         sleeps = 0
 
-        async def reader(_: str) -> GateState:
+        async def reader(_: str, __: str) -> GateState:
             nonlocal reads
             reads += 1
             if reads == 1:
@@ -1526,7 +1713,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         logs: list[str] = []
         with self.assertRaises(asyncio.CancelledError):
             await run_controller(
-                ControllerConfig("refresh", "child"),
+                ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
                 family,
                 gate_reader=reader,
                 sleep=cross_expiry_then_stop,
@@ -1548,7 +1735,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         reads = 0
         sleeps = 0
 
-        async def reader(_: str) -> GateState:
+        async def reader(_: str, __: str) -> GateState:
             nonlocal reads
             reads += 1
             if reads == 1:
@@ -1569,7 +1756,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         logs: list[str] = []
         with self.assertRaises(asyncio.CancelledError):
             await run_controller(
-                ControllerConfig("refresh", "child"),
+                ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
                 family,
                 gate_reader=reader,
                 sleep=cross_expiry_then_stop,
@@ -1590,7 +1777,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         delays: list[float] = []
         blocked_during_sleeps: list[bool] = []
 
-        async def reader(_: str) -> GateState:
+        async def reader(_: str, __: str) -> GateState:
             nonlocal reads
             reads += 1
             if reads == 1:
@@ -1611,6 +1798,8 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
                 ControllerConfig(
                     "refresh",
                     "child",
+                    AGENT_TOKEN,
+                    EDUKATOR_URL,
                     poll_seconds=120,
                 ),
                 family,
@@ -1658,7 +1847,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         current = datetime(2026, 8, 12, 20, 59, tzinfo=timezone.utc)
         sleeps = 0
 
-        async def unavailable(_: str) -> GateState:
+        async def unavailable(_: str, __: str) -> GateState:
             raise RuntimeError("нет связи")
 
         async def cross_expiry_then_stop(_: float) -> None:
@@ -1672,7 +1861,7 @@ class ReconcileTests(unittest.IsolatedAsyncioTestCase):
         logs: list[str] = []
         with self.assertRaises(asyncio.CancelledError):
             await run_controller(
-                ControllerConfig("refresh", "child"),
+                ControllerConfig("refresh", "child", AGENT_TOKEN, EDUKATOR_URL),
                 family,
                 gate_reader=unavailable,
                 sleep=cross_expiry_then_stop,

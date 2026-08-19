@@ -14,6 +14,7 @@ from .config import (
     ControllerConfig,
     clear_pending_login,
     config_path,
+    load_config,
     load_pending_login,
     save_config,
     save_pending_login,
@@ -58,6 +59,40 @@ async def update_family_with_retry(
         "Не удалось загрузить Family Safety после нескольких попыток. "
         "Сессия сохранена — запустите family:login ещё раз позже"
     ) from last_error
+
+
+def ask_server_access(
+    target: Path,
+    *,
+    ask: Callable[[str], str] = input,
+    ask_secret: Callable[[str], str] = getpass.getpass,
+) -> tuple[str, str]:
+    """Спрашивает адрес сервера и агентский токен устройства.
+
+    Токен читается скрытым вводом: он равнозначен ключу от детского аккаунта,
+    и эхо в терминале осталось бы и в истории сессии, и в записи экрана.
+    """
+    try:
+        previous: ControllerConfig | None = load_config(target)
+    except ValueError:
+        # Первый вход или конфигурация без новых полей — спрашиваем всё заново.
+        previous = None
+
+    default_url = previous.edukator_url if previous is not None else ""
+    hint = f" [{default_url}]" if default_url else " (например https://edukator.example.com)"
+    url = (ask(f"Адрес сервера Edukator{hint}: ").strip() or default_url).rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("Адрес сервера должен начинаться с http:// или https://")
+
+    keep = " (Enter — оставить прежний)" if previous is not None else ""
+    token = ask_secret(f"Агентский токен устройства{keep}, ввод скрыт: ").strip()
+    if not token and previous is not None:
+        token = previous.agent_token
+    if not token:
+        raise ValueError(
+            "Агентский токен не введён; выпустите устройству kind=agent в разделе «Семья»"
+        )
+    return url, token
 
 
 async def authenticate(target: Path) -> Any:
@@ -117,10 +152,13 @@ async def login(target: Path) -> None:
             for device in (matches[0].devices or [])
         ):
             raise RuntimeError("У выбранного участника нет устройства Windows")
+        edukator_url, agent_token = ask_server_access(target)
         save_config(
             ControllerConfig(
                 refresh_token=auth.refresh_token,
                 child_user_id=child_user_id,
+                agent_token=agent_token,
+                edukator_url=edukator_url,
             ),
             target,
         )

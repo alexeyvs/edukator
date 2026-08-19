@@ -1,4 +1,4 @@
-"""Конфигурация контроллера и безопасная запись refresh token."""
+"""Конфигурация контроллера и безопасная запись его секретов."""
 
 from __future__ import annotations
 
@@ -17,13 +17,29 @@ DEFAULT_CONFIG = Path.home() / ".config" / "edukator" / "family-safety.json"
 class ControllerConfig:
     refresh_token: str
     child_user_id: str
-    edukator_url: str = "http://127.0.0.1:3000"
+    agent_token: str
+    edukator_url: str
     poll_seconds: float = 20.0
     verify_seconds: float = 300.0
     block_days: int = 7
 
     def with_refresh_token(self, token: str) -> ControllerConfig:
         return replace(self, refresh_token=token)
+
+    def __repr__(self) -> str:
+        # Конфигурация целиком попадает в текст ошибки при любой оплошности —
+        # от `assertEqual` до `repr` в трассировке. Оба секрета здесь скрыты,
+        # чтобы ключ от детского аккаунта не оседал в логах и на экране.
+        return (
+            "ControllerConfig("
+            "refresh_token=<скрыт>, "
+            f"child_user_id={self.child_user_id!r}, "
+            "agent_token=<скрыт>, "
+            f"edukator_url={self.edukator_url!r}, "
+            f"poll_seconds={self.poll_seconds!r}, "
+            f"verify_seconds={self.verify_seconds!r}, "
+            f"block_days={self.block_days!r})"
+        )
 
 
 def config_path() -> Path:
@@ -58,7 +74,11 @@ def load_config(path: Path | None = None) -> ControllerConfig:
     config = ControllerConfig(
         refresh_token=_required_text(raw, "refresh_token"),
         child_user_id=_required_text(raw, "child_user_id"),
-        edukator_url=str(raw.get("edukator_url", "http://127.0.0.1:3000")).rstrip("/"),
+        # Адрес и агентский токен умолчания не имеют намеренно: сервер теперь
+        # многоарендный, и молчаливый `localhost` без токена дал бы вечный
+        # fail-closed вместо внятной жалобы на незаполненную конфигурацию.
+        agent_token=_required_text(raw, "agent_token"),
+        edukator_url=_required_text(raw, "edukator_url").rstrip("/"),
         poll_seconds=float(raw.get("poll_seconds", 20)),
         verify_seconds=float(raw.get("verify_seconds", 300)),
         block_days=int(raw.get("block_days", 7)),
@@ -101,6 +121,7 @@ def save_config(config: ControllerConfig, path: Path | None = None) -> None:
         {
             "refresh_token": config.refresh_token,
             "child_user_id": config.child_user_id,
+            "agent_token": config.agent_token,
             "edukator_url": config.edukator_url,
             "poll_seconds": config.poll_seconds,
             "verify_seconds": config.verify_seconds,

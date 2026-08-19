@@ -9,6 +9,9 @@ description = "Связывает дневной план Edukator с Microsoft 
 requires-python = ">=3.11"
 dependencies = ["pyfamilysafety==2.0.0"]
 
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
 [project.scripts]
 edukator-family-controller = "edukator_family_controller.main:main"
 edukator-family-login = "edukator_family_controller.login:main"
