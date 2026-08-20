@@ -7,6 +7,7 @@ import {
   type NextBossTaskResponse,
 } from './boss-api';
 import { TaskPrompt } from './TaskPrompt';
+import { BrandLink } from './BrandMark';
 
 const BOSS_TARGET = 5;
 const DISPUTE_FIRST_DELAY_MS = 1_000;
@@ -292,7 +293,7 @@ export function BossScreen({ runId, api = browserBossApi, wait = defaultWait }: 
   return (
     <main className="run-shell boss-shell">
       <header className="run-header">
-        <a className="brand" href="/" aria-label="На главный экран">Э</a>
+        <BrandLink label="На главный экран" />
         <div className="progress-block">
           <div className="progress-copy"><span>Босс</span><strong>{completed} из {BOSS_TARGET}</strong></div>
           <Progress completed={completed} />

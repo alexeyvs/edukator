@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { FinishScreen } from './FinishScreen';
 import { SafeRichText, TaskPrompt } from './TaskPrompt';
+import { BrandLink } from './BrandMark';
 import {
   browserRunApi,
   RunApiError,
@@ -140,7 +141,7 @@ export function TriageScreen({ runId, api = browserRunApi, wait = defaultWait }:
   return (
     <main className="run-shell triage-shell">
       <header className="run-header">
-        <a className="brand" href="/" aria-label="На главный экран">Э</a>
+        <BrandLink label="На главный экран" />
         <div className="progress-block" aria-label={`Прогресс триажа: ${progress.total} из ${progress.target}`}>
           <div className="progress-copy"><span>Триаж</span><strong>{progress.total} из {progress.target}</strong></div>
           <div className="progress-track" aria-hidden="true">

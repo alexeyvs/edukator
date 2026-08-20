@@ -9,6 +9,7 @@ import {
   type IssuedInvite,
 } from './family-api';
 import { isParentPin } from './pin-format';
+import { BrandLink } from './BrandMark';
 
 const STATUS_NAMES: Record<FamilyChild['status'], string> = {
   provisioning: 'База заводится',
@@ -387,7 +388,7 @@ export function FamilyScreen({
     // сразу подтвердить родителю, в какую учётную запись он вошёл.
     return (
       <main className="family-shell">
-        <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+        <BrandLink />
         <p>{email}</p>
         <p role={problem === null ? 'status' : 'alert'}>{problem ?? 'Открываю семью…'}</p>
         {problem !== null && (
@@ -410,7 +411,7 @@ export function FamilyScreen({
   return (
     <main className="family-shell">
       <header className="family-header">
-        <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+        <BrandLink />
         <div><span>Родительский вход</span><strong>{family.email}</strong></div>
         <button className="secondary" type="button" onClick={onLogout}>Выйти</button>
       </header>

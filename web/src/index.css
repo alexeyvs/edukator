@@ -657,15 +657,39 @@ input:focus-visible {
 .brand {
   display: grid;
   flex: 0 0 3rem;
+  width: 3rem;
   height: 3rem;
   place-items: center;
   border-radius: 1rem;
   color: white;
   background: var(--evergreen);
   box-shadow: 0 8px 20px rgb(7 91 69 / 22%);
-  font-size: 1.35rem;
-  font-weight: 800;
   text-decoration: none;
+}
+
+.brand-mark {
+  width: 2.35rem;
+  height: 2.35rem;
+  overflow: visible;
+}
+
+.brand-mark-route {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 3.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.brand-mark-finish {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 180ms ease;
+}
+
+.brand:hover .brand-mark-finish,
+.brand:focus-visible .brand-mark-finish {
+  transform: rotate(12deg) scale(1.08);
 }
 
 .progress-block {

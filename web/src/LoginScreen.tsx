@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { browserAuthApi, type AuthApi, type Principal } from './auth-api';
+import { BrandLink } from './BrandMark';
 
 export interface LoginScreenProps {
   api?: AuthApi;
@@ -37,7 +38,7 @@ export function LoginScreen({ api = browserAuthApi, onSignedIn, notice }: LoginS
 
   return (
     <main className="auth-shell">
-      <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+      <BrandLink />
       <form className="auth-card" onSubmit={(event) => { void submit(event); }}>
         <p className="auth-kicker">Вход для родителя</p>
         <h1>Эдукатор</h1>

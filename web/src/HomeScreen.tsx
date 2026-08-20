@@ -12,6 +12,7 @@ import {
 import type { FinishRunResponse } from './run-api';
 import { isPreliminaryForecast } from './forecast-presentation';
 import { SUBJECT_MARKS, SUBJECT_NAMES, SUBJECTS } from './subject-meta';
+import { BrandLink } from './BrandMark';
 
 export interface HomeScreenProps {
   api?: HomeApi;
@@ -283,7 +284,7 @@ export function HomeScreen({
   return (
     <main className="home-shell">
       <header className="home-header">
-        <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+        <BrandLink />
         <div><span>Подготовка к экзамену</span><strong>Эдукатор</strong></div>
         <a className="profile-link" href="/?screen=profile">Профиль</a>
       </header>

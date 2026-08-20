@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { browserAuthApi, type AuthApi } from './auth-api';
 import { HttpError } from './http';
+import { BrandLink } from './BrandMark';
 
 /** Тот же предел, что и на сервере: короткий пароль отвергнет и он. */
 export const MIN_PASSWORD_LENGTH = 10;
@@ -81,7 +82,7 @@ export function InviteScreen({ token, api = browserAuthApi, onSignedIn }: Invite
   if (broken) {
     return (
       <main className="auth-shell">
-        <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+        <BrandLink />
         <div className="auth-card">
           <h1>Ссылка не работает</h1>
           <p className="auth-message error" role="alert">{problem}</p>
@@ -96,7 +97,7 @@ export function InviteScreen({ token, api = browserAuthApi, onSignedIn }: Invite
   if (problem !== null && email === null) {
     return (
       <main className="auth-shell">
-        <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+        <BrandLink />
         <div className="auth-card">
           <h1>Не удалось проверить ссылку</h1>
           <p className="auth-message error" role="alert">{problem}</p>
@@ -109,7 +110,7 @@ export function InviteScreen({ token, api = browserAuthApi, onSignedIn }: Invite
 
   return (
     <main className="auth-shell">
-      <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+      <BrandLink />
       <form className="auth-card" onSubmit={(event) => { void submit(event); }}>
         <p className="auth-kicker">Приглашение родителя</p>
         <h1>Придумайте пароль</h1>

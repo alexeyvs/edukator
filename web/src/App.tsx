@@ -10,6 +10,7 @@ import { FamilyScreen } from './FamilyScreen';
 import { InviteScreen } from './InviteScreen';
 import { JoinScreen } from './JoinScreen';
 import { LoginScreen } from './LoginScreen';
+import { BrandLink } from './BrandMark';
 import { browserAuthApi, type AuthApi, type AuthState, type Principal } from './auth-api';
 import { onSignedOut, SignedOutError } from './http';
 import { browserProfileApi, type Profile, type ProfileApi } from './profile-api';
@@ -53,7 +54,7 @@ export function ProfileGate({
   if (profile === null) {
     return (
       <main className="run-state" role="status">
-        <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+        <BrandLink />
         <p>Проверяю профиль…</p>
       </main>
     );
@@ -329,7 +330,7 @@ export function App({ authApi = browserAuthApi }: { authApi?: AuthApi } = {}) {
   if (principal === null) {
     return (
       <main className="run-state" role="status">
-        <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+        <BrandLink />
         <p>Проверяю вход…</p>
       </main>
     );

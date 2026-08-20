@@ -7,6 +7,7 @@ import {
 } from './learning-api';
 import { SafeFormula } from './TaskPrompt';
 import { SUBJECT_MARKS, SUBJECT_NAMES } from './subject-meta';
+import { BrandLink } from './BrandMark';
 
 export interface LearningScreenProps {
   materialId: number;
@@ -83,7 +84,7 @@ export function LearningScreen({
   return (
     <main className={`lesson-shell lesson-${material.subject}`}>
       <header className="lesson-header">
-        <a className="brand" href="/" aria-label="На главный экран">Э</a>
+        <BrandLink label="На главный экран" />
         <div><span>{SUBJECT_NAMES[material.subject]}</span><strong>{material.topic.title}</strong></div>
         <small>{material.estimatedMinutes} минут</small>
       </header>

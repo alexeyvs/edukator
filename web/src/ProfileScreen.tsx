@@ -5,6 +5,7 @@ import {
   type ProfileApi,
   type ProfilePatch,
 } from './profile-api';
+import { BrandLink } from './BrandMark';
 
 export interface ProfileScreenProps {
   api?: ProfileApi;
@@ -118,7 +119,7 @@ export function ProfileScreen({
   return (
     <main className={`profile-shell ${onboarding ? 'onboarding-shell' : ''}`}>
       <header className="profile-header">
-        <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+        <BrandLink />
         {!onboarding && <a className="profile-home" href="/">К плану дня</a>}
       </header>
 

@@ -12,6 +12,7 @@ import {
 import { isParentPin } from './pin-format';
 import { SUBJECT_NAMES, SUBJECTS } from './subject-meta';
 import { SafeFormula, SafeRichText } from './TaskPrompt';
+import { BrandLink } from './BrandMark';
 
 const KIND_NAMES = {
   run: 'Обычный забег',
@@ -731,7 +732,7 @@ export function ParentsScreen({
   return (
     <main className="parents-shell">
       <header className="parents-header">
-        <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+        <BrandLink />
         <div><span>Открытая сводка</span><strong>Для ученика и родителей</strong></div>
         {siblings.length > 1 && <label className="parents-switch">
           <span>Ребёнок</span>

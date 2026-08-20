@@ -1,5 +1,6 @@
 import type { FinishRunResponse, RunTopicChange } from './run-api';
 import { isPreliminaryForecast, runResultMessage } from './forecast-presentation';
+import { BrandLink } from './BrandMark';
 
 export interface FinishScreenProps {
   result: FinishRunResponse;
@@ -90,7 +91,7 @@ export function FinishScreen({ result, kind = 'run' }: FinishScreenProps) {
   return (
     <main className="run-shell finish-shell">
       <header className="run-header">
-        <a className="brand" href="/" aria-label="На главный экран">Э</a>
+        <BrandLink label="На главный экран" />
       </header>
       <article className="run-card finish-card">
         {kind === 'triage' ? <TriageFinish result={result} /> : <RunFinish result={result} />}

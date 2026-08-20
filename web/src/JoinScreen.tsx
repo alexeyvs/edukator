@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { browserAuthApi, type AuthApi, type AuthState, type DeviceClaim } from './auth-api';
 import { HttpError } from './http';
+import { BrandLink } from './BrandMark';
 
 export interface JoinScreenProps {
   token: string;
@@ -73,7 +74,7 @@ export function JoinScreen({ token, api = browserAuthApi, onClaimed }: JoinScree
   if (warned) {
     return (
       <main className="auth-shell">
-        <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+        <BrandLink />
         <div className="auth-card">
           <h1>Это ссылка для ученика</h1>
           <p>
@@ -91,7 +92,7 @@ export function JoinScreen({ token, api = browserAuthApi, onClaimed }: JoinScree
   if (problem !== null) {
     return (
       <main className="auth-shell">
-        <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+        <BrandLink />
         <div className="auth-card">
           <h1>{problem.dead ? 'Ссылка не работает' : 'Не удалось подключить'}</h1>
           <p className="auth-message error" role="alert">{problem.text}</p>
@@ -114,7 +115,7 @@ export function JoinScreen({ token, api = browserAuthApi, onClaimed }: JoinScree
   if (agent !== null) {
     return (
       <main className="auth-shell">
-        <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+        <BrandLink />
         <div className="auth-card">
           <p className="auth-kicker">Устройство контроля доступа</p>
           <h1>Токен агента</h1>
@@ -131,7 +132,7 @@ export function JoinScreen({ token, api = browserAuthApi, onClaimed }: JoinScree
   if (who !== null && !approved) {
     return (
       <main className="auth-shell">
-        <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+        <BrandLink />
         <div className="auth-card">
           <h1>Подключить устройство ученика</h1>
           <p>Ссылка одноразовая. Подтвердите, что открыли её на нужном компьютере.</p>
@@ -143,7 +144,7 @@ export function JoinScreen({ token, api = browserAuthApi, onClaimed }: JoinScree
 
   return (
     <main className="auth-shell" role="status">
-      <a className="brand" href="/" aria-label="Эдукатор">Э</a>
+      <BrandLink />
       <p>{who === null ? 'Проверяю устройство…' : 'Подключаю устройство…'}</p>
     </main>
   );

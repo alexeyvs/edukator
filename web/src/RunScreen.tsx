@@ -19,6 +19,7 @@ import {
   type LearningApi,
 } from './learning-api';
 import { SafeRichText, TaskPrompt } from './TaskPrompt';
+import { BrandLink } from './BrandMark';
 
 const NO_TASK_RETRY_MS = 2_000;
 const DISPUTE_FIRST_DELAY_MS = 1_000;
@@ -399,7 +400,7 @@ export function RunScreen({
   if (integrity?.status === 'retry_required') {
     return <main className="run-shell">
       <header className="run-header integrity-header">
-        <a className="brand" href="/" aria-label="На главный экран">Э</a>
+        <BrandLink label="На главный экран" />
         <div><span>Подтверждение решения</span><strong>Осталось вопросов: {integrity.remaining}</strong></div>
       </header>
       <section className="run-card integrity-retry" aria-labelledby="integrity-question">
@@ -438,11 +439,10 @@ export function RunScreen({
   return (
     <main className="run-shell">
       <header className="run-header">
-        <a
-          className="brand"
+        <BrandLink
           href={kind === 'lesson' && progress.total > 0 ? `/?runId=${runId}&kind=lesson` : '/'}
-          aria-label={kind === 'lesson' && progress.total > 0 ? 'Вернуться к тесту' : 'На главный экран'}
-        >Э</a>
+          label={kind === 'lesson' && progress.total > 0 ? 'Вернуться к тесту' : 'На главный экран'}
+        />
         <div className="progress-block" aria-label={`Прогресс: ${progress.total} из ${progress.target}`}>
           <div className="progress-copy">
             <span>{kind === 'lesson' ? 'Проверка темы' : 'Забег'}</span>
