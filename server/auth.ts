@@ -20,8 +20,10 @@ import {
   CHILD_ID_PATTERN,
   isChildServiceable,
   readChild,
+  readParentEmail,
   resolveAdminSession,
   resolveChildDevice,
+  resolveImpersonation,
   resolveParentSession,
   type AdminPrincipal,
   type ChildPrincipal,
@@ -51,6 +53,13 @@ export const ACTOR_COOKIE = '__Host-edu_actor';
 export const ADMIN_COOKIE = '__Host-edu_admin';
 
 /**
+ * Имя cookie захода в чужую семью. Живёт **рядом** с админской, а не вместо
+ * неё: выход из имперсонации обязан возвращать оператора в админку, а не
+ * выбрасывать его на экран входа.
+ */
+export const IMPERSONATION_COOKIE = '__Host-edu_impersonation';
+
+/**
  * Заголовок агентского токена. Схема `Bearer`, а не cookie: контроллер ходит из
  * Python, cookie ему не нужны, а заголовок к тому же не досылается браузером
  * автоматически — то есть с чужой страницы агентом не притвориться.
@@ -64,11 +73,28 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 export type BearerKind = 'parent' | 'browser' | 'agent' | 'admin';
 
-/** Предъявитель запроса. Родитель приходит без ребёнка, устройство — со своим. */
+/**
+ * Отметка «этот предъявитель — заход оператора в чужую семью». Она едет полем
+ * обычного предъявителя, а не новым `BearerKind`: иначе `admin`-как-ребёнок
+ * пришлось бы вписывать в каждую строку матрицы `ROUTE_ACCESS`, и забытая
+ * строка закрывала бы оператору ровно тот маршрут, ради которого он зашёл.
+ */
+export interface ImpersonationMark {
+  adminId: string;
+  expiresAt: string;
+}
+
+/**
+ * Предъявитель запроса. Родитель приходит без ребёнка, устройство — со своим.
+ *
+ * `impersonation` у агента объявлен `never` намеренно: роли захода ровно две
+ * (`browser` и `parent`), и «оператор притворился контроллером доступа»
+ * обязано быть невозможным на сборке, а не отсеиваться проверкой.
+ */
 export type Bearer =
-  | { kind: 'parent'; parent: ParentPrincipal }
-  | { kind: 'browser'; child: ChildPrincipal }
-  | { kind: 'agent'; child: ChildPrincipal };
+  | { kind: 'parent'; parent: ParentPrincipal; impersonation?: ImpersonationMark }
+  | { kind: 'browser'; child: ChildPrincipal; impersonation?: ImpersonationMark }
+  | { kind: 'agent'; child: ChildPrincipal; impersonation?: never };
 
 /** Действительные браузерные предъявители без выбора приоритета между ними. */
 export interface BrowserPrincipals {
@@ -86,6 +112,8 @@ export type AuthErrorCode =
   | 'cross-origin'
   /** Нет такого ребёнка **или** он не ваш: снаружи это одно и то же. */
   | 'no-child'
+  /** Оператор смотрит чужую семью и пытается её изменить. */
+  | 'read-only'
   /** Потолок открытых баз исчерпан. */
   | 'too-many-open'
   /** База ребёнка недоступна. */
@@ -97,6 +125,7 @@ export const AUTH_STATUS: Record<AuthErrorCode, number> = {
   forbidden: 403,
   'cross-origin': 403,
   'no-child': 404,
+  'read-only': 403,
   'too-many-open': 503,
   unavailable: 503,
 };
@@ -111,6 +140,7 @@ export const AUTH_MESSAGE: Record<AuthErrorCode, string> = {
   forbidden: 'Доступ закрыт',
   'cross-origin': 'Запрос пришёл не со страницы приложения',
   'no-child': 'Ребёнок не найден',
+  'read-only': 'Только просмотр: вы в чужой семье',
   'too-many-open': 'Сервер занят, попробуйте позже',
   unavailable: 'База ребёнка недоступна',
 };
@@ -195,6 +225,14 @@ export function resolveBearer(
   now: Date = new Date(),
 ): Bearer | undefined {
   const jar = parseCookies(headerValue(headers, 'cookie'));
+
+  // Заход оператора проверяется **первым** и перекрывает собственные cookie:
+  // оператор заходит в чужую семью со своей же машины, где живы и его
+  // родительский, и его детский вход, и проигравший заход показывал бы ему
+  // собственные данные под баннером чужой семьи.
+  const impersonated = resolveImpersonatedBearer(control, jar, now);
+  if (impersonated !== undefined) return impersonated;
+
   const browser = resolveBrowserPrincipals(control, headers, now);
 
   // Явный выбор действует только пока обе сессии действительно живы. Cookie
@@ -219,6 +257,48 @@ export function resolveBearer(
   if (browser.parent !== undefined) return { kind: 'parent', parent: browser.parent };
 
   return undefined;
+}
+
+/**
+ * Разбирает cookie захода в чужую семью в обычного предъявителя целевой семьи.
+ * `undefined` — отказ по любой причине: «нет такой», «истекла», «оператора
+ * отключили» и «семью вывели» снаружи неразличимы.
+ *
+ * Ни `children.last_activity_at`, ни `last_seen_at` целевого родителя здесь не
+ * подновляются: чужие данные читает оператор, а не ребёнок вернулся за экран.
+ */
+function resolveImpersonatedBearer(
+  control: Database.Database,
+  jar: Map<string, string>,
+  now: Date,
+): Bearer | undefined {
+  const token = jar.get(IMPERSONATION_COOKIE);
+  if (token === undefined) return undefined;
+  const session = resolveImpersonation(control, token, now);
+  if (session === undefined) return undefined;
+  const impersonation: ImpersonationMark = {
+    adminId: session.adminId,
+    expiresAt: session.expiresAt,
+  };
+
+  if (session.role === 'parent') {
+    // Адрес читается заново, а не хранится в строке захода: отключённый с тех
+    // пор родитель обязан закрыть и заход, как закрывает собственный вход.
+    const email = readParentEmail(control, session.parentId);
+    if (email === undefined) return undefined;
+    return { kind: 'parent', parent: { parentId: session.parentId, email }, impersonation };
+  }
+
+  return {
+    kind: 'browser',
+    child: {
+      childId: session.childId,
+      parentId: session.parentId,
+      kind: 'browser',
+      name: session.childName,
+    },
+    impersonation,
+  };
 }
 
 /**
@@ -424,6 +504,18 @@ export function resolveTenant(options: ResolveTenantOptions): ResolvedTenant {
   if (bearer === undefined) throw new AuthError('unauthenticated', 'Предъявитель не разобран');
   if (!allow.includes(bearer.kind)) {
     throw new AuthError('forbidden', `Предъявителю ${bearer.kind} сюда нельзя`);
+  }
+
+  // Первый замок имперсонации. Он стоит до `authorizeChild` намеренно: сам
+  // разбор принадлежности ничего не пишет, но открывать чужую базу ради
+  // запроса, которому всё равно откажут, незачем. Второй замок —
+  // `PRAGMA query_only` на отдельном соединении — независим от этого и
+  // переживает забытый `mutating` у нового маршрута.
+  if (bearer.impersonation !== undefined && (isMutating(options.method) || options.mutating === true)) {
+    throw new AuthError(
+      'read-only',
+      `Оператор ${bearer.impersonation.adminId} смотрит чужую семью и не меняет её`,
+    );
   }
 
   const child = authorizeChild(options.control, bearer, options.childId);

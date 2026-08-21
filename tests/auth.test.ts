@@ -9,7 +9,9 @@ import {
   createChild,
   createParent,
   disableAdmin,
+  disableParent,
   hashToken,
+  IMPERSONATION_TTL_MS,
   issueDeviceInvite,
   issueParentInvite,
   loginAdmin,
@@ -17,6 +19,8 @@ import {
   redeemParentInvite,
   retireChild,
   revokeDevice,
+  revokeImpersonation,
+  startImpersonation,
   openControlDatabase,
   setAdminPassword,
 } from '../server/control-db.js';
@@ -30,6 +34,7 @@ import {
   ACTOR_COOKIE,
   ADMIN_COOKIE,
   CHILD_COOKIE,
+  IMPERSONATION_COOKIE,
   PARENT_COOKIE,
   assertSameOrigin,
   authorizeChild,
@@ -64,6 +69,8 @@ function topic(id: string): Topic {
 const GRAPH: TopicGraph = buildTopicGraph([topic('math.a')]);
 
 const HOST = 'edukator.local:3000';
+/** Опорный момент времени: сроки захода отмеряются от него, а не от «сейчас». */
+const NOW = new Date('2026-08-21T10:00:00.000Z');
 /** Допуск, при котором проверяется всё, кроме самого допуска: он проверяется отдельно. */
 const ALLOW_ALL: readonly BearerKind[] = ['parent', 'browser', 'agent'];
 
@@ -544,20 +551,21 @@ describe('разрешение предъявителя и аренды', () => 
     });
   });
 
+  /** Пароль оператора длиннее родительского: `MIN_ADMIN_PASSWORD_LENGTH` — 16. */
+  const ADMIN_PASSWORD = 'пароль-оператора-подлиннее';
+
+  /** Заводит оператора с паролем и возвращает его `id` и токен свежей сессии. */
+  function operator(email = 'оператор@example.com'): { adminId: string; token: string } {
+    const adminId = createAdmin(control, email);
+    setAdminPassword(control, adminId, ADMIN_PASSWORD);
+    const login = loginAdmin(control, email, ADMIN_PASSWORD);
+    if (!login.ok) throw new Error(`оператор ${email} не вошёл: ${login.reason}`);
+    return { adminId, token: login.session.token };
+  }
+
   describe('предъявитель админки', () => {
-    /** Пароль оператора длиннее родительского: `MIN_ADMIN_PASSWORD_LENGTH` — 16. */
-    const ADMIN_PASSWORD = 'пароль-оператора-подлиннее';
     /** Допуск админского маршрута. Ровно `ROUTE_ACCESS.admin`, выписанный руками. */
     const ALLOW_ADMIN: readonly BearerKind[] = ['admin'];
-
-    /** Заводит оператора с паролем и возвращает его `id` и токен свежей сессии. */
-    function operator(email = 'оператор@example.com'): { adminId: string; token: string } {
-      const adminId = createAdmin(control, email);
-      setAdminPassword(control, adminId, ADMIN_PASSWORD);
-      const login = loginAdmin(control, email, ADMIN_PASSWORD);
-      if (!login.ok) throw new Error(`оператор ${email} не вошёл: ${login.reason}`);
-      return { adminId, token: login.session.token };
-    }
 
     it('разбирает cookie оператора в предъявителя', () => {
       const { adminId, token } = operator();
@@ -667,6 +675,207 @@ describe('разрешение предъявителя и аренды', () => 
       });
 
       expect(bearer.admin.adminId).toBe(adminId);
+    });
+  });
+
+  describe('предъявитель имперсонации и первый замок', () => {
+    /** Заводит оператору живой заход в чужую семью и отдаёт токен его cookie. */
+    function enter(
+      adminId: string,
+      childId: string,
+      role: 'browser' | 'parent',
+      now: Date = NOW,
+    ): string {
+      const started = startImpersonation(control, { adminId, childId, role }, now);
+      if (!started.ok) throw new Error(`заход не начался: ${started.reason}`);
+      return started.session.token;
+    }
+
+    it('отдаёт детского предъявителя целевой семьи, а не новый вид', () => {
+      const alpha = family('alpha');
+      const { adminId } = operator();
+      // Имя cookie вписано руками: это межмодульный инвариант с клиентом.
+      expect(IMPERSONATION_COOKIE).toBe('__Host-edu_impersonation');
+      const token = enter(adminId, alpha.childId, 'browser');
+
+      const bearer = bearerOf(cookies([IMPERSONATION_COOKIE, token]));
+
+      expect(bearer.kind).toBe('browser');
+      expect(bearer.impersonation).toEqual({
+        adminId,
+        expiresAt: new Date(NOW.getTime() + IMPERSONATION_TTL_MS).toISOString(),
+      });
+      if (bearer.kind !== 'browser') throw new Error('ожидался детский предъявитель');
+      expect(bearer.child.childId).toBe(alpha.childId);
+      expect(bearer.child.parentId).toBe(alpha.parentId);
+      expect(bearer.child.name).toBe('alpha');
+      // Устройства у захода нет: оператор смотрит из админки, а не с детской машины.
+      expect(bearer.child.deviceId).toBeUndefined();
+    });
+
+    it('отдаёт родительского предъявителя целевой семьи в роли `parent`', () => {
+      const alpha = family('alpha');
+      const { adminId } = operator();
+      const token = enter(adminId, alpha.childId, 'parent');
+
+      const bearer = bearerOf(cookies([IMPERSONATION_COOKIE, token]));
+
+      expect(bearer.kind).toBe('parent');
+      if (bearer.kind !== 'parent') throw new Error('ожидался родительский предъявитель');
+      expect(bearer.parent).toEqual({ parentId: alpha.parentId, email: 'alpha@example.com' });
+      expect(bearer.impersonation?.adminId).toBe(adminId);
+    });
+
+    // Оператор заходит в чужую семью со своей же машины, где живы и его
+    // собственные входы. Проиграв им, заход показывал бы ему собственные данные
+    // под баннером чужой семьи.
+    it('выигрывает у собственных cookie оператора', () => {
+      const alpha = family('alpha');
+      const beta = family('beta');
+      const { adminId } = operator();
+      const token = enter(adminId, alpha.childId, 'browser');
+
+      const bearer = bearerOf(
+        cookies(
+          [IMPERSONATION_COOKIE, token],
+          [PARENT_COOKIE, beta.parentToken],
+          [CHILD_COOKIE, beta.childToken],
+          [ACTOR_COOKIE, 'parent'],
+        ),
+      );
+
+      if (bearer.kind !== 'browser') throw new Error('ожидался детский предъявитель');
+      expect(bearer.child.childId).toBe(alpha.childId);
+    });
+
+    it('не пускает истёкший заход: остаются собственные cookie оператора', () => {
+      const alpha = family('alpha');
+      const beta = family('beta');
+      const { adminId } = operator();
+      const token = enter(adminId, alpha.childId, 'browser');
+      const late = new Date(NOW.getTime() + IMPERSONATION_TTL_MS);
+
+      const alone = resolveBearer(control, cookies([IMPERSONATION_COOKIE, token]), late);
+      const withOwn = resolveBearer(
+        control,
+        cookies([IMPERSONATION_COOKIE, token], [PARENT_COOKIE, beta.parentToken]),
+        late,
+      );
+
+      expect(alone).toBeUndefined();
+      expect(withOwn?.kind).toBe('parent');
+      expect(withOwn?.impersonation).toBeUndefined();
+    });
+
+    it('не пускает закрытый заход', () => {
+      const alpha = family('alpha');
+      const { adminId } = operator();
+      const token = enter(adminId, alpha.childId, 'browser');
+      expect(revokeImpersonation(control, token, NOW)).toBe(true);
+
+      expect(resolveBearer(control, cookies([IMPERSONATION_COOKIE, token]), NOW)).toBeUndefined();
+    });
+
+    it('пропускает чтение чужой семьи и открывает её базу', () => {
+      const alpha = family('alpha');
+      const { adminId } = operator();
+      const token = enter(adminId, alpha.childId, 'browser');
+      const tenants = counting();
+
+      const resolved = resolveTenant({
+        allow: ALLOW_ALL,
+        control,
+        tenants,
+        method: 'GET',
+        headers: cookies([IMPERSONATION_COOKIE, token]),
+        now: NOW,
+      });
+
+      expect(resolved.child.id).toBe(alpha.childId);
+      expect(resolved.bearer.impersonation?.adminId).toBe(adminId);
+      expect(tenants.opened).toEqual([alpha.childId]);
+    });
+
+    it('отказывает изменяющему запросу и не открывает базу', () => {
+      const alpha = family('alpha');
+      const { adminId } = operator();
+      const token = enter(adminId, alpha.childId, 'browser');
+      const tenants = counting();
+
+      const error = catchAuth(() =>
+        resolveTenant({
+          allow: ALLOW_ALL,
+          control,
+          tenants,
+          method: 'POST',
+          headers: cookies([IMPERSONATION_COOKIE, token]),
+          now: NOW,
+        }),
+      );
+
+      expect(error.code).toBe('read-only');
+      expect(AUTH_STATUS[error.code]).toBe(403);
+      expect(AUTH_MESSAGE[error.code]).toBe('Только просмотр: вы в чужой семье');
+      expect(tenants.opened).toEqual([]);
+    });
+
+    // `GET /api/session/next` списывает задание из банка безвозвратно и потому
+    // помечен `mutating`. Решает не метод, а то, что маршрут делает: заход
+    // оператора не имеет права жечь чужой банк.
+    it('отказывает помеченному `mutating` безопасному по методу запросу', () => {
+      const alpha = family('alpha');
+      const { adminId } = operator();
+      const token = enter(adminId, alpha.childId, 'browser');
+      const tenants = counting();
+
+      const error = catchAuth(() =>
+        resolveTenant({
+          allow: ALLOW_ALL,
+          control,
+          tenants,
+          method: 'GET',
+          mutating: true,
+          headers: cookies([IMPERSONATION_COOKIE, token]),
+          now: NOW,
+        }),
+      );
+
+      expect(error.code).toBe('read-only');
+      expect(tenants.opened).toEqual([]);
+    });
+
+    // Тот же запрос без захода проходит: иначе отказ выше ничего не доказывал бы.
+    it('своего же ребёнка изменяющий запрос по-прежнему меняет', () => {
+      const alpha = family('alpha');
+      const tenants = counting();
+
+      const resolved = resolveTenant({
+        allow: ALLOW_ALL,
+        control,
+        tenants,
+        method: 'POST',
+        headers: cookies([CHILD_COOKIE, alpha.childToken]),
+        now: NOW,
+      });
+
+      expect(resolved.bearer.impersonation).toBeUndefined();
+      expect(tenants.opened).toEqual([alpha.childId]);
+    });
+
+    it('не пускает заход к выведенному ребёнку и в семью отключённого родителя', () => {
+      const alpha = family('alpha');
+      const beta = family('beta');
+      const { adminId } = operator();
+      const toAlpha = enter(adminId, alpha.childId, 'parent');
+      // Второй заход того же оператора гасит первый — берём его отдельным.
+      const other = operator('второй@example.com');
+      const toBeta = enter(other.adminId, beta.childId, 'browser');
+
+      disableParent(control, alpha.parentId);
+      retireChild(control, beta.childId);
+
+      expect(resolveBearer(control, cookies([IMPERSONATION_COOKIE, toAlpha]), NOW)).toBeUndefined();
+      expect(resolveBearer(control, cookies([IMPERSONATION_COOKIE, toBeta]), NOW)).toBeUndefined();
     });
   });
 

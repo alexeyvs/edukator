@@ -1203,7 +1203,12 @@ export type DeviceClaimResult =
 export interface ChildPrincipal {
   childId: string;
   parentId: string;
-  deviceId: number;
+  /**
+   * Устройство, чьим токеном пришёл предъявитель. У захода оператора в чужую
+   * семью его нет: он смотрит из админки, а не с детской машины, и выдуманный
+   * номер выглядел бы в отзыве устройств настоящей строкой.
+   */
+  deviceId?: number;
   kind: DeviceKind;
   name: string;
 }
