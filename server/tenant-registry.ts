@@ -28,7 +28,7 @@ import {
 import { finishRun } from './run.js';
 import { finishLearningMaterial } from './learning.js';
 import { readDailyGate } from './daily-gate.js';
-import { failureLogFor, type FailureLog } from './log.js';
+import { failureLogFor, type FailureLog, type FailureRecord } from './log.js';
 
 /**
  * Отпечаток файла базы: устройство и inode. Нужен, чтобы отличить тот файл, с
@@ -221,6 +221,8 @@ export class TenantRegistry {
   readonly #tenants = new Map<string, Tenant>();
   /** Дети, открытие которых идёт прямо сейчас: см. `open`. */
   readonly #opening = new Set<string>();
+  /** Уже названные аварии открытия, по ребёнку: см. `#reportOnce`. */
+  readonly #reported = new Map<string, Set<string>>();
 
   constructor(options: TenantRegistryOptions) {
     const maxOpen = options.maxOpen ?? DEFAULT_MAX_OPEN_TENANTS;
@@ -307,7 +309,9 @@ export class TenantRegistry {
         `открыто ${String(this.#tenants.size)} баз при потолке ${String(this.#maxOpen)}: ` +
         `ребёнку ${childId} отказано, открытые базы не тронуты`;
       this.#log(overflow);
-      this.#failures({ event: 'tenant-open-failed', message: overflow, childId });
+      this.#reportOnce(childId, 'too-many-open', {
+        event: 'tenant-open-failed', message: overflow, childId,
+      });
       throw new TenantError('too-many-open', `Потолок открытых баз исчерпан: ${childId}`);
     }
 
@@ -323,16 +327,19 @@ export class TenantRegistry {
         // можно только тем, есть ли файл сейчас. Проверка вероятностная, как и
         // сам отпечаток, но авария «базу подменили» и авария «базы нет» зовут к
         // разным действиям, и одно название на обе прятало бы первую.
-        this.#failures(
-          fileIdentity(path) === undefined
+        const detached = fileIdentity(path) !== undefined;
+        this.#reportOnce(
+          childId,
+          detached ? 'detached' : 'not-opened',
+          detached
             ? {
-                event: 'tenant-open-failed',
-                message: 'файл базы не открылся',
+                event: 'tenant-detached',
+                message: 'файл базы подменён в момент открытия',
                 childId,
               }
             : {
-                event: 'tenant-detached',
-                message: 'файл базы подменён в момент открытия',
+                event: 'tenant-open-failed',
+                message: 'файл базы не открылся',
                 childId,
               },
         );
@@ -356,7 +363,7 @@ export class TenantRegistry {
       if (error instanceof TenantError) throw error;
       // Сюда доезжает и отказ миграции: она идёт внутри `openDatabase`, и база
       // новее приложения либо не поддающаяся обновлению видна только отсюда.
-      this.#failures({
+      this.#reportOnce(childId, 'not-migrated', {
         event: 'tenant-open-failed',
         message: 'база ребёнка не открыта',
         detail: (error as Error).message,
@@ -369,6 +376,81 @@ export class TenantRegistry {
 
     const file = opened.file;
     const available = (): boolean => fileIdentity(path) === file;
+    // Сборка координаторов защищена так же, как открытие: она не инертна.
+    // `createIntegrityCoordinator` синхронно поднимает незакрытые проверки, и
+    // осиротевшая строка (задание удалено, темы больше нет в карте) бросает
+    // отсюда. Оставленная снаружи защиты, она уносила бы соединение мимо кеша:
+    // закрыть его было бы уже нечем — в `#tenants` аренда не попала, `close`
+    // и `closeAll` до неё не достают, — и каждый следующий запрос открывал бы
+    // ещё одно, не замечая потолка. Наружу при этом уходила бы пятисотка
+    // вместо `unavailable`.
+    let tenant: Tenant;
+    try {
+      tenant = this.#assemble(childId, path, opened, available);
+    } catch (error) {
+      this.#closeQuietly(childId, opened.db);
+      this.#log(`база ребёнка ${childId} недоступна: ${(error as Error).message}`);
+      this.#reportOnce(childId, 'not-assembled', {
+        event: 'tenant-open-failed',
+        message: 'аренда ребёнка не собрана',
+        detail: (error as Error).message,
+        childId,
+      });
+      throw new TenantError('unavailable', `База ребёнка ${childId} недоступна: ${path}`);
+    }
+    this.#tenants.set(childId, tenant);
+    // База открылась — прежние жалобы на неё больше не «уже сказанное»:
+    // сломайся она снова, авария обязана попасть в журнал заново.
+    this.#reported.delete(childId);
+    // Восстановление идёт при открытии каждой базы, а не один раз при старте
+    // сервера: спор переживает процесс в SQLite, а база второго ребёнка
+    // открывается только по первому его обращению — и до него незакрытый спор
+    // остался бы без исполнителя навсегда.
+    //
+    // Отказ восстановления аренду не отменяет: она уже в кеше, часть споров
+    // могла встать на разбор и держать соединение, так что закрыть базу отсюда
+    // нельзя, а пятисотка наружу запретила бы ребёнку заниматься из-за спора,
+    // который и без того переспросится следующим нажатием кнопки.
+    try {
+      tenant.disputes.restore();
+    } catch (error) {
+      this.#log(
+        `незакрытые споры ребёнка ${childId} не восстановлены: ${(error as Error).message}`,
+      );
+    }
+    return tenant;
+  }
+
+  /**
+   * Авария открытия пишется **переходом**, а не на каждую попытку.
+   *
+   * Открытие зовут все подряд: маршруты ребёнка, обход диспетчера раз в минуту
+   * и опрос агента раз в двадцать секунд, — а все три причины отказа (файла
+   * нет, файл подменён, потолок исчерпан) держатся до починки. Строка на каждую
+   * попытку давала бы тысячи одинаковых записей в сутки при всём ретеншене
+   * `LOG_MAX_BYTES × LOG_KEEP_FILES` и видимом хвосте `LOG_TAIL_BYTES`: они
+   * вытеснили бы из журнала ровно ту запись, которая называет причину. То же
+   * рассуждение, что у `/api/health`, где переход состояния пишется по той же
+   * причине.
+   */
+  #reportOnce(childId: string, key: string, record: FailureRecord): void {
+    const seen = this.#reported.get(childId) ?? new Set<string>();
+    if (seen.has(key)) return;
+    seen.add(key);
+    this.#reported.set(childId, seen);
+    this.#failures(record);
+  }
+
+  /**
+   * Координаторы аренды и она сама. Вынесено из `open` только затем, чтобы
+   * отказ сборки ловился одним `catch` вместе с закрытием соединения.
+   */
+  #assemble(
+    childId: string,
+    path: string,
+    opened: SessionDatabase,
+    available: () => boolean,
+  ): Tenant {
     const disputes = new DisputeCoordinator({
       ...this.#disputeOptions,
       db: opened.db,
@@ -399,33 +481,15 @@ export class TenantRegistry {
         throw new Error(`Проверка осмысленности не завершает занятие вида «${String(kind)}»`);
       },
     });
-    const tenant: Tenant = {
+    return {
       childId,
       path,
       db: opened.db,
-      file,
+      file: opened.file,
       available,
       disputes,
       integrity,
     };
-    this.#tenants.set(childId, tenant);
-    // Восстановление идёт при открытии каждой базы, а не один раз при старте
-    // сервера: спор переживает процесс в SQLite, а база второго ребёнка
-    // открывается только по первому его обращению — и до него незакрытый спор
-    // остался бы без исполнителя навсегда.
-    //
-    // Отказ восстановления аренду не отменяет: она уже в кеше, часть споров
-    // могла встать на разбор и держать соединение, так что закрыть базу отсюда
-    // нельзя, а пятисотка наружу запретила бы ребёнку заниматься из-за спора,
-    // который и без того переспросится следующим нажатием кнопки.
-    try {
-      disputes.restore();
-    } catch (error) {
-      this.#log(
-        `незакрытые споры ребёнка ${childId} не восстановлены: ${(error as Error).message}`,
-      );
-    }
-    return tenant;
   }
 
   /**

@@ -19,6 +19,7 @@ import unittest
 from unittest import mock
 from urllib.error import HTTPError
 
+from edukator_family_controller import config as config_module
 from edukator_family_controller import gate as gate_module
 from edukator_family_controller.config import (
     ControllerConfig,
@@ -43,6 +44,7 @@ from edukator_family_controller.gate import (
 from edukator_family_controller.family import MicrosoftFamilyClient
 from edukator_family_controller.login import (
     ask_server_access,
+    authenticate,
     merged_config,
     update_family_with_retry,
 )
@@ -846,6 +848,49 @@ class ConfigTests(unittest.TestCase):
             self.assertIsNone(load_pending_login(path))
 
 
+    def test_transient_error_keeps_the_resumable_login(self) -> None:
+        # Refresh token одноразовый: сохранённый — единственный способ
+        # продолжить настройку. Стерев его на отвалившемся Wi-Fi, контроллер
+        # отправляет родителя проходить весь вход Microsoft заново, пока
+        # компьютер ребёнка стоит заблокированным (fail-closed).
+        import pyfamilysafety
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "family.json"
+            save_pending_login("resumable", path)
+
+            async def refuse(**_kwargs: Any) -> Any:
+                raise ConnectionResetError("сеть отвалилась")
+
+            with mock.patch.object(pyfamilysafety.Authenticator, "create", refuse), \
+                    mock.patch("webbrowser.open", return_value=False), \
+                    mock.patch("getpass.getpass", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    asyncio.run(authenticate(path))
+
+            self.assertEqual(load_pending_login(path), "resumable")
+
+    def test_rejected_token_clears_the_pending_login(self) -> None:
+        import pyfamilysafety
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "family.json"
+            save_pending_login("stale", path)
+
+            async def reject(**_kwargs: Any) -> Any:
+                raise ValueError("refresh token отвергнут")
+
+            with mock.patch.object(pyfamilysafety.Authenticator, "create", reject), \
+                    mock.patch("webbrowser.open", return_value=False), \
+                    mock.patch("getpass.getpass", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    asyncio.run(authenticate(path))
+
+            # Отвергнутый токен — мусор: держать его значит предлагать
+            # продолжение, которого не будет.
+            self.assertIsNone(load_pending_login(path))
+
+
 class ServerAccessPromptTests(unittest.TestCase):
     def test_asks_for_address_and_hidden_token_on_first_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1037,7 +1082,27 @@ class ServerAccessPromptTests(unittest.TestCase):
 
     def test_config_directory_is_private_even_when_it_already_exists(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory) / "конфиг"
+            home = Path(directory) / ".config" / "edukator"
+            home.mkdir(parents=True, mode=0o755)
+            path = home / "family.json"
+
+            with mock.patch.object(
+                config_module, "DEFAULT_CONFIG", home / "family-safety.json"
+            ):
+                save_config(
+                    ControllerConfig("secret", "child-id", AGENT_TOKEN, EDUKATOR_URL),
+                    path,
+                )
+
+            # В своём каталоге лежат refresh token, агентский токен и времянка
+            # `mkstemp` с предсказуемым именем: `mkdir(mode=...)` уже
+            # существующий каталог не трогает вовсе.
+            self.assertEqual(home.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_foreign_directory_keeps_its_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "дом"
             home.mkdir(mode=0o755)
             path = home / "family.json"
 
@@ -1045,10 +1110,11 @@ class ServerAccessPromptTests(unittest.TestCase):
                 ControllerConfig("secret", "child-id", AGENT_TOKEN, EDUKATOR_URL), path
             )
 
-            # В каталоге лежат refresh token, агентский токен и времянка
-            # `mkstemp` с предсказуемым именем: `mkdir(mode=...)` уже
-            # существующий каталог не трогает вовсе.
-            self.assertEqual(home.stat().st_mode & 0o777, 0o700)
+            # Путь задаёт человек, а сохранение повторяется на каждой ротации
+            # refresh token: `--config ~/family.json` иначе раз за разом ужимал
+            # бы до 0700 домашний каталог, а относительный путь — рабочий.
+            # Секреты защищает режим самого файла.
+            self.assertEqual(home.stat().st_mode & 0o777, 0o755)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_non_numeric_interval_is_named_instead_of_crashing(self) -> None:
@@ -1069,6 +1135,28 @@ class ServerAccessPromptTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "poll_seconds"):
                 load_config(path)
+
+    def test_nan_and_infinity_intervals_are_refused(self) -> None:
+        # `NaN` и `Infinity` — законные литералы для `json.loads`, и оба проходят
+        # проверку «больше нуля»: `NaN <= 0` ложно, `Infinity` истинно.
+        # Пропущенный `NaN` превращает `asyncio.sleep` в мгновенный возврат —
+        # цикл начинает бить в `gate/status` и в Microsoft без пауз.
+        for broken in ("NaN", "Infinity"):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "family.json"
+                path.write_text(
+                    '{"refresh_token": "secret", "child_user_id": "child-id",'
+                    f' "agent_token": "{AGENT_TOKEN}", "edukator_url": "{EDUKATOR_URL}",'
+                    f' "poll_seconds": {broken}}}',
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(ValueError, "конечными"):
+                    load_config(path)
+
+                # Тот же предел у мягкого чтения: разъехавшись, оно сохраняло бы
+                # значение, на котором следующий запуск откажет.
+                self.assertNotIn("poll_seconds", read_poll_settings(path))
 
     def test_first_login_needs_no_previous_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

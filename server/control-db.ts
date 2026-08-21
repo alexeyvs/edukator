@@ -400,7 +400,15 @@ const REQUIRED_CONTROL_FRAGMENTS: Partial<Record<ControlTable, readonly string[]
   children: ["'provisioning', 'ready', 'failed'", CHILD_ID_CHECK],
   child_devices: ["'browser', 'agent'", '(claimed_at IS NULL) = (token_hash IS NULL)'],
   codex_quota: ['PRIMARY KEY (child_id, day)'],
-  login_attempts: ["'email', 'address'", "'password', 'pin', 'admin'"],
+  // Составной ключ проверяется наравне с `CHECK`: версия 2 меняла именно его,
+  // и база со старым `(scope, key)` при новом `user_version` прошла бы молча —
+  // а `ON CONFLICT (scope, kind, key)` падал бы уже на входе, превращая каждую
+  // попытку входа в `unavailable` без единой строки о причине.
+  login_attempts: [
+    "'email', 'address'",
+    "'password', 'pin', 'admin'",
+    'PRIMARY KEY (scope, kind, key)',
+  ],
   admins: ['email = lower(email)'],
   admin_impersonations: [IMPERSONATION_ROLE_CHECK],
 };

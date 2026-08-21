@@ -109,6 +109,22 @@ export interface RequestPolicy {
    * на форме входа — гасил бы текст «неверный адрес или пароль».
    */
   signedOutOn401?: boolean;
+  /**
+   * Считать ли потерей сессии 401, который сервер назвал сам
+   * (`code: 'unauthenticated'`), даже когда `signedOutOn401` снят.
+   *
+   * Нужно там, где 401 бывает двух пород сразу: детское устройство предъявляет
+   * PIN на каждом изменяющем запросе, так что «не тот PIN» и «cookie погашена»
+   * приходят одним кодом, и без разбора кода вторая рисовалась бы красной
+   * строкой под кнопками — экран навсегда оставался бы на устаревшей сводке,
+   * объясняя это опечаткой родителя.
+   *
+   * Отдельным полем, а не общим правилом: `signedOutOn401: false` снимают ещё в
+   * двух местах и по другим причинам — форма входа (там 401 значит «не тот
+   * пароль» и гасить текст отказа нельзя) и админка (у неё своя дверь, а общие
+   * слушатели принадлежат приложению семьи).
+   */
+  signedOutOnUnauthenticated?: boolean;
 }
 
 /** Тело отказа, если оно вообще JSON. Не-JSON — не поломка клиента, а чужой ответ. */
@@ -140,7 +156,8 @@ export async function requestJson<T>(
     const record = typeof body === 'object' && body !== null ? body as Record<string, unknown> : {};
     const serverMessage = typeof record['error'] === 'string' ? record['error'] : undefined;
     const code = typeof record['code'] === 'string' ? record['code'] : undefined;
-    if (response.status === 401 && policy.signedOutOn401 !== false) {
+    const namedByServer = policy.signedOutOnUnauthenticated === true && code === 'unauthenticated';
+    if (response.status === 401 && (policy.signedOutOn401 !== false || namedByServer)) {
       for (const listener of [...signedOutListeners]) listener();
       throw new SignedOutError(serverMessage ?? SIGNED_OUT_MESSAGE);
     }

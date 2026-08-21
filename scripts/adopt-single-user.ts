@@ -40,7 +40,11 @@ import {
   ensureDataDir,
   provisionChildDatabase,
 } from '../server/data-dir.js';
-import { ADOPT_LOCK_OWNER, acquireDataLock } from '../server/data-lock.js';
+import {
+  ADOPT_LOCK_OWNER,
+  acquireDataLock,
+  releaseDataLockOnSignals,
+} from '../server/data-lock.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -120,6 +124,9 @@ export function adoptSingleUser(options: AdoptOptions): AdoptResult {
   // ребёнка между `rename` и переводом в `ready` — то есть ровно ту, которую
   // перенос в этот момент ещё собирает.
   const lock = acquireDataLock(dir, ADOPT_LOCK_OWNER);
+  // Смерть по сигналу `finally` не разворачивает, а брошенный замок каталога
+  // снимается только руками — и до тех пор сервер не поднимается вовсе.
+  releaseDataLockOnSignals(lock);
   try {
     const control = openControlDatabase(controlDatabasePath(dir));
     try {

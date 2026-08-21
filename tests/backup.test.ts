@@ -200,9 +200,29 @@ describe('снятие копии базы', () => {
     expect(() => {
       backupDatabase(source, join(dir, 'копия.db'), { verify: validateSchema });
     }).toThrow(/Схема базы повреждена/u);
-    // Файл при этом остаётся: разбираться с ним человеку, а молча убранная
-    // копия скрыла бы причину отказа.
-    expect(statSync(join(dir, 'копия.db')).size).toBeGreaterThan(0);
+    // Файл остаётся человеку, но под именем непрошедшей: под своим он был бы
+    // неотличим от годной копии, а путь запирал бы повтор навсегда — снятие
+    // отказывалось бы «файл уже есть» при любом числе попыток.
+    expect(existsSync(join(dir, 'копия.db'))).toBe(false);
+    expect(statSync(join(dir, 'копия.db.failed')).size).toBeGreaterThan(0);
+  });
+
+  it('повтор после непрошедшей копии проходит, а не упирается в её файл', () => {
+    const source = join(dir, 'чужая.db');
+    const foreign = new BetterSqlite3(source);
+    opened.push(foreign);
+    foreign.exec('CREATE TABLE чужая (id INTEGER PRIMARY KEY)');
+    foreign.close();
+
+    const target = join(dir, 'повтор.db');
+    expect(() => {
+      backupDatabase(source, target, { verify: validateSchema });
+    }).toThrow(/Схема базы повреждена/u);
+    // Причина отказа та же, что и в первый раз: без отодвигания её заслонило бы
+    // «файл уже есть», то есть повтор винил бы адрес вместо базы.
+    expect(() => {
+      backupDatabase(source, target, { verify: validateSchema });
+    }).toThrow(/Схема базы повреждена/u);
   });
 });
 

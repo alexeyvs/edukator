@@ -17,6 +17,7 @@ import {
   retireChild,
 } from '../server/control-db.js';
 import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
+import type { FailureRecord } from '../server/log.js';
 import {
   DEFAULT_MAX_OPEN_TENANTS,
   TenantError,
@@ -427,6 +428,50 @@ describe('реестр детских баз', () => {
       expect(() => broken.open(childId)).toThrow();
       expect(broken.size).toBe(0);
       expect(lastSession?.open).toBe(false);
+    });
+
+    // Сборка координаторов — не инертная часть открытия: `createIntegrityCoordinator`
+    // синхронно поднимает незакрытые проверки, и осиротевшая строка бросает
+    // прямо из конструктора. Оставленная снаружи защиты, она уносила бы
+    // соединение мимо кеша — закрыть его было бы нечем ни `close`, ни
+    // `closeAll`, потолок его не считал бы, и каждый следующий запрос открывал
+    // бы ещё одно; наружу при этом уходила бы пятисотка вместо 503.
+    it('закрывает соединение, когда падает сборка координаторов', () => {
+      const childId = readyChild();
+      const failures: FailureRecord[] = [];
+      const broken = registry({
+        openSession: failing(/FROM integrity_reviews/u),
+        failures: (record) => failures.push(record),
+      });
+
+      expect(() => broken.open(childId)).toThrow(TenantError);
+      try {
+        broken.open(childId);
+      } catch (error) {
+        expect((error as TenantError).code).toBe('unavailable');
+      }
+      expect(broken.size).toBe(0);
+      expect(lastSession?.open).toBe(false);
+      expect(failures.map((record) => record.event)).toContain('tenant-open-failed');
+    });
+
+    // Открытие зовут маршруты, обход диспетчера раз в минуту и опрос агента раз
+    // в двадцать секунд, а причина отказа держится до починки: строка на каждую
+    // попытку выдавила бы из видимого хвоста журнала ровно ту запись, которая
+    // называет причину.
+    it('пишет аварию открытия переходом, а не на каждую попытку', () => {
+      const childId = readyChild();
+      const failures: FailureRecord[] = [];
+      const broken = registry({
+        openSession: failing(/topic_state/u),
+        failures: (record) => failures.push(record),
+      });
+
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        expect(() => broken.open(childId)).toThrow();
+      }
+
+      expect(failures.filter((record) => record.event === 'tenant-open-failed')).toHaveLength(1);
     });
 
     // Восстановление незакрытых споров — не условие занятия: оно уже в кеше,

@@ -585,7 +585,14 @@ export function collectAdminStats(control: Database, options: AdminStatsOptions)
     return count === undefined ? [] : [{ subject, children: count }];
   });
   if (accuracy !== undefined) learning.accuracy = accuracy;
-  const upheldShare = accuracyOf(learning.disputes.total, learning.disputes.upheld);
+  // Знаменатель — только решённые споры. С `total` доля выигранных падала бы от
+  // самой длины очереди: пять выигранных при пяти открытых читались бы как
+  // «проверяющий ошибается в половине случаев», хотя ни одного вердикта против
+  // ребёнка ещё не было.
+  const upheldShare = accuracyOf(
+    learning.disputes.upheld + learning.disputes.rejected,
+    learning.disputes.upheld,
+  );
   if (upheldShare !== undefined) learning.disputes.upheldShare = upheldShare;
 
   const day = moscowDate(now);

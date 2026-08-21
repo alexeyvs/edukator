@@ -49,7 +49,12 @@ import {
 } from '../server/control-db.js';
 import { controlDatabasePath, dataDir as resolveDataDir } from '../server/data-dir.js';
 import { failureLogFor } from '../server/log.js';
-import { acquireDataLock, DataLockBusyError, PREFETCH_LOCK_OWNER } from '../server/data-lock.js';
+import {
+  acquireDataLock,
+  DataLockBusyError,
+  PREFETCH_LOCK_OWNER,
+  releaseDataLockOnSignals,
+} from '../server/data-lock.js';
 import { CURRICULUM_DIR, loadCurriculum, syncTopicState } from '../server/curriculum.js';
 import type { CodexRunner } from '../server/codex/client.js';
 import { createQuotedRunner } from '../server/codex/quota.js';
@@ -410,6 +415,9 @@ export async function prefetchChildren(
     }
     throw error;
   }
+  // Ctrl-C по многочасовому прогреву — обычное дело, а `finally` при смерти по
+  // сигналу не выполняется: брошенный замок не дал бы потом подняться серверу.
+  releaseDataLockOnSignals(lock);
 
   try {
     const controlPath = controlDatabasePath(dir);

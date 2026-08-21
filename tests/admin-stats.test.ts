@@ -361,12 +361,16 @@ describe('слой 2 статистики оператора', () => {
     ]);
     expect(report.learning.boss).toEqual({ won: 1, lost: 0, failed: 0, live: 1 });
     expect(report.learning.integrity).toEqual({ reviews: 1, needsRetry: 1, retryItems: 1 });
+    // Доля выигранных считается от решённых, а не от всех: открытый спор ещё
+    // не проигран, и с `total` в знаменателе цифра падала бы от самой длины
+    // очереди — «проверяющий ошибается в половине случаев» там, где ни одного
+    // вердикта против ребёнка не было.
     expect(report.learning.disputes).toEqual({
       total: 2,
       upheld: 1,
       rejected: 0,
       open: 1,
-      upheldShare: 0.5,
+      upheldShare: 1,
     });
   });
 

@@ -108,13 +108,44 @@ describe('главный экран админки', () => {
     );
 
     expect(await screen.findByText('Семьи')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Войти как родитель' }));
+    await waitFor(() => expect(entered).toHaveBeenCalledTimes(1));
+    expect(impersonate).toHaveBeenCalledWith('ребёнок-1', 'parent');
+
+    // Начавшийся заход запирает кнопки до конца ухода. `onEntered` по
+    // умолчанию — `location.assign`, а он асинхронный: отпустив кнопки сразу,
+    // экран пускал бы второй щелчок в окно между ответом и уходом страницы, а
+    // второй заход гасит первый, сбрасывает счётчик отказов записи и кладёт в
+    // `admin_audit` вторую строку `impersonation-start` на одно намерение.
+    fireEvent.click(screen.getByRole('button', { name: 'Войти как ребёнок' }));
+    await Promise.resolve();
+    expect(impersonate).toHaveBeenCalledTimes(1);
+  });
+
+  it('отпускает кнопки захода, когда заход не удался', async () => {
+    const impersonate = vi.fn()
+      .mockRejectedValueOnce(new Error('сеть отвалилась'))
+      .mockResolvedValue({
+        childId: 'ребёнок-1', role: 'browser', expiresAt: '2026-08-21T09:15:00.000Z',
+      });
+    const entered = vi.fn();
+    render(
+      <AdminHomeScreen
+        api={adminApi({ impersonate })}
+        onEntered={entered}
+        onSignedOut={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText('Семьи')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Войти как ребёнок' }));
+    expect(await screen.findByText('сеть отвалилась')).toBeInTheDocument();
+
+    // Отказ — единственное место, где кнопки отпираются: без него обрыв сети
+    // запирал бы оператору заход навсегда.
     fireEvent.click(screen.getByRole('button', { name: 'Войти как ребёнок' }));
     await waitFor(() => expect(entered).toHaveBeenCalledTimes(1));
-    expect(impersonate).toHaveBeenCalledWith('ребёнок-1', 'browser');
-
-    fireEvent.click(screen.getByRole('button', { name: 'Войти как родитель' }));
-    await waitFor(() => expect(impersonate).toHaveBeenCalledTimes(2));
-    expect(impersonate).toHaveBeenLastCalledWith('ребёнок-1', 'parent');
+    expect(impersonate).toHaveBeenCalledTimes(2);
   });
 
   it('не предлагает захода в ребёнка без базы', async () => {

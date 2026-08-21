@@ -200,6 +200,40 @@ describe('маршруты входа оператора', () => {
       ]);
     });
 
+    it('вход закрывает заход, доставшийся от прежнего оператора', async () => {
+      const first = admin();
+      const parentId = createParent(control, 'семья@example.com', current);
+      const childId = createChild(control, parentId, 'Ученик', current);
+      provisionChildDatabase(control, childId, dir);
+      const started = startImpersonation(control, { adminId: first, childId, role: 'browser' }, current);
+      expect(started.ok).toBe(true);
+      const impersonation = started.ok ? started.session.token : '';
+
+      // Машина у операторов бывает общей, а `resolveBearer` проверяет заход
+      // **первым**: оставленный входом, чужой заход встретил бы вошедшего чужой
+      // семьёй под чужим именем на полосе, а его «выйти» закрыло бы и записало
+      // в журнал заход другого оператора вместе с его счётчиком отказов.
+      const second = createAdmin(control, 'второй@example.com', current);
+      setAdminPassword(control, second, PASSWORD, current);
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/auth/admin/login',
+        headers: { ...SAME_ORIGIN, cookie: `${IMPERSONATION_COOKIE}=${impersonation}` },
+        payload: { email: 'второй@example.com', password: PASSWORD },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(resolveImpersonation(control, impersonation, current)).toBeUndefined();
+      const cookies = response.headers['set-cookie'] as string[];
+      expect(cookies.some((value) => value.includes(`${IMPERSONATION_COOKIE}=;`)
+        && value.includes('Max-Age=0'))).toBe(true);
+      // Конец захода приписан тому, кто его начинал, а не вошедшему.
+      expect(audit()).toEqual([
+        { action: 'impersonation-end', adminId: first, detail: 'browser, отказов записи: 0' },
+        { action: 'login', adminId: second },
+      ]);
+    });
+
     it('гасит cookie и без живой сессии: мёртвый токен браузер носить не должен', async () => {
       const response = await logout({ cookie: `${ADMIN_COOKIE}=нет-такого-токена` });
 

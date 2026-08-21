@@ -293,18 +293,33 @@ export function buildAdminOverview(
     )
     .all(day);
 
+  // Счёт живых устройств повторяет предикат `resolveChildDevice`, а не считает
+  // строки: цифра на экране обещает «столько устройств сервер прямо сейчас
+  // пустит». Отключённый родитель, выведенный ребёнок, неготовая база и смена
+  // пароля гасят токен, не трогая `revoked_at`, — и без этих условий панель
+  // после смены пароля (обычной реакции на утёкшую ссылку) продолжала бы
+  // отчитываться о погашенных устройствах как о живых. То же рассуждение, что
+  // у `countLiveParentSessions`.
+  const DEVICE_LIVE = `d.revoked_at IS NULL
+        AND p.disabled_at IS NULL AND c.retired_at IS NULL AND c.status = 'ready'`;
   const deviceRows = control
     .prepare<[], { kind: 'browser' | 'agent'; live: number }>(
-      `SELECT kind, COUNT(*) AS live FROM child_devices
-        WHERE claimed_at IS NOT NULL AND revoked_at IS NULL
-        GROUP BY kind`,
+      `SELECT d.kind AS kind, COUNT(*) AS live FROM child_devices d
+         JOIN children c ON c.id = d.child_id
+         JOIN parents p ON p.id = c.parent_id
+        WHERE d.claimed_at IS NOT NULL AND ${DEVICE_LIVE}
+          AND (p.credentials_changed_at IS NULL OR p.credentials_changed_at <= d.claimed_at)
+        GROUP BY d.kind`,
     )
     .all();
   const pendingInvites = requireAggregate(
     control
       .prepare<[string], { pending: number }>(
-        `SELECT COUNT(*) AS pending FROM child_devices
-          WHERE claimed_at IS NULL AND revoked_at IS NULL AND invite_expires_at > ?`,
+        `SELECT COUNT(*) AS pending FROM child_devices d
+           JOIN children c ON c.id = d.child_id
+           JOIN parents p ON p.id = c.parent_id
+          WHERE d.claimed_at IS NULL AND ${DEVICE_LIVE} AND d.invite_expires_at > ?
+            AND d.created_at >= COALESCE(p.credentials_changed_at, '')`,
       )
       .get(stamp),
     'приглашения устройств',

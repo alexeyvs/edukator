@@ -239,6 +239,12 @@ export function AdminHomeScreen({
     void api.impersonate(childId, role)
       .then(onEntered)
       .catch((error: unknown) => {
+        // Кнопки отпираются только здесь, на отказе. `finally` отпирал бы их и
+        // на успехе — а уход по `onEntered` (`location.assign`) асинхронный, и
+        // в это окно второй щелчок начинал бы второй заход: он гасит первый,
+        // сбрасывает счётчик отказов и кладёт в `admin_audit` вторую строку
+        // `impersonation-start` на одно намерение оператора.
+        setEntering(null);
         // Кончившаяся сессия оператора и здесь не поломка: пускать обратно
         // будет форма входа, а не кнопка «Повторить».
         if (error instanceof HttpError && error.status === 401) {
@@ -246,8 +252,7 @@ export function AdminHomeScreen({
           return;
         }
         setEnterProblem(error instanceof Error ? error.message : 'Не получилось зайти в семью');
-      })
-      .finally(() => setEntering(null));
+      });
   }
 
   function logout(): void {

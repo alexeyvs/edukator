@@ -95,6 +95,36 @@ def ask_server_access(
     return url, token
 
 
+# Отказы, означающие «до Microsoft не доехали», а не «токен больше не годен».
+# Имена, а не классы: `aiohttp` здесь не импортируется, а тянуть его ради одного
+# `isinstance` значило бы завести у входа вторую зависимость от внутренностей
+# `pyfamilysafety`.
+_TRANSIENT_ERROR_NAMES = frozenset({
+    "ClientConnectionError",
+    "ClientConnectorError",
+    "ClientOSError",
+    "ClientPayloadError",
+    "ServerDisconnectedError",
+    "ServerTimeoutError",
+})
+
+
+def _is_transient(error: BaseException) -> bool:
+    """Обрыв связи, а не отвергнутый токен.
+
+    Разделение нужно потому, что refresh token одноразовый: сохранённый —
+    единственный способ продолжить настройку, и стереть его на отвалившемся
+    Wi-Fi значит отправить родителя проходить весь вход Microsoft заново, пока
+    компьютер ребёнка стоит заблокированным (контроллер fail-closed).
+    """
+    if isinstance(error, (OSError, TimeoutError)):
+        return True
+    status = getattr(error, "status", None)
+    if isinstance(status, int) and status >= 500:
+        return True
+    return any(klass.__name__ in _TRANSIENT_ERROR_NAMES for klass in type(error).__mro__)
+
+
 async def authenticate(target: Path) -> Any:
     from pyfamilysafety import Authenticator
 
@@ -105,8 +135,19 @@ async def authenticate(target: Path) -> Any:
         try:
             auth = await Authenticator.create(token=pending_token, use_refresh_token=True)
         except Exception as error:
-            print(f"Сохранённая сессия больше не действует: {error}", file=sys.stderr)
-            clear_pending_login(target)
+            if _is_transient(error):
+                # Сессию не отвергли — до неё не доехали. Файл остаётся: вход
+                # ниже её перезапишет, а прерванный на полпути — не потеряет.
+                print(f"Сессия не проверена: {error}", file=sys.stderr)
+            else:
+                print(f"Сохранённая сессия больше не действует: {error}", file=sys.stderr)
+                # Уборка в своём `try`: `clear_pending_login` бросает `ValueError`
+                # на `OSError`, и отсюда он заслонил бы настоящую причину и увёл
+                # бы вход мимо браузерного сценария, к которому и надо перейти.
+                try:
+                    clear_pending_login(target)
+                except ValueError as cleanup:
+                    print(f"Временная сессия не удалена: {cleanup}", file=sys.stderr)
         if auth is not None:
             # Запись обновлённого токена — уже не проверка сессии, и её отказ
             # не повод объявлять сессию мёртвой: стерев pending, мы потеряли бы

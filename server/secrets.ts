@@ -49,7 +49,11 @@ function assertParams(params: ScryptParams): void {
   if (!Number.isInteger(p) || p < 1 || p > MAX_SCRYPT_P) {
     throw new Error(`Параметр scrypt p недопустим: ${p}`);
   }
-  if (128 * N * r > MAX_SCRYPT_MEMORY) {
+  // Считается настоящий расход, а не `128 * N * r`: `scrypt` берёт ещё и блок
+  // распараллеливания, и без `p` в формуле проверка пропускала бы параметры,
+  // которые сам KDF отвергает по `maxmem` (`scrypt$65536$8$16$…` — ровно такие).
+  // Пропущенные сюда, они падают уже внутри `derive`, то есть на пути входа.
+  if (128 * r * (N + p + 2) > MAX_SCRYPT_MEMORY) {
     throw new Error(`Параметры scrypt требуют больше ${MAX_SCRYPT_MEMORY} байт памяти`);
   }
 }
@@ -136,5 +140,15 @@ export function verifySecret(stored: string, presented: string): boolean {
   if (presented.length === 0 || presented.length > MAX_SECRET_LENGTH) return false;
   const parsed = parseSecretHash(stored);
   if (parsed === undefined) return false;
-  return timingSafeEqual(derive(presented, parsed.salt, parsed.params), parsed.key);
+  // Второй заслон под тем же правилом «испорченная запись — отказ во входе, а
+  // не исключение»: границы параметров выше проверены, но они и сам KDF —
+  // разные реализации одного условия, и разъехавшись, они превратили бы одну
+  // испорченную строку в пятисотку на каждой попытке входа этой учётной записи.
+  let derived: Buffer;
+  try {
+    derived = derive(presented, parsed.salt, parsed.params);
+  } catch {
+    return false;
+  }
+  return timingSafeEqual(derived, parsed.key);
 }

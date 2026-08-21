@@ -43,12 +43,22 @@ export function registerAdminAuditRoutes(
       return reply.code(400).send({ error: 'Неизвестное действие' });
     }
     const before = typeof query['before'] === 'string' && query['before'] !== '' ? query['before'] : undefined;
-    const beforeId = typeof query['beforeId'] === 'string' ? Number(query['beforeId']) : undefined;
+    // Пустая строка разбирается отдельно: `Number('')` — это 0, а целый ноль
+    // проходит проверку вида и даёт курсор `(at, 0)`, который выкидывает
+    // **все** записи этой отметки. Потеря соседей по границе — ровно то, от
+    // чего курсор и сделан парой.
+    const rawId = query['beforeId'];
+    const beforeId = typeof rawId === 'string' && rawId.trim() !== '' ? Number(rawId) : undefined;
     // Половина курсора — не курсор: по одному `at` страница поехала бы,
     // повторив или потеряв записи той же секунды, и молчаливое «читаю с
-    // начала» пряталось бы за правдоподобным ответом.
-    if ((before === undefined) !== (beforeId === undefined || !Number.isInteger(beforeId))) {
+    // начала» пряталось бы за правдоподобным ответом. Половины проверяются
+    // порознь: одним выражением «нет `before`, а `beforeId` испорчен» читалось
+    // бы как исправная пара, и мусор в запросе давал бы первую страницу.
+    if ((before === undefined) !== (beforeId === undefined)) {
       return reply.code(400).send({ error: 'Курсор задаётся парой before и beforeId' });
+    }
+    if (beforeId !== undefined && (!Number.isInteger(beforeId) || beforeId < 1)) {
+      return reply.code(400).send({ error: 'beforeId — целое число записи' });
     }
     const cursor: AdminAuditCursor | undefined =
       before === undefined || beforeId === undefined ? undefined : { at: before, id: beforeId };

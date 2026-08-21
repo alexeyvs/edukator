@@ -143,6 +143,10 @@ export function AdminApp({ api }: { api?: AdminApi } = {}) {
   if (page.kind === 'child') {
     return (
       <AdminChildScreen
+        // Ключ по ребёнку: без него смена адреса оставляла бы прежнюю карточку
+        // на экране до прихода новой — то есть чужие темы, споры и гейт под
+        // новым именем на том самом экране, где путаница детей и опасна.
+        key={page.childId}
         {...(api === undefined ? {} : { api })}
         childId={page.childId}
         onBack={() => go({ kind: 'home' })}

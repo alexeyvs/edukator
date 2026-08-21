@@ -111,9 +111,6 @@ export function AdminLogsScreen({ api = browserAdminApi, onBack, onSignedOut }: 
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
-  // Новая попытка после сорвавшейся и перезапуск ленты по фильтру: эффект сам
-  // не повторится, и без счётчика обрыв сети запирал бы оператора навсегда.
-  const [attempt, setAttempt] = useState(0);
   /**
    * Номер последнего запроса. Без него догрузка «Показать ещё», доехавшая
    * после смены фильтра, дописала бы нефильтрованный хвост к свежему списку и
@@ -121,11 +118,20 @@ export function AdminLogsScreen({ api = browserAdminApi, onBack, onSignedOut }: 
    * ровно ту, которую отдельный `applied` и заведён предотвращать.
    */
   const generation = useRef(0);
+  /**
+   * Что именно сорвалось. «Повторить» обязано повторить **тот же** запрос:
+   * догрузка, перезапущенная первой страницей, молча отматывала бы ленту к
+   * началу — оператор, ушедший на шестой экран вглубь журнала, после одного
+   * обрыва сети оказывался бы в начале, и ничто на экране об этом не сказало
+   * бы.
+   */
+  const failed = useRef<{ query: AdminLogQuery; append: boolean } | null>(null);
 
   const load = useCallback((query: AdminLogQuery, append: boolean) => {
     const mine = generation.current + 1;
     generation.current = mine;
     setBusy(true);
+    failed.current = { query, append };
     api.logs(query)
       .then((page) => {
         if (generation.current !== mine) return;
@@ -134,6 +140,7 @@ export function AdminLogsScreen({ api = browserAdminApi, onBack, onSignedOut }: 
           : page.entries));
         setNextBefore(page.nextBefore);
         setProblem(null);
+        failed.current = null;
       })
       .catch((error: unknown) => {
         if (generation.current !== mine) return;
@@ -150,9 +157,20 @@ export function AdminLogsScreen({ api = browserAdminApi, onBack, onSignedOut }: 
       });
   }, [api, onSignedOut]);
 
+  // Первая страница применённого фильтра. Повтор сорвавшегося запроса сюда не
+  // ходит: он повторяет **свой** запрос, а не начало ленты, — см. `failed`.
   useEffect(() => {
+    failed.current = null;
     load(applied, false);
-  }, [load, applied, attempt]);
+  }, [load, applied]);
+
+  /** Повторить именно то, что сорвалось: первую страницу или догрузку. */
+  function retry(): void {
+    const last = failed.current;
+    setProblem(null);
+    if (last === null) load(applied, false);
+    else load(last.query, last.append);
+  }
 
   /** Применить набранный фильтр: лента начинается заново, а не дописывается. */
   function apply(): void {
@@ -214,12 +232,7 @@ export function AdminLogsScreen({ api = browserAdminApi, onBack, onSignedOut }: 
       {problem !== null && (
         <>
           <p className="auth-message error" role="alert">{problem}</p>
-          <button
-            type="button"
-            onClick={() => { setProblem(null); setAttempt((value) => value + 1); }}
-          >
-            Повторить
-          </button>
+          <button type="button" onClick={retry}>Повторить</button>
         </>
       )}
 

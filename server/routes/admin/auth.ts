@@ -116,6 +116,28 @@ export function registerAdminAuthRoutes(
       });
   }
 
+  /**
+   * Закрывает заход, cookie которого пришла с запросом: гасит строку, пишет
+   * конец в `admin_audit` и закрывает соединение только для чтения. Общая у
+   * входа и выхода: обе двери обязаны оставлять браузер без живого захода.
+   */
+  function closeCarriedImpersonation(request: FastifyRequest, at: Date): void {
+    const token = parseCookies(request.headers.cookie).get(IMPERSONATION_COOKIE);
+    if (token === undefined) return;
+    const session = resolveImpersonation(control, token, at);
+    revokeImpersonation(control, token, at);
+    if (session === undefined) return;
+    finishImpersonation(
+      {
+        control,
+        refusals,
+        ...(options.impersonations === undefined ? {} : { impersonations: options.impersonations }),
+      },
+      session,
+      at,
+    );
+  }
+
   app.post('/api/auth/admin/login', (request, reply) => {
     const blocked = crossOrigin(request, reply);
     if (blocked !== undefined) return blocked;
@@ -162,8 +184,18 @@ export function registerAdminAuthRoutes(
     clearLoginFailures(control, target);
     recordAdminAudit(control, { adminId: result.adminId, action: 'login' }, at);
 
+    // Вход гасит заход так же, как выход, и по той же причине: `resolveBearer`
+    // проверяет заход **первым**, а машина у операторов бывает общей. Оставленный
+    // здесь, чужой заход встретил бы вошедшего оператора чужой семьёй под чужим
+    // именем на полосе, а его «выйти» закрыло бы и записало в `admin_audit`
+    // заход **другого** оператора — вместе с его счётчиком отказов записи.
+    closeCarriedImpersonation(request, at);
+
     return reply
-      .header('set-cookie', serializeCookie('admin', result.session.token, { secure }))
+      .header('set-cookie', [
+        serializeCookie('admin', result.session.token, { secure }),
+        serializeCookie('impersonation', '', { secure, maxAgeSeconds: 0 }),
+      ])
       .send({ kind: 'admin', email });
   });
 
@@ -188,24 +220,7 @@ export function registerAdminAuthRoutes(
     // приложение оператора молча показывало бы чужую семью, а снять заход было
     // бы уже нечем — `DELETE /api/admin/impersonate` требует админской cookie,
     // которую этот же выход только что погасил.
-    const impersonationToken = jar.get(IMPERSONATION_COOKIE);
-    if (impersonationToken !== undefined) {
-      const session = resolveImpersonation(control, impersonationToken, at);
-      revokeImpersonation(control, impersonationToken, at);
-      if (session !== undefined) {
-        finishImpersonation(
-          {
-            control,
-            refusals,
-            ...(options.impersonations === undefined
-              ? {}
-              : { impersonations: options.impersonations }),
-          },
-          session,
-          at,
-        );
-      }
-    }
+    closeCarriedImpersonation(request, at);
     // Обе cookie гасятся и тогда, когда сессии в базе не нашлось: иначе браузер
     // продолжал бы носить мёртвый токен на каждом запросе.
     return reply

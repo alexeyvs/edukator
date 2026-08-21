@@ -16,6 +16,7 @@ import {
   MAX_DISPUTE_CONCURRENCY,
 } from '../server/codex/concurrency.js';
 import { CodexUnavailableError, type CodexRequest } from '../server/codex/client.js';
+import type { ProduceRequest } from '../server/codex/worker.js';
 import { readCodexQuota } from '../server/control-db.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import type { DisputeReview } from '../server/codex/dispute.js';
@@ -306,6 +307,40 @@ describe('воркер рабочего сервера', () => {
     expect(visited.statusCode).toBe(200);
     expect(afterAgent).toBe(afterStart);
     expect(pauses).toBeGreaterThan(afterAgent);
+  });
+
+  // Кешированная аренда отпечаток не перепроверяет, а маршруты и разбор споров —
+  // да: по подменённому файлу они отвечают 503 и ничего не пишут. Обход,
+  // оставленный без сверки, тратил бы на такого ребёнка суточную квоту целиком
+  // и складывал бы задания в отвязанный inode, отчитываясь `stored > 0`, — то
+  // есть выглядел бы здоровым до самого перезапуска.
+  it('не греет ребёнка, чей файл базы подменили под живым соединением', async () => {
+    const warmed: string[] = [];
+    server = await startTenantServer({
+      dataDir: join(tempDir, 'data'),
+      seedDir: join(tempDir, 'seed-bank'),
+      log: () => undefined,
+      worker: {
+        topics: 1,
+        produce: (request: ProduceRequest) => {
+          warmed.push(request.topic.id);
+          return Promise.resolve([]);
+        },
+        wait: (): Promise<void> => new Promise<void>(() => undefined),
+      },
+    });
+    app = server.app;
+    // Единственный ребёнок помощника: его аренда уже в кеше — помощник открыл
+    // её запросом при старте.
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${server.dbPath}${suffix}`, { force: true });
+    openDatabase(server.dbPath).close();
+    // Маршруты подмену уже видят и отвечают 503, ничего не записав.
+    expect((await app.inject({ method: 'GET', url: '/api/gate/status' })).statusCode).toBe(503);
+
+    await app.listen({ host: HOST, port: 0 });
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+    expect(warmed).toEqual([]);
   });
 
   it('при недоступном codex откладывает воркер, но оставляет обычное занятие рабочим', async () => {

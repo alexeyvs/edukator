@@ -61,6 +61,30 @@ describe('общий разбор ответа', () => {
     unsubscribe();
   });
 
+  it('всё равно выкидывает на вход, когда 401 назван сервером «unauthenticated»', async () => {
+    // Детское устройство предъявляет PIN всегда, так что `signedOutOn401: false`
+    // стоит и на погашенной cookie. Без разбора кода сервера кончившаяся сессия
+    // рисовалась бы красной строкой «неверный PIN» под кнопками, а экран
+    // навсегда оставался бы на устаревшей сводке — объясняя это опечаткой.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      response({ error: 'Нужно войти', code: 'unauthenticated' }, { ok: false, status: 401 }),
+    ));
+    const listener = vi.fn();
+    const unsubscribe = onSignedOut(listener);
+
+    const failure = await requestJson(
+      '/api/parents/c-1/computer-access',
+      { method: 'PUT' },
+      'Не получилось изменить режим доступа',
+      undefined,
+      { signedOutOn401: false, signedOutOnUnauthenticated: true },
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(SignedOutError);
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
   it('не трогает остальные коды и оставляет им фабрику ошибки и fallback', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({}, { ok: false, status: 503 })));
     const listener = vi.fn();

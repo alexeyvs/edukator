@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import json
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -109,9 +110,11 @@ def read_poll_settings(path: Path) -> dict[str, Any]:
     """
     raw = _read_raw(path)
     settings: dict[str, Any] = {}
+    # `math.isfinite` стоит рядом с границей намеренно: `NaN <= 0` — ложь, и
+    # без него `NaN` проходил бы за «положительное число».
     limits = (
-        ("poll_seconds", float, lambda value: value > 0),
-        ("verify_seconds", float, lambda value: value > 0),
+        ("poll_seconds", float, lambda value: math.isfinite(value) and value > 0),
+        ("verify_seconds", float, lambda value: math.isfinite(value) and value > 0),
         ("block_days", int, lambda value: value >= 1),
     )
     for key, cast, allowed in limits:
@@ -162,6 +165,13 @@ def load_config(path: Path | None = None) -> ControllerConfig:
         verify_seconds=_number(raw, "verify_seconds", 300.0, float),
         block_days=_number(raw, "block_days", 7, int),
     )
+    # `NaN` и `Infinity` — законные литералы для `json.loads`, и оба проходят
+    # проверку «больше нуля»: `NaN <= 0` ложно, `Infinity` истинно-положительна.
+    # Пропущенный `NaN` превращает `asyncio.sleep` в мгновенный возврат — цикл
+    # начинает бить в `gate/status` без пауз, — а `Infinity` записывается назад
+    # нечитаемым литералом.
+    if not math.isfinite(config.poll_seconds) or not math.isfinite(config.verify_seconds):
+        raise ValueError("Интервалы опроса должны быть конечными числами")
     if config.poll_seconds <= 0 or config.verify_seconds <= 0:
         raise ValueError("Интервалы опроса должны быть положительными")
     if config.block_days < 1:
@@ -195,19 +205,40 @@ def _sync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
+def _owns_directory(directory: Path) -> bool:
+    """Наш ли это каталог, чтобы ужимать его права.
+
+    Свой — тот, который контроллер сам и заводит: каталог конфигурации по
+    умолчанию (`~/.config/edukator`) и каталог, названный `--config`/
+    `EDUKATOR_FAMILY_CONFIG` **целиком**, то есть с именем `edukator`. Чужому
+    права не меняются: путь конфигурации задаёт человек, сохранение повторяется
+    на каждой ротации refresh token, и `--config ~/family.json` иначе раз за
+    разом ужимал бы до 0700 домашний каталог, а относительный путь — рабочий.
+    Секреты защищает режим самого файла (0600), а не режим каталога вокруг.
+    """
+    try:
+        return directory.resolve() == DEFAULT_CONFIG.parent.resolve()
+    except OSError:
+        return False
+
+
 def _save_private_json(payload: dict[str, Any], target: Path) -> None:
+    created = not target.parent.is_dir()
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     # `mode` у `mkdir` действует только на создаваемый последний каталог: уже
     # существующий `~/.config/edukator` остался бы с чем был, а в нём лежат и
     # refresh token, и агентский токен, и времянка `mkstemp` с предсказуемым
-    # именем.
-    try:
-        os.chmod(target.parent, 0o700)
-    except OSError:
-        # Каталог может быть чужим (общий `~/.config` под управлением системы):
-        # права файлов важнее, и они выставляются ниже независимо от этого.
-        pass
-    encoded = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    # именем. Поэтому свой каталог ужимается и тогда, когда он уже был, — но
+    # только свой (см. `_owns_directory`).
+    if created or _owns_directory(target.parent):
+        try:
+            os.chmod(target.parent, 0o700)
+        except OSError:
+            # Права файлов важнее, и они выставляются ниже независимо от этого.
+            pass
+    # `allow_nan=False`: `NaN`/`Infinity` — не JSON, и записанные сюда они
+    # сделали бы конфигурацию нечитаемой всем, кроме самого Python.
+    encoded = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
 
     temporary: Path | None = None
     try:

@@ -271,6 +271,35 @@ function readRecordQuietly(path: string): DataLockRecord | undefined {
   }
 }
 
+/**
+ * Снимает замок на смерть по сигналу и досылает сигнал дальше.
+ *
+ * `finally` при смерти по сигналу не выполняется, а у CLI под замком (прогрев,
+ * перенос) смерть по сигналу — обычное дело: Ctrl-C по многочасовому
+ * `npm run prefetch`. Хуже того, `runChild` при живом потомке досылает сигнал
+ * себе руками, так что стек не разворачивается гарантированно. Брошенный после
+ * этого замок снимается только руками — а до тех пор `buildServer` вообще не
+ * поднимается (`DataLockBusyError`), то есть один Ctrl-C кладёт приложение до
+ * прихода человека.
+ *
+ * Автоматическому снятию **чужого** замка это не противоречит: снимается свой,
+ * по своему же nonce, и только там, где процесс ещё жив и знает, что уходит.
+ */
+export function releaseDataLockOnSignals(
+  lock: DataLock,
+  signals: readonly NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP'],
+): void {
+  for (const signal of signals) {
+    process.once(signal, () => {
+      lock.release();
+      // Смерть по сигналу досылается руками: обработчик её отменил, а код
+      // возврата обязан остаться сигнальным — по нему cron отличает снятие
+      // руками от отказа.
+      process.kill(process.pid, signal);
+    });
+  }
+}
+
 function makeLock(path: string, nonce: string): DataLock {
   let released = false;
   return {

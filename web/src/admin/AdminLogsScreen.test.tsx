@@ -143,6 +143,29 @@ describe('лента аварий', () => {
     expect(screen.queryByRole('button', { name: 'Показать ещё' })).toBeNull();
   });
 
+  it('повторяет сорвавшуюся догрузку, а не отматывает ленту к началу', async () => {
+    const logs = vi.fn()
+      .mockResolvedValueOnce({
+        entries: [entry({ message: 'первая' })],
+        nextBefore: '2026-08-21T09:00:00.000Z#1',
+      } satisfies AdminLogPage)
+      .mockRejectedValueOnce(new Error('сеть отвалилась'))
+      .mockResolvedValueOnce({ entries: [entry({ message: 'вторая' })] } satisfies AdminLogPage);
+    render(<AdminLogsScreen api={adminApi({ logs })} onSignedOut={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Показать ещё' }));
+    expect(await screen.findByText('сеть отвалилась')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Повторить' }));
+
+    // Повтор идёт с тем же курсором: перезапущенный первой страницей, он молча
+    // возвращал бы оператора, ушедшего вглубь журнала, к его началу — и ничто
+    // на экране не сказало бы, что прочитанный хвост выброшен.
+    expect(await screen.findByText('вторая')).toBeInTheDocument();
+    expect(logs).toHaveBeenLastCalledWith({ before: '2026-08-21T09:00:00.000Z#1' });
+    expect(screen.getByText('первая')).toBeInTheDocument();
+  });
+
   it('не досыпает отставшую догрузку в свежеотфильтрованную ленту', async () => {
     let releaseAppend = (): void => {};
     const logs = vi.fn()

@@ -269,6 +269,31 @@ describe('сводка оператора по управляющей базе',
     expect(overview().devices).toEqual({ browser: 1, agent: 1, pendingInvites: 1 });
   });
 
+  it('не считает живыми устройства, чей токен уже не пустят', () => {
+    // Цифра обещает «столько устройств сервер прямо сейчас пустит», а
+    // `resolveChildDevice` гасит токен ещё четырьмя условиями, не трогая
+    // `revoked_at`. Считая строки таблицы, панель после смены пароля — обычной
+    // реакции на утёкшую ссылку — продолжала бы отчитываться о погашенных
+    // устройствах как о живых.
+    const выведенный = parent('выведенный@example.com');
+    const ушедший = child(выведенный, 'Ушедший');
+    markChildReady(control, ушедший);
+    const первое = issueDeviceInvite(control, ушедший, 'browser', '', NOW);
+    expect(redeemDeviceInvite(control, первое.token, NOW).ok).toBe(true);
+    issueDeviceInvite(control, ушедший, 'agent', '', NOW);
+    retireChild(control, ушедший, NOW);
+
+    const сменивший = parent('сменивший@example.com');
+    const его = child(сменивший, 'Его');
+    markChildReady(control, его);
+    const второе = issueDeviceInvite(control, его, 'agent', '', NOW);
+    expect(redeemDeviceInvite(control, второе.token, NOW).ok).toBe(true);
+    issueDeviceInvite(control, его, 'browser', '', NOW);
+    setParentPassword(control, сменивший, 'новый-длинный-пароль', NOW);
+
+    expect(overview().devices).toEqual({ browser: 0, agent: 0, pendingInvites: 0 });
+  });
+
   it('показывает действующие локауты входа и забывает остывшие', () => {
     for (let attempt = 0; attempt < LOGIN_EMAIL_FAILURE_LIMIT; attempt += 1) {
       recordLoginFailure(control, { kind: 'password', email: 'жертва@example.com', address: '10.0.0.1' }, NOW);

@@ -125,10 +125,29 @@ describe('маршрут журнала действий оператора', ()
 
   it('отвергает половину курсора', async () => {
     write('login', 0);
-    for (const query of ['?before=2026-08-21T09:00:00.000Z', '?beforeId=3', '?before=x&beforeId=нет']) {
+    // Пустой и мусорный `beforeId` — тоже половина курсора. Принятые молча, они
+    // читали бы первую страницу под видом продолжения: `Number('')` — это 0, и
+    // курсор `(at, 0)` выкидывает **все** записи своей отметки, то есть теряет
+    // ровно тех соседей по границе, ради которых курсор и сделан парой.
+    const halves = [
+      '?before=2026-08-21T09:00:00.000Z',
+      '?beforeId=3',
+      '?beforeId=нет',
+      '?before=2026-08-21T09:00:00.000Z&beforeId=',
+      '?before=2026-08-21T09:00:00.000Z&beforeId=%20%20',
+    ];
+    for (const query of halves) {
       const response = await get(`/api/admin/audit${query}`);
       expect([query, response.statusCode]).toEqual([query, 400]);
       expect(response.json()).toEqual({ error: 'Курсор задаётся парой before и beforeId' });
+    }
+
+    // Обе половины на месте, но номер не номер: отдельный отказ, а не молчаливое
+    // чтение с начала.
+    for (const query of ['?before=x&beforeId=нет', '?before=x&beforeId=0', '?before=x&beforeId=1.5']) {
+      const response = await get(`/api/admin/audit${query}`);
+      expect([query, response.statusCode]).toEqual([query, 400]);
+      expect(response.json()).toEqual({ error: 'beforeId — целое число записи' });
     }
   });
 

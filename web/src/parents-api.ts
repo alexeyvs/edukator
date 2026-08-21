@@ -146,7 +146,7 @@ export function parentsApiFor(childId: string): ParentsApi {
       // (родительская сессия его не предъявляет вовсе) 401 может означать
       // только «сессии больше нет» — и тогда нужен экран входа, а не красная
       // строка под кнопкой. См. `http.ts`.
-      { signedOutOn401: pin === undefined },
+      { signedOutOn401: pin === undefined, signedOutOnUnauthenticated: true },
     ),
     approveIntegrity: (runId, itemId, pin) => requestJson<IntegrityStatusResponse>(
       `${base}/runs/${String(runId)}/integrity/${String(itemId)}/approve`,
@@ -156,7 +156,7 @@ export function parentsApiFor(childId: string): ParentsApi {
       },
       'Не получилось подтвердить ответ',
       ({ status, message }) => new ComputerAccessError(message, status),
-      { signedOutOn401: pin === undefined },
+      { signedOutOn401: pin === undefined, signedOutOnUnauthenticated: true },
     ),
   };
 }

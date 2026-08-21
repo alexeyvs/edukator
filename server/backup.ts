@@ -13,7 +13,15 @@
  * при живом сервере, а замок стоит на бюджете codex, которого снятие копии не
  * тратит (см. `server/data-lock.ts`).
  */
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  rmSync,
+} from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import { syncDirectory } from './atomic-write.js';
@@ -68,14 +76,41 @@ export function backupDatabase(
   }
   syncDirectory(to);
 
-  const copy = new Database(to, { fileMustExist: true, readonly: true });
   try {
-    const [integrity] = copy.pragma('quick_check') as [{ quick_check: string }];
-    if (integrity.quick_check !== 'ok') {
-      throw new Error(`Копия ${to} не прошла quick_check: ${integrity.quick_check}`);
+    const copy = new Database(to, { fileMustExist: true, readonly: true });
+    try {
+      const [integrity] = copy.pragma('quick_check') as [{ quick_check: string }];
+      if (integrity.quick_check !== 'ok') {
+        throw new Error(`Копия ${to} не прошла quick_check: ${integrity.quick_check}`);
+      }
+      options.verify?.(copy);
+    } finally {
+      copy.close();
     }
-    options.verify?.(copy);
-  } finally {
-    copy.close();
+  } catch (error) {
+    // Непрошедшая копия остаётся человеку, но **не под именем годной**.
+    // Оставленная на месте, она неотличима от исправной ни на глаз, ни для
+    // `[[ -d ... ]]` серверной половины деплоя, и вдобавок запирает путь
+    // навсегда: следующий запуск упирается в «файл уже есть», то есть этот
+    // ребёнок остаётся в `failed[]` при любом числе повторов. Убранная молча —
+    // уносит с собой причину отказа. Поэтому она переезжает в `.failed`.
+    setAside(to);
+    throw error;
+  }
+}
+
+/**
+ * Отодвигает непрошедшую копию под имя, которое нельзя принять за годную.
+ * Своё `try`: отказ уборки не имеет права заслонить причину отказа копии.
+ */
+function setAside(path: string): void {
+  const aside = `${path}.failed`;
+  try {
+    rmSync(aside, { force: true });
+    renameSync(path, aside);
+  } catch (error) {
+    process.stderr.write(
+      `непрошедшая копия ${path} не отодвинута: ${(error as Error).message}\n`,
+    );
   }
 }

@@ -1,4 +1,13 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -9,7 +18,11 @@ const helper = resolve('scripts/deploy-release.sh');
 const releaseId = '20260821T120000Z-abcdef123456';
 const proxy = 'http://deploy-user:deploy-secret@proxy.test:3128';
 
-describe('remote-helper деплоя', () => {
+// Каждый сценарий гоняет настоящий bash, а тот — `npm ci` заглушкой, `curl`
+// health и `sleep`: с умолчанием vitest в 5 секунд файл краснел под нагрузкой
+// полного прогона, не имея к делу никакого отношения. Отдельный срок ставится
+// на весь файл, а не на один сценарий: медленный здесь любой из них.
+describe('remote-helper деплоя', { timeout: 30_000 }, () => {
   let root: string;
   let appRoot: string;
   let archive: string;
@@ -151,6 +164,34 @@ describe('remote-helper деплоя', () => {
     expect(inside.status).toBe(1);
     expect(inside.stderr).toContain('унёс бы данные вместе с версией');
     expect(readFileSync(join(appRoot, 'app', 'version'), 'utf8')).toBe('old\n');
+  });
+
+  it('видит каталог данных внутри релиза и через симлинк, и через ..', () => {
+    // Текстовое сравнение путей ловит только прямое написание, а `mv "$app_dir"`
+    // унёс бы живые базы в `releases/` при любом из трёх — и health отдал бы 200
+    // на пустой `control.db`, потому что открытых аренд после подъёма нет.
+    const proxyLines = [
+      `http_proxy=${proxy}`,
+      `https_proxy=${proxy}`,
+      `HTTP_PROXY=${proxy}`,
+      `HTTPS_PROXY=${proxy}`,
+    ];
+    const inside = join(appRoot, 'app', 'data');
+    mkdirSync(inside, { recursive: true });
+    const link = join(root, 'через-симлинк');
+    symlinkSync(inside, link);
+
+    for (const disguise of [link, join(root, 'opt', '..', 'opt', 'edukator', 'app', 'data')]) {
+      writeFileSync(
+        envFile,
+        [...proxyLines, `EDUKATOR_DATA_DIR=${disguise}`, ''].join('\n'),
+        { mode: 0o600 },
+      );
+      const result = deploy('ok');
+      expect([disguise, result.status], result.stderr).toEqual([disguise, 1]);
+      expect(result.stderr).toContain('унёс бы данные вместе с версией');
+      expect(readFileSync(join(appRoot, 'app', 'version'), 'utf8')).toBe('old\n');
+    }
   });
 
   it('отвергает идентификатор релиза, который можно использовать как путь', () => {
