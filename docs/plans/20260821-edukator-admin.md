@@ -541,11 +541,18 @@ VPS, и в `control.db` живут чужие семьи. У оператора 
 
 ### Task 23: Пороги покрытия для админки
 
-- [ ] добавить в `vitest.config.ts` шаблоны для `server/admin/**`,
+- [x] добавить в `vitest.config.ts` шаблоны для `server/admin/**`,
       `server/routes/admin/**`, `server/log.ts`, `web/src/admin/**` и
       `web/src/app-route.ts`: пороги заданы поимённо, и без правки 80% пофайлово
       для новых модулей осталось бы пожеланием
-- [ ] прогнать `npm run coverage` — пороги должны выполняться
+- [x] ➕ добавить туда же `web/src/admin-api.ts` и внести новые клиентские файлы в
+      `coverage.include`: список включений перечисляет клиента поимённо, и без
+      этого шаблон `web/src/admin/**` не измерял бы вовсе ничего
+- [x] ➕ дописать тесты под открывшиеся пороги: ветки `readChildDetail`
+      (заполненные отметки времени, тема вне карты, время по умолчанию),
+      пустые разделы и безымянная тема в `AdminChildScreen`, переходы корня
+      админки (`web/src/admin/AdminApp.test.tsx`)
+- [x] прогнать `npm run coverage` — пороги должны выполняться
 
 ### Task 24: Verify acceptance criteria
 

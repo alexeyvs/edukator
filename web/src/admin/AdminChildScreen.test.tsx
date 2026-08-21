@@ -130,6 +130,103 @@ describe('карточка ребёнка в админке', () => {
     expect(screen.getByText(/команда родителя: открыт/u)).toBeInTheDocument();
   });
 
+  it('называет пустым каждый раздел ребёнка, который ещё не занимался', async () => {
+    const пустая = detail({
+      topics: [],
+      materials: [],
+      disputes: [],
+      bosses: [],
+      gate: {
+        day: '2026-08-21',
+        required: 3,
+        completed: 3,
+        remaining: 0,
+        learning: { materialId: 4, required: true, passed: true },
+        automaticUnlocked: true,
+        override: null,
+        unlocked: true,
+      },
+    } as Partial<AdminChildDetail>) as AdminChildDetail & { lastActivityAt?: string };
+    // Ребёнка завели, а он ни разу не заходил: карточка обязана сказать это
+    // словами, иначе пустые разделы читаются как поломка отчёта.
+    delete пустая.lastActivityAt;
+    render(
+      <AdminChildScreen
+        api={adminApi({ child: vi.fn().mockResolvedValue(пустая) })}
+        childId="ребёнок-1"
+        onSignedOut={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText('Ни одной начатой темы')).toBeInTheDocument();
+    expect(screen.getByText('Разборов не было')).toBeInTheDocument();
+    expect(screen.getByText('Споров не было')).toBeInTheDocument();
+    expect(screen.getByText('Боёв не было')).toBeInTheDocument();
+    expect(screen.getByText(/ни разу не занимался/u)).toBeInTheDocument();
+    expect(screen.getByText(/автоматически открыт/u)).toBeInTheDocument();
+    expect(screen.getByText(/зачтён/u)).toBeInTheDocument();
+  });
+
+  it('показывает тему без названия, её причину и закрытый спор', async () => {
+    const безымянная: AdminTopicCard = {
+      topicId: 'math.устаревшая',
+      mastery: 0.1,
+      attempts: 2,
+      bank: { valid: 0, pending: 0, rejected: 1, used: 3, reserved: 0 },
+    };
+    const карточка = detail({
+      topics: [безымянная],
+      disputes: [{
+        id: 9,
+        attemptId: 31,
+        topicId: 'math.a',
+        status: 'rejected',
+        createdAt: '2026-08-20T07:00:00.000Z',
+        resolvedAt: '2026-08-20T08:00:00.000Z',
+      }],
+      gate: {
+        day: '2026-08-21',
+        required: 3,
+        completed: 3,
+        remaining: 0,
+        learning: { materialId: null, required: false, passed: false },
+        automaticUnlocked: true,
+        override: {
+          mode: 'blocked',
+          changedAt: '2026-08-21T08:00:00.000Z',
+          expiresAt: '2026-08-21T21:00:00.000Z',
+        },
+        unlocked: false,
+      },
+    } as Partial<AdminChildDetail>);
+    render(
+      <AdminChildScreen
+        api={adminApi({ child: vi.fn().mockResolvedValue(карточка) })}
+        childId="ребёнок-1"
+        onSignedOut={vi.fn()}
+      />,
+    );
+
+    // Тема из прошлой редакции карты: названия взять негде, и без опознания по
+    // идентификатору строка была бы пустой.
+    // Название и идентификатор совпадают ровно потому, что названия нет: строка
+    // показывает его дважды, а не молчит о теме.
+    expect(await screen.findAllByText('math.устаревшая')).toHaveLength(2);
+    expect(screen.getByText(/Банк пуст/u)).toBeInTheDocument();
+    expect(screen.getByText(/закрыт 20/u)).toBeInTheDocument();
+    expect(screen.getByText(/команда родителя: закрыт/u)).toBeInTheDocument();
+  });
+
+  it('не выдумывает текста, когда отказ пришёл не ошибкой', async () => {
+    const read = vi.fn().mockRejectedValue('строка вместо ошибки');
+    render(
+      <AdminChildScreen api={adminApi({ child: read })} childId="ребёнок-1" onSignedOut={vi.fn()} />,
+    );
+
+    expect(await screen.findByRole('alert'))
+      .toHaveTextContent('Не получилось загрузить карточку ребёнка');
+  });
+
   it('отличает базу, ждущую первого захода, от пустой', async () => {
     const отставший = detail({ state: 'stale', schemaVersion: 16 } as Partial<AdminChildDetail>);
     render(

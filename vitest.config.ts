@@ -8,9 +8,10 @@ export default defineConfig({
       provider: 'v8',
       include: [
         'server/**/*.ts', 'scripts/**/*.ts',
-        'web/src/{home,profile,run,boss,parents,auth,family}-api.ts',
+        'web/src/{home,profile,run,boss,parents,auth,family,admin}-api.ts',
         'web/src/{BossScreen,ParentsScreen,App,LoginScreen,FamilyScreen,InviteScreen,JoinScreen}.tsx',
-        'web/src/http.ts',
+        'web/src/{http,app-route}.ts',
+        'web/src/admin/**/*.tsx',
       ],
       // Порог держится на ядре, занятии и генерации: все они детерминированы —
       // внешние процессы подменяются через `run`/`produce`/`review`, — и дефект
@@ -141,6 +142,53 @@ export default defineConfig({
           lines: 80,
         },
         'web/src/http.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        // Админка оператора. Её модули видят сразу все семьи, поэтому непокрытая
+        // ветка здесь — не испорченный учебный план одного ребёнка, а чужие
+        // данные в чужих руках. `server/**` и `web/src/**` под порог целиком не
+        // заведены, так что без поимённого шаблона все эти файлы остались бы
+        // вовсе без требования.
+        'server/admin/**/*.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        // Маршруты админки названы отдельно от `server/routes/*.ts`: тот шаблон
+        // не заглядывает в подкаталог, и `admin/` под него не попадает.
+        'server/routes/admin/*.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        // Журнал аварий — единственный след упавшего запроса после перехода с
+        // journald: ротация и хвост не имеют права оказаться непроверенными.
+        'server/log.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        'web/src/admin-api.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        'web/src/admin/**/*.tsx': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        // Выбор состояния клиента вынесен в чистую функцию именно ради теста:
+        // порог держит его отдельно от `App.tsx`, где он раньше жил веткой.
+        'web/src/app-route.ts': {
           statements: 80,
           branches: 80,
           functions: 80,

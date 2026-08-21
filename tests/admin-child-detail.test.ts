@@ -8,6 +8,7 @@ import {
   createChild,
   createParent,
   markChildReady,
+  retireChild,
   openControlDatabase,
   setParentPassword,
 } from '../server/control-db.js';
@@ -255,6 +256,93 @@ describe('слой 3 статистики оператора', () => {
 
     const card = detail(id);
     expect(card?.state).toBe('failed');
+  });
+
+  it('показывает заполненные отметки времени и тему, выпавшую из карты', () => {
+    const id = child('Пройденный');
+    control
+      .prepare('UPDATE children SET last_activity_at = ? WHERE id = ?')
+      .run(NOW.toISOString(), id);
+    retireChild(control, id, NOW);
+    seed(id, (db) => {
+      db.prepare('UPDATE topic_state SET mastery = 1, attempts = 9, closed_at = ? WHERE topic_id = ?')
+        .run(NOW.toISOString(), 'math.a');
+      // Тема из прошлой редакции карты: строка прогресса осталась, названия
+      // взять негде. Карточка обязана показать её без заголовка, а не молчать.
+      db.prepare('INSERT INTO topic_state (topic_id, mastery, attempts) VALUES (?, 0.2, 3)')
+        .run('math.устаревшая');
+
+      // Материал, который ещё готовится: `ready_at` пуст, и это не то же самое,
+      // что готовый и открытый.
+      db.prepare(
+        `INSERT INTO learning_materials
+           (subject, topic_id, status, recommendation_reason, mastery_before, created_at)
+         VALUES ('math', 'math.b', 'preparing', 'ПРИЧИНА', 0.4, ?)`,
+      ).run(NOW.toISOString());
+      db.prepare(
+        `INSERT INTO learning_materials
+           (subject, topic_id, status, recommendation_reason, mastery_before,
+            created_at, ready_at, opened_at, finished_at)
+         VALUES ('math', 'math.a', 'passed', 'ПРИЧИНА', 0.4, ?, ?, ?, ?)`,
+      ).run(NOW.toISOString(), NOW.toISOString(), NOW.toISOString(), NOW.toISOString());
+
+      const run = addRun(db, 'math.a');
+      const task = addTask(db, 'math.a', 'used', 1);
+      const attempt = db
+        .prepare(
+          `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct, created_at)
+           VALUES (?, 'math.a', ?, 'ОТВЕТ-РЕБЁНКА', 0, ?)`,
+        )
+        .run(task, run, NOW.toISOString());
+      db.prepare(
+        `INSERT INTO disputes (attempt_id, status, resolution, created_at, resolved_at)
+         VALUES (?, 'upheld', 'РАЗБОР-МОДЕЛИ', ?, ?)`,
+      ).run(Number(attempt.lastInsertRowid), NOW.toISOString(), NOW.toISOString());
+
+      db.prepare(
+        `INSERT INTO boss_batches (topic_id, status, created_at, activated_at, finished_at)
+         VALUES ('math.b', 'won', ?, ?, ?)`,
+      ).run(NOW.toISOString(), NOW.toISOString(), NOW.toISOString());
+    });
+
+    const card = detail(id);
+    if (card?.state !== 'read') throw new Error('карточка не прочитана');
+
+    expect(card.lastActivityAt).toBe(NOW.toISOString());
+    expect(card.retiredAt).toBe(NOW.toISOString());
+
+    const closed = card.topics.find((row) => row.topicId === 'math.a');
+    expect(closed?.closedAt).toBe(NOW.toISOString());
+    const orphan = card.topics.find((row) => row.topicId === 'math.устаревшая');
+    expect(orphan).toMatchObject({ mastery: 0.2, attempts: 3 });
+    expect(orphan?.title).toBeUndefined();
+    expect(orphan?.subject).toBeUndefined();
+
+    const preparing = card.materials.find((row) => row.status === 'preparing');
+    expect(preparing?.readyAt).toBeUndefined();
+    expect(card.materials.find((row) => row.status === 'passed')).toMatchObject({
+      readyAt: NOW.toISOString(),
+      openedAt: NOW.toISOString(),
+      finishedAt: NOW.toISOString(),
+    });
+
+    expect(card.disputes[0]?.resolvedAt).toBe(NOW.toISOString());
+    expect(card.bosses[0]).toMatchObject({
+      activatedAt: NOW.toISOString(),
+      finishedAt: NOW.toISOString(),
+    });
+  });
+
+  it('без явного времени отмечает карточку нынешним', () => {
+    const id = child('Ученик');
+    const before = Date.now();
+
+    const card = readChildDetail(control, { dataDir: dir, graph: GRAPH, childId: id });
+
+    if (card?.state !== 'read') throw new Error('карточка не прочитана');
+    const generated = Date.parse(card.generatedAt);
+    expect(generated).toBeGreaterThanOrEqual(before);
+    expect(generated).toBeLessThanOrEqual(Date.now());
   });
 
   it('не находит ребёнка, которого нет в управляющей базе', () => {
