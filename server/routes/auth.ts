@@ -13,6 +13,7 @@
 import type { Database } from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import {
+  ADMIN_SESSION_MAX_MS,
   MIN_PASSWORD_LENGTH,
   checkLoginGate,
   clearLoginFailures,
@@ -28,6 +29,7 @@ import {
   type LoginTarget,
 } from '../control-db.js';
 import {
+  ADMIN_COOKIE,
   AUTH_MESSAGE,
   AUTH_STATUS,
   ACTOR_COOKIE,
@@ -50,8 +52,12 @@ import { MAX_SECRET_LENGTH } from '../secrets.js';
  */
 export const CHILD_COOKIE_MAX_AGE_SECONDS = 10 * 365 * 24 * 60 * 60;
 
-/** Общий текст отказа входу: причина наружу не уходит. */
-const LOGIN_REJECTED = 'Неверный адрес или пароль';
+/**
+ * Общий текст отказа входу: причина наружу не уходит. Экспортируется, потому
+ * что тем же текстом отказывает вход оператора: две копии одной строки
+ * разъехались бы, и по разнице текстов стало бы видно, какой вход какой.
+ */
+export const LOGIN_REJECTED = 'Неверный адрес или пароль';
 
 /** Общий текст отказа по ссылке: протухшую и чужую снаружи не различить. */
 const LINK_REJECTED = 'Ссылка недействительна или уже использована';
@@ -73,7 +79,7 @@ export interface AuthRoutesOptions {
 }
 
 /** Сторона, которой выдаётся cookie. От неё зависят `SameSite` и срок. */
-type CookieAudience = 'parent' | 'child';
+export type CookieAudience = 'parent' | 'child' | 'admin';
 
 /**
  * Атрибуты cookie по стороне. `Strict` родителю потому, что его вход умеет
@@ -84,16 +90,22 @@ type CookieAudience = 'parent' | 'child';
 const COOKIE_SAME_SITE: Record<CookieAudience, 'Strict' | 'Lax'> = {
   parent: 'Strict',
   child: 'Lax',
+  admin: 'Strict',
 };
 
 const COOKIE_NAME: Record<CookieAudience, string> = {
   parent: PARENT_COOKIE,
   child: CHILD_COOKIE,
+  admin: ADMIN_COOKIE,
 };
 
 const COOKIE_MAX_AGE_SECONDS: Record<CookieAudience, number> = {
   parent: Math.floor(PARENT_SESSION_MAX_MS / 1000),
   child: CHILD_COOKIE_MAX_AGE_SECONDS,
+  // Срок в браузере равен потолку сессии, а не сроку бездействия: cookie,
+  // протухающая через полчаса, унесла бы с собой и возможность выйти, а
+  // выключателем всё равно служит `revoked_at` на сервере.
+  admin: Math.floor(ADMIN_SESSION_MAX_MS / 1000),
 };
 
 /**
@@ -135,7 +147,7 @@ function serializeActorCookie(value: 'parent' | 'child', secure: boolean): strin
  * «клиент стал богаче», а что запрос пришёл не оттуда, откуда мы думаем. Так же
  * строг `readMode` в родительских маршрутах.
  */
-function readLoginBody(body: unknown): { email: string; password: string } | undefined {
+export function readLoginBody(body: unknown): { email: string; password: string } | undefined {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined;
   const fields = body as Record<string, unknown>;
   const names = Object.keys(fields);

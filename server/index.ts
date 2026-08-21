@@ -22,6 +22,10 @@ import { registerLearningRoutes, registerUnavailableLearning } from './routes/le
 import { registerGateRoutes, registerUnavailableGate } from './routes/gate.js';
 import { registerIntegrityRoutes, registerUnavailableIntegrity } from './routes/integrity.js';
 import { registerAuthRoutes, registerUnavailableAuth } from './routes/auth.js';
+import {
+  registerAdminAuthRoutes,
+  registerUnavailableAdminAuth,
+} from './routes/admin/auth.js';
 import { registerFamilyRoutes, registerUnavailableFamily } from './routes/family.js';
 import { codexConcurrency, disputeConcurrency, type CodexConcurrency } from './codex/concurrency.js';
 import { createQuotedRunner } from './codex/quota.js';
@@ -354,6 +358,14 @@ export function buildServer(
           ? { insecureCookies: process.env['EDUKATOR_INSECURE_COOKIES'] === '1' }
           : { insecureCookies: options.insecureCookies }),
       });
+      registerAdminAuthRoutes(app, {
+        control,
+        ...(options.now === undefined ? {} : { now: options.now }),
+        ...(options.trustedProxies === undefined ? {} : { trustedProxies: options.trustedProxies }),
+        ...(options.insecureCookies === undefined
+          ? { insecureCookies: process.env['EDUKATOR_INSECURE_COOKIES'] === '1' }
+          : { insecureCookies: options.insecureCookies }),
+      });
       registerFamilyRoutes(app, {
         control,
         dataDir,
@@ -424,6 +436,7 @@ export function buildServer(
     } else {
       const reason = graph === undefined ? 'карта тем не загружена' : 'управляющая база недоступна';
       registerUnavailableAuth(app, reason);
+      registerUnavailableAdminAuth(app, reason);
       registerUnavailableFamily(app, reason);
       registerUnavailableSession(app, reason);
       registerUnavailableRun(app, reason);
