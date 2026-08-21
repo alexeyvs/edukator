@@ -64,8 +64,20 @@ const LOGIN_ATTEMPTS_SCHEMA = `
   );
 `;
 
-/** Ограничение роли имперсонации: оператор входит в семью либо ребёнком, либо родителем. */
-const IMPERSONATION_ROLE_CHECK = `role IN ('browser', 'parent')`;
+/**
+ * Роли имперсонации: оператор входит в чужую семью либо ребёнком, либо
+ * родителем. `agent` сюда не входит намеренно — ему открыт единственный
+ * read-only маршрут, и смотреть под ним нечего.
+ */
+export const IMPERSONATION_ROLES = ['browser', 'parent'] as const;
+
+export type ImpersonationRole = (typeof IMPERSONATION_ROLES)[number];
+
+/**
+ * Ограничение схемы собирается из того же списка: разойтись им нечем, а
+ * рукописная копия перечисления в DDL молча разрешила бы роль, которой нет.
+ */
+const IMPERSONATION_ROLE_CHECK = `role IN (${IMPERSONATION_ROLES.map((role) => `'${role}'`).join(', ')})`;
 
 /**
  * Таблицы админки оператора. Появились в версии 2 и держатся отдельно от
@@ -2037,22 +2049,32 @@ export const ADMIN_SESSION_IDLE_MS = 30 * 60 * 1000;
 export const ADMIN_SESSION_MAX_MS = 8 * 60 * 60 * 1000;
 
 /**
- * Живая сессия оператора одним текстом SQL. Он читается и при разрешении
+ * Живая строка оператора одним текстом SQL. Он читается и при разрешении
  * cookie, и погашающим `UPDATE` смены пароля: две разошедшиеся копии условия
  * означали бы, что гасится не то множество строк, которое проверяется, а
  * снимок между отдельными чтением и записью успел бы устареть.
  *
  * Отключение и смена пароля стоят здесь же, а не в JS: `disabled_at` гасит
- * сессию, не переписывая ни одной её строки, а `credentials_changed_at`
- * отсекает всё, что было выдано до неё.
+ * строку, не переписывая её, а `credentials_changed_at` отсекает всё, что было
+ * выдано до неё.
+ *
+ * Имя таблицы — параметр, потому что условие у сессии и у имперсонации
+ * буквально одно: разойдясь, они дали бы смену пароля, которая гасит вход, но
+ * оставляет открытой имперсонацию, ради которой в этот вход и приходят.
  */
-const ADMIN_SESSION_ALIVE = `
-  admin_sessions.revoked_at IS NULL
-  AND admin_sessions.created_at >= COALESCE(
-        (SELECT a.credentials_changed_at FROM admins a WHERE a.id = admin_sessions.admin_id), '')
+function adminOwnedAlive(table: 'admin_sessions' | 'admin_impersonations'): string {
+  return `
+  ${table}.revoked_at IS NULL
+  AND ${table}.created_at >= COALESCE(
+        (SELECT a.credentials_changed_at FROM admins a WHERE a.id = ${table}.admin_id), '')
   AND NOT EXISTS (
         SELECT 1 FROM admins a
-         WHERE a.id = admin_sessions.admin_id AND a.disabled_at IS NOT NULL)`;
+         WHERE a.id = ${table}.admin_id AND a.disabled_at IS NOT NULL)`;
+}
+
+const ADMIN_SESSION_ALIVE = adminOwnedAlive('admin_sessions');
+
+const IMPERSONATION_ALIVE = adminOwnedAlive('admin_impersonations');
 
 /** Причина отказа во входе оператора. Наружу маршрут отдаёт один общий текст. */
 export type AdminAuthFailure =
@@ -2171,6 +2193,12 @@ export function setAdminPassword(
     db.prepare(
       `UPDATE admin_sessions SET revoked_at = ?
         WHERE admin_id = ? AND ${ADMIN_SESSION_ALIVE}`,
+    ).run(stamp, adminId);
+    // Имперсонация гасится тем же движением и по той же причине: право войти в
+    // чужую семью выдано этим же паролем, и пережить его смену оно не должно.
+    db.prepare(
+      `UPDATE admin_impersonations SET revoked_at = ?
+        WHERE admin_id = ? AND ${IMPERSONATION_ALIVE}`,
     ).run(stamp, adminId);
     const updated = db
       .prepare(
@@ -2333,6 +2361,159 @@ export function countLiveAdminSessions(db: Database.Database, now: Date = new Da
     )
     .get(now.toISOString(), new Date(now.getTime() - ADMIN_SESSION_IDLE_MS).toISOString());
   return row?.live ?? 0;
+}
+
+/* ─── Имперсонация ──────────────────────────────────────────────────────── */
+
+/**
+ * Срок имперсонации. Пятнадцать минут против восьми часов админской сессии:
+ * заход в чужую семью — это «посмотреть и выйти», и всё, что переживает
+ * оставленную вкладку, — открытая дверь в чужие данные. Число задано спекой;
+ * меняете его — меняйте и её.
+ */
+export const IMPERSONATION_TTL_MS = 15 * 60 * 1000;
+
+const IMPERSONATION_ROLE_SET: ReadonlySet<string> = new Set(IMPERSONATION_ROLES);
+
+/**
+ * Роль ли это из закрытого списка. Проверка нужна во время работы, а не только
+ * на сборке: роль приезжает телом запроса, и `agent` там отличается от `parent`
+ * одной строкой.
+ */
+export function isImpersonationRole(value: string): value is ImpersonationRole {
+  return IMPERSONATION_ROLE_SET.has(value);
+}
+
+/** Причина отказа начать имперсонацию. */
+export type ImpersonationFailure = 'bad-role' | 'no-child';
+
+export type ImpersonationStart =
+  | {
+      ok: true;
+      childId: string;
+      parentId: string;
+      role: ImpersonationRole;
+      session: IssuedToken;
+    }
+  | { ok: false; reason: ImpersonationFailure };
+
+/**
+ * Живая имперсонация так, как её видит разрешение предъявителя. Адрес
+ * оператора и имя ребёнка здесь потому, что их показывает несъёмная полоса
+ * поверх чужого экрана: без них она называет семью тем же непрозрачным `id`,
+ * которым её называет URL.
+ */
+export interface ImpersonationPrincipal {
+  adminId: string;
+  adminEmail: string;
+  childId: string;
+  parentId: string;
+  childName: string;
+  role: ImpersonationRole;
+  expiresAt: string;
+}
+
+interface ImpersonationRow {
+  admin_id: string;
+  email: string;
+  child_id: string;
+  role: string;
+  expires_at: string;
+}
+
+/**
+ * Начинает имперсонацию. `created_at` пишется явно, как и у сессии: по нему
+ * строка сравнивается с отметкой смены пароля, и расхождение часов SQLite с
+ * нашими на секунду погасило бы только что выданный заход.
+ */
+export function startImpersonation(
+  db: Database.Database,
+  // Роль объявлена строкой намеренно: она приходит телом запроса, и сузить её
+  // типом — значит проверить на сборке то, что известно только во время работы.
+  request: { adminId: string; childId: string; role: string },
+  now: Date = new Date(),
+): ImpersonationStart {
+  const { adminId, childId, role } = request;
+  if (!isImpersonationRole(role)) return { ok: false, reason: 'bad-role' };
+  const child = readChild(db, childId);
+  // «Не тот ребёнок» и «нет такого» — один ответ: обслуживать `provisioning` и
+  // выведенного нечем, а разница между ними оператору ничего не даёт.
+  if (child === undefined || !isChildServiceable(child)) return { ok: false, reason: 'no-child' };
+
+  const token = createBearerToken();
+  const stamp = now.toISOString();
+  const expiresAt = new Date(now.getTime() + IMPERSONATION_TTL_MS).toISOString();
+  db.transaction(() => {
+    // Гашение прежней и выдача новой — одним движением: живая имперсонация у
+    // оператора ровно одна, иначе «в чьей я семье» становится вопросом к
+    // вкладке браузера, а не к базе.
+    db.prepare(
+      `UPDATE admin_impersonations SET revoked_at = ?
+        WHERE admin_id = ? AND ${IMPERSONATION_ALIVE}`,
+    ).run(stamp, adminId);
+    db.prepare(
+      `INSERT INTO admin_impersonations (admin_id, child_id, role, token_hash, expires_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(adminId, childId, role, hashToken(token), expiresAt, stamp);
+  }).immediate();
+
+  return { ok: true, childId: child.id, parentId: child.parentId, role, session: { token, expiresAt } };
+}
+
+/**
+ * Разрешает cookie имперсонации. `undefined` — отказ по любой причине: снаружи
+ * «нет такой», «истекла» и «оператора отключили» неразличимы.
+ */
+export function resolveImpersonation(
+  db: Database.Database,
+  token: string,
+  now: Date = new Date(),
+): ImpersonationPrincipal | undefined {
+  const row = db
+    .prepare<[string], ImpersonationRow>(
+      `SELECT admin_impersonations.admin_id, admin_impersonations.child_id,
+              admin_impersonations.role, admin_impersonations.expires_at, admins.email
+         FROM admin_impersonations JOIN admins ON admins.id = admin_impersonations.admin_id
+        WHERE admin_impersonations.token_hash = ? AND ${IMPERSONATION_ALIVE}`,
+    )
+    .get(hashToken(token));
+  if (row === undefined) return undefined;
+  if (row.expires_at <= now.toISOString()) return undefined;
+  if (!isImpersonationRole(row.role)) {
+    // Роль ограничена схемой, и попасть сюда нечему. Но молчаливый отказ на
+    // этом месте выглядел бы истёкшим сроком, а испорченная таблица — нет.
+    throw new Error(`Имперсонация содержит неизвестную роль «${row.role}»`);
+  }
+
+  // Обслуживаемость проверяется на каждом обращении, а не только на старте:
+  // пятнадцать минут — долгий срок для «семью вывели», а открытая вкладка
+  // продолжала бы показывать базу, которую больше не обслуживают.
+  const child = readChild(db, row.child_id);
+  if (child === undefined || !isChildServiceable(child)) return undefined;
+
+  return {
+    adminId: row.admin_id,
+    adminEmail: row.email,
+    childId: child.id,
+    parentId: child.parentId,
+    childName: child.name,
+    role: row.role,
+    expiresAt: row.expires_at,
+  };
+}
+
+/** Выход из имперсонации. Строка остаётся для разбора, но заходом уже не служит. */
+export function revokeImpersonation(
+  db: Database.Database,
+  token: string,
+  now: Date = new Date(),
+): boolean {
+  const result = db
+    .prepare(
+      'UPDATE admin_impersonations SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL',
+    )
+    .run(now.toISOString(), hashToken(token));
+  return result.changes > 0;
 }
 
 /**

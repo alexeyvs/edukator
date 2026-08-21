@@ -14,6 +14,8 @@ import {
   CONTROL_SCHEMA_VERSION,
   CONTROL_TABLES,
   DEVICE_INVITE_TTL_MS,
+  IMPERSONATION_ROLES,
+  IMPERSONATION_TTL_MS,
   MAX_CHILD_NAME_LENGTH,
   MAX_DEVICE_LABEL_LENGTH,
   MAX_EMAIL_LENGTH,
@@ -38,6 +40,7 @@ import {
   findParentByEmail,
   hashToken,
   isAdminAuditAction,
+  isImpersonationRole,
   issueDeviceInvite,
   issueParentInvite,
   listAdminAudit,
@@ -64,6 +67,9 @@ import {
   reserveCodexCall,
   resolveAdminSession,
   resolveChildDevice,
+  resolveImpersonation,
+  revokeImpersonation,
+  startImpersonation,
   setAdminPassword,
   setParentPassword,
   setParentPin,
@@ -2248,5 +2254,215 @@ describe('журнал действий оператора', () => {
     ]);
     expect(isAdminAuditAction('impersonation-end')).toBe(true);
     expect(isAdminAuditAction('impersonation')).toBe(false);
+  });
+});
+
+describe('имперсонация оператора', () => {
+  const NOW = new Date('2026-08-21T09:00:00.000Z');
+  const EMAIL = 'operator@example.com';
+  const PASSWORD = 'пароль-оператора-длинный';
+
+  function at(ms: number): Date {
+    return new Date(NOW.getTime() + ms);
+  }
+
+  function seedAdmin(db: Database, id = 'a1', email = EMAIL): string {
+    db.prepare('INSERT INTO admins (id, email) VALUES (?, ?)').run(id, email);
+    return id;
+  }
+
+  /** Обслуживаемый ребёнок: без готовой базы имперсонировать нечего. */
+  function seedReadyChild(db: Database, id = 'abcdef01'): string {
+    const parentId = seedParent(db, `p-${id}`, `mama-${id}@example.com`);
+    db.prepare('INSERT INTO children (id, parent_id, name, status) VALUES (?, ?, ?, ?)').run(
+      id,
+      parentId,
+      'Сын',
+      'ready',
+    );
+    return id;
+  }
+
+  function start(
+    db: Database,
+    adminId: string,
+    childId: string,
+    role = 'browser',
+    now: Date = NOW,
+  ): { token: string; expiresAt: string } {
+    const result = startImpersonation(db, { adminId, childId, role }, now);
+    if (!result.ok) throw new Error(`имперсонация не началась: ${result.reason}`);
+    return { token: result.session.token, expiresAt: result.session.expiresAt };
+  }
+
+  it('заводит имперсонацию, хранит только отпечаток и разрешает её в предъявителя', () => {
+    const db = open();
+    const adminId = seedAdmin(db);
+    const childId = seedReadyChild(db);
+
+    const result = startImpersonation(db, { adminId, childId, role: 'parent' }, NOW);
+    expect(result).toMatchObject({ ok: true, childId, parentId: `p-${childId}`, role: 'parent' });
+    if (!result.ok) throw new Error('имперсонация обязана начаться');
+    expect(result.session.expiresAt).toBe(at(IMPERSONATION_TTL_MS).toISOString());
+
+    // В базе — только отпечаток: её дамп в чужую семью не пускает.
+    const stored = db
+      .prepare<[string], { token_hash: string; role: string }>(
+        'SELECT token_hash, role FROM admin_impersonations WHERE admin_id = ?',
+      )
+      .get(adminId);
+    expect(stored?.token_hash).toBe(hashToken(result.session.token));
+    expect(stored?.token_hash).not.toBe(result.session.token);
+    expect(stored?.role).toBe('parent');
+
+    expect(resolveImpersonation(db, result.session.token, at(60_000))).toEqual({
+      adminId,
+      adminEmail: EMAIL,
+      childId,
+      parentId: `p-${childId}`,
+      childName: 'Сын',
+      role: 'parent',
+      expiresAt: at(IMPERSONATION_TTL_MS).toISOString(),
+    });
+  });
+
+  it('гасит предыдущую живую имперсонацию того же оператора', () => {
+    const db = open();
+    const adminId = seedAdmin(db);
+    const first = seedReadyChild(db, 'abcdef01');
+    const second = seedReadyChild(db, 'abcdef02');
+
+    const one = start(db, adminId, first);
+    const two = start(db, adminId, second, 'browser', at(60_000));
+
+    // «В чьей я семье» не должно быть вопросом к вкладке браузера: живая
+    // имперсонация у оператора ровно одна.
+    expect(resolveImpersonation(db, one.token, at(2 * 60_000))).toBeUndefined();
+    expect(resolveImpersonation(db, two.token, at(2 * 60_000))).toMatchObject({
+      childId: second,
+    });
+    expect(
+      db
+        .prepare<[string], { revoked_at: string | null }>(
+          'SELECT revoked_at FROM admin_impersonations WHERE token_hash = ?',
+        )
+        .get(hashToken(one.token))?.revoked_at,
+    ).toBe(at(60_000).toISOString());
+
+    // Чужого оператора вытеснение не касается: у каждого своя одна.
+    const other = seedAdmin(db, 'a2', 'second@example.com');
+    const alien = start(db, other, first, 'parent', at(3 * 60_000));
+    expect(resolveImpersonation(db, two.token, at(4 * 60_000))).toMatchObject({ childId: second });
+    expect(resolveImpersonation(db, alien.token, at(4 * 60_000))).toMatchObject({ adminId: other });
+  });
+
+  it('истекает по сроку и гасится выходом', () => {
+    const db = open();
+    const adminId = seedAdmin(db);
+    const childId = seedReadyChild(db);
+    const { token } = start(db, adminId, childId);
+
+    expect(resolveImpersonation(db, token, at(IMPERSONATION_TTL_MS - 1))).toBeDefined();
+    expect(resolveImpersonation(db, token, at(IMPERSONATION_TTL_MS))).toBeUndefined();
+
+    const fresh = start(db, adminId, childId, 'browser', at(IMPERSONATION_TTL_MS));
+    expect(revokeImpersonation(db, fresh.token, at(IMPERSONATION_TTL_MS + 60_000))).toBe(true);
+    expect(resolveImpersonation(db, fresh.token, at(IMPERSONATION_TTL_MS + 2 * 60_000))).toBeUndefined();
+    // Повторный выход и посторонний токен — тот же ответ, без исключения.
+    expect(revokeImpersonation(db, fresh.token, at(IMPERSONATION_TTL_MS + 3 * 60_000))).toBe(false);
+    expect(revokeImpersonation(db, 'посторонний токен', NOW)).toBe(false);
+    expect(resolveImpersonation(db, 'посторонний токен', NOW)).toBeUndefined();
+  });
+
+  it('гасит имперсонацию сменой пароля в ту же миллисекунду и отключением оператора', () => {
+    const db = open();
+    const adminId = createAdmin(db, EMAIL, NOW);
+    setAdminPassword(db, adminId, PASSWORD, NOW);
+    const childId = seedReadyChild(db);
+    const { token } = start(db, adminId, childId);
+
+    // Отметка `credentials_changed_at` совпадает с `created_at` строки, и
+    // сравнением строк их не упорядочить: без явного погашения уведённая
+    // cookie имперсонации пережила бы смену пароля.
+    setAdminPassword(db, adminId, 'пароль-оператора-новый!', NOW);
+    expect(resolveImpersonation(db, token, at(60_000))).toBeUndefined();
+
+    const fresh = start(db, adminId, childId, 'browser', at(60_000));
+    disableAdmin(db, adminId, at(2 * 60_000));
+    // Отключение ни одной строки не переписывает: её гасит тот же текст
+    // условия, которым имперсонация и проверяется.
+    expect(
+      db
+        .prepare<[string], { revoked_at: string | null }>(
+          'SELECT revoked_at FROM admin_impersonations WHERE token_hash = ?',
+        )
+        .get(hashToken(fresh.token))?.revoked_at,
+    ).toBeNull();
+    expect(resolveImpersonation(db, fresh.token, at(3 * 60_000))).toBeUndefined();
+  });
+
+  it('отказывает агенту и необслуживаемому ребёнку, ничего не записав', () => {
+    const db = open();
+    const adminId = seedAdmin(db);
+    const ready = seedReadyChild(db);
+    const parentId = seedParent(db, 'p-provisioning', 'papa@example.com');
+    db.prepare('INSERT INTO children (id, parent_id, name) VALUES (?, ?, ?)').run(
+      'abcdef03',
+      parentId,
+      'Дочь',
+    );
+    const retired = seedReadyChild(db, 'abcdef04');
+    retireChild(db, retired, NOW);
+
+    // Агенту открыт один read-only маршрут: смотреть там нечего.
+    expect(startImpersonation(db, { adminId, childId: ready, role: 'agent' }, NOW)).toEqual({
+      ok: false,
+      reason: 'bad-role',
+    });
+    expect(startImpersonation(db, { adminId, childId: ready, role: 'admin' }, NOW)).toEqual({
+      ok: false,
+      reason: 'bad-role',
+    });
+    expect(startImpersonation(db, { adminId, childId: 'abcdef03', role: 'browser' }, NOW)).toEqual({
+      ok: false,
+      reason: 'no-child',
+    });
+    expect(startImpersonation(db, { adminId, childId: retired, role: 'browser' }, NOW)).toEqual({
+      ok: false,
+      reason: 'no-child',
+    });
+    expect(startImpersonation(db, { adminId, childId: 'abcdef99', role: 'browser' }, NOW)).toEqual({
+      ok: false,
+      reason: 'no-child',
+    });
+    expect(
+      db.prepare<[], { count: number }>('SELECT COUNT(*) AS count FROM admin_impersonations').get(),
+    ).toEqual({ count: 0 });
+  });
+
+  it('перестаёт разрешать имперсонацию, если ребёнка вывели уже после старта', () => {
+    const db = open();
+    const adminId = seedAdmin(db);
+    const childId = seedReadyChild(db);
+    const { token } = start(db, adminId, childId);
+    expect(resolveImpersonation(db, token, at(60_000))).toBeDefined();
+
+    retireChild(db, childId, at(2 * 60_000));
+
+    // Пятнадцать минут — долгий срок для «семья ушла»: обслуживаемость
+    // проверяется на каждом обращении, а не только на старте.
+    expect(resolveImpersonation(db, token, at(3 * 60_000))).toBeUndefined();
+  });
+
+  it('знает закрытый список ролей имперсонации', () => {
+    expect([...IMPERSONATION_ROLES]).toEqual(['browser', 'parent']);
+    expect(isImpersonationRole('browser')).toBe(true);
+    expect(isImpersonationRole('parent')).toBe(true);
+    expect(isImpersonationRole('agent')).toBe(false);
+    expect(isImpersonationRole('admin')).toBe(false);
+  });
+
+  it('держит калибровочные константы спеки: срок имперсонации', () => {
+    expect(IMPERSONATION_TTL_MS).toBe(15 * 60 * 1000);
   });
 });
