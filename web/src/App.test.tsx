@@ -2,7 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { App, ProfileGate, readLinkPage } from './App';
+import { App, ProfileGate } from './App';
 import type { AuthApi, Principal } from './auth-api';
 import { requestJson, SignedOutError } from './http';
 import './test-setup';
@@ -43,24 +43,6 @@ function authApi(overrides: Partial<AuthApi> = {}): AuthApi {
     ...overrides,
   };
 }
-
-describe('разбор страницы по ссылке', () => {
-  it('узнаёт приглашение и погашение, но не пустой и не составной токен', () => {
-    expect(readLinkPage('/invite/abc')).toEqual({ kind: 'invite', token: 'abc' });
-    expect(readLinkPage('/join/abc')).toEqual({ kind: 'join', token: 'abc' });
-    expect(readLinkPage('/join/')).toBeNull();
-    expect(readLinkPage('/join/a/b')).toBeNull();
-    expect(readLinkPage('/parents')).toBeNull();
-  });
-
-  it('не падает на битой процентной последовательности', () => {
-    // Разбор зовётся из инициализатора состояния корневого компонента:
-    // `URIError` отсюда — белый экран без единого слова, а не экран «ссылка не
-    // работает».
-    expect(readLinkPage('/join/%')).toBeNull();
-    expect(readLinkPage('/invite/%zz')).toBeNull();
-  });
-});
 
 describe('App', () => {
   it('подключён к общему прогону компонентных тестов', () => {
@@ -638,6 +620,23 @@ describe('App', () => {
     await waitFor(() => expect(screen.getByRole('link', { name: 'Эдукатор' })).toBeInTheDocument());
     expect(screen.queryByRole('button', { name: 'Выйти в админку' })).toBeNull();
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('отдаёт адрес /admin админке и не спрашивает у сервера детского предъявителя', async () => {
+    window.history.replaceState({}, '', '/admin');
+    // Сводка оператора отвечает 401: живость его сессии показывает первый же
+    // запрос за данными, и админка переходит ко входу сама.
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({
+      ok: false,
+      status: 401,
+      json: () => Promise.resolve({ error: 'unauthorized' }),
+    })));
+    const me = vi.fn().mockResolvedValue(CHILD);
+
+    render(<App authApi={authApi({ me })} />);
+
+    expect(await screen.findByText('Вход оператора')).toBeInTheDocument();
+    expect(me).not.toHaveBeenCalled();
   });
 
   it('открывает pathname /parents ученику со сводкой его собственного ребёнка', async () => {

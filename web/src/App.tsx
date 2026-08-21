@@ -11,8 +11,10 @@ import { InviteScreen } from './InviteScreen';
 import { JoinScreen } from './JoinScreen';
 import { LoginScreen } from './LoginScreen';
 import { BrandLink } from './BrandMark';
+import { AdminApp } from './admin/AdminApp';
 import { ImpersonationBanner } from './admin/ImpersonationBanner';
-import { browserAuthApi, type AuthApi, type AuthState, type Principal } from './auth-api';
+import { appRoute, isAdminPath, readLinkPage, type LinkPage } from './app-route';
+import { browserAuthApi, type AuthApi, type AuthState } from './auth-api';
 import { onSignedOut, SignedOutError } from './http';
 import { browserProfileApi, type Profile, type ProfileApi } from './profile-api';
 
@@ -64,41 +66,6 @@ export function ProfileGate({
     return <ProfileScreen api={api} initialProfile={profile} onboarding onSaved={setProfile} />;
   }
   return children;
-}
-
-/** Страница по ссылке: приглашение родителя или погашение детского устройства. */
-export interface LinkPage {
-  kind: 'invite' | 'join';
-  token: string;
-}
-
-const LINK_PREFIXES: ReadonlyArray<[string, LinkPage['kind']]> = [
-  ['/invite/', 'invite'],
-  ['/join/', 'join'],
-];
-
-/**
- * Токен из адреса страницы. Пустой и составной сегменты — не токен: сервер
- * такие страницы и не отдаёт, а разбирать их здесь значило бы носить по
- * приложению строку, которая ничего не открывает.
- *
- * Битая процентная последовательность (`/join/%`) — тоже «не токен», а не
- * исключение: `decodeURIComponent` бросает на ней `URIError`, а зовётся разбор
- * из инициализатора состояния корневого компонента, где вылет означает белый
- * экран без единого слова вместо экрана «ссылка не работает».
- */
-export function readLinkPage(pathname: string): LinkPage | null {
-  for (const [prefix, kind] of LINK_PREFIXES) {
-    if (!pathname.startsWith(prefix)) continue;
-    let token: string;
-    try {
-      token = decodeURIComponent(pathname.slice(prefix.length));
-    } catch {
-      return null;
-    }
-    if (token !== '' && !token.includes('/')) return { kind, token };
-  }
-  return null;
 }
 
 /** Занятие ученика: тот же разбор адреса, что и в однопользовательской версии. */
@@ -223,7 +190,10 @@ export function App({ authApi = browserAuthApi }: { authApi?: AuthApi } = {}) {
   }), []);
 
   useEffect(() => {
-    if (link !== null || principal !== null) return;
+    // Админка не спрашивает `me` вовсе: у оператора нет ни детской, ни
+    // родительской сессии, а под заходом ответ пришёл бы от чужой семьи —
+    // предъявителя админских маршрутов он не называет ни в одном случае.
+    if (link !== null || principal !== null || isAdminPath(window.location.pathname)) return;
     let active = true;
     authApi.me()
       .then((who) => {
@@ -308,11 +278,17 @@ export function App({ authApi = browserAuthApi }: { authApi?: AuthApi } = {}) {
       .finally(() => setPersonaPending(false));
   }, [authApi, personaPassword, personaPending]);
 
-  if (link !== null) {
-    return link.kind === 'invite'
-      ? <InviteScreen api={authApi} token={link.token} onSignedIn={finishLink} />
-      : <JoinScreen api={authApi} token={link.token} onClaimed={finishLink} />;
+  const route = appRoute({ link, pathname: window.location.pathname, principal });
+
+  if (route.kind === 'link') {
+    return route.page.kind === 'invite'
+      ? <InviteScreen api={authApi} token={route.page.token} onSignedIn={finishLink} />
+      : <JoinScreen api={authApi} token={route.page.token} onClaimed={finishLink} />;
   }
+
+  // Админка идёт до поломки проверки входа: `me` на её адресе не спрашивают
+  // вовсе, и чужая ошибка сети заслоняла бы оператору его единственный экран.
+  if (route.kind === 'admin') return <AdminApp />;
 
   if (problem !== null) {
     return (
@@ -328,7 +304,7 @@ export function App({ authApi = browserAuthApi }: { authApi?: AuthApi } = {}) {
     );
   }
 
-  if (principal === null) {
+  if (route.kind === 'pending') {
     return (
       <main className="run-state" role="status">
         <BrandLink />
@@ -337,7 +313,7 @@ export function App({ authApi = browserAuthApi }: { authApi?: AuthApi } = {}) {
     );
   }
 
-  if (principal.kind === 'anonymous') {
+  if (route.kind === 'login') {
     // Предъявитель перечитывается, а не берётся из ответа входа, ровно по той
     // же причине, что и после погашения ссылки: вход родителя на детской машине
     // отвечает `parent`, а `me` обязан вернуть обе живые сессии и активную роль.
@@ -350,21 +326,24 @@ export function App({ authApi = browserAuthApi }: { authApi?: AuthApi } = {}) {
     );
   }
 
-  const active: Principal = principal.kind === 'both'
-    ? principal.active === 'parent'
-      ? { kind: 'parent', email: principal.parent.email }
-      : { kind: 'child', childId: principal.child.childId, name: principal.child.name }
-    : principal;
+  // Агентский токен в браузере — не рабочее состояние: он выдаётся контроллеру
+  // доступа, у которого никакого интерфейса нет.
+  if (route.kind === 'agent') {
+    return (
+      <main className="run-state">
+        <p className="home-error" role="alert">Это устройство подключено как контроллер доступа, а не как компьютер ученика.</p>
+      </main>
+    );
+  }
 
   // Полоса захода рисуется поверх настоящих экранов семьи, а не вместо них:
   // оператор пришёл смотреть ровно то, что видит семья, и подменённый экран
-  // отвечал бы не на тот вопрос. `both` её не получает никогда — под заходом
-  // `me` возвращает предъявителя целевой семьи, а не пару своих сессий.
-  const banner = active.kind !== 'agent' && active.impersonation !== undefined
-    ? <ImpersonationBanner impersonation={active.impersonation} />
+  // отвечал бы не на тот вопрос.
+  const banner = route.impersonation !== undefined
+    ? <ImpersonationBanner impersonation={route.impersonation} />
     : null;
 
-  if (active.kind === 'parent') {
+  if (route.kind === 'parent') {
     return <>
       {banner}
       {logoutProblem !== null && (
@@ -373,27 +352,16 @@ export function App({ authApi = browserAuthApi }: { authApi?: AuthApi } = {}) {
           <button type="button" onClick={logout}>Повторить выход</button>
         </div>
       )}
-      {principal.kind === 'both' && (
+      {route.child !== undefined && (
         <button type="button" onClick={switchToChild}>
-          Перейти к ученику {principal.child.name}
+          Перейти к ученику {route.child.name}
         </button>
       )}
-      <ParentArea email={active.email} onLogout={logout} />
+      <ParentArea email={route.email} onLogout={logout} />
     </>;
   }
 
-  // Агентский токен в браузере — не рабочее состояние: он выдаётся контроллеру
-  // доступа, у которого никакого интерфейса нет.
-  if (active.kind === 'agent') {
-    return (
-      <main className="run-state">
-        <p className="home-error" role="alert">Это устройство подключено как контроллер доступа, а не как компьютер ученика.</p>
-      </main>
-    );
-  }
-
-
-  const childSwitcher = principal.kind === 'both' ? (
+  const childSwitcher = route.parent !== undefined ? (
     parentSwitchOpen ? (
       <form className="auth-card" onSubmit={(event) => { event.preventDefault(); switchToParent(); }}>
         <label className="auth-field">
@@ -422,8 +390,8 @@ export function App({ authApi = browserAuthApi }: { authApi?: AuthApi } = {}) {
 
   // Ребёнок назван в адресе сводки и у самого ученика: его номер приходит из
   // `me`, а не подразумевается по cookie.
-  if (window.location.pathname === '/parents') {
-    return <>{banner}{childSwitcher}<ParentsScreen childId={active.childId} /></>;
+  if (route.parents) {
+    return <>{banner}{childSwitcher}<ParentsScreen childId={route.childId} /></>;
   }
   return <>{banner}{childSwitcher}<ChildArea /></>;
 }
