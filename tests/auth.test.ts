@@ -926,6 +926,41 @@ describe('разрешение предъявителя и аренды', () => 
       expect(tenants.opened).toEqual([]);
     });
 
+    // Счётчик отказов живёт снаружи запроса: `resolveTenant` между запросами
+    // не помнит ничего, а запись `impersonation-end` обязана назвать число.
+    it('сообщает об отказе тому, кто считает отказы', () => {
+      const alpha = family('alpha');
+      const { adminId } = operator();
+      const token = enter(adminId, alpha.childId, 'browser');
+      const refused: string[] = [];
+
+      catchAuth(() =>
+        resolveTenant({
+          allow: ALLOW_ALL,
+          control,
+          tenants: counting(),
+          method: 'POST',
+          headers: cookies([IMPERSONATION_COOKIE, token]),
+          onReadOnly: (impersonation) => refused.push(impersonation.adminId),
+          now: NOW,
+        }),
+      );
+      expect(refused).toEqual([adminId]);
+
+      // Чтение отказом не считается: иначе счётчик показывал бы усердие
+      // оператора, а не его попытки писать.
+      resolveTenant({
+        allow: ALLOW_ALL,
+        control,
+        tenants: counting(),
+        method: 'GET',
+        headers: cookies([IMPERSONATION_COOKIE, token]),
+        onReadOnly: (impersonation) => refused.push(impersonation.adminId),
+        now: NOW,
+      });
+      expect(refused).toEqual([adminId]);
+    });
+
     // Тот же запрос без захода проходит: иначе отказ выше ничего не доказывал бы.
     it('своего же ребёнка изменяющий запрос по-прежнему меняет', () => {
       const alpha = family('alpha');

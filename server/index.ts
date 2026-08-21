@@ -34,6 +34,14 @@ import {
   registerAdminLogsRoutes,
   registerUnavailableAdminLogs,
 } from './routes/admin/logs.js';
+import {
+  registerAdminImpersonateRoutes,
+  registerUnavailableAdminImpersonate,
+} from './routes/admin/impersonate.js';
+import {
+  registerAdminAuditRoutes,
+  registerUnavailableAdminAudit,
+} from './routes/admin/audit.js';
 import { registerFamilyRoutes, registerUnavailableFamily } from './routes/family.js';
 import { codexConcurrency, disputeConcurrency, type CodexConcurrency } from './codex/concurrency.js';
 import { createQuotedRunner } from './codex/quota.js';
@@ -54,6 +62,7 @@ import { createAdminContext, createTenantContext } from './routes/tenant-context
 import { redactTokenUrl, registerTokenPrivacy } from './routes/token-privacy.js';
 import { failureLogFor, type FailureLog } from './log.js';
 import { ImpersonationTenants } from './admin/impersonation-tenants.js';
+import { ImpersonationRefusals } from './admin/impersonation-refusals.js';
 import { createTenantOpener } from './tenant-opener.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -378,9 +387,15 @@ export function buildServer(
         ...(dispatcher === undefined ? {} : { wake: (childId: string) => dispatcher.wake(childId) }),
       });
 
+      // Отказы первого замка считает тот, кто пишет запись о конце захода:
+      // счётчик обязан пережить запрос, а `resolveTenant` между запросами не
+      // помнит ничего.
+      const refusals = new ImpersonationRefusals();
+
       const context = createTenantContext({
         control,
         tenants: opener,
+        onReadOnly: (impersonation) => refusals.record(impersonation.adminId),
         ...(options.now === undefined ? {} : { now: options.now }),
       });
 
@@ -413,6 +428,17 @@ export function buildServer(
         ...(options.now === undefined ? {} : { now: options.now }),
       });
       registerAdminLogsRoutes(app, { context: adminContext, dataDir });
+      registerAdminImpersonateRoutes(app, {
+        context: adminContext,
+        control,
+        refusals,
+        impersonations,
+        ...(options.now === undefined ? {} : { now: options.now }),
+        ...(options.insecureCookies === undefined
+          ? { insecureCookies: process.env['EDUKATOR_INSECURE_COOKIES'] === '1' }
+          : { insecureCookies: options.insecureCookies }),
+      });
+      registerAdminAuditRoutes(app, { context: adminContext, control });
       registerFamilyRoutes(app, {
         control,
         dataDir,
@@ -489,6 +515,8 @@ export function buildServer(
       registerUnavailableAdminAuth(app, reason);
       registerUnavailableAdminOverview(app, reason);
       registerUnavailableAdminLogs(app, reason);
+      registerUnavailableAdminImpersonate(app, reason);
+      registerUnavailableAdminAudit(app, reason);
       registerUnavailableFamily(app, reason);
       registerUnavailableSession(app, reason);
       registerUnavailableRun(app, reason);

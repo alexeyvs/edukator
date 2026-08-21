@@ -2629,37 +2629,53 @@ export function recordAdminAudit(
 }
 
 /**
+ * Размер страницы журнала действий. Ровно как у ленты аварий: оператор читает
+ * их одним движением сверху вниз, и разные размеры страниц у двух соседних
+ * лент означали бы, что «дальше» в одной и в другой значит разное.
+ */
+export const ADMIN_AUDIT_PAGE = 200;
+
+/**
  * Страница журнала, новые сверху. Читается на строку больше запрошенного: так
  * «дальше ничего нет» отличается от «страница кончилась ровно» без второго
  * запроса `COUNT`, который под записью показал бы уже другое число.
  */
 export function listAdminAudit(
   db: Database.Database,
-  // Курсор объявлен принимающим `undefined` явно: страницу продолжают тем же
-  // `next`, которого у последней страницы нет, и `exactOptionalPropertyTypes`
-  // иначе заставлял бы каждого вызывающего разбирать этот случай спредом.
-  options: { limit: number; before?: AdminAuditCursor | undefined },
+  // Курсор и фильтр объявлены принимающими `undefined` явно: страницу
+  // продолжают тем же `next`, которого у последней страницы нет, и
+  // `exactOptionalPropertyTypes` иначе заставлял бы каждого вызывающего
+  // разбирать этот случай спредом.
+  options: {
+    limit: number;
+    action?: AdminAuditAction | undefined;
+    before?: AdminAuditCursor | undefined;
+  },
 ): AdminAuditPage {
-  const { limit, before } = options;
+  const { limit, action, before } = options;
   if (!Number.isInteger(limit) || limit <= 0) {
     throw new Error(`Размер страницы журнала должен быть положительным целым, а не ${limit}`);
   }
-  const rows =
-    before === undefined
-      ? db
-          .prepare<[number], AdminAuditRow>(
-            `SELECT id, admin_id, at, action, child_id, parent_id, detail
-               FROM admin_audit ORDER BY at DESC, id DESC LIMIT ?`,
-          )
-          .all(limit + 1)
-      : db
-          .prepare<[string, string, number, number], AdminAuditRow>(
-            `SELECT id, admin_id, at, action, child_id, parent_id, detail
-               FROM admin_audit
-              WHERE at < ? OR (at = ? AND id < ?)
-              ORDER BY at DESC, id DESC LIMIT ?`,
-          )
-          .all(before.at, before.at, before.id, limit + 1);
+  const conditions: string[] = [];
+  const params: Array<string | number> = [];
+  if (action !== undefined) {
+    conditions.push('action = ?');
+    params.push(action);
+  }
+  if (before !== undefined) {
+    // Обе половины курсора: по одному `at` порядок неоднозначен, и на границе
+    // страницы записи одной секунды либо повторились бы, либо пропали.
+    conditions.push('(at < ? OR (at = ? AND id < ?))');
+    params.push(before.at, before.at, before.id);
+  }
+  const where = conditions.length === 0 ? '' : ` WHERE ${conditions.join(' AND ')}`;
+  const rows = db
+    .prepare<Array<string | number>, AdminAuditRow>(
+      `SELECT id, admin_id, at, action, child_id, parent_id, detail
+         FROM admin_audit${where}
+        ORDER BY at DESC, id DESC LIMIT ?`,
+    )
+    .all(...params, limit + 1);
 
   const entries = rows.slice(0, limit).map(toAuditEntry);
   const last = entries[entries.length - 1];

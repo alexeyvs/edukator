@@ -501,6 +501,12 @@ export interface ResolveTenantOptions {
    * подтверждает источник наравне с `POST`.
    */
   mutating?: boolean;
+  /**
+   * Отказ первого замка. Сам `resolveTenant` ничего не помнит между запросами,
+   * а счётчик отказов обязан дожить до записи `impersonation-end`, поэтому
+   * считает их тот, кто эту запись потом и пишет.
+   */
+  onReadOnly?: (impersonation: ImpersonationMark) => void;
   now?: Date;
 }
 
@@ -527,6 +533,7 @@ export function resolveTenant(options: ResolveTenantOptions): ResolvedTenant {
   // `PRAGMA query_only` на отдельном соединении — независим от этого и
   // переживает забытый `mutating` у нового маршрута.
   if (bearer.impersonation !== undefined && (isMutating(options.method) || options.mutating === true)) {
+    options.onReadOnly?.(bearer.impersonation);
     throw new AuthError(
       'read-only',
       `Оператор ${bearer.impersonation.adminId} смотрит чужую семью и не меняет её`,

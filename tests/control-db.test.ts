@@ -43,6 +43,7 @@ import {
   isImpersonationRole,
   issueDeviceInvite,
   issueParentInvite,
+  ADMIN_AUDIT_PAGE,
   listAdminAudit,
   listAllChildren,
   listServiceableChildren,
@@ -2201,6 +2202,28 @@ describe('журнал действий оператора', () => {
     // Хвост ровно кончился — курсора дальше нет, иначе экран просил бы пустую
     // страницу вечно.
     expect(third.next).toBeUndefined();
+  });
+
+  it('фильтрует ленту по действию и продолжает фильтр курсором', () => {
+    const db = open();
+    const adminId = seedAdmin(db);
+    recordAdminAudit(db, { adminId, action: 'login', detail: 'вход-1' }, at(0));
+    recordAdminAudit(db, { adminId, action: 'login-failed', detail: 'мимо' }, at(1));
+    recordAdminAudit(db, { adminId, action: 'login', detail: 'вход-2' }, at(2));
+    recordAdminAudit(db, { adminId, action: 'login', detail: 'вход-3' }, at(3));
+
+    const page = listAdminAudit(db, { limit: 2, action: 'login' });
+    expect(page.entries.map((entry) => entry.detail)).toEqual(['вход-3', 'вход-2']);
+    // Курсор строится по отфильтрованной ленте: сползание на чужое действие
+    // прятало бы половину страницы за записью, которой в фильтре нет.
+    const next = listAdminAudit(db, { limit: 2, action: 'login', before: page.next });
+    expect(next.entries.map((entry) => entry.detail)).toEqual(['вход-1']);
+    expect(next.next).toBeUndefined();
+  });
+
+  it('держит калибровочные константы спеки: размер страницы журнала действий', () => {
+    // Число вписано руками: ожидание из той же константы её подмену не ловит.
+    expect(ADMIN_AUDIT_PAGE).toBe(200);
   });
 
   it('не обещает следующей страницы, когда записей ровно на страницу', () => {

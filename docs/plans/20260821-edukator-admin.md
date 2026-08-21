@@ -397,17 +397,30 @@ VPS, и в `control.db` живут чужие семьи. У оператора 
 
 ### Task 16: Маршруты имперсонации
 
-- [ ] создать `server/routes/admin/impersonate.ts`: `POST /api/admin/impersonate`
+- [x] создать `server/routes/admin/impersonate.ts`: `POST /api/admin/impersonate`
       (`{ childId, role }`) и `DELETE /api/admin/impersonate`
-- [ ] ставить и снимать cookie `__Host-edu_impersonation` с `SameSite=Strict`
+- [x] ставить и снимать cookie `__Host-edu_impersonation` с `SameSite=Strict`
       рядом с админской, а не вместо неё: выход возвращает оператора в админку
-- [ ] писать в `admin_audit` начало и конец, в записи о конце — счётчик
+- [x] писать в `admin_audit` начало и конец, в записи о конце — счётчик
       отказанных попыток записи
-- [ ] создать `server/routes/admin/audit.ts` с `GET /api/admin/audit`
-- [ ] написать тесты маршрутов: старт, выход, повторный старт гасит первый, чужой
+- [x] создать `server/routes/admin/audit.ts` с `GET /api/admin/audit`
+- [x] написать тесты маршрутов: старт, выход, повторный старт гасит первый, чужой
       или необслуживаемый ребёнок даёт `no-child`, счётчик отказов доезжает до
       записи о конце
-- [ ] прогнать тесты — должны проходить до задачи 17
+- [x] прогнать тесты — должны проходить до задачи 17
+- ➕ счётчик отказов вынесен в `server/admin/impersonation-refusals.ts`, а
+      `resolveTenant` получил необязательный `onReadOnly`: сам он между
+      запросами не помнит ничего, а число обязано дожить до записи о конце.
+      Счётчик процессный, не в `control.db`: запись на каждый отказ означала бы,
+      что закрытый маршрут умеет заставить нас писать.
+- ➕ `listAdminAudit` получил фильтр по действию (комментарий у
+      `isAdminAuditAction` обещал его маршруту ещё в задаче 3) и константу
+      `ADMIN_AUDIT_PAGE = 200` с буквальным тестом — размер страницы тот же, что
+      у ленты аварий.
+- ➕ `serializeCookie` получил четвёртую сторону `impersonation`
+      (`SameSite=Strict`, срок равен `IMPERSONATION_TTL_MS`): политика cookie
+      обязана оставаться одной, своя сборка `Set-Cookie` в новом маршруте
+      разъехалась бы с прочими молча.
 
 ### Task 17: Клиент — баннер имперсонации
 

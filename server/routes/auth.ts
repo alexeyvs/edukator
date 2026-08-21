@@ -14,6 +14,7 @@ import type { Database } from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import {
   ADMIN_SESSION_MAX_MS,
+  IMPERSONATION_TTL_MS,
   MIN_PASSWORD_LENGTH,
   checkLoginGate,
   clearLoginFailures,
@@ -34,6 +35,7 @@ import {
   AUTH_STATUS,
   ACTOR_COOKIE,
   CHILD_COOKIE,
+  IMPERSONATION_COOKIE,
   PARENT_COOKIE,
   headerValue,
   isSameOrigin,
@@ -79,7 +81,7 @@ export interface AuthRoutesOptions {
 }
 
 /** Сторона, которой выдаётся cookie. От неё зависят `SameSite` и срок. */
-export type CookieAudience = 'parent' | 'child' | 'admin';
+export type CookieAudience = 'parent' | 'child' | 'admin' | 'impersonation';
 
 /**
  * Атрибуты cookie по стороне. `Strict` родителю потому, что его вход умеет
@@ -91,12 +93,17 @@ const COOKIE_SAME_SITE: Record<CookieAudience, 'Strict' | 'Lax'> = {
   parent: 'Strict',
   child: 'Lax',
   admin: 'Strict',
+  // Заход в чужую семью начинается только со страницы админки: переходом со
+  // стороны сюда попадать неоткуда, и `Lax` был бы здесь послаблением без
+  // единого сценария, ради которого его делают ребёнку.
+  impersonation: 'Strict',
 };
 
 const COOKIE_NAME: Record<CookieAudience, string> = {
   parent: PARENT_COOKIE,
   child: CHILD_COOKIE,
   admin: ADMIN_COOKIE,
+  impersonation: IMPERSONATION_COOKIE,
 };
 
 const COOKIE_MAX_AGE_SECONDS: Record<CookieAudience, number> = {
@@ -106,6 +113,9 @@ const COOKIE_MAX_AGE_SECONDS: Record<CookieAudience, number> = {
   // протухающая через полчаса, унесла бы с собой и возможность выйти, а
   // выключателем всё равно служит `revoked_at` на сервере.
   admin: Math.floor(ADMIN_SESSION_MAX_MS / 1000),
+  // Ровно срок самого захода: cookie, живущая дольше строки в базе, каждый раз
+  // приносила бы отказ вместо того, чтобы просто исчезнуть.
+  impersonation: Math.floor(IMPERSONATION_TTL_MS / 1000),
 };
 
 /**

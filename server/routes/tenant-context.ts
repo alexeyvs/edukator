@@ -21,6 +21,7 @@ import {
   resolveTenant,
   type AdminBearer,
   type BearerKind,
+  type ImpersonationMark,
   type ResolvedTenant,
   type TenantOpener,
 } from '../auth.js';
@@ -98,6 +99,12 @@ export interface CreateTenantContextOptions {
   control: Database.Database;
   /** Реестр детских баз. */
   tenants: TenantOpener;
+  /**
+   * Куда сообщать об отказе первого замка имперсонации. Проброшен насквозь, а
+   * не заведён здесь: считает отказы тот, кто пишет запись о конце захода, и
+   * второй счётчик рядом с ним разъехался бы с ней молча.
+   */
+  onReadOnly?: (impersonation: ImpersonationMark) => void;
   now?: () => Date;
 }
 
@@ -112,6 +119,7 @@ export function createTenantContext(options: CreateTenantContextOptions): Tenant
       method: request.method,
       now: now(),
       allow: context.allow,
+      ...(options.onReadOnly === undefined ? {} : { onReadOnly: options.onReadOnly }),
       ...(context.childId === undefined ? {} : { childId: context.childId }),
       ...(context.mutating === undefined ? {} : { mutating: context.mutating }),
     });
