@@ -43,7 +43,7 @@ describe('статика интерфейса', () => {
   it('отдаёт страницу приложения по каждому пользовательскому адресу', async () => {
     app = buildServer(undefined, { dataDir, worker: false, webDist });
 
-    expect(APP_PAGES).toEqual(['/', '/parents', '/join/:token', '/invite/:token']);
+    expect(APP_PAGES).toEqual(['/', '/parents', '/admin', '/join/:token', '/invite/:token']);
     for (const page of APP_PAGES) {
       // Шаблон адреса превращается в настоящий: токен — часть пути, и именно по
       // такому адресу ребёнок открывает приложение.

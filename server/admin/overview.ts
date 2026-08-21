@@ -111,8 +111,32 @@ export interface AdminStorageOverview {
   children: AdminDatabaseSize[];
 }
 
+/** Ребёнок в списке семей: состояние, а не содержание занятий. */
+export interface AdminFamilyChild {
+  childId: string;
+  name: string;
+  status: ChildStatus;
+  lastActivityAt?: string;
+  retiredAt?: string;
+  createdAt: string;
+}
+
+/**
+ * Семья целиком. Выведенные дети остаются в списке: «куда делся ребёнок» —
+ * такой же вопрос оператору, как «почему он не занимается», и семья без них
+ * выглядела бы пустой у того, кто всех детей вывел.
+ */
+export interface AdminFamily {
+  parentId: string;
+  email: string;
+  disabledAt?: string;
+  createdAt: string;
+  children: AdminFamilyChild[];
+}
+
 export interface AdminOverview {
   generatedAt: string;
+  families: AdminFamily[];
   parents: AdminParentsOverview;
   children: AdminChildrenOverview;
   stuck: AdminStuckChild[];
@@ -281,21 +305,64 @@ export function buildAdminOverview(
 
   // Список берётся полным, вместе с выведенными: место на диске они занимают
   // так же, а «куда делись гигабайты» — вопрос как раз к ним.
-  const childIds = control
-    .prepare<[], { id: string }>('SELECT id FROM children ORDER BY created_at, id')
+  const childRows = control
+    .prepare<[], {
+      id: string;
+      parent_id: string;
+      name: string;
+      status: ChildStatus;
+      last_activity_at: string | null;
+      retired_at: string | null;
+      created_at: string;
+    }>(
+      `SELECT id, parent_id, name, status, last_activity_at, retired_at, created_at
+         FROM children ORDER BY created_at, id`,
+    )
     .all();
-  const sizes: AdminDatabaseSize[] = childIds.map((row) => {
+  const sizes: AdminDatabaseSize[] = childRows.map((row) => {
     const bytes = databaseSize(childDatabasePath(options.dataDir, row.id));
     return bytes === undefined
       ? { childId: row.id, bytes: 0, present: false }
       : { childId: row.id, bytes, present: true };
   });
+  // Семьи собираются из тех же строк, что и размеры: второй проход по
+  // `children` разошёлся бы с первым ровно тогда, когда между ними кого-то
+  // завели, и ребёнок оказался бы в списке семьи без своего размера на диске.
+  const byParent = new Map<string, AdminFamilyChild[]>();
+  for (const row of childRows) {
+    const list = byParent.get(row.parent_id) ?? [];
+    list.push({
+      childId: row.id,
+      name: row.name,
+      status: row.status,
+      ...(row.last_activity_at === null ? {} : { lastActivityAt: row.last_activity_at }),
+      ...(row.retired_at === null ? {} : { retiredAt: row.retired_at }),
+      createdAt: row.created_at,
+    });
+    byParent.set(row.parent_id, list);
+  }
+  // Родитель без детей остаётся в списке: заведённая и пустая учётная запись —
+  // это состояние, за которым оператор и приходит («пригласил и не завёл»).
+  const families: AdminFamily[] = control
+    .prepare<[], { id: string; email: string; disabled_at: string | null; created_at: string }>(
+      'SELECT id, email, disabled_at, created_at FROM parents ORDER BY created_at, id',
+    )
+    .all()
+    .map((row) => ({
+      parentId: row.id,
+      email: row.email,
+      ...(row.disabled_at === null ? {} : { disabledAt: row.disabled_at }),
+      createdAt: row.created_at,
+      children: byParent.get(row.id) ?? [],
+    }));
+
   const controlBytes = databaseSize(controlDatabasePath(options.dataDir)) ?? 0;
   const childrenBytes = sizes.reduce((sum, size) => sum + size.bytes, 0);
   const free = freeSpace(options.dataDir);
 
   return {
     generatedAt: stamp,
+    families,
     parents: {
       total: parents.total,
       last7Days: parents.last7,

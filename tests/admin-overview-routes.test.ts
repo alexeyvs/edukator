@@ -81,9 +81,18 @@ describe('маршрут сводки оператора', () => {
   it('отдаёт сводку оператору', async () => {
     const response = await get({ cookie: adminCookie });
     expect(response.statusCode).toBe(200);
-    const body = response.json() as { generatedAt: string; children: { total: number } };
+    const body = response.json() as {
+      generatedAt: string;
+      children: { total: number };
+      families: Array<{ email: string; children: Array<{ name: string }> }>;
+    };
     expect(body.generatedAt).toBe(NOW.toISOString());
     expect(body.children.total).toBe(1);
+    // Список семей едет тем же ответом: главный экран рисует по нему и цифры,
+    // и семьи, и второй запрос показывал бы их на разные моменты времени.
+    expect(body.families).toMatchObject([
+      { email: 'родитель@example.com', children: [{ name: 'Ребёнок' }] },
+    ]);
   });
 
   it('отказывает родителю и анониму', async () => {

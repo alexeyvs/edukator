@@ -138,6 +138,54 @@ describe('сводка оператора по управляющей базе',
     expect(overview().stuck).toEqual([]);
   });
 
+  it('собирает семьи с детьми, статусами и последней активностью', () => {
+    const первый = parent('первый@example.com', ago(2 * DAY));
+    const второй = parent('второй@example.com', ago(DAY));
+    const старший = child(первый, 'Старший', ago(2 * DAY));
+    markChildReady(control, старший);
+    control
+      .prepare('UPDATE children SET last_activity_at = ? WHERE id = ?')
+      .run(ago(MINUTE).toISOString(), старший);
+    const младший = child(первый, 'Младшая', ago(DAY));
+    child(второй, 'Один', ago(DAY));
+
+    const families = overview().families;
+
+    // Порядок устойчив и там, и там: семьи по времени заведения, дети внутри —
+    // тоже. Перестановка равных строк меняла бы список у оператора на каждом
+    // обновлении экрана.
+    expect(families.map((family) => family.email)).toEqual([
+      'первый@example.com',
+      'второй@example.com',
+    ]);
+    expect(families[0]?.children.map((кто) => кто.name)).toEqual(['Старший', 'Младшая']);
+    expect(families[0]?.children[0]).toMatchObject({
+      childId: старший,
+      status: 'ready',
+      lastActivityAt: ago(MINUTE).toISOString(),
+    });
+    // Ни разу не занимавшийся ребёнок не притворяется занимавшимся: поля нет.
+    expect(families[0]?.children[1]).toMatchObject({ childId: младший, status: 'provisioning' });
+    expect(families[0]?.children[1]?.lastActivityAt).toBeUndefined();
+    expect(families[0]?.disabledAt).toBeUndefined();
+  });
+
+  it('называет отключённого родителя и оставляет выведенных детей в семье', () => {
+    const родитель = parent('родитель@example.com');
+    const ушедший = child(родитель, 'Ушедшая');
+    retireChild(control, ушедший, NOW);
+    disableParent(control, родитель, NOW);
+    // Родитель без детей: приглашение выпустили, ребёнка не завели — это
+    // состояние, а не пустота, и в списке оно обязано быть видно.
+    parent('пустой@example.com', new Date(NOW.getTime() + MINUTE));
+
+    const families = overview().families;
+
+    expect(families[0]).toMatchObject({ email: 'родитель@example.com', disabledAt: NOW.toISOString() });
+    expect(families[0]?.children).toMatchObject([{ childId: ушедший, retiredAt: NOW.toISOString() }]);
+    expect(families[1]).toMatchObject({ email: 'пустой@example.com', children: [] });
+  });
+
   it('складывает расход квоты за московские сутки по каждому ребёнку', () => {
     const родитель = parent('родитель@example.com');
     const первый = child(родитель, 'Первая');

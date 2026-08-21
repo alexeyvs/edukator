@@ -89,7 +89,7 @@ export type CurriculumStatus = 'ok' | 'error';
  * `/join/:token` и `/invite/:token` называются шаблоном, потому что токен в
  * них — часть пути, а не запрос (см. `server/routes/token-privacy.ts`).
  */
-export const APP_PAGES = ['/', '/parents', '/join/:token', '/invite/:token'] as const;
+export const APP_PAGES = ['/', '/parents', '/admin', '/join/:token', '/invite/:token'] as const;
 
 /** Настройки сервера, которые подменяют тесты и рабочий запуск. */
 export type ServerOptions =
