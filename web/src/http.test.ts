@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { onSignedOut, requestJson, SignedOutError } from './http';
+import { HttpError, onReadOnly, onSignedOut, ReadOnlyError, requestJson, SignedOutError } from './http';
 
 function response(body: unknown, options: { ok?: boolean; status?: number } = {}) {
   return {
@@ -97,6 +97,64 @@ describe('общий разбор ответа', () => {
     expect(failure).toBeInstanceOf(SignedOutError);
     expect(listener).toHaveBeenCalledTimes(1);
     unsubscribe();
+  });
+
+  it('переводит отказ «только просмотр» в отдельный отказ и объявляет его', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      response(
+        { error: 'Только просмотр: вы в чужой семье', code: 'read-only' },
+        { ok: false, status: 403 },
+      ),
+    ));
+    const listener = vi.fn();
+    const unsubscribe = onReadOnly(listener);
+
+    const failure = await requestJson(
+      '/api/session/answer',
+      { method: 'POST' },
+      'Не получилось отправить ответ',
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ReadOnlyError);
+    expect((failure as Error).message).toBe('Только просмотр: вы в чужой семье');
+    expect(listener).toHaveBeenCalledWith('Только просмотр: вы в чужой семье');
+    unsubscribe();
+  });
+
+  it('различает «только просмотр» и прочие 403: у них один статус и разный смысл', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      response({ error: 'Доступ закрыт', code: 'forbidden' }, { ok: false, status: 403 }),
+    ));
+    const listener = vi.fn();
+    const unsubscribe = onReadOnly(listener);
+
+    const failure = await requestJson(
+      '/api/profile',
+      { method: 'PUT' },
+      'Не получилось сохранить профиль',
+      (info) => new HttpError(info),
+    ).catch((error: unknown) => error);
+
+    expect(failure).not.toBeInstanceOf(ReadOnlyError);
+    expect((failure as HttpError).code).toBe('forbidden');
+    expect(listener).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
+  it('отписка снимает и слушателя отказа «только просмотр»', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      response({ code: 'read-only' }, { ok: false, status: 403 }),
+    ));
+    const listener = vi.fn();
+    onReadOnly(listener)();
+
+    const failure = await requestJson('/api/profile', { method: 'PUT' }, 'Не получилось сохранить профиль')
+      .catch((error: unknown) => error);
+
+    // Тела сервер мог и не прислать: текст тогда свой, но отказ — тот же самый.
+    expect(failure).toBeInstanceOf(ReadOnlyError);
+    expect((failure as Error).message).toBe('Только просмотр: вы в чужой семье');
+    expect(listener).not.toHaveBeenCalled();
   });
 
   it('отписка снимает слушателя: закрытый экран не должен решать за открытый', async () => {

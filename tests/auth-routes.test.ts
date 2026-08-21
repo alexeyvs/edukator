@@ -6,18 +6,26 @@ import type { Database } from 'better-sqlite3';
 import Fastify, { type FastifyInstance } from 'fastify';
 import {
   DEVICE_INVITE_TTL_MS,
+  IMPERSONATION_TTL_MS,
   LOGIN_EMAIL_FAILURE_LIMIT,
   LOGIN_LOCKOUT_MS,
   MIN_PASSWORD_LENGTH,
   PARENT_INVITE_TTL_MS,
+  createAdmin,
   createChild,
   createParent,
   issueDeviceInvite,
   issueParentInvite,
   openControlDatabase,
+  startImpersonation,
 } from '../server/control-db.js';
 import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
-import { ACTOR_COOKIE, CHILD_COOKIE, PARENT_COOKIE } from '../server/auth.js';
+import {
+  ACTOR_COOKIE,
+  CHILD_COOKIE,
+  IMPERSONATION_COOKIE,
+  PARENT_COOKIE,
+} from '../server/auth.js';
 import { CHILD_COOKIE_MAX_AGE_SECONDS, registerAuthRoutes } from '../server/routes/auth.js';
 
 const NOW = new Date('2026-08-19T09:00:00.000Z');
@@ -368,6 +376,87 @@ describe('маршруты входа', () => {
 
       expect(setCookie(response.headers)).not.toContain('Secure');
       await insecure.close();
+    });
+  });
+
+  describe('заход оператора в чужую семью', () => {
+    /** Заход в готовую семью: наружу уходит открытый токен cookie захода. */
+    function enter(childId: string, role: 'browser' | 'parent'): string {
+      const adminId = createAdmin(control, 'оператор@example.com', current);
+      const started = startImpersonation(control, { adminId, childId, role }, current);
+      if (!started.ok) throw new Error(`заход не начался: ${started.reason}`);
+      return started.session.token;
+    }
+
+    it('называет оператора, семью и срок в роли ребёнка', async () => {
+      const parentId = await parentWithPassword();
+      const browser = deviceInvite(parentId, 'browser');
+      const token = enter(browser.childId, 'browser');
+
+      const response = await me({ cookie: `${IMPERSONATION_COOKIE}=${token}` });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        kind: 'child',
+        childId: browser.childId,
+        name: 'Ученик',
+        impersonation: {
+          adminEmail: 'оператор@example.com',
+          childName: 'Ученик',
+          role: 'browser',
+          expiresAt: new Date(current.getTime() + IMPERSONATION_TTL_MS).toISOString(),
+        },
+      });
+    });
+
+    it('называет заход и в роли родителя целевой семьи', async () => {
+      const parentId = await parentWithPassword();
+      const browser = deviceInvite(parentId, 'browser');
+      const token = enter(browser.childId, 'parent');
+
+      expect((await me({ cookie: `${IMPERSONATION_COOKIE}=${token}` })).json()).toEqual({
+        kind: 'parent',
+        email: 'родитель@example.com',
+        impersonation: {
+          adminEmail: 'оператор@example.com',
+          childName: 'Ученик',
+          role: 'parent',
+          expiresAt: new Date(current.getTime() + IMPERSONATION_TTL_MS).toISOString(),
+        },
+      });
+    });
+
+    it('выигрывает у собственных живых cookie оператора', async () => {
+      const own = await parentWithPassword();
+      const ownToken = cookieValue(setCookie((await login()).headers));
+      const ownDevice = deviceInvite(own, 'browser');
+      const ownChildToken = cookieValue(setCookie((await app.inject({
+        method: 'POST',
+        url: `/api/auth/child/claim/${ownDevice.token}`,
+        headers: SAME_ORIGIN,
+      })).headers));
+      const strangerParent = await parentWithPassword('чужой@example.com');
+      const stranger = deviceInvite(strangerParent, 'browser');
+      const token = enter(stranger.childId, 'browser');
+
+      // Обе собственные cookie живы, то есть без захода `me` вернул бы `both`.
+      const body = (await me({
+        cookie: `${PARENT_COOKIE}=${ownToken}; ${CHILD_COOKIE}=${ownChildToken}; ${IMPERSONATION_COOKIE}=${token}`,
+      })).json() as { kind: string; childId?: string };
+
+      expect(body.kind).toBe('child');
+      expect(body.childId).toBe(stranger.childId);
+      expect(body.childId).not.toBe(ownDevice.childId);
+    });
+
+    it('не называет захода, когда его cookie уже не действует', async () => {
+      const parentId = await parentWithPassword();
+      const browser = deviceInvite(parentId, 'browser');
+      const token = enter(browser.childId, 'browser');
+      current = new Date(NOW.getTime() + IMPERSONATION_TTL_MS + 1000);
+
+      expect((await me({ cookie: `${IMPERSONATION_COOKIE}=${token}` })).json())
+        .toEqual({ kind: 'anonymous' });
     });
   });
 

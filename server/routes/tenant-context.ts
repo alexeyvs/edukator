@@ -83,10 +83,20 @@ export const ROUTE_ACCESS = {
   admin: ['admin'],
 } as const satisfies Record<string, readonly BearerKind[]>;
 
-/** Отвечает на отказ допуска. Чужие ошибки пролетают наверх пятисоткой. */
+/**
+ * Отвечает на отказ допуска. Чужие ошибки пролетают наверх пятисоткой.
+ *
+ * Код отказа едет в теле рядом с текстом: по одному статусу клиент не отличит
+ * «только просмотр» от «доступ закрыт» и от «запрос пришёл не со страницы» —
+ * все три отвечают 403, — и отказ второму замку показывался бы экраном
+ * поломки вместо строки в баннере имперсонации. Текст остаётся человеку, код —
+ * коду: разбирать русскую фразу клиент не должен.
+ */
 export function failAuth(reply: FastifyReply, error: unknown): FastifyReply {
   if (!(error instanceof AuthError)) throw error;
-  return reply.code(AUTH_STATUS[error.code]).send({ error: AUTH_MESSAGE[error.code] });
+  return reply
+    .code(AUTH_STATUS[error.code])
+    .send({ error: AUTH_MESSAGE[error.code], code: error.code });
 }
 
 /** Ребёнок из адреса. Значение не проверяется здесь: это делает `authorizeChild`. */

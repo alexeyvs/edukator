@@ -3438,3 +3438,51 @@ button.parents-home {
   border-radius: .8rem;
   font-weight: 750;
 }
+
+.admin-enter {
+  display: flex;
+  gap: .5rem;
+}
+
+.admin-enter button {
+  min-height: 2.2rem;
+  padding: 0 .8rem;
+  border-radius: .7rem;
+  font-size: .8rem;
+  font-weight: 750;
+}
+
+/* Полоса захода оператора приклеена к верху окна и рисуется поверх всего: она
+   и есть подпись кадра, а уехавшая при прокрутке подпись подписывает только
+   первый экран. */
+.impersonation-banner {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .8rem;
+  padding: .7rem 1.1rem;
+  border-bottom: 2px solid #a4571f;
+  background: #fdf1e2;
+  color: #5a3410;
+}
+
+.impersonation-banner p {
+  margin: 0;
+  font-size: .9rem;
+}
+
+.impersonation-banner button {
+  margin-left: auto;
+  min-height: 2.4rem;
+  padding: 0 1rem;
+  border-radius: .8rem;
+  font-weight: 750;
+}
+
+.impersonation-refusal {
+  flex-basis: 100%;
+  font-weight: 700;
+}

@@ -562,6 +562,84 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: 'Перейти к тесту' })).toBeInTheDocument();
   });
 
+  it('держит полосу захода поверх настоящего детского экрана', async () => {
+    // План занятия в этом тесте не приезжает: проверяется полоса поверх экрана,
+    // а не сам экран, и своя выдумка плана разъехалась бы с его тестами.
+    vi.stubGlobal('fetch', vi.fn((url: string) => (url.startsWith('/api/profile')
+      ? Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          name: 'Тимофей', interests: [], examDate: null, partnerName: 'Кекс', introduction: 'Готовы.',
+        }),
+      })
+      : new Promise(() => undefined))));
+
+    render(<App authApi={authApi({
+      me: vi.fn().mockResolvedValue({
+        kind: 'child',
+        childId: 'c-1',
+        name: 'Тимофей',
+        impersonation: {
+          adminEmail: 'оператор@example.com',
+          childName: 'Тимофей',
+          role: 'browser',
+          expiresAt: '2999-01-01T00:00:00.000Z',
+        },
+      }),
+    })} />);
+
+    expect(await screen.findByRole('button', { name: 'Выйти в админку' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('оператор@example.com');
+    // Экран остаётся настоящим: оператор пришёл смотреть ровно то, что видит
+    // ученик, и подменённый полосой экран отвечал бы не на тот вопрос.
+    expect(screen.getByRole('link', { name: 'Эдукатор' })).toBeInTheDocument();
+  });
+
+  it('держит полосу захода и поверх родительского экрана', async () => {
+    vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(url.startsWith('/api/family')
+        ? { email: 'чужой@example.org', pinConfigured: false, children: [] }
+        : DASHBOARD),
+    })));
+
+    render(<App authApi={authApi({
+      me: vi.fn().mockResolvedValue({
+        kind: 'parent',
+        email: 'чужой@example.org',
+        impersonation: {
+          adminEmail: 'оператор@example.com',
+          childName: 'Тимофей',
+          role: 'parent',
+          expiresAt: '2999-01-01T00:00:00.000Z',
+        },
+      }),
+    })} />);
+
+    expect(await screen.findByRole('heading', { name: 'Дети' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('как родитель');
+  });
+
+  it('не рисует полосы там, где захода нет', async () => {
+    vi.stubGlobal('fetch', vi.fn((url: string) => (url.startsWith('/api/profile')
+      ? Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          name: 'Тимофей', interests: [], examDate: null, partnerName: 'Кекс', introduction: 'Готовы.',
+        }),
+      })
+      : new Promise(() => undefined))));
+
+    render(<App authApi={authApi()} />);
+
+    await waitFor(() => expect(screen.getByRole('link', { name: 'Эдукатор' })).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Выйти в админку' })).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('открывает pathname /parents ученику со сводкой его собственного ребёнка', async () => {
     window.history.replaceState({}, '', '/parents');
     const fetchMock = vi.fn(() => Promise.resolve({

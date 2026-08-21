@@ -26,6 +26,7 @@ import {
   resolveImpersonation,
   resolveParentSession,
   type AdminPrincipal,
+  type ImpersonationRole,
   type ChildPrincipal,
   type ChildSummary,
   type ParentPrincipal,
@@ -81,6 +82,15 @@ export type BearerKind = 'parent' | 'browser' | 'agent' | 'admin';
  */
 export interface ImpersonationMark {
   adminId: string;
+  /**
+   * Кто и в чью семью зашёл. Эти три поля здесь ради несъёмной полосы поверх
+   * чужого экрана: она обязана назвать оператора и семью словами, а не
+   * непрозрачным `id`, и второй запрос за ними показывал бы чужой экран уже
+   * нарисованным, но ещё неподписанным.
+   */
+  adminEmail: string;
+  childName: string;
+  role: ImpersonationRole;
   expiresAt: string;
 }
 
@@ -278,6 +288,9 @@ function resolveImpersonatedBearer(
   if (session === undefined) return undefined;
   const impersonation: ImpersonationMark = {
     adminId: session.adminId,
+    adminEmail: session.adminEmail,
+    childName: session.childName,
+    role: session.role,
     expiresAt: session.expiresAt,
   };
 

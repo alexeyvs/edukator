@@ -251,7 +251,7 @@ describe('маршруты захода оператора в семью', () =>
         payload: { interests: [`попытка ${attempt}`] },
       });
       expect(refused.statusCode).toBe(403);
-      expect(refused.json()).toEqual({ error: 'Только просмотр: вы в чужой семье' });
+      expect(refused.json()).toEqual({ error: 'Только просмотр: вы в чужой семье', code: 'read-only' });
     }
     // Чтение отказом не считается: иначе счётчик показывал бы усердие
     // оператора, а не его попытки писать.
@@ -374,7 +374,7 @@ describe('маршруты захода оператора в семью', () =>
       payload: { childId, role: 'browser' },
     });
     expect(response.statusCode).toBe(403);
-    expect(response.json()).toEqual({ error: 'Запрос пришёл не со страницы приложения' });
+    expect(response.json()).toEqual({ error: 'Запрос пришёл не со страницы приложения', code: 'cross-origin' });
   });
 
   it('гасит cookie и без живого захода', async () => {

@@ -8,6 +8,17 @@ export interface HttpFailure {
 export const SIGNED_OUT_MESSAGE = 'Нужно войти';
 
 /**
+ * Код отказа первого замка имперсонации. Копия серверного `AuthErrorCode`
+ * (`server/auth.ts`): импортировать `server/` клиенту нечем, а по одному
+ * статусу отличить «только просмотр» от «доступ закрыт» и «запрос пришёл не со
+ * страницы» нельзя — все три отвечают 403.
+ */
+export const READ_ONLY_CODE = 'read-only';
+
+/** Текст на случай, когда сервер отказал без своего объяснения. */
+export const READ_ONLY_MESSAGE = 'Только просмотр: вы в чужой семье';
+
+/**
  * Отказ по отсутствующей сессии. Отдельный класс, а не обычная `Error`, потому
  * что 401 для экрана — не «не удалось загрузить»: данные в порядке, вошедшего
  * нет. Без этого различия каждый экран показывал бы свой fallback («не
@@ -43,9 +54,41 @@ export class HttpError extends Error {
   }
 }
 
+/**
+ * Отказ замка имперсонации: оператор смотрит чужую семью и попробовал её
+ * изменить. Отдельный класс по той же причине, что и
+ * `SignedOutError`: с данными всё в порядке и повторять запрос бессмысленно, а
+ * показанный обычной ошибкой отказ выглядел бы поломкой сервера ровно там, где
+ * сервер отработал как задумано.
+ */
+export class ReadOnlyError extends Error {
+  readonly status = 403;
+
+  readonly code = READ_ONLY_CODE;
+
+  constructor(message: string = READ_ONLY_MESSAGE) {
+    super(message);
+    this.name = 'ReadOnlyError';
+  }
+}
+
 type SignedOutListener = () => void;
 
 const signedOutListeners = new Set<SignedOutListener>();
+
+type ReadOnlyListener = (message: string) => void;
+
+const readOnlyListeners = new Set<ReadOnlyListener>();
+
+/**
+ * Подписка на отказ «только просмотр». Слушателя ставит несъёмная полоса
+ * имперсонации: отказ прилетает посреди любого чужого экрана, а объяснять его
+ * обязано то единственное место, которое вообще знает про заход оператора.
+ */
+export function onReadOnly(listener: ReadOnlyListener): () => void {
+  readOnlyListeners.add(listener);
+  return () => { readOnlyListeners.delete(listener); };
+}
 
 /**
  * Подписка на потерю сессии. Слушателя ставит корень приложения: сессия
@@ -100,6 +143,15 @@ export async function requestJson<T>(
     if (response.status === 401 && policy.signedOutOn401 !== false) {
       for (const listener of [...signedOutListeners]) listener();
       throw new SignedOutError(serverMessage ?? SIGNED_OUT_MESSAGE);
+    }
+    // Отказ «только просмотр» разбирается здесь, а не в каждом экране: под
+    // заходом оператора его умеет получить любой изменяющий запрос из
+    // приложения семьи, и оставленный экранам он показывал бы «не получилось
+    // ответить» — то есть выглядел бы поломкой вместо работающего замка.
+    if (response.status === 403 && code === READ_ONLY_CODE) {
+      const message = serverMessage ?? READ_ONLY_MESSAGE;
+      for (const listener of [...readOnlyListeners]) listener(message);
+      throw new ReadOnlyError(message);
     }
     throw errorFactory({
       status: response.status,

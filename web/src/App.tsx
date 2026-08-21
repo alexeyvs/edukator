@@ -11,6 +11,7 @@ import { InviteScreen } from './InviteScreen';
 import { JoinScreen } from './JoinScreen';
 import { LoginScreen } from './LoginScreen';
 import { BrandLink } from './BrandMark';
+import { ImpersonationBanner } from './admin/ImpersonationBanner';
 import { browserAuthApi, type AuthApi, type AuthState, type Principal } from './auth-api';
 import { onSignedOut, SignedOutError } from './http';
 import { browserProfileApi, type Profile, type ProfileApi } from './profile-api';
@@ -355,8 +356,17 @@ export function App({ authApi = browserAuthApi }: { authApi?: AuthApi } = {}) {
       : { kind: 'child', childId: principal.child.childId, name: principal.child.name }
     : principal;
 
+  // Полоса захода рисуется поверх настоящих экранов семьи, а не вместо них:
+  // оператор пришёл смотреть ровно то, что видит семья, и подменённый экран
+  // отвечал бы не на тот вопрос. `both` её не получает никогда — под заходом
+  // `me` возвращает предъявителя целевой семьи, а не пару своих сессий.
+  const banner = active.kind !== 'agent' && active.impersonation !== undefined
+    ? <ImpersonationBanner impersonation={active.impersonation} />
+    : null;
+
   if (active.kind === 'parent') {
     return <>
+      {banner}
       {logoutProblem !== null && (
         <div className="auth-message error" role="alert">
           <p>{logoutProblem}</p>
@@ -413,7 +423,7 @@ export function App({ authApi = browserAuthApi }: { authApi?: AuthApi } = {}) {
   // Ребёнок назван в адресе сводки и у самого ученика: его номер приходит из
   // `me`, а не подразумевается по cookie.
   if (window.location.pathname === '/parents') {
-    return <>{childSwitcher}<ParentsScreen childId={active.childId} /></>;
+    return <>{banner}{childSwitcher}<ParentsScreen childId={active.childId} /></>;
   }
-  return <>{childSwitcher}<ChildArea /></>;
+  return <>{banner}{childSwitcher}<ChildArea /></>;
 }

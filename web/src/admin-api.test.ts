@@ -33,6 +33,25 @@ describe('адаптер админского API', () => {
     ]);
   });
 
+  it('собирает адреса захода в чужую семью и выхода из него', async () => {
+    const fetch = vi.fn().mockResolvedValue(response({
+      childId: 'ребёнок-1', role: 'browser', expiresAt: '2026-08-21T09:15:00.000Z',
+    }));
+    vi.stubGlobal('fetch', fetch);
+
+    await browserAdminApi.impersonate('ребёнок-1', 'browser');
+    await browserAdminApi.stopImpersonation();
+
+    expect(fetch.mock.calls).toEqual([
+      ['/api/admin/impersonate', expect.objectContaining({
+        method: 'POST',
+        body: '{"childId":"ребёнок-1","role":"browser"}',
+      })],
+      // Тела у выхода нет: заход называет cookie, а не запрос.
+      ['/api/admin/impersonate', { method: 'DELETE' }],
+    ]);
+  });
+
   it('отдаёт 401 своим кодом и не трогает общий переход ко входу семьи', async () => {
     const listener = vi.fn();
     const unsubscribe = onSignedOut(listener);

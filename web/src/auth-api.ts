@@ -1,13 +1,30 @@
 import { HttpError, jsonRequest, requestJson, type HttpFailure } from './http';
 
 /**
+ * Заход оператора в чужую семью так, как его видит клиент. Поле приезжает
+ * вместе с предъявителем, а не отдельным запросом: чужой экран, нарисованный
+ * раньше своей подписи, — это ровно тот скриншот, ради которого баннер и
+ * заведён.
+ */
+export interface Impersonation {
+  adminEmail: string;
+  childName: string;
+  role: 'browser' | 'parent';
+  expiresAt: string;
+}
+
+/**
  * Кто сейчас за браузером. `anonymous` — обычное состояние страницы входа, а
  * не ошибка: сервер отвечает на `me` двухсоткой и в этом случае тоже.
+ *
+ * `impersonation` есть только у родителя и ребёнка целевой семьи: роли захода
+ * ровно две, и «оператор притворился контроллером доступа» невозможно на
+ * сервере — значит, и здесь такого поля быть не должно.
  */
 export type Principal =
   | { kind: 'anonymous' }
-  | { kind: 'parent'; email: string }
-  | { kind: 'child'; childId: string; name: string }
+  | { kind: 'parent'; email: string; impersonation?: Impersonation }
+  | { kind: 'child'; childId: string; name: string; impersonation?: Impersonation }
   | { kind: 'agent'; childId: string };
 
 export type AuthState = Principal | {

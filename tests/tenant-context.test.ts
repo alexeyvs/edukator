@@ -293,7 +293,7 @@ describe('контекст арендатора', () => {
         const response = await app.inject({ method: 'GET', url: fill(route.url), headers: blind });
         if (route.mutating === true) {
           expect(response.statusCode).toBe(403);
-          expect(response.json()).toEqual({ error: 'Запрос пришёл не со страницы приложения' });
+          expect(response.json()).toEqual({ error: 'Запрос пришёл не со страницы приложения', code: 'cross-origin' });
         } else {
           expect(response.statusCode).not.toBe(403);
         }
@@ -338,7 +338,7 @@ describe('контекст арендатора', () => {
     it('отвечает агенту 403, а не молчаливым 404, на детских маршрутах', async () => {
       const response = await get('/api/profile', 'agent');
       expect(response.statusCode).toBe(403);
-      expect(response.json()).toEqual({ error: 'Доступ закрыт' });
+      expect(response.json()).toEqual({ error: 'Доступ закрыт', code: 'forbidden' });
     });
 
     it('отвечает родителю на детском маршруте 403: ребёнка он там не называл', async () => {
@@ -349,7 +349,7 @@ describe('контекст арендатора', () => {
     it('не пускает ребёнка в сводку соседа: она неотличима от несуществующей', async () => {
       const response = await get(`/api/parents/${otherChildId}`, 'browser');
       expect(response.statusCode).toBe(404);
-      expect(response.json()).toEqual({ error: 'Ребёнок не найден' });
+      expect(response.json()).toEqual({ error: 'Ребёнок не найден', code: 'no-child' });
     });
 
     it('пускает родителя в сводку каждого своего ребёнка', async () => {
@@ -403,7 +403,7 @@ describe('контекст арендатора', () => {
             headers: headers[bearer],
           });
           expect([bearer, response.statusCode]).toEqual([bearer, 401]);
-          expect(response.json()).toEqual({ error: 'Нужно войти' });
+          expect(response.json()).toEqual({ error: 'Нужно войти', code: 'unauthenticated' });
         }
       } finally {
         await own.close();
@@ -434,7 +434,7 @@ describe('контекст арендатора', () => {
           headers: { cookie: headers.admin['cookie'] ?? '', origin: 'https://чужой.example' },
         });
         expect(blind.statusCode).toBe(403);
-        expect(blind.json()).toEqual({ error: 'Запрос пришёл не со страницы приложения' });
+        expect(blind.json()).toEqual({ error: 'Запрос пришёл не со страницы приложения', code: 'cross-origin' });
 
         const same = await own.inject({
           method: 'POST',
@@ -469,7 +469,7 @@ describe('контекст арендатора', () => {
           headers: { cookie: headers.admin['cookie'] ?? '' },
         });
         expect(blind.statusCode).toBe(403);
-        expect(blind.json()).toEqual({ error: 'Запрос пришёл не со страницы приложения' });
+        expect(blind.json()).toEqual({ error: 'Запрос пришёл не со страницы приложения', code: 'cross-origin' });
 
         const same = await own.inject({
           method: 'GET',
@@ -581,7 +581,7 @@ describe('контекст арендатора', () => {
         payload: { name: 'Тимофей' },
       });
       expect(response.statusCode).toBe(403);
-      expect(response.json()).toEqual({ error: 'Запрос пришёл не со страницы приложения' });
+      expect(response.json()).toEqual({ error: 'Запрос пришёл не со страницы приложения', code: 'cross-origin' });
       expect(tenants.peek(childId)).toBeUndefined();
     });
   });

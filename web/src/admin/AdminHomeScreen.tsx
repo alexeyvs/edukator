@@ -5,6 +5,7 @@ import {
   type AdminChildStatus,
   type AdminFamily,
   type AdminFamilyChild,
+  type AdminImpersonationRole,
   type AdminOverview,
 } from '../admin-api';
 import { HttpError } from '../http';
@@ -93,7 +94,16 @@ function Numbers({ overview }: { overview: AdminOverview }) {
   );
 }
 
-function Family({ family }: { family: AdminFamily }) {
+function Family({
+  family,
+  onEnter,
+  entering,
+}: {
+  family: AdminFamily;
+  onEnter: (childId: string, role: AdminImpersonationRole) => void;
+  /** Ребёнок, заход к которому уже начат: две нажатые кнопки — два захода. */
+  entering: string | null;
+}) {
   return (
     <article className="admin-family">
       <header>
@@ -111,6 +121,27 @@ function Family({ family }: { family: AdminFamily }) {
                   <small>{STATUS_NAMES[child.status]} · {childState(child)}</small>
                 </div>
                 <code>{child.childId}</code>
+                {/* Заход предлагается только готовому ребёнку: у застрявшего
+                    заведения базы ещё нет вовсе, и заход в него кончился бы
+                    отказом на первом же экране. */}
+                {child.status === 'ready' && (
+                  <div className="admin-enter">
+                    <button
+                      disabled={entering !== null}
+                      type="button"
+                      onClick={() => onEnter(child.childId, 'browser')}
+                    >
+                      Войти как ребёнок
+                    </button>
+                    <button
+                      disabled={entering !== null}
+                      type="button"
+                      onClick={() => onEnter(child.childId, 'parent')}
+                    >
+                      Войти как родитель
+                    </button>
+                  </div>
+                )}
               </li>
             ))}
           </ul>
@@ -134,6 +165,12 @@ export interface AdminHomeScreenProps {
   onLogs?: () => void;
   /** Сессии оператора больше нет: решение показать вход принимает корень. */
   onSignedOut: (reason: AdminSignOutReason) => void;
+  /**
+   * Куда уходить после начала захода. По умолчанию — на корень приложения:
+   * cookie захода уже стоит, и там оператора встречают настоящие экраны
+   * семьи под несъёмной полосой.
+   */
+  onEntered?: () => void;
 }
 
 /**
@@ -143,7 +180,13 @@ export interface AdminHomeScreenProps {
  * при любом состоянии этих баз — в том числе когда сломаны все разом. Именно в
  * этот момент по нему и смотрят.
  */
-export function AdminHomeScreen({ api = browserAdminApi, email, onLogs, onSignedOut }: AdminHomeScreenProps) {
+export function AdminHomeScreen({
+  api = browserAdminApi,
+  email,
+  onLogs,
+  onSignedOut,
+  onEntered = (): void => { window.location.assign('/'); },
+}: AdminHomeScreenProps) {
   const [overview, setOverview] = useState<AdminOverview | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   // Новая попытка после сорвавшейся: эффект сам не повторится (сводка так и
@@ -151,6 +194,8 @@ export function AdminHomeScreen({ api = browserAdminApi, email, onLogs, onSigned
   const [attempt, setAttempt] = useState(0);
   const [leaving, setLeaving] = useState(false);
   const [logoutProblem, setLogoutProblem] = useState<string | null>(null);
+  const [entering, setEntering] = useState<string | null>(null);
+  const [enterProblem, setEnterProblem] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -169,6 +214,24 @@ export function AdminHomeScreen({ api = browserAdminApi, email, onLogs, onSigned
       });
     return () => { active = false; };
   }, [api, attempt, onSignedOut]);
+
+  function enter(childId: string, role: AdminImpersonationRole): void {
+    if (entering !== null) return;
+    setEntering(childId);
+    setEnterProblem(null);
+    void api.impersonate(childId, role)
+      .then(onEntered)
+      .catch((error: unknown) => {
+        // Кончившаяся сессия оператора и здесь не поломка: пускать обратно
+        // будет форма входа, а не кнопка «Повторить».
+        if (error instanceof HttpError && error.status === 401) {
+          onSignedOut('expired');
+          return;
+        }
+        setEnterProblem(error instanceof Error ? error.message : 'Не получилось зайти в семью');
+      })
+      .finally(() => setEntering(null));
+  }
 
   function logout(): void {
     if (leaving) return;
@@ -254,9 +317,14 @@ export function AdminHomeScreen({ api = browserAdminApi, email, onLogs, onSigned
       )}
       <section className="admin-panel">
         <h2>Семьи</h2>
+        {enterProblem !== null && (
+          <p className="auth-message error" role="alert">{enterProblem}</p>
+        )}
         {overview.families.length === 0
           ? <p className="admin-empty">Ни одной семьи не заведено</p>
-          : overview.families.map((family) => <Family key={family.parentId} family={family} />)}
+          : overview.families.map((family) => (
+            <Family key={family.parentId} entering={entering} family={family} onEnter={enter} />
+          ))}
       </section>
     </main>
   );

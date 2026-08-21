@@ -730,8 +730,13 @@ describe('разрешение предъявителя и аренды', () => 
       const bearer = bearerOf(cookies([IMPERSONATION_COOKIE, token]));
 
       expect(bearer.kind).toBe('browser');
+      // Отметка несёт всё, что рисует несъёмная полоса: адрес оператора, имя
+      // ребёнка и роль. Без них баннер называл бы семью непрозрачным `id`.
       expect(bearer.impersonation).toEqual({
         adminId,
+        adminEmail: 'оператор@example.com',
+        childName: 'alpha',
+        role: 'browser',
         expiresAt: new Date(NOW.getTime() + IMPERSONATION_TTL_MS).toISOString(),
       });
       if (bearer.kind !== 'browser') throw new Error('ожидался детский предъявитель');

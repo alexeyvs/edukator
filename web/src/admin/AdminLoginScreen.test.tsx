@@ -16,6 +16,10 @@ function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
     logout: vi.fn().mockResolvedValue(undefined),
     overview: vi.fn().mockRejectedValue(new Error('сводка в этом тесте не нужна')),
     logs: vi.fn().mockRejectedValue(new Error('журнал в этом тесте не нужен')),
+    impersonate: vi.fn().mockResolvedValue({
+      childId: 'ребёнок-1', role: 'browser', expiresAt: '2026-08-21T09:15:00.000Z',
+    }),
+    stopImpersonation: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }

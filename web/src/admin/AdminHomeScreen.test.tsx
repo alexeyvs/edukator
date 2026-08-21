@@ -68,6 +68,10 @@ function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
     logout: vi.fn().mockResolvedValue(undefined),
     overview: vi.fn().mockResolvedValue(overview()),
     logs: vi.fn().mockResolvedValue({ entries: [] }),
+    impersonate: vi.fn().mockResolvedValue({
+      childId: 'ребёнок-1', role: 'browser', expiresAt: '2026-08-21T09:15:00.000Z',
+    }),
+    stopImpersonation: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -86,6 +90,76 @@ describe('главный экран админки', () => {
     expect(screen.getByText('Детей нет')).toBeInTheDocument();
     expect(screen.getByText('4.0 МБ')).toBeInTheDocument();
     expect(screen.getByText('operator@example.com')).toBeInTheDocument();
+  });
+
+  it('заводит заход в семью обеими ролями и уводит к настоящим экранам', async () => {
+    const impersonate = vi.fn().mockResolvedValue({
+      childId: 'ребёнок-1', role: 'parent', expiresAt: '2026-08-21T09:15:00.000Z',
+    });
+    const entered = vi.fn();
+    render(
+      <AdminHomeScreen
+        api={adminApi({ impersonate })}
+        onEntered={entered}
+        onSignedOut={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText('Семьи')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Войти как ребёнок' }));
+    await waitFor(() => expect(entered).toHaveBeenCalledTimes(1));
+    expect(impersonate).toHaveBeenCalledWith('ребёнок-1', 'browser');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Войти как родитель' }));
+    await waitFor(() => expect(impersonate).toHaveBeenCalledTimes(2));
+    expect(impersonate).toHaveBeenLastCalledWith('ребёнок-1', 'parent');
+  });
+
+  it('не предлагает захода в ребёнка без базы', async () => {
+    render(<AdminHomeScreen api={adminApi()} onSignedOut={vi.fn()} />);
+
+    expect(await screen.findByText('Семьи')).toBeInTheDocument();
+    // Готовый ребёнок в списке один: у второго заведение не доехало, и заход в
+    // него кончился бы отказом на первом же экране.
+    expect(screen.getAllByRole('button', { name: 'Войти как ребёнок' })).toHaveLength(1);
+    expect(screen.getByText('Младшая')).toBeInTheDocument();
+  });
+
+  it('называет отказ захода и оставляет оператора в админке', async () => {
+    const entered = vi.fn();
+    render(
+      <AdminHomeScreen
+        api={adminApi({ impersonate: vi.fn().mockRejectedValue(new Error('Ребёнок не найден')) })}
+        onEntered={entered}
+        onSignedOut={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText('Семьи')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Войти как ребёнок' }));
+
+    expect(await screen.findByText('Ребёнок не найден')).toBeInTheDocument();
+    expect(entered).not.toHaveBeenCalled();
+    // Сводка остаётся на месте: отказ захода — не поломка экрана.
+    expect(screen.getByText('Семьи')).toBeInTheDocument();
+  });
+
+  it('сообщает наверх о кончившейся сессии и с кнопки захода', async () => {
+    const onSignedOut = vi.fn();
+    render(
+      <AdminHomeScreen
+        api={adminApi({
+          impersonate: vi.fn().mockRejectedValue(new HttpError({ status: 401, message: 'Нужно войти' })),
+        })}
+        onEntered={vi.fn()}
+        onSignedOut={onSignedOut}
+      />,
+    );
+
+    expect(await screen.findByText('Семьи')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Войти как ребёнок' }));
+
+    await waitFor(() => expect(onSignedOut).toHaveBeenCalledWith('expired'));
   });
 
   it('называет застрявших и запертый перебором вход', async () => {

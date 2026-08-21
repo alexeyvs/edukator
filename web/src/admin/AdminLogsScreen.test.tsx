@@ -44,6 +44,10 @@ function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
       storage: { controlBytes: 0, childrenBytes: 0, totalBytes: 0, children: [] },
     }),
     logs: vi.fn().mockResolvedValue({ entries: [entry()] } satisfies AdminLogPage),
+    impersonate: vi.fn().mockResolvedValue({
+      childId: 'ребёнок-1', role: 'browser', expiresAt: '2026-08-21T09:15:00.000Z',
+    }),
+    stopImpersonation: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }

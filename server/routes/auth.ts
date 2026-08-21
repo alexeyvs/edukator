@@ -414,7 +414,22 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
   // `me` отвечает 200 и на «никого нет»: 401 здесь заставил бы клиент считать
   // ошибкой обычное состояние незалогиненной страницы входа.
   app.get('/api/auth/me', (request, reply) => {
-    const browser = resolveBrowserPrincipals(control, request.headers, now());
+    const at = now();
+    const bearer = resolveBearer(control, request.headers, at);
+
+    // Заход оператора в чужую семью проверяется **раньше** собственных cookie:
+    // оператор заходит со своей машины, где живы и его родительский, и его
+    // детский вход, и ветка `both` вернула бы ему свою же семью — то есть
+    // баннер не появился бы ровно там, где он и нужен.
+    if (bearer?.impersonation !== undefined) {
+      const { adminEmail, childName, role, expiresAt } = bearer.impersonation;
+      const impersonation = { adminEmail, childName, role, expiresAt };
+      return reply.send(bearer.kind === 'parent'
+        ? { kind: 'parent', email: bearer.parent.email, impersonation }
+        : { kind: 'child', childId: bearer.child.childId, name: bearer.child.name, impersonation });
+    }
+
+    const browser = resolveBrowserPrincipals(control, request.headers, at);
     if (browser.parent !== undefined && browser.child !== undefined) {
       const selected = parseCookies(request.headers.cookie).get(ACTOR_COOKIE);
       return reply.send({
@@ -424,7 +439,6 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
         child: { childId: browser.child.childId, name: browser.child.name },
       });
     }
-    const bearer = resolveBearer(control, request.headers, now());
     if (bearer === undefined) return reply.send({ kind: 'anonymous' });
     if (bearer.kind === 'parent') {
       return reply.send({ kind: 'parent', email: bearer.parent.email });

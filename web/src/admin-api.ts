@@ -142,11 +142,25 @@ export interface AdminLogQuery {
   before?: string;
 }
 
+/** Роль захода в чужую семью: то же слово, что и у сервера. */
+export type AdminImpersonationRole = 'browser' | 'parent';
+
+/** Что вернул старт захода. Срок нужен полосе: она называет остаток времени. */
+export interface AdminImpersonationStart {
+  childId: string;
+  role: AdminImpersonationRole;
+  expiresAt: string;
+}
+
 export interface AdminApi {
   login(email: string, password: string): Promise<{ kind: 'admin'; email: string }>;
   logout(): Promise<void>;
   overview(): Promise<AdminOverview>;
   logs(query?: AdminLogQuery): Promise<AdminLogPage>;
+  /** Зайти в чужую семью. Cookie захода ставится рядом с админской. */
+  impersonate(childId: string, role: AdminImpersonationRole): Promise<AdminImpersonationStart>;
+  /** Выйти из захода. Оператор остаётся вошедшим: админская cookie не трогается. */
+  stopImpersonation(): Promise<void>;
 }
 
 /**
@@ -202,6 +216,24 @@ export const browserAdminApi: AdminApi = {
     adminError,
     ADMIN_POLICY,
   ),
+  impersonate: (childId, role) => requestJson<AdminImpersonationStart>(
+    '/api/admin/impersonate',
+    jsonRequest('POST', { childId, role }),
+    'Не получилось зайти в семью',
+    adminError,
+    ADMIN_POLICY,
+  ),
+  stopImpersonation: async () => {
+    await requestJson<{ kind: 'admin' }>(
+      '/api/admin/impersonate',
+      // `DELETE` собирается здесь руками: `jsonRequest` знает только методы с
+      // телом, а тела у выхода нет — заход называет cookie, а не запрос.
+      { method: 'DELETE' },
+      'Не получилось выйти из семьи',
+      adminError,
+      ADMIN_POLICY,
+    );
+  },
   logs: (query = {}) => requestJson<AdminLogPage>(
     adminLogsUrl(query),
     undefined,
