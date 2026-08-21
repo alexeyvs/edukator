@@ -47,13 +47,14 @@ import {
   type DataLock,
 } from './data-lock.js';
 import { openControlDatabase, validateControlSchema } from './control-db.js';
-import { fileIdentity, TenantRegistry, type Tenant } from './tenant-registry.js';
+import { fileIdentity, TenantRegistry } from './tenant-registry.js';
 import type { DisputeCoordinatorOptions } from './dispute-coordinator.js';
 import type { IntegrityCoordinatorOptions } from './integrity.js';
 import { createAdminContext, createTenantContext } from './routes/tenant-context.js';
 import { redactTokenUrl, registerTokenPrivacy } from './routes/token-privacy.js';
 import { failureLogFor, type FailureLog } from './log.js';
-import type { BearerKind, TenantOpener } from './auth.js';
+import { ImpersonationTenants } from './admin/impersonation-tenants.js';
+import { createTenantOpener } from './tenant-opener.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -363,28 +364,19 @@ export function buildServer(
               ...(options.now === undefined ? {} : { now: options.now }),
             });
 
-      /**
-       * Реестр в том виде, в каком его видит допуск. Обёртка нужна ради
-       * будильника диспетчера: вернувшийся ребёнок узнаётся по первому своему
-       * запросу, то есть внутри `open`, а не при старте сервера.
-       */
-      const opener: TenantOpener = {
-        open(childId: string, bearer: BearerKind): Tenant {
-          const tenant = tenants.open(childId);
-          // Будильник только по новому в обходе ребёнку: вернувшийся после
-          // перерыва не должен досиживать чужую паузу, а занимающийся не должен
-          // будить диспетчер каждым своим запросом (см. `wake`).
-          //
-          // И только по браузерному предъявителю. Агент опрашивает `gate/status`
-          // раз в двадцать секунд и активностью ребёнка не считается: брошенный
-          // ребёнок в обход не попадает, то есть в `#served` его нет никогда, и
-          // каждый его опрос срывал бы паузу — получасовой отступ по недоступному
-          // codex не наступал бы вовсе. Родитель за сводкой — тоже не ученик за
-          // экраном, и греть по его запросу нечего.
-          if (bearer === 'browser') dispatcher?.wake(childId);
-          return tenant;
-        },
-      };
+      // Соединения только для чтения, которыми смотрят чужие семьи. Живут рядом
+      // с реестром, а не внутри него: реестр держит по одной базе на ребёнка, а
+      // второй handle — свойство захода оператора, а не аренды.
+      const impersonations = new ImpersonationTenants({
+        log,
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
+
+      const opener = createTenantOpener({
+        tenants,
+        impersonations,
+        ...(dispatcher === undefined ? {} : { wake: (childId: string) => dispatcher.wake(childId) }),
+      });
 
       const context = createTenantContext({
         control,
@@ -480,6 +472,9 @@ export function buildServer(
       });
       app.addHook('onClose', async () => {
         await dispatcher?.stop();
+        // Соединения имперсонации первыми: они ничего не пишут и никого не
+        // ждут, а держат дескриптор той же базы, которую сейчас закроет реестр.
+        impersonations.closeAll();
         // Порядок задан зависимостями, а не удобством. Диспетчер первым: его
         // заход держит и базу ребёнка, и счётчик квоты в `control.db`. Потом
         // арендаторы: закрытие аренды дожидается её разбора спора, а тот после

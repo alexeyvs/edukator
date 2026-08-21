@@ -51,6 +51,7 @@ import {
   type BearerKind,
   type RequestHeaders,
   type TenantOpener,
+  type TenantRequester,
 } from '../server/auth.js';
 
 function topic(id: string): Topic {
@@ -129,21 +130,49 @@ describe('разрешение предъявителя и аренды', () => 
     return claim.token;
   }
 
+  /** Отметка «ребёнок был за экраном»; `null`, пока он ни разу не заходил. */
+  function activityOf(childId: string): string | null {
+    const row = control
+      .prepare<[string], { last_activity_at: string | null }>(
+        'SELECT last_activity_at FROM children WHERE id = ?',
+      )
+      .get(childId);
+    if (row === undefined) throw new Error(`ребёнка ${childId} нет в управляющей базе`);
+    return row.last_activity_at;
+  }
+
+  /** Самая свежая отметка живой родительской сессии; `null`, если их нет. */
+  function parentSeenOf(parentId: string): string | null {
+    const row = control
+      .prepare<[string], { last_seen_at: string | null }>(
+        'SELECT MAX(last_seen_at) AS last_seen_at FROM parent_sessions WHERE parent_id = ?',
+      )
+      .get(parentId);
+    return row?.last_seen_at ?? null;
+  }
+
   function cookies(...pairs: [string, string][]): RequestHeaders {
     return { ...SAME_ORIGIN, cookie: pairs.map(([name, value]) => `${name}=${value}`).join('; ') };
   }
 
   /** Реестр, считающий открытия: изоляция обязана отказывать **до** открытия базы. */
-  function counting(): TenantOpener & { opened: string[]; kinds: BearerKind[] } {
+  function counting(): TenantOpener & {
+    opened: string[];
+    kinds: BearerKind[];
+    impersonated: boolean[];
+  } {
     const tenants = new TenantRegistry({ control, dataDir: tempDir, graph: GRAPH, log: () => {} });
     const opened: string[] = [];
     const kinds: BearerKind[] = [];
+    const impersonated: boolean[] = [];
     return {
       opened,
       kinds,
-      open(childId: string, bearer: BearerKind): Tenant {
+      impersonated,
+      open(childId: string, bearer: TenantRequester): Tenant {
         opened.push(childId);
-        kinds.push(bearer);
+        kinds.push(bearer.kind);
+        impersonated.push(bearer.impersonated);
         return tenants.open(childId);
       },
     };
@@ -794,6 +823,59 @@ describe('разрешение предъявителя и аренды', () => 
       expect(resolved.child.id).toBe(alpha.childId);
       expect(resolved.bearer.impersonation?.adminId).toBe(adminId);
       expect(tenants.opened).toEqual([alpha.childId]);
+      // Признак доезжает до реестра отдельным полем: вид у захода `browser`, и
+      // по одному ему реестр отдал бы пишущее соединение и разбудил бы прогрев.
+      expect(tenants.kinds).toEqual(['browser']);
+      expect(tenants.impersonated).toEqual([true]);
+    });
+
+    // Заход оператора — не «ребёнок вернулся за экран». Отметка активности
+    // ставит его в очередь прогрева и держит там, пока он «за экраном»: обход
+    // диспетчера начинался бы с семьи, в которую оператор просто заглянул.
+    it('не двигает ни отметку активности ребёнка, ни сессию целевого родителя', () => {
+      const alpha = family('alpha');
+      const { adminId } = operator();
+      const asChild = enter(adminId, alpha.childId, 'browser');
+      // Второй заход того же оператора погасил бы первый — берём его отдельным.
+      const asParent = enter(operator('второй@example.com').adminId, alpha.childId, 'parent');
+      const activityBefore = activityOf(alpha.childId);
+      const seenBefore = parentSeenOf(alpha.parentId);
+      const later = new Date(NOW.getTime() + 60_000);
+
+      for (const token of [asChild, asParent]) {
+        resolveTenant({
+          allow: ALLOW_ALL,
+          control,
+          tenants: counting(),
+          method: 'GET',
+          // Родительский заход называет ребёнка в адресе, как и обычный
+          // родитель: ребёнка у такого предъявителя своего нет.
+          childId: alpha.childId,
+          headers: cookies([IMPERSONATION_COOKIE, token]),
+          now: later,
+        });
+      }
+
+      expect(activityOf(alpha.childId)).toBe(activityBefore);
+      expect(parentSeenOf(alpha.parentId)).toBe(seenBefore);
+    });
+
+    // Тот же запрос от самого ребёнка отметку двигает: иначе проверка выше
+    // проходила бы и на предъявителе, который её вовсе не умеет ставить.
+    it('отметку активности по-прежнему двигает сам ребёнок', () => {
+      const alpha = family('alpha');
+      const before = activityOf(alpha.childId);
+
+      resolveTenant({
+        allow: ALLOW_ALL,
+        control,
+        tenants: counting(),
+        method: 'GET',
+        headers: cookies([CHILD_COOKIE, alpha.childToken]),
+        now: new Date(NOW.getTime() + 60_000),
+      });
+
+      expect(activityOf(alpha.childId)).not.toBe(before);
     });
 
     it('отказывает изменяющему запросу и не открывает базу', () => {
@@ -860,6 +942,7 @@ describe('разрешение предъявителя и аренды', () => 
 
       expect(resolved.bearer.impersonation).toBeUndefined();
       expect(tenants.opened).toEqual([alpha.childId]);
+      expect(tenants.impersonated).toEqual([false]);
     });
 
     it('не пускает заход к выведенному ребёнку и в семью отключённого родителя', () => {

@@ -451,14 +451,29 @@ export function authorizeChild(
 }
 
 /**
+ * Кто просит базу, в том объёме, в каком это важно реестру.
+ *
+ * `impersonated` — обязательное поле, а не необязательный аргумент: заход
+ * оператора приходит с видом `browser` (см. `resolveImpersonatedBearer`), и
+ * забытый на новом вызове признак молча вернул бы поведение «ребёнок вернулся
+ * за экран» — то есть и будильник прогрева, и пишущее соединение.
+ */
+export interface TenantRequester {
+  kind: BearerKind;
+  impersonated: boolean;
+}
+
+/**
  * Реестр в том объёме, в каком его знает допуск: открыть базу по `id`.
  *
- * Вид предъявителя передаётся вместе с `id` не ради самого открытия, а ради
- * будильника прогрева: «ребёнок вернулся» — это только `browser`. Опрос агента
- * активностью не считается ни в `children.last_activity_at`, ни здесь.
+ * Предъявитель передаётся вместе с `id` не ради самого открытия, а ради двух
+ * вещей: будильника прогрева («ребёнок вернулся» — это только `browser`, опрос
+ * агента активностью не считается ни в `children.last_activity_at`, ни здесь) и
+ * второго замка имперсонации, который подменяет соединение аренды своим, с
+ * `PRAGMA query_only = ON`.
  */
 export interface TenantOpener {
-  open(childId: string, bearer: BearerKind): Tenant;
+  open(childId: string, bearer: TenantRequester): Tenant;
 }
 
 /** Итог разрешения: кто пришёл, к какому ребёнку и с какой базой. */
@@ -519,7 +534,11 @@ export function resolveTenant(options: ResolveTenantOptions): ResolvedTenant {
   }
 
   const child = authorizeChild(options.control, bearer, options.childId);
-  return { bearer, child, tenant: openTenant(options.tenants, child.id, bearer.kind) };
+  const tenant = openTenant(options.tenants, child.id, {
+    kind: bearer.kind,
+    impersonated: bearer.impersonation !== undefined,
+  });
+  return { bearer, child, tenant };
 }
 
 /**
@@ -527,7 +546,7 @@ export function resolveTenant(options: ResolveTenantOptions): ResolvedTenant {
  * `not-serviceable` здесь — гонка с выводом ребёнка между проверкой и
  * открытием, и снаружи она обязана выглядеть так же, как чужой `id`.
  */
-function openTenant(tenants: TenantOpener, childId: string, bearer: BearerKind): Tenant {
+function openTenant(tenants: TenantOpener, childId: string, bearer: TenantRequester): Tenant {
   try {
     return tenants.open(childId, bearer);
   } catch (error) {
