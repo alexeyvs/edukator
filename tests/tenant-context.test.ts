@@ -6,17 +6,21 @@ import type { Database } from 'better-sqlite3';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { buildTopicGraph, type Topic, type TopicGraph } from '../server/curriculum.js';
 import {
+  createAdmin,
   createChild,
   createParent,
+  disableAdmin,
   issueDeviceInvite,
   issueParentInvite,
+  loginAdmin,
   redeemDeviceInvite,
   redeemParentInvite,
   openControlDatabase,
+  setAdminPassword,
   setParentPin,
 } from '../server/control-db.js';
 import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
-import { CHILD_COOKIE, PARENT_COOKIE } from '../server/auth.js';
+import { ADMIN_COOKIE, CHILD_COOKIE, PARENT_COOKIE } from '../server/auth.js';
 import { TenantRegistry } from '../server/tenant-registry.js';
 import { hashParentPin } from '../server/parent-pin.js';
 import { registerBossRoutes } from '../server/routes/boss.js';
@@ -28,10 +32,17 @@ import { registerRunRoutes } from '../server/routes/run.js';
 import { registerSessionRoutes } from '../server/routes/session.js';
 import { registerTriageRoutes } from '../server/routes/triage.js';
 import { registerIntegrityRoutes } from '../server/routes/integrity.js';
-import { createTenantContext, failAuth } from '../server/routes/tenant-context.js';
+import {
+  ROUTE_ACCESS,
+  createAdminContext,
+  createTenantContext,
+  failAuth,
+} from '../server/routes/tenant-context.js';
 
 const NOW = new Date('2026-08-19T09:00:00.000Z');
 const PASSWORD = 'пароль-подлиннее';
+/** Пароль оператора: `MIN_ADMIN_PASSWORD_LENGTH` — 16 знаков. */
+const ADMIN_PASSWORD = 'пароль-оператора-подлиннее';
 const PIN = '135790';
 const PEPPER = 'серверный-pepper-подлиннее';
 
@@ -59,7 +70,7 @@ interface Injected {
 }
 
 /** Вид предъявителя вместе с заголовками, которыми он представляется. */
-type BearerName = 'parent' | 'browser' | 'agent' | 'anonymous';
+type BearerName = 'parent' | 'browser' | 'agent' | 'admin' | 'anonymous';
 
 describe('контекст арендатора', () => {
   let dir: string;
@@ -69,6 +80,7 @@ describe('контекст арендатора', () => {
   let app: FastifyInstance;
   let childId: string;
   let otherChildId: string;
+  let adminId: string;
   let headers: Record<BearerName, Record<string, string>>;
   /** Всё, что маршруты действительно зарегистрировали: таблица ниже сверяется с этим. */
   const registered: { method: string; url: string }[] = [];
@@ -98,10 +110,16 @@ describe('контекст арендатора', () => {
     otherChildId = createChild(control, parentId, 'Второй', NOW);
     provisionChildDatabase(control, otherChildId, dir);
 
+    adminId = createAdmin(control, 'оператор@example.com', NOW);
+    setAdminPassword(control, adminId, ADMIN_PASSWORD, NOW);
+    const login = loginAdmin(control, 'оператор@example.com', ADMIN_PASSWORD, NOW);
+    if (!login.ok) throw new Error(`оператор не вошёл: ${login.reason}`);
+
     headers = {
       parent: { ...SAME_ORIGIN, cookie: `${PARENT_COOKIE}=${redeemed.session.token}` },
       browser: { ...SAME_ORIGIN, cookie: `${CHILD_COOKIE}=${claim('browser')}` },
       agent: { ...SAME_ORIGIN, authorization: `Bearer ${claim('agent')}` },
+      admin: { ...SAME_ORIGIN, cookie: `${ADMIN_COOKIE}=${login.session.token}` },
       anonymous: { ...SAME_ORIGIN },
     };
 
@@ -282,6 +300,35 @@ describe('контекст арендатора', () => {
       });
     }
 
+    // Строка оператора добавлена рядом с тремя прежними, а не внутрь них.
+    // Пополнение любой из трёх значением `admin` открыло бы cookie оператора
+    // прямой доступ к чужой семье мимо обоих замков имперсонации, и заметить
+    // это по маршрутам было бы уже поздно.
+    it('держит `admin` единственной строкой оператора', () => {
+      expect(ROUTE_ACCESS.admin).toEqual(['admin']);
+      expect(ROUTE_ACCESS.child).toEqual(['browser']);
+      expect(ROUTE_ACCESS.gate).toEqual(['browser', 'agent']);
+      expect(ROUTE_ACCESS.dashboard).toEqual(['parent', 'browser']);
+      for (const [group, allow] of Object.entries(ROUTE_ACCESS)) {
+        if (group === 'admin') continue;
+        expect(allow).not.toContain('admin');
+      }
+    });
+
+    it('не пускает cookie оператора ни на один существующий маршрут', async () => {
+      for (const route of ROUTES) {
+        const response = await app.inject({
+          method: route.method,
+          url: fill(route.url),
+          headers: headers.admin,
+          ...(route.method === 'GET' ? {} : { payload: {} }),
+        });
+        // Ровно 401: `resolveBearer` про админскую cookie не знает вовсе, то
+        // есть предъявителя нет — а не «есть, но не тот».
+        expect([route.url, response.statusCode]).toEqual([route.url, 401]);
+      }
+    });
+
     it('не пускает никуда без предъявителя', async () => {
       for (const url of ['/api/profile', '/api/gate/status', `/api/parents/${childId}`]) {
         expect((await get(url, 'anonymous')).statusCode).toBe(401);
@@ -308,6 +355,158 @@ describe('контекст арендатора', () => {
     it('пускает родителя в сводку каждого своего ребёнка', async () => {
       expect((await get(`/api/parents/${childId}`, 'parent')).statusCode).toBe(200);
       expect((await get(`/api/parents/${otherChildId}`, 'parent')).statusCode).toBe(200);
+    });
+  });
+
+  describe('админский контекст', () => {
+    /**
+     * Пробный админский маршрут: настоящие появятся в задаче 5, а проверять
+     * `createAdminContext` надо уже сейчас — и именно через Fastify, потому что
+     * его смысл в переводе заголовков запроса в предъявителя.
+     */
+    async function adminApp(): Promise<FastifyInstance> {
+      const context = createAdminContext({ control, now: () => NOW });
+      const own = Fastify();
+      own.get('/api/admin/проба', async (request, reply) => {
+        try {
+          return { adminId: context(request, { allow: ROUTE_ACCESS.admin }).admin.adminId };
+        } catch (error) {
+          return failAuth(reply, error);
+        }
+      });
+      own.post('/api/admin/проба', async (request, reply) => {
+        try {
+          return { adminId: context(request, { allow: ROUTE_ACCESS.admin }).admin.adminId };
+        } catch (error) {
+          return failAuth(reply, error);
+        }
+      });
+      await own.ready();
+      return own;
+    }
+
+    it('пускает оператора и не пускает остальных', async () => {
+      const own = await adminApp();
+      try {
+        const ok = await own.inject({
+          method: 'GET',
+          url: '/api/admin/проба',
+          headers: headers.admin,
+        });
+        expect(ok.statusCode).toBe(200);
+        expect(ok.json()).toEqual({ adminId });
+
+        for (const bearer of ['parent', 'browser', 'agent', 'anonymous'] as const) {
+          const response = await own.inject({
+            method: 'GET',
+            url: '/api/admin/проба',
+            headers: headers[bearer],
+          });
+          expect([bearer, response.statusCode]).toEqual([bearer, 401]);
+          expect(response.json()).toEqual({ error: 'Нужно войти' });
+        }
+      } finally {
+        await own.close();
+      }
+    });
+
+    it('не пускает отключённого оператора', async () => {
+      const own = await adminApp();
+      try {
+        disableAdmin(control, adminId, NOW);
+        const response = await own.inject({
+          method: 'GET',
+          url: '/api/admin/проба',
+          headers: headers.admin,
+        });
+        expect(response.statusCode).toBe(401);
+      } finally {
+        await own.close();
+      }
+    });
+
+    it('требует подтверждённого источника у изменяющего админского запроса', async () => {
+      const own = await adminApp();
+      try {
+        const blind = await own.inject({
+          method: 'POST',
+          url: '/api/admin/проба',
+          headers: { cookie: headers.admin['cookie'] ?? '', origin: 'https://чужой.example' },
+        });
+        expect(blind.statusCode).toBe(403);
+        expect(blind.json()).toEqual({ error: 'Запрос пришёл не со страницы приложения' });
+
+        const same = await own.inject({
+          method: 'POST',
+          url: '/api/admin/проба',
+          headers: headers.admin,
+        });
+        expect(same.statusCode).toBe(200);
+      } finally {
+        await own.close();
+      }
+    });
+
+    // `mutating` поднимает до изменяющего и безопасный по методу запрос: у
+    // админки такими будут выдачи, списывающие что-то на стороне оператора.
+    it('требует источник и у безопасного метода, помеченного изменяющим', async () => {
+      const context = createAdminContext({ control, now: () => NOW });
+      const own = Fastify();
+      own.get('/api/admin/проба', async (request, reply) => {
+        try {
+          return {
+            adminId: context(request, { allow: ROUTE_ACCESS.admin, mutating: true }).admin.adminId,
+          };
+        } catch (error) {
+          return failAuth(reply, error);
+        }
+      });
+      await own.ready();
+      try {
+        const blind = await own.inject({
+          method: 'GET',
+          url: '/api/admin/проба',
+          headers: { cookie: headers.admin['cookie'] ?? '' },
+        });
+        expect(blind.statusCode).toBe(403);
+        expect(blind.json()).toEqual({ error: 'Запрос пришёл не со страницы приложения' });
+
+        const same = await own.inject({
+          method: 'GET',
+          url: '/api/admin/проба',
+          headers: headers.admin,
+        });
+        expect(same.statusCode).toBe(200);
+      } finally {
+        await own.close();
+      }
+    });
+
+    it('берёт время сам, когда его не подменили', async () => {
+      // Сессия заводится настоящим временем: сроки бездействия и потолка
+      // считаются от него же, и выданная на `NOW` cookie здесь уже просрочена.
+      const fresh = loginAdmin(control, 'оператор@example.com', ADMIN_PASSWORD);
+      if (!fresh.ok) throw new Error(`оператор не вошёл: ${fresh.reason}`);
+      const context = createAdminContext({ control });
+      const own = Fastify();
+      own.get('/api/admin/проба', async (request, reply) => {
+        try {
+          return { adminId: context(request, { allow: ROUTE_ACCESS.admin }).admin.adminId };
+        } catch (error) {
+          return failAuth(reply, error);
+        }
+      });
+      await own.ready();
+      try {
+        const response = await own.inject({
+          method: 'GET',
+          url: '/api/admin/проба',
+          headers: { ...SAME_ORIGIN, cookie: `${ADMIN_COOKIE}=${fresh.session.token}` },
+        });
+        expect(response.statusCode).toBe(200);
+      } finally {
+        await own.close();
+      }
     });
   });
 

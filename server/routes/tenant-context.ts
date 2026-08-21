@@ -17,7 +17,9 @@ import {
   AUTH_MESSAGE,
   AUTH_STATUS,
   AuthError,
+  resolveAdmin,
   resolveTenant,
+  type AdminBearer,
   type BearerKind,
   type ResolvedTenant,
   type TenantOpener,
@@ -67,11 +69,17 @@ export type TenantContextResolver = (
  * (см. `server/routes/parents.ts`) — но у родительской сессии он не
  * спрашивается: PIN подтверждает родителя за детской машиной, а вошедший
  * родитель уже подтверждён паролем.
+ *
+ * `admin` — единственная строка оператора, и ни одна из трёх остальных им не
+ * пополняется: оператор смотрит чужие семьи только имперсонацией, а прямой
+ * допуск его cookie к детским и родительским маршрутам означал бы обход обоих
+ * замков на запись.
  */
 export const ROUTE_ACCESS = {
   child: ['browser'],
   gate: ['browser', 'agent'],
   dashboard: ['parent', 'browser'],
+  admin: ['admin'],
 } as const satisfies Record<string, readonly BearerKind[]>;
 
 /** Отвечает на отказ допуска. Чужие ошибки пролетают наверх пятисоткой. */
@@ -105,6 +113,48 @@ export function createTenantContext(options: CreateTenantContextOptions): Tenant
       now: now(),
       allow: context.allow,
       ...(context.childId === undefined ? {} : { childId: context.childId }),
+      ...(context.mutating === undefined ? {} : { mutating: context.mutating }),
+    });
+}
+
+/** Кто пришёл в админку. Аренды здесь нет: ребёнка админский маршрут не называет. */
+export type AdminContext = AdminBearer;
+
+/** Что админский маршрут знает о допуске. Ребёнка в этих опциях нет намеренно. */
+export interface AdminContextOptions {
+  /** Кого пускать. Обязательно, как и у аренды: забытый `allow` иначе открывал бы маршрут молча. */
+  allow: readonly BearerKind[];
+  /** Маршрут меняет состояние, хотя метод у него безопасный. */
+  mutating?: boolean;
+}
+
+/** Разрешение админского запроса. Бросает `AuthError`: его отображает `failAuth`. */
+export type AdminContextResolver = (
+  request: FastifyRequest,
+  options: AdminContextOptions,
+) => AdminContext;
+
+export interface CreateAdminContextOptions {
+  /** Управляющая база: в ней живут операторы и их сессии. */
+  control: Database.Database;
+  now?: () => Date;
+}
+
+/**
+ * Рабочее разрешение оператора. Отдельный резолвер, а не ветка в
+ * `createTenantContext`: реестра детских баз админским маршрутам не нужно
+ * вовсе, и передача его сюда обязывала бы админку работать только тогда, когда
+ * с детскими базами всё в порядке.
+ */
+export function createAdminContext(options: CreateAdminContextOptions): AdminContextResolver {
+  const now = options.now ?? ((): Date => new Date());
+  return (request, context) =>
+    resolveAdmin({
+      control: options.control,
+      headers: request.headers,
+      method: request.method,
+      now: now(),
+      allow: context.allow,
       ...(context.mutating === undefined ? {} : { mutating: context.mutating }),
     });
 }

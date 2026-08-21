@@ -1,8 +1,10 @@
 /**
  * Разрешение предъявителя запроса и его аренды.
  *
- * Предъявителей ровно три: `parent` (cookie родительской сессии), `browser`
- * (cookie детского устройства) и `agent` (токен заголовком). Агент — **не**
+ * Предъявителей четыре: `parent` (cookie родительской сессии), `browser`
+ * (cookie детского устройства), `agent` (токен заголовком) и `admin` (cookie
+ * оператора). Первые три ходят в аренду, четвёртый — мимо неё: у админских
+ * маршрутов ребёнка нет вовсе, и разбирает их отдельный `resolveAdmin`. Агент — **не**
  * детская сессия: за ним стоит контроллер доступа к компьютеру, которому нужен
  * один read-only маршрут, и допуск его к обычным детским маршрутам означал бы,
  * что токен из файла настройки на детской машине умеет сдавать ответы.
@@ -18,8 +20,10 @@ import {
   CHILD_ID_PATTERN,
   isChildServiceable,
   readChild,
+  resolveAdminSession,
   resolveChildDevice,
   resolveParentSession,
+  type AdminPrincipal,
   type ChildPrincipal,
   type ChildSummary,
   type ParentPrincipal,
@@ -40,6 +44,13 @@ export const CHILD_COOKIE = '__Host-edu_child';
 export const ACTOR_COOKIE = '__Host-edu_actor';
 
 /**
+ * Имя cookie сессии оператора. Тот же префикс `__Host-` и по той же причине.
+ * Отдельное имя, а не общее с родительским: одна cookie на две роли означала
+ * бы, что вход оператора выбрасывает его же родительский вход на той же машине.
+ */
+export const ADMIN_COOKIE = '__Host-edu_admin';
+
+/**
  * Заголовок агентского токена. Схема `Bearer`, а не cookie: контроллер ходит из
  * Python, cookie ему не нужны, а заголовок к тому же не досылается браузером
  * автоматически — то есть с чужой страницы агентом не притвориться.
@@ -51,7 +62,7 @@ const AGENT_SCHEME = 'bearer';
 /** Методы, которые ничего не меняют: с них проверка источника не спрашивается. */
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
-export type BearerKind = 'parent' | 'browser' | 'agent';
+export type BearerKind = 'parent' | 'browser' | 'agent' | 'admin';
 
 /** Предъявитель запроса. Родитель приходит без ребёнка, устройство — со своим. */
 export type Bearer =
@@ -234,6 +245,28 @@ export function resolveBrowserPrincipals(
   return result;
 }
 
+/** Предъявитель админки. Ребёнка он не называет: аренды у его маршрутов нет. */
+export interface AdminBearer {
+  kind: 'admin';
+  admin: AdminPrincipal;
+}
+
+/**
+ * Разрешает cookie оператора. Смотрит **только** `__Host-edu_admin`: ни детская,
+ * ни родительская cookie здесь не участвуют, и приоритета между ними нет —
+ * админка живёт рядом с обычным приложением, а не вместо него.
+ */
+export function resolveAdminBearer(
+  control: Database.Database,
+  headers: RequestHeaders,
+  now: Date = new Date(),
+): AdminBearer | undefined {
+  const token = parseCookies(headerValue(headers, 'cookie')).get(ADMIN_COOKIE);
+  if (token === undefined) return undefined;
+  const admin = resolveAdminSession(control, token, now);
+  return admin === undefined ? undefined : { kind: 'admin', admin };
+}
+
 /** Меняет ли запрос состояние. От этого зависит проверка источника. */
 export function isMutating(method: string): boolean {
   return !SAFE_METHODS.has(method.toUpperCase());
@@ -412,4 +445,39 @@ function openTenant(tenants: TenantOpener, childId: string, bearer: BearerKind):
     }
     throw new AuthError(error.code, error.message);
   }
+}
+
+export interface ResolveAdminOptions {
+  control: Database.Database;
+  headers: RequestHeaders;
+  method: string;
+  /**
+   * Кого пускать. Поле обязательное по той же причине, что и у аренды: строка
+   * матрицы у маршрута должна быть выписана, а не подразумеваться.
+   */
+  allow: readonly BearerKind[];
+  /** Маршрут меняет состояние независимо от метода. */
+  mutating?: boolean;
+  now?: Date;
+}
+
+/**
+ * Полный путь допуска оператора: источник → предъявитель. Аренды в нём нет
+ * вовсе, и `resolveTenant` админским маршрутам не нужен: приоритет
+ * имперсонации иначе возвращал бы на `/api/admin/*` предъявителя целевой
+ * семьи, и админка отказывала бы ровно тогда, когда оператор в имперсонации и
+ * хочет из неё выйти.
+ *
+ * Проверка источника идёт первой и здесь: разбор сессии подновляет
+ * `last_seen_at`, то есть пишет, и чужая страница не должна уметь заставить нас
+ * это сделать.
+ */
+export function resolveAdmin(options: ResolveAdminOptions): AdminBearer {
+  assertSameOrigin(options.method, options.headers, options.mutating === true);
+  if (!options.allow.includes('admin')) {
+    throw new AuthError('forbidden', 'Маршрут не открыт оператору');
+  }
+  const bearer = resolveAdminBearer(options.control, options.headers, options.now ?? new Date());
+  if (bearer === undefined) throw new AuthError('unauthenticated', 'Оператор не разобран');
+  return bearer;
 }

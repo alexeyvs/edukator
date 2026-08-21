@@ -5,15 +5,20 @@ import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import { buildTopicGraph, type Topic, type TopicGraph } from '../server/curriculum.js';
 import {
+  createAdmin,
   createChild,
   createParent,
+  disableAdmin,
+  hashToken,
   issueDeviceInvite,
   issueParentInvite,
+  loginAdmin,
   redeemDeviceInvite,
   redeemParentInvite,
   retireChild,
   revokeDevice,
   openControlDatabase,
+  setAdminPassword,
 } from '../server/control-db.js';
 import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
 import { TenantError, TenantRegistry, type Tenant } from '../server/tenant-registry.js';
@@ -23,6 +28,7 @@ import {
   AuthError,
   AGENT_HEADER,
   ACTOR_COOKIE,
+  ADMIN_COOKIE,
   CHILD_COOKIE,
   PARENT_COOKIE,
   assertSameOrigin,
@@ -32,6 +38,8 @@ import {
   isSameOrigin,
   parseCookies,
   readAgentToken,
+  resolveAdmin,
+  resolveAdminBearer,
   resolveBearer,
   resolveTenant,
   type Bearer,
@@ -536,10 +544,145 @@ describe('разрешение предъявителя и аренды', () => 
     });
   });
 
+  describe('предъявитель админки', () => {
+    /** Пароль оператора длиннее родительского: `MIN_ADMIN_PASSWORD_LENGTH` — 16. */
+    const ADMIN_PASSWORD = 'пароль-оператора-подлиннее';
+    /** Допуск админского маршрута. Ровно `ROUTE_ACCESS.admin`, выписанный руками. */
+    const ALLOW_ADMIN: readonly BearerKind[] = ['admin'];
+
+    /** Заводит оператора с паролем и возвращает его `id` и токен свежей сессии. */
+    function operator(email = 'оператор@example.com'): { adminId: string; token: string } {
+      const adminId = createAdmin(control, email);
+      setAdminPassword(control, adminId, ADMIN_PASSWORD);
+      const login = loginAdmin(control, email, ADMIN_PASSWORD);
+      if (!login.ok) throw new Error(`оператор ${email} не вошёл: ${login.reason}`);
+      return { adminId, token: login.session.token };
+    }
+
+    it('разбирает cookie оператора в предъявителя', () => {
+      const { adminId, token } = operator();
+      // Имя cookie вписано руками: это межмодульный инвариант с клиентом.
+      expect(ADMIN_COOKIE).toBe('__Host-edu_admin');
+
+      const bearer = resolveAdminBearer(control, cookies([ADMIN_COOKIE, token]));
+
+      expect(bearer).toEqual({ kind: 'admin', admin: { adminId, email: 'оператор@example.com' } });
+    });
+
+    it('не считает оператором ни родительскую, ни детскую cookie', () => {
+      const alpha = family('alpha');
+      operator();
+
+      expect(resolveAdminBearer(control, cookies([PARENT_COOKIE, alpha.parentToken]))).toBeUndefined();
+      expect(resolveAdminBearer(control, cookies([CHILD_COOKIE, alpha.childToken]))).toBeUndefined();
+      expect(
+        catchAuth(() =>
+          resolveAdmin({
+            control,
+            method: 'GET',
+            headers: cookies([PARENT_COOKIE, alpha.parentToken]),
+            allow: ALLOW_ADMIN,
+          }),
+        ).code,
+      ).toBe('unauthenticated');
+    });
+
+    // Обратная сторона того же: админская cookie не должна давать доступа к
+    // детским и родительским маршрутам — их допуск разбирает `resolveBearer`.
+    it('не превращает cookie оператора в детского или родительского предъявителя', () => {
+      const { token } = operator();
+
+      expect(resolveBearer(control, cookies([ADMIN_COOKIE, token]))).toBeUndefined();
+    });
+
+    it('не пускает без cookie вовсе', () => {
+      const error = catchAuth(() =>
+        resolveAdmin({ control, method: 'GET', headers: SAME_ORIGIN, allow: ALLOW_ADMIN }),
+      );
+
+      expect(error.code).toBe('unauthenticated');
+      expect(AUTH_STATUS[error.code]).toBe(401);
+    });
+
+    it('не пускает отключённого оператора: сессию гасит тот же признак', () => {
+      const { adminId, token } = operator();
+      disableAdmin(control, adminId);
+
+      expect(
+        catchAuth(() =>
+          resolveAdmin({
+            control,
+            method: 'GET',
+            headers: cookies([ADMIN_COOKIE, token]),
+            allow: ALLOW_ADMIN,
+          }),
+        ).code,
+      ).toBe('unauthenticated');
+    });
+
+    it('не пускает оператора туда, где его нет в строке матрицы', () => {
+      const { token } = operator();
+
+      const error = catchAuth(() =>
+        resolveAdmin({
+          control,
+          method: 'GET',
+          headers: cookies([ADMIN_COOKIE, token]),
+          allow: ALLOW_ALL,
+        }),
+      );
+
+      expect(error.code).toBe('forbidden');
+    });
+
+    // Проверка источника идёт до разбора сессии: разбор подновляет
+    // `last_seen_at`, то есть пишет, и чужая страница не должна уметь заставить
+    // нас это сделать.
+    it('отказывает изменяющему запросу без подтверждённого источника, не тронув сессию', () => {
+      const { token } = operator();
+      const before = lastSeen(token);
+      expect(before).toBeDefined();
+
+      const error = catchAuth(() =>
+        resolveAdmin({
+          control,
+          method: 'POST',
+          headers: { host: HOST, origin: 'https://чужой.example', cookie: `${ADMIN_COOKIE}=${token}` },
+          allow: ALLOW_ADMIN,
+        }),
+      );
+
+      expect(error.code).toBe('cross-origin');
+      expect(lastSeen(token)).toBe(before);
+    });
+
+    it('пропускает изменяющий запрос со своей же страницы', () => {
+      const { adminId, token } = operator();
+
+      const bearer = resolveAdmin({
+        control,
+        method: 'POST',
+        headers: cookies([ADMIN_COOKIE, token]),
+        allow: ALLOW_ADMIN,
+      });
+
+      expect(bearer.admin.adminId).toBe(adminId);
+    });
+  });
+
   function bearerOf(headers: RequestHeaders): Bearer {
     const bearer = resolveBearer(control, headers);
     if (bearer === undefined) throw new Error('предъявитель не разобран');
     return bearer;
+  }
+
+  /** Отметка подновления сессии оператора: по ней видно, читали ли её вовсе. */
+  function lastSeen(token: string): string | undefined {
+    return control
+      .prepare<[string], { last_seen_at: string }>(
+        'SELECT last_seen_at FROM admin_sessions WHERE token_hash = ?',
+      )
+      .get(hashToken(token))?.last_seen_at;
   }
 
   function lastActivity(childId: string): string | null {
