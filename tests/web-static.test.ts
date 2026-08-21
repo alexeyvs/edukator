@@ -43,11 +43,20 @@ describe('статика интерфейса', () => {
   it('отдаёт страницу приложения по каждому пользовательскому адресу', async () => {
     app = buildServer(undefined, { dataDir, worker: false, webDist });
 
-    expect(APP_PAGES).toEqual(['/', '/parents', '/admin', '/join/:token', '/invite/:token']);
+    expect(APP_PAGES).toEqual([
+      '/',
+      '/parents',
+      '/admin',
+      '/admin/child/:childId',
+      '/join/:token',
+      '/invite/:token',
+    ]);
     for (const page of APP_PAGES) {
       // Шаблон адреса превращается в настоящий: токен — часть пути, и именно по
       // такому адресу ребёнок открывает приложение.
-      const url = page.replace(':token', 'токен-приглашения');
+      const url = page
+        .replace(':token', 'токен-приглашения')
+        .replace(':childId', 'a1b2c3d4');
       const response = await app.inject({ method: 'GET', url });
 
       expect(response.statusCode, url).toBe(200);

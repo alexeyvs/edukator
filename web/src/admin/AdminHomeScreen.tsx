@@ -96,10 +96,13 @@ function Numbers({ overview }: { overview: AdminOverview }) {
 
 function Family({
   family,
+  onChild,
   onEnter,
   entering,
 }: {
   family: AdminFamily;
+  /** Открыть карточку ребёнка: слой 3 читает только его базу. */
+  onChild?: (childId: string) => void;
   onEnter: (childId: string, role: AdminImpersonationRole) => void;
   /** Ребёнок, заход к которому уже начат: две нажатые кнопки — два захода. */
   entering: string | null;
@@ -121,6 +124,13 @@ function Family({
                   <small>{STATUS_NAMES[child.status]} · {childState(child)}</small>
                 </div>
                 <code>{child.childId}</code>
+                {/* Карточка предлагается любому: у застрявшего заведения она и
+                    нужнее всего — она называет причину, по которой базы нет. */}
+                {onChild !== undefined && (
+                  <button type="button" onClick={() => onChild(child.childId)}>
+                    Карточка
+                  </button>
+                )}
                 {/* Заход предлагается только готовому ребёнку: у застрявшего
                     заведения базы ещё нет вовсе, и заход в него кончился бы
                     отказом на первом же экране. */}
@@ -163,6 +173,10 @@ export interface AdminHomeScreenProps {
   email?: string;
   /** Перейти к ленте аварий: второй экран админки выбирает корень, а не сводка. */
   onLogs?: () => void;
+  /** Перейти к статистике: слой 2 обходит все детские базы и потому не здесь. */
+  onStats?: () => void;
+  /** Открыть карточку ребёнка: слой 3 живёт своим адресом. */
+  onChild?: (childId: string) => void;
   /** Сессии оператора больше нет: решение показать вход принимает корень. */
   onSignedOut: (reason: AdminSignOutReason) => void;
   /**
@@ -183,7 +197,9 @@ export interface AdminHomeScreenProps {
 export function AdminHomeScreen({
   api = browserAdminApi,
   email,
+  onChild,
   onLogs,
+  onStats,
   onSignedOut,
   onEntered = (): void => { window.location.assign('/'); },
 }: AdminHomeScreenProps) {
@@ -277,6 +293,9 @@ export function AdminHomeScreen({
           <span>Админка оператора</span>
           <strong>{email ?? 'Оператор'}</strong>
         </div>
+        {onStats !== undefined && (
+          <button className="admin-header-link" type="button" onClick={onStats}>Статистика</button>
+        )}
         {onLogs !== undefined && (
           <button className="admin-header-link" type="button" onClick={onLogs}>Аварии</button>
         )}
@@ -323,7 +342,13 @@ export function AdminHomeScreen({
         {overview.families.length === 0
           ? <p className="admin-empty">Ни одной семьи не заведено</p>
           : overview.families.map((family) => (
-            <Family key={family.parentId} entering={entering} family={family} onEnter={enter} />
+            <Family
+              key={family.parentId}
+              entering={entering}
+              family={family}
+              onEnter={enter}
+              {...(onChild === undefined ? {} : { onChild })}
+            />
           ))}
       </section>
     </main>

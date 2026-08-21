@@ -142,6 +142,194 @@ export interface AdminLogQuery {
   before?: string;
 }
 
+/** Предмет: те же два слова, что и у сервера. */
+export type AdminSubject = 'math' | 'russian';
+
+export interface AdminActiveTime {
+  total: number;
+  last7Days: number;
+  today: number;
+}
+
+export interface AdminBossCounts {
+  won: number;
+  lost: number;
+  failed: number;
+  live: number;
+}
+
+export interface AdminIntegrityCounts {
+  reviews: number;
+  needsRetry: number;
+  retryItems: number;
+}
+
+export interface AdminDisputeCounts {
+  total: number;
+  upheld: number;
+  rejected: number;
+  open: number;
+}
+
+export interface AdminEngagement {
+  activeToday: number;
+  active7Days: number;
+  active30Days: number;
+  activeMsTotal: number;
+  activeMs7Days: number;
+  streaks: { withCurrent: number; longestCurrent: number; longestEver: number };
+  churned: number;
+  churnByWeek: Array<{ week: number; children: number }>;
+}
+
+export interface AdminLearningPicture {
+  finishedRuns: number;
+  answers: number;
+  correct: number;
+  /** Доли нет, пока нет ни одного ответа: ноль означал бы «все мимо». */
+  accuracy?: number;
+  mastery: Array<{ subject: AdminSubject; average: number; topics: number; children: number }>;
+  calibrated: Array<{ subject: AdminSubject; children: number }>;
+  boss: AdminBossCounts;
+  integrity: AdminIntegrityCounts;
+  disputes: AdminDisputeCounts & { upheldShare?: number };
+}
+
+export interface AdminContentQuality {
+  codexCalls: number;
+  tasksAdded: number;
+  callsPerTask?: number;
+  emptyBanks: Array<{ topicId: string; children: number }>;
+  worstTopics: Array<{ topicId: string; answers: number; correct: number; accuracy: number }>;
+}
+
+/** Строка ребёнка в отчёте слоя 2: список семей на первом экране этих чисел не знает. */
+export interface AdminChildStats {
+  childId: string;
+  schemaVersion: number;
+  createdAt: string;
+  lastAttemptAt?: string;
+  activeMs: AdminActiveTime;
+  finishedRuns: number;
+  answers: number;
+  correct: number;
+  streak: { current: number; best: number };
+  bank: {
+    valid: number;
+    pending: number;
+    rejected: number;
+    used: number;
+    reserved: number;
+    addedToday: number;
+  };
+  emptyBankTopics: string[];
+}
+
+/** База, до которой обход не добрался: схема не той версии либо файл не открылся. */
+export interface AdminSkippedDatabase {
+  childId: string;
+  schemaVersion: number;
+}
+
+/** Слой 2: обход всех детских баз с отметкой времени и признаком неполноты. */
+export interface AdminStats {
+  generatedAt: string;
+  day: string;
+  engagement: AdminEngagement;
+  learning: AdminLearningPicture;
+  content: AdminContentQuality;
+  children: AdminChildStats[];
+  stale: AdminSkippedDatabase[];
+  failed: Array<{ childId: string; reason: string }>;
+  skipped: Array<{ childId: string; reason: string }>;
+  /** Часть баз не прочитана: числа считаны не по всем детям. */
+  partial: boolean;
+}
+
+/** Банк и прогресс по одной теме в карточке ребёнка. */
+export interface AdminTopicCard {
+  topicId: string;
+  title?: string;
+  subject?: AdminSubject;
+  mastery: number;
+  attempts: number;
+  closedAt?: string;
+  bank: { valid: number; pending: number; rejected: number; used: number; reserved: number };
+}
+
+export interface AdminMaterialCard {
+  id: number;
+  topicId: string;
+  subject: AdminSubject;
+  status: string;
+  createdAt: string;
+  readyAt?: string;
+  openedAt?: string;
+  finishedAt?: string;
+  tasks: number;
+  runs: number;
+}
+
+export interface AdminDisputeCard {
+  id: number;
+  attemptId: number;
+  topicId: string;
+  status: 'open' | 'upheld' | 'rejected';
+  createdAt: string;
+  resolvedAt?: string;
+}
+
+export interface AdminBossCard {
+  id: number;
+  topicId: string;
+  status: string;
+  createdAt: string;
+  activatedAt?: string;
+  finishedAt?: string;
+  tasks: number;
+}
+
+/** Состояние дневного доступа: то же, что видит родитель у себя в сводке. */
+export interface AdminGateState {
+  day: string;
+  required: number;
+  completed: number;
+  remaining: number;
+  learning: { materialId: number | null; required: boolean; passed: boolean };
+  automaticUnlocked: boolean;
+  override: { mode: 'blocked' | 'unlocked'; changedAt: string; expiresAt: string } | null;
+  unlocked: boolean;
+}
+
+/** Что известно о ребёнке из управляющей базы: оно есть и тогда, когда базы нет. */
+export interface AdminChildCard {
+  generatedAt: string;
+  childId: string;
+  parentId: string;
+  name: string;
+  status: AdminChildStatus;
+  createdAt: string;
+  lastActivityAt?: string;
+  retiredAt?: string;
+}
+
+/**
+ * Слой 3: карточка одного ребёнка. Три состояния, и сводить их к одному нельзя —
+ * «база не читалась» и «в базе пусто» на экране обязаны различаться.
+ */
+export type AdminChildDetail =
+  | (AdminChildCard & {
+    state: 'read';
+    schemaVersion: number;
+    topics: AdminTopicCard[];
+    materials: AdminMaterialCard[];
+    disputes: AdminDisputeCard[];
+    bosses: AdminBossCard[];
+    gate: AdminGateState;
+  })
+  | (AdminChildCard & { state: 'stale'; schemaVersion: number })
+  | (AdminChildCard & { state: 'failed'; reason: string });
+
 /** Роль захода в чужую семью: то же слово, что и у сервера. */
 export type AdminImpersonationRole = 'browser' | 'parent';
 
@@ -157,6 +345,10 @@ export interface AdminApi {
   logout(): Promise<void>;
   overview(): Promise<AdminOverview>;
   logs(query?: AdminLogQuery): Promise<AdminLogPage>;
+  /** Слой 2. `refresh` заказывает пересчёт: без него отдаётся сохранённый отчёт. */
+  stats(refresh?: boolean): Promise<AdminStats>;
+  /** Слой 3: карточка названного ребёнка, без кеша — по жалобе смотрят «сейчас». */
+  child(childId: string): Promise<AdminChildDetail>;
   /** Зайти в чужую семью. Cookie захода ставится рядом с админской. */
   impersonate(childId: string, role: AdminImpersonationRole): Promise<AdminImpersonationStart>;
   /** Выйти из захода. Оператор остаётся вошедшим: админская cookie не трогается. */
@@ -190,6 +382,24 @@ export function adminLogsUrl(query: AdminLogQuery = {}): string {
   if (query.before !== undefined && query.before !== '') params.set('before', query.before);
   const search = params.toString();
   return search === '' ? '/api/admin/logs' : `/api/admin/logs?${search}`;
+}
+
+/**
+ * Адрес отчёта. Пересчёт заказывается ровно значением `1`: сервер сравнивает
+ * именно с ним, и `?refresh=0` пересчёта не даст — параметр должен либо быть
+ * заказом, либо отсутствовать.
+ */
+export function adminStatsUrl(refresh = false): string {
+  return refresh ? '/api/admin/stats?refresh=1' : '/api/admin/stats';
+}
+
+/**
+ * Адрес карточки. Идентификатор ребёнка уезжает сегментом пути и потому
+ * кодируется: чужой формат сервер отвергает `no-child`, но собрать из него
+ * адрес, который спрашивает не про того ребёнка, клиент не должен.
+ */
+export function adminChildUrl(childId: string): string {
+  return `/api/admin/children/${encodeURIComponent(childId)}`;
 }
 
 export const browserAdminApi: AdminApi = {
@@ -234,6 +444,20 @@ export const browserAdminApi: AdminApi = {
       ADMIN_POLICY,
     );
   },
+  stats: (refresh = false) => requestJson<AdminStats>(
+    adminStatsUrl(refresh),
+    undefined,
+    'Не получилось загрузить статистику',
+    adminError,
+    ADMIN_POLICY,
+  ),
+  child: (childId) => requestJson<AdminChildDetail>(
+    adminChildUrl(childId),
+    undefined,
+    'Не получилось загрузить карточку ребёнка',
+    adminError,
+    ADMIN_POLICY,
+  ),
   logs: (query = {}) => requestJson<AdminLogPage>(
     adminLogsUrl(query),
     undefined,

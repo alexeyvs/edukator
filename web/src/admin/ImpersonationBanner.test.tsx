@@ -30,6 +30,8 @@ function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
     logs: vi.fn().mockRejectedValue(new Error('журнал в этом тесте не нужен')),
     impersonate: vi.fn().mockRejectedValue(new Error('заход в этом тесте не начинается')),
     stopImpersonation: vi.fn().mockResolvedValue(undefined),
+    stats: vi.fn().mockRejectedValue(new Error('статистика в этом тесте не нужна')),
+    child: vi.fn().mockRejectedValue(new Error('карточка в этом тесте не нужна')),
     ...overrides,
   };
 }

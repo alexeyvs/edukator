@@ -583,11 +583,22 @@ describe('разрешение предъявителя и аренды', () => 
   /** Пароль оператора длиннее родительского: `MIN_ADMIN_PASSWORD_LENGTH` — 16. */
   const ADMIN_PASSWORD = 'пароль-оператора-подлиннее';
 
-  /** Заводит оператора с паролем и возвращает его `id` и токен свежей сессии. */
-  function operator(email = 'оператор@example.com'): { adminId: string; token: string } {
-    const adminId = createAdmin(control, email);
-    setAdminPassword(control, adminId, ADMIN_PASSWORD);
-    const login = loginAdmin(control, email, ADMIN_PASSWORD);
+  /**
+   * Заводит оператора с паролем и возвращает его `id` и токен свежей сессии.
+   *
+   * Часы передаются насквозь и по умолчанию настоящие. Смешивать их с
+   * зафиксированным `NOW` нельзя: `credentials_changed_at` гасит всё, что
+   * заведено раньше него, — и оператор, чей пароль поставлен «сейчас», отменял
+   * бы заход, начатый в `NOW`, ровно с того момента настоящих суток, когда
+   * настоящее время обгонит `NOW`.
+   */
+  function operator(
+    email = 'оператор@example.com',
+    now: Date = new Date(),
+  ): { adminId: string; token: string } {
+    const adminId = createAdmin(control, email, now);
+    setAdminPassword(control, adminId, ADMIN_PASSWORD, now);
+    const login = loginAdmin(control, email, ADMIN_PASSWORD, now);
     if (!login.ok) throw new Error(`оператор ${email} не вошёл: ${login.reason}`);
     return { adminId, token: login.session.token };
   }
@@ -722,12 +733,12 @@ describe('разрешение предъявителя и аренды', () => 
 
     it('отдаёт детского предъявителя целевой семьи, а не новый вид', () => {
       const alpha = family('alpha');
-      const { adminId } = operator();
+      const { adminId } = operator('оператор@example.com', NOW);
       // Имя cookie вписано руками: это межмодульный инвариант с клиентом.
       expect(IMPERSONATION_COOKIE).toBe('__Host-edu_impersonation');
       const token = enter(adminId, alpha.childId, 'browser');
 
-      const bearer = bearerOf(cookies([IMPERSONATION_COOKIE, token]));
+      const bearer = bearerOf(cookies([IMPERSONATION_COOKIE, token]), NOW);
 
       expect(bearer.kind).toBe('browser');
       // Отметка несёт всё, что рисует несъёмная полоса: адрес оператора, имя
@@ -749,10 +760,10 @@ describe('разрешение предъявителя и аренды', () => 
 
     it('отдаёт родительского предъявителя целевой семьи в роли `parent`', () => {
       const alpha = family('alpha');
-      const { adminId } = operator();
+      const { adminId } = operator('оператор@example.com', NOW);
       const token = enter(adminId, alpha.childId, 'parent');
 
-      const bearer = bearerOf(cookies([IMPERSONATION_COOKIE, token]));
+      const bearer = bearerOf(cookies([IMPERSONATION_COOKIE, token]), NOW);
 
       expect(bearer.kind).toBe('parent');
       if (bearer.kind !== 'parent') throw new Error('ожидался родительский предъявитель');
@@ -766,7 +777,7 @@ describe('разрешение предъявителя и аренды', () => 
     it('выигрывает у собственных cookie оператора', () => {
       const alpha = family('alpha');
       const beta = family('beta');
-      const { adminId } = operator();
+      const { adminId } = operator('оператор@example.com', NOW);
       const token = enter(adminId, alpha.childId, 'browser');
 
       const bearer = bearerOf(
@@ -776,6 +787,7 @@ describe('разрешение предъявителя и аренды', () => 
           [CHILD_COOKIE, beta.childToken],
           [ACTOR_COOKIE, 'parent'],
         ),
+        NOW,
       );
 
       if (bearer.kind !== 'browser') throw new Error('ожидался детский предъявитель');
@@ -785,7 +797,7 @@ describe('разрешение предъявителя и аренды', () => 
     it('не пускает истёкший заход: остаются собственные cookie оператора', () => {
       const alpha = family('alpha');
       const beta = family('beta');
-      const { adminId } = operator();
+      const { adminId } = operator('оператор@example.com', NOW);
       const token = enter(adminId, alpha.childId, 'browser');
       const late = new Date(NOW.getTime() + IMPERSONATION_TTL_MS);
 
@@ -803,7 +815,7 @@ describe('разрешение предъявителя и аренды', () => 
 
     it('не пускает закрытый заход', () => {
       const alpha = family('alpha');
-      const { adminId } = operator();
+      const { adminId } = operator('оператор@example.com', NOW);
       const token = enter(adminId, alpha.childId, 'browser');
       expect(revokeImpersonation(control, token, NOW)).toBe(true);
 
@@ -812,7 +824,7 @@ describe('разрешение предъявителя и аренды', () => 
 
     it('пропускает чтение чужой семьи и открывает её базу', () => {
       const alpha = family('alpha');
-      const { adminId } = operator();
+      const { adminId } = operator('оператор@example.com', NOW);
       const token = enter(adminId, alpha.childId, 'browser');
       const tenants = counting();
 
@@ -839,10 +851,10 @@ describe('разрешение предъявителя и аренды', () => 
     // диспетчера начинался бы с семьи, в которую оператор просто заглянул.
     it('не двигает ни отметку активности ребёнка, ни сессию целевого родителя', () => {
       const alpha = family('alpha');
-      const { adminId } = operator();
+      const { adminId } = operator('оператор@example.com', NOW);
       const asChild = enter(adminId, alpha.childId, 'browser');
       // Второй заход того же оператора погасил бы первый — берём его отдельным.
-      const asParent = enter(operator('второй@example.com').adminId, alpha.childId, 'parent');
+      const asParent = enter(operator('второй@example.com', NOW).adminId, alpha.childId, 'parent');
       const activityBefore = activityOf(alpha.childId);
       const seenBefore = parentSeenOf(alpha.parentId);
       const later = new Date(NOW.getTime() + 60_000);
@@ -885,7 +897,7 @@ describe('разрешение предъявителя и аренды', () => 
 
     it('отказывает изменяющему запросу и не открывает базу', () => {
       const alpha = family('alpha');
-      const { adminId } = operator();
+      const { adminId } = operator('оператор@example.com', NOW);
       const token = enter(adminId, alpha.childId, 'browser');
       const tenants = counting();
 
@@ -911,7 +923,7 @@ describe('разрешение предъявителя и аренды', () => 
     // оператора не имеет права жечь чужой банк.
     it('отказывает помеченному `mutating` безопасному по методу запросу', () => {
       const alpha = family('alpha');
-      const { adminId } = operator();
+      const { adminId } = operator('оператор@example.com', NOW);
       const token = enter(adminId, alpha.childId, 'browser');
       const tenants = counting();
 
@@ -935,7 +947,7 @@ describe('разрешение предъявителя и аренды', () => 
     // не помнит ничего, а запись `impersonation-end` обязана назвать число.
     it('сообщает об отказе тому, кто считает отказы', () => {
       const alpha = family('alpha');
-      const { adminId } = operator();
+      const { adminId } = operator('оператор@example.com', NOW);
       const token = enter(adminId, alpha.childId, 'browser');
       const refused: string[] = [];
 
@@ -988,10 +1000,10 @@ describe('разрешение предъявителя и аренды', () => 
     it('не пускает заход к выведенному ребёнку и в семью отключённого родителя', () => {
       const alpha = family('alpha');
       const beta = family('beta');
-      const { adminId } = operator();
+      const { adminId } = operator('оператор@example.com', NOW);
       const toAlpha = enter(adminId, alpha.childId, 'parent');
       // Второй заход того же оператора гасит первый — берём его отдельным.
-      const other = operator('второй@example.com');
+      const other = operator('второй@example.com', NOW);
       const toBeta = enter(other.adminId, beta.childId, 'browser');
 
       disableParent(control, alpha.parentId);
@@ -1002,8 +1014,8 @@ describe('разрешение предъявителя и аренды', () => 
     });
   });
 
-  function bearerOf(headers: RequestHeaders): Bearer {
-    const bearer = resolveBearer(control, headers);
+  function bearerOf(headers: RequestHeaders, now: Date = new Date()): Bearer {
+    const bearer = resolveBearer(control, headers, now);
     if (bearer === undefined) throw new Error('предъявитель не разобран');
     return bearer;
   }

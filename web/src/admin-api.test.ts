@@ -52,6 +52,25 @@ describe('адаптер админского API', () => {
     ]);
   });
 
+  it('собирает адреса статистики и карточки ребёнка', async () => {
+    const fetch = vi.fn().mockResolvedValue(response({}));
+    vi.stubGlobal('fetch', fetch);
+
+    await browserAdminApi.stats();
+    await browserAdminApi.stats(true);
+    await browserAdminApi.child('ребёнок-1');
+
+    expect(fetch.mock.calls).toEqual([
+      // Пересчёт заказывается ровно значением `1`: без параметра сервер отдаёт
+      // сохранённый отчёт, и `?refresh=0` пересчёта не даст.
+      ['/api/admin/stats'],
+      ['/api/admin/stats?refresh=1'],
+      // Идентификатор уезжает сегментом пути и потому кодируется: собрать из
+      // него адрес, который спрашивает не про того ребёнка, клиент не должен.
+      ['/api/admin/children/%D1%80%D0%B5%D0%B1%D1%91%D0%BD%D0%BE%D0%BA-1'],
+    ]);
+  });
+
   it('отдаёт 401 своим кодом и не трогает общий переход ко входу семьи', async () => {
     const listener = vi.fn();
     const unsubscribe = onSignedOut(listener);

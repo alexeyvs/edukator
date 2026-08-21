@@ -1,11 +1,51 @@
 import { useCallback, useRef, useState } from 'react';
+import { AdminChildScreen } from './AdminChildScreen';
 import { AdminHomeScreen, type AdminSignOutReason } from './AdminHomeScreen';
 import { AdminLoginScreen } from './AdminLoginScreen';
 import { AdminLogsScreen } from './AdminLogsScreen';
+import { AdminStatsScreen } from './AdminStatsScreen';
 import type { AdminApi } from '../admin-api';
 
+const CHILD_PREFIX = '/admin/child/';
+
+/** Какой экран админки открыт. Адресом выбирается только карточка ребёнка. */
+export type AdminPage =
+  | { kind: 'home' }
+  | { kind: 'logs' }
+  | { kind: 'stats' }
+  | { kind: 'child'; childId: string };
+
 /**
- * Корень админки: вход или главный экран.
+ * Экран по адресу страницы.
+ *
+ * Адрес есть ровно у карточки ребёнка, и это не непоследовательность: сводка и
+ * лента открываются от начала работы, а ссылку на карточку хочется уметь
+ * отправить себе же — она и есть то, что называют в жалобе. Отсюда же
+ * `/admin/child/:childId` в `APP_PAGES`: без него ссылка уходила бы в 404
+ * статики.
+ *
+ * Битая процентная последовательность — не карточка, а главный экран:
+ * `decodeURIComponent` бросает на ней `URIError`, а зовётся разбор из
+ * инициализатора состояния, где вылет означает белый экран без единого слова.
+ */
+export function readAdminPage(pathname: string): AdminPage {
+  if (!pathname.startsWith(CHILD_PREFIX)) return { kind: 'home' };
+  let childId: string;
+  try {
+    childId = decodeURIComponent(pathname.slice(CHILD_PREFIX.length));
+  } catch {
+    return { kind: 'home' };
+  }
+  return childId === '' || childId.includes('/') ? { kind: 'home' } : { kind: 'child', childId };
+}
+
+/** Адрес открытого экрана: в истории браузера остаётся только карточка. */
+function pathOf(page: AdminPage): string {
+  return page.kind === 'child' ? `${CHILD_PREFIX}${encodeURIComponent(page.childId)}` : '/admin';
+}
+
+/**
+ * Корень админки: вход или один из её экранов.
  *
  * Отдельного `/api/admin/me` нет намеренно — живость сессии оператора
  * показывает первый же запрос за данными. Поэтому экран сначала пробует
@@ -15,13 +55,7 @@ import type { AdminApi } from '../admin-api';
  */
 export function AdminApp({ api }: { api?: AdminApi } = {}) {
   const [signedIn, setSignedIn] = useState(true);
-  /**
-   * Какой экран открыт. Адресом это не выбирается: `/admin` — единственная
-   * страница админки в `APP_PAGES`, а вторая ссылка потребовала бы её туда
-   * вписать, то есть лента аварий ломалась бы 404 статики ровно в тот день,
-   * когда её открывают.
-   */
-  const [page, setPage] = useState<'home' | 'logs'>('home');
+  const [page, setPage] = useState<AdminPage>(() => readAdminPage(window.location.pathname));
   const [email, setEmail] = useState<string | undefined>(undefined);
   const [notice, setNotice] = useState<string | undefined>(undefined);
   /**
@@ -30,6 +64,12 @@ export function AdminApp({ api }: { api?: AdminApi } = {}) {
    * впервые открывший админку, читал бы над формой, что его сессия закончилась.
    */
   const entered = useRef(false);
+
+  /** Переход между экранами вместе с адресом: карточка обязана быть ссылкой. */
+  const go = useCallback((next: AdminPage) => {
+    setPage(next);
+    window.history.pushState(null, '', pathOf(next));
+  }, []);
 
   const signedOut = useCallback((reason: AdminSignOutReason) => {
     // Объяснение появляется только у оборвавшейся сессии: нажатая самим
@@ -40,7 +80,7 @@ export function AdminApp({ api }: { api?: AdminApi } = {}) {
     );
     entered.current = false;
     setEmail(undefined);
-    setPage('home');
+    setPage({ kind: 'home' });
     setSignedIn(false);
   }, []);
 
@@ -58,11 +98,31 @@ export function AdminApp({ api }: { api?: AdminApi } = {}) {
       />
     );
   }
-  if (page === 'logs') {
+  if (page.kind === 'logs') {
     return (
       <AdminLogsScreen
         {...(api === undefined ? {} : { api })}
-        onBack={() => setPage('home')}
+        onBack={() => go({ kind: 'home' })}
+        onSignedOut={signedOut}
+      />
+    );
+  }
+  if (page.kind === 'stats') {
+    return (
+      <AdminStatsScreen
+        {...(api === undefined ? {} : { api })}
+        onBack={() => go({ kind: 'home' })}
+        onChild={(childId) => go({ kind: 'child', childId })}
+        onSignedOut={signedOut}
+      />
+    );
+  }
+  if (page.kind === 'child') {
+    return (
+      <AdminChildScreen
+        {...(api === undefined ? {} : { api })}
+        childId={page.childId}
+        onBack={() => go({ kind: 'home' })}
         onSignedOut={signedOut}
       />
     );
@@ -71,7 +131,9 @@ export function AdminApp({ api }: { api?: AdminApi } = {}) {
     <AdminHomeScreen
       {...(api === undefined ? {} : { api })}
       {...(email === undefined ? {} : { email })}
-      onLogs={() => setPage('logs')}
+      onChild={(childId) => go({ kind: 'child', childId })}
+      onLogs={() => go({ kind: 'logs' })}
+      onStats={() => go({ kind: 'stats' })}
       onSignedOut={signedOut}
     />
   );

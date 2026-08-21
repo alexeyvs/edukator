@@ -20,6 +20,8 @@ function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
       childId: 'ребёнок-1', role: 'browser', expiresAt: '2026-08-21T09:15:00.000Z',
     }),
     stopImpersonation: vi.fn().mockResolvedValue(undefined),
+    stats: vi.fn().mockRejectedValue(new Error('статистика в этом тесте не нужна')),
+    child: vi.fn().mockRejectedValue(new Error('карточка в этом тесте не нужна')),
     ...overrides,
   };
 }

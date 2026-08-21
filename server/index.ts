@@ -31,6 +31,14 @@ import {
   registerUnavailableAdminOverview,
 } from './routes/admin/overview.js';
 import {
+  registerAdminStatsRoutes,
+  registerUnavailableAdminStats,
+} from './routes/admin/stats.js';
+import {
+  registerAdminChildrenRoutes,
+  registerUnavailableAdminChildren,
+} from './routes/admin/children.js';
+import {
   registerAdminLogsRoutes,
   registerUnavailableAdminLogs,
 } from './routes/admin/logs.js';
@@ -61,6 +69,7 @@ import type { IntegrityCoordinatorOptions } from './integrity.js';
 import { createAdminContext, createTenantContext } from './routes/tenant-context.js';
 import { redactTokenUrl, registerTokenPrivacy } from './routes/token-privacy.js';
 import { failureLogFor, type FailureLog } from './log.js';
+import { AdminStatsCache } from './admin/stats.js';
 import { ImpersonationTenants } from './admin/impersonation-tenants.js';
 import { ImpersonationRefusals } from './admin/impersonation-refusals.js';
 import { createTenantOpener } from './tenant-opener.js';
@@ -104,7 +113,14 @@ export type CurriculumStatus = 'ok' | 'error';
  * `/join/:token` и `/invite/:token` называются шаблоном, потому что токен в
  * них — часть пути, а не запрос (см. `server/routes/token-privacy.ts`).
  */
-export const APP_PAGES = ['/', '/parents', '/admin', '/join/:token', '/invite/:token'] as const;
+export const APP_PAGES = [
+  '/',
+  '/parents',
+  '/admin',
+  '/admin/child/:childId',
+  '/join/:token',
+  '/invite/:token',
+] as const;
 
 /** Настройки сервера, которые подменяют тесты и рабочий запуск. */
 export type ServerOptions =
@@ -427,6 +443,25 @@ export function buildServer(
         dataDir,
         ...(options.now === undefined ? {} : { now: options.now }),
       });
+      // Кеш отчёта один на процесс и живёт рядом с маршрутом, а не внутри
+      // него: посчитанный обход всех детских баз обязан пережить запрос, иначе
+      // открытый на стене экран читал бы их при каждом обновлении страницы.
+      registerAdminStatsRoutes(app, {
+        context: adminContext,
+        cache: new AdminStatsCache({
+          control,
+          dataDir,
+          graph: loaded,
+          ...(options.now === undefined ? {} : { now: options.now }),
+        }),
+      });
+      registerAdminChildrenRoutes(app, {
+        context: adminContext,
+        control,
+        dataDir,
+        graph: loaded,
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
       registerAdminLogsRoutes(app, { context: adminContext, dataDir });
       registerAdminImpersonateRoutes(app, {
         context: adminContext,
@@ -514,6 +549,8 @@ export function buildServer(
       registerUnavailableAuth(app, reason);
       registerUnavailableAdminAuth(app, reason);
       registerUnavailableAdminOverview(app, reason);
+      registerUnavailableAdminStats(app, reason);
+      registerUnavailableAdminChildren(app, reason);
       registerUnavailableAdminLogs(app, reason);
       registerUnavailableAdminImpersonate(app, reason);
       registerUnavailableAdminAudit(app, reason);
