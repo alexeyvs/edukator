@@ -255,7 +255,14 @@ export function bossFightState(db: Database, graph: TopicGraph, runId: number): 
   return { outcome: 'active', progress: { ...progress, done: false } };
 }
 
-/** Возвращает только очередную позицию и никогда не раскрывает решение или подсказку. */
+/**
+ * Возвращает только очередную позицию и никогда не раскрывает решение или подсказку.
+ *
+ * Транзакция отложенная: снимок нужен — состояние боя читается несколькими
+ * выборками, — а замок записи нет. `BEGIN IMMEDIATE` его берёт и потому
+ * отказывает целиком на соединении с `PRAGMA query_only`, которым чужую семью
+ * смотрит оператор.
+ */
 export function nextBossTask(db: Database, graph: TopicGraph, runId: number): NextBossTaskResult {
   return db.transaction((): NextBossTaskResult => {
     const fight = readFight(db, runId);
@@ -277,7 +284,7 @@ export function nextBossTask(db: Database, graph: TopicGraph, runId: number): Ne
       throw new BossError('boss-inconsistent', `Босс: задание ${task.id} относится к другой теме`);
     }
     return { batchId: fight.batchId, runId, position, task: projectBossTask(topic, task) };
-  }).immediate();
+  })();
 }
 
 export interface SubmitBossAnswerRequest {

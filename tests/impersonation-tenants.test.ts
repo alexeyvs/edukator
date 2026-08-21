@@ -69,8 +69,10 @@ describe('соединение имперсонации только для чт
   }
 
   /** Соединения имперсонации, которые тест закроет за собой сам. */
-  function tracked(options: ConstructorParameters<typeof ImpersonationTenants>[0] = {}): ImpersonationTenants {
-    const opened = new ImpersonationTenants({ log: () => {}, ...options });
+  function tracked(
+    options: Partial<ConstructorParameters<typeof ImpersonationTenants>[0]> = {},
+  ): ImpersonationTenants {
+    const opened = new ImpersonationTenants({ graph: GRAPH, log: () => {}, ...options });
     handles.push(opened);
     return opened;
   }
@@ -84,8 +86,10 @@ describe('соединение имперсонации только для чт
     expect(view.childId).toBe(tenant.childId);
     expect(view.path).toBe(tenant.path);
     expect(view.file).toBe(tenant.file);
-    expect(view.disputes).toBe(tenant.disputes);
-    expect(view.integrity).toBe(tenant.integrity);
+    // Координаторы аренды — **не** те же: они носят пишущее соединение
+    // реестра, и `query_only` до них не достаёт.
+    expect(view.disputes).not.toBe(tenant.disputes);
+    expect(view.integrity).not.toBe(tenant.integrity);
     expect(view.db).not.toBe(tenant.db);
     expect(view.db.pragma('query_only', { simple: true })).toBe(1);
   });
@@ -118,6 +122,25 @@ describe('соединение имперсонации только для чт
     // Чтение при этом проходит: заперта запись, а не база.
     expect(view.db.prepare(`SELECT mastery FROM topic_state WHERE topic_id = 'math.a'`).get())
       .toEqual({ mastery: 0 });
+  });
+
+  // **Третья половина второго замка.** `query_only` стоит на соединении, а
+  // координаторы аренды носят своё, пишущее: оставленные как есть, они дают
+  // обычному `GET` записать в чужую базу мимо обоих замков. Проверять это надо
+  // отдельно от прагмы — тест, зелёный после возврата координаторов реестра,
+  // не держит ничего.
+  it('отказывает координаторам аренды писать под заходом', () => {
+    const tenant = tenantOf('alpha');
+    const view = tracked().view(tenant);
+
+    // `status` у настоящего координатора не безобиден: незакрытую проверку он
+    // тут же ставит на разбор, а тот пишет и тратит слот codex.
+    expect(view.integrity.status(999)).toBeNull();
+    expect(() => view.integrity.begin(1)).toThrow(/чужую семью/u);
+    expect(() => view.integrity.retry(1, 1, 'ответ', 0, false)).toThrow(/чужую семью/u);
+    expect(() => view.integrity.approve(1, 1)).toThrow(/чужую семью/u);
+    expect(() => view.disputes.schedule(1)).toThrow(/чужую семью/u);
+    expect(() => view.disputes.restore()).toThrow(/чужую семью/u);
   });
 
   // `query_only` — свойство соединения. Включённый на общем handle реестра он
@@ -272,9 +295,10 @@ describe('соединение имперсонации только для чт
   });
 
   it('не собирается со сроком, который снимает соединение раньше запроса', () => {
-    expect(() => new ImpersonationTenants({ ttlMs: 0 })).toThrow(/положительным/);
-    expect(() => new ImpersonationTenants({ ttlMs: -1 })).toThrow(/положительным/);
-    expect(() => new ImpersonationTenants({ ttlMs: Number.NaN })).toThrow(/положительным/);
+    expect(() => new ImpersonationTenants({ graph: GRAPH, ttlMs: 0 })).toThrow(/положительным/);
+    expect(() => new ImpersonationTenants({ graph: GRAPH, ttlMs: -1 })).toThrow(/положительным/);
+    expect(() => new ImpersonationTenants({ graph: GRAPH, ttlMs: Number.NaN }))
+      .toThrow(/положительным/);
   });
 
   describe('выбор соединения по предъявителю', () => {

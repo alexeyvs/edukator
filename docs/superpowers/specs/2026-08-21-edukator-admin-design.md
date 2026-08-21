@@ -461,3 +461,9 @@ E2E — один сценарий «оператор»: админ заводи�
 | `LOG_KEEP_FILES` | 4 |
 | `LOG_TAIL_BYTES` | 512 КБ |
 | `ADMIN_LOG_PAGE` | 200 |
+| `ADMIN_AUDIT_PAGE` | 200 |
+| `OVERVIEW_WINDOW_DAYS` | `[7, 30]` |
+| `STUCK_PROVISIONING_MS` | 1 час |
+| `CHURN_SILENCE_DAYS` | 14 |
+| `WORST_TOPICS_LIMIT` | 10 |
+| `WORST_TOPIC_MIN_ANSWERS` | 5 |

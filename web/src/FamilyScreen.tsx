@@ -263,7 +263,13 @@ export interface FamilyScreenProps {
   /** Адрес вошедшего родителя: он известен из `me` ещё до загрузки семьи. */
   email: string;
   onOpenDashboard: (childId: string, children: Array<{ id: string; name: string }>) => void;
-  onLogout: () => void;
+  /**
+   * Выход из учётной записи. `undefined` — кнопки нет: под заходом оператора
+   * этот экран рисует чужую семью, а `POST /api/auth/parent/logout` читает
+   * **собственную** cookie оператора и погасил бы его же сессию — вместе с
+   * несъёмной полосой, то есть с единственной кнопкой возврата в админку.
+   */
+  onLogout?: () => void;
 }
 
 export function FamilyScreen({
@@ -399,7 +405,9 @@ export function FamilyScreen({
             >
               Повторить
             </button>
-            <button className="secondary" type="button" onClick={onLogout}>Выйти</button>
+            {onLogout !== undefined && (
+              <button className="secondary" type="button" onClick={onLogout}>Выйти</button>
+            )}
           </div>
         )}
       </main>
@@ -413,7 +421,9 @@ export function FamilyScreen({
       <header className="family-header">
         <BrandLink />
         <div><span>Родительский вход</span><strong>{family.email}</strong></div>
-        <button className="secondary" type="button" onClick={onLogout}>Выйти</button>
+        {onLogout !== undefined && (
+          <button className="secondary" type="button" onClick={onLogout}>Выйти</button>
+        )}
       </header>
 
       <section className="family-panel" aria-labelledby="family-children-title">

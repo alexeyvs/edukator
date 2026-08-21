@@ -97,7 +97,8 @@ function ParentArea({
   onLogout,
 }: {
   email: string;
-  onLogout: () => void;
+  /** `undefined` под заходом оператора: см. `FamilyScreen`. */
+  onLogout?: () => void;
 }) {
   const [dashboard, setDashboard] = useState<
     { childId: string; children: Array<{ id: string; name: string }> } | null
@@ -107,7 +108,7 @@ function ParentArea({
     return (
       <FamilyScreen
         email={email}
-        onLogout={onLogout}
+        {...(onLogout === undefined ? {} : { onLogout })}
         onOpenDashboard={(childId, children) => setDashboard({ childId, children })}
       />
     );
@@ -357,7 +358,16 @@ export function App({ authApi = browserAuthApi }: { authApi?: AuthApi } = {}) {
           Перейти к ученику {route.child.name}
         </button>
       )}
-      <ParentArea email={route.email} onLogout={logout} />
+      {/*
+        Выход прячется под заходом оператора: он читает **собственную** cookie
+        оператора, а не cookie захода, — то есть гасит его же родительскую
+        сессию, уводит корень на экран входа и уносит вместе с ним несъёмную
+        полосу, единственную кнопку возврата в админку.
+      */}
+      <ParentArea
+        email={route.email}
+        {...(route.impersonation === undefined ? { onLogout: logout } : {})}
+      />
     </>;
   }
 

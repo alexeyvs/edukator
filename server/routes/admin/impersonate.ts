@@ -25,6 +25,7 @@ import {
   startImpersonation,
   type ImpersonationPrincipal,
 } from '../../control-db.js';
+import { finishImpersonation } from '../../admin/impersonation-finish.js';
 import { AUTH_MESSAGE, AUTH_STATUS, IMPERSONATION_COOKIE, parseCookies } from '../../auth.js';
 import type { ImpersonationRefusals } from '../../admin/impersonation-refusals.js';
 import { ROUTE_ACCESS, failAuth, type AdminContextResolver } from '../tenant-context.js';
@@ -72,25 +73,19 @@ export function registerAdminImpersonateRoutes(
   }
 
   /**
-   * Закрывает заход: запись о конце со счётчиком и своё соединение. Гашение
-   * строки сюда не входит намеренно — её гасит либо выход, либо старт
-   * следующего захода, и второе гашение здесь стёрло бы отметку времени того,
-   * которое уже состоялось.
+   * Закрывает заход: запись о конце со счётчиком и своё соединение. Общая с
+   * выходом из самой админки: он закрывает живой заход тем же порядком.
    */
   function finish(session: ImpersonationPrincipal, at: Date): void {
-    const refused = options.refusals.take(session.adminId);
-    recordAdminAudit(
-      control,
+    finishImpersonation(
       {
-        adminId: session.adminId,
-        action: 'impersonation-end',
-        childId: session.childId,
-        parentId: session.parentId,
-        detail: `${session.role}, отказов записи: ${refused}`,
+        control,
+        refusals: options.refusals,
+        ...(options.impersonations === undefined ? {} : { impersonations: options.impersonations }),
       },
+      session,
       at,
     );
-    options.impersonations?.close(session.childId);
   }
 
   app.post('/api/admin/impersonate', (request, reply) => {
@@ -131,6 +126,12 @@ export function registerAdminImpersonateRoutes(
     // приписала бы отказы не тому.
     if (previous !== undefined && previous.adminId === admin.admin.adminId) {
       finish(previous, at);
+    } else {
+      // Счётчик отказов процессный и переживает истёкший заход: закрывать его
+      // было некому, потому что `resolveImpersonation` просроченную строку уже
+      // не отдаёт. Не сброшенный здесь, он приписал бы попытки записи в прошлой
+      // семье записи о конце захода в **следующей**.
+      options.refusals.take(admin.admin.adminId);
     }
     recordAdminAudit(
       control,

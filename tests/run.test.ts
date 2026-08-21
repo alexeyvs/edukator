@@ -385,6 +385,23 @@ describe('жизненный цикл забега', () => {
     ]);
   });
 
+  it('читает прогресс на соединении только для чтения', () => {
+    const { runId } = startRun(db, graph, 'math', { now: at(0) });
+    addAttempt({ runId, topicId: 'math.a', correct: true, now: at(0) });
+
+    // Так чужую семью смотрит оператор: второй замок имперсонации — это
+    // `PRAGMA query_only` на своём соединении. Обёрнутое в `BEGIN IMMEDIATE`
+    // чтение на нём отказывает целиком («attempt to write a readonly
+    // database»), и `GET /api/run/plan` отвечал бы пятисоткой любому заходу в
+    // семью с незакрытым забегом.
+    db.pragma('query_only = ON');
+    try {
+      expect(runProgress(db, runId)).toMatchObject({ total: 1, correct: 1 });
+    } finally {
+      db.pragma('query_only = OFF');
+    }
+  });
+
   it('отвергает неизвестный забег и предмет вне карты тем', () => {
     expect(() => runProgress(db, 999)).toThrow(/забег.*999.*не найден/ui);
     expect(() => startRun(db, graph, 'english', { now: at(0) })).toThrow(

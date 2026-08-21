@@ -18,6 +18,7 @@ import {
   DisputeCoordinator,
   type BackgroundRunner,
   type DisputeCoordinatorOptions,
+  type DisputeScheduler,
 } from './dispute-coordinator.js';
 import {
   createIntegrityCoordinator,
@@ -154,7 +155,7 @@ export interface Tenant {
    * причине: спор — строка в базе конкретного ребёнка, и номера у разных детей
    * совпадают.
    */
-  disputes: DisputeCoordinator;
+  disputes: DisputeScheduler;
   /** Проверка осмысленности ответов этой детской базы. */
   integrity: IntegrityCoordinator;
 }

@@ -393,6 +393,7 @@ export function buildServer(
       // с реестром, а не внутри него: реестр держит по одной базе на ребёнка, а
       // второй handle — свойство захода оператора, а не аренды.
       const impersonations = new ImpersonationTenants({
+        graph: loaded,
         log,
         ...(options.now === undefined ? {} : { now: options.now }),
       });
@@ -425,6 +426,11 @@ export function buildServer(
       });
       registerAdminAuthRoutes(app, {
         control,
+        // Выход из админки закрывает и живой заход: счётчик отказов и
+        // соединения имперсонации нужны ему по той же причине, что и явному
+        // выходу из семьи.
+        refusals,
+        impersonations,
         ...(options.now === undefined ? {} : { now: options.now }),
         ...(options.trustedProxies === undefined ? {} : { trustedProxies: options.trustedProxies }),
         ...(options.insecureCookies === undefined
@@ -477,6 +483,9 @@ export function buildServer(
       registerFamilyRoutes(app, {
         control,
         dataDir,
+        // Аренды у этих маршрутов нет, а замок имперсонации нужен: состав
+        // семьи лежит в управляющей базе, до которой `query_only` не достаёт.
+        onReadOnly: (impersonation) => refusals.record(impersonation.adminId),
         ...(pinPepper === undefined ? {} : { pinPepper }),
         ...(options.now === undefined ? {} : { now: options.now }),
       });
@@ -575,6 +584,18 @@ export function buildServer(
     }
 
     /**
+     * Что уже записано в журнал этим маршрутом. Здоровье опрашивает монитор,
+     * и запись на каждый опрос — это не диагностика, а её уничтожение: и
+     * поломка управляющей базы, и отвязанный файл ребёнка держатся до
+     * перезапуска, так что за час опроса раз в минуту журнал вытеснил бы
+     * ровно ту запись, которая называет причину. Пишется поэтому переход
+     * состояния, а не факт опроса; маршрут не авторизован, и записывать по
+     * запросу извне мы себе позволить не можем вовсе.
+     */
+    let loggedControlError = false;
+    const loggedDetached = new Set<string>();
+
+    /**
      * Состояние управляющей базы. Проверяется подробно: без неё сервер не умеет
      * разобрать ни одного предъявителя, то есть не работает вовсе, — и цена
      * `quick_check` по одному маленькому файлу здесь оправдана.
@@ -586,14 +607,18 @@ export function buildServer(
           throw new Error('файл заменён после старта, нужен перезапуск');
         }
         validateControlSchema(control);
+        loggedControlError = false;
         return 'ok';
       } catch (error) {
         log(`управляющая база ${controlPath} недоступна: ${(error as Error).message}`);
-        failures({
-          event: 'control-error',
-          message: 'управляющая база недоступна',
-          detail: (error as Error).message,
-        });
+        if (!loggedControlError) {
+          loggedControlError = true;
+          failures({
+            event: 'control-error',
+            message: 'управляющая база недоступна',
+            detail: (error as Error).message,
+          });
+        }
         return 'error';
       }
     }
@@ -617,8 +642,13 @@ export function buildServer(
       if (detached.length > 0) {
         log(`файл базы заменён после старта у детей: ${detached.join(', ')}; нужен перезапуск`);
         // Запись на ребёнка, а не одна на всех: фильтр админки ищет по
-        // `childId`, и список в тексте сообщения ему не виден.
+        // `childId`, и список в тексте сообщения ему не виден. По одной на
+        // ребёнка за весь запуск: отвязанный файл держится до перезапуска, и
+        // повтор на каждый опрос здоровья вытеснил бы из журнала всё
+        // остальное.
         for (const childId of detached) {
+          if (loggedDetached.has(childId)) continue;
+          loggedDetached.add(childId);
           failures({
             event: 'tenant-detached',
             message: 'файл базы заменён после старта, нужен перезапуск',

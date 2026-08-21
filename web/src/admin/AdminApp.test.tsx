@@ -176,6 +176,38 @@ describe('переходы между экранами админки', () => {
     expect(await screen.findByText('Семьи')).toBeInTheDocument();
   });
 
+  it('возвращает «назад» браузера экран вместе с адресом', async () => {
+    render(<AdminApp api={adminApi()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Карточка' }));
+    await screen.findByText('Дневной доступ');
+
+    // jsdom меняет адрес по `back()`, но `popstate` шлёт сам браузер: сценарий
+    // повторяет обе половины руками.
+    window.history.back();
+    window.history.replaceState(null, '', '/admin');
+    fireEvent.popState(window);
+
+    // Без слушателя карточка осталась бы нарисованной поверх `/admin`, а
+    // следующее «назад» увело бы с админки, показывая её же.
+    expect(await screen.findByText('Семьи')).toBeInTheDocument();
+  });
+
+  it('не кладёт в историю повтор `/admin` за каждый экран без адреса', async () => {
+    render(<AdminApp api={adminApi()} />);
+    const before = window.history.length;
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Статистика' }));
+    await screen.findByText('Вовлечённость');
+    fireEvent.click(screen.getByRole('button', { name: 'К сводке' }));
+    await screen.findByText('Семьи');
+
+    // Иначе «назад» столько же раз не делает ничего видимого, а потом уводит со
+    // страницы целиком.
+    expect(window.history.length).toBe(before);
+    expect(window.location.pathname).toBe('/admin');
+  });
+
   it('возвращает со статистики к сводке своей кнопкой', async () => {
     render(<AdminApp api={adminApi()} />);
 

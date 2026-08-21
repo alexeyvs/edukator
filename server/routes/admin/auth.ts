@@ -25,7 +25,9 @@ import {
   recordAdminAudit,
   recordLoginFailure,
   resolveAdminSession,
+  resolveImpersonation,
   revokeAdminSession,
+  revokeImpersonation,
   type LoginGate,
   type LoginTarget,
 } from '../../control-db.js';
@@ -33,10 +35,13 @@ import {
   ADMIN_COOKIE,
   AUTH_MESSAGE,
   AUTH_STATUS,
+  IMPERSONATION_COOKIE,
   headerValue,
   isSameOrigin,
   parseCookies,
 } from '../../auth.js';
+import { finishImpersonation } from '../../admin/impersonation-finish.js';
+import { ImpersonationRefusals } from '../../admin/impersonation-refusals.js';
 import { clientAddress, readTrustedProxies } from '../../client-address.js';
 import { LOGIN_REJECTED, readLoginBody, serializeCookie } from '../auth.js';
 
@@ -47,6 +52,14 @@ export interface AdminAuthRoutesOptions {
   trustedProxies?: Set<string>;
   /** Снять ли `Secure` с cookie. Только для разработки по голому http. */
   insecureCookies?: boolean;
+  /**
+   * Счётчик отказов первого замка. Нужен здесь потому, что выход из админки
+   * закрывает и живой заход, а его запись о конце обязана назвать число
+   * отказанных попыток записи.
+   */
+  refusals?: ImpersonationRefusals;
+  /** Соединения только для чтения; на маршрутных тестах второго замка нет. */
+  impersonations?: { close(childId: string): void };
 }
 
 export function registerAdminAuthRoutes(
@@ -58,6 +71,7 @@ export function registerAdminAuthRoutes(
   const trusted =
     options.trustedProxies ?? readTrustedProxies(process.env['EDUKATOR_TRUSTED_PROXIES']);
   const secure = options.insecureCookies !== true;
+  const refusals = options.refusals ?? new ImpersonationRefusals();
 
   function address(request: FastifyRequest): string {
     return clientAddress({
@@ -150,7 +164,8 @@ export function registerAdminAuthRoutes(
     if (blocked !== undefined) return blocked;
 
     const at = now();
-    const token = parseCookies(request.headers.cookie).get(ADMIN_COOKIE);
+    const jar = parseCookies(request.headers.cookie);
+    const token = jar.get(ADMIN_COOKIE);
     if (token !== undefined) {
       // Предъявитель читается **до** гашения: после него сессия уже не
       // разбирается, и записать в журнал было бы некого.
@@ -160,10 +175,36 @@ export function registerAdminAuthRoutes(
         recordAdminAudit(control, { adminId: admin.adminId, action: 'logout' }, at);
       }
     }
-    // Cookie гасится и тогда, когда сессии в базе не нашлось: иначе браузер
+    // Живой заход гасится тем же выходом. Оставленный, он пережил бы админскую
+    // сессию: `resolveBearer` проверяет его **первым**, так что собственное
+    // приложение оператора молча показывало бы чужую семью, а снять заход было
+    // бы уже нечем — `DELETE /api/admin/impersonate` требует админской cookie,
+    // которую этот же выход только что погасил.
+    const impersonationToken = jar.get(IMPERSONATION_COOKIE);
+    if (impersonationToken !== undefined) {
+      const session = resolveImpersonation(control, impersonationToken, at);
+      revokeImpersonation(control, impersonationToken, at);
+      if (session !== undefined) {
+        finishImpersonation(
+          {
+            control,
+            refusals,
+            ...(options.impersonations === undefined
+              ? {}
+              : { impersonations: options.impersonations }),
+          },
+          session,
+          at,
+        );
+      }
+    }
+    // Обе cookie гасятся и тогда, когда сессии в базе не нашлось: иначе браузер
     // продолжал бы носить мёртвый токен на каждом запросе.
     return reply
-      .header('set-cookie', serializeCookie('admin', '', { secure, maxAgeSeconds: 0 }))
+      .header('set-cookie', [
+        serializeCookie('admin', '', { secure, maxAgeSeconds: 0 }),
+        serializeCookie('impersonation', '', { secure, maxAgeSeconds: 0 }),
+      ])
       .send({ kind: 'anonymous' });
   });
 }

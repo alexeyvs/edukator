@@ -106,6 +106,16 @@ set +a
 if [[ -z "${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}" ]]; then
   die "в $env_file не задан HTTP(S)-прокси"
 fi
+# Каталог данных проверяется здесь, а не сервером: без переменной приложение
+# берёт умолчание `<корень проекта>/data`, то есть `$app_dir/data`. Деплой
+# унёс бы живые базы вместе с прежней версией в `releases/`, поднял бы пустую
+# `control.db`, прошёл health зелёным — и стёр бы единственную копию, когда
+# срок хранения релизов дойдёт до этого каталога.
+[[ -n "${EDUKATOR_DATA_DIR:-}" ]] || die "в $env_file не задан EDUKATOR_DATA_DIR"
+[[ "$EDUKATOR_DATA_DIR" == /* ]] || die 'EDUKATOR_DATA_DIR должен быть абсолютным путём'
+case "${EDUKATOR_DATA_DIR%/}/" in
+  "$app_root"/*) die "EDUKATOR_DATA_DIR лежит внутри $app_root: деплой унёс бы данные вместе с версией" ;;
+esac
 export HOME="$home_dir"
 export npm_config_cache="$home_dir/.npm"
 

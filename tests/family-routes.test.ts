@@ -8,17 +8,20 @@ import {
   MAX_CHILD_NAME_LENGTH,
   MAX_DEVICE_LABEL_LENGTH,
   childDatabasePath,
+  createAdmin,
   createChild,
   createParent,
   issueParentInvite,
+  listDevices,
   openControlDatabase,
   readChild,
   readParentPinHash,
   redeemParentInvite,
   resolveChildDevice,
+  startImpersonation,
 } from '../server/control-db.js';
 import { controlDatabasePath, ensureDataDir } from '../server/data-dir.js';
-import { CHILD_COOKIE, PARENT_COOKIE } from '../server/auth.js';
+import { CHILD_COOKIE, IMPERSONATION_COOKIE, PARENT_COOKIE } from '../server/auth.js';
 import { registerAuthRoutes } from '../server/routes/auth.js';
 import { registerFamilyRoutes } from '../server/routes/family.js';
 
@@ -40,6 +43,7 @@ describe('маршруты семьи', () => {
   let control: Database;
   let app: FastifyInstance;
   let current: Date;
+  let refusals: string[];
 
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'edukator-family-routes-'));
@@ -47,7 +51,14 @@ describe('маршруты семьи', () => {
     control = openControlDatabase(controlDatabasePath(dir));
     current = NOW;
     app = Fastify();
-    registerFamilyRoutes(app, { control, dataDir: dir, pinPepper: PEPPER, now: () => current });
+    refusals = [];
+    registerFamilyRoutes(app, {
+      control,
+      dataDir: dir,
+      pinPepper: PEPPER,
+      onReadOnly: (impersonation) => refusals.push(impersonation.adminId),
+      now: () => current,
+    });
     // Маршруты входа поднимаются рядом: полный путь семьи кончается погашением
     // детской ссылки, а его умеет только вход.
     registerAuthRoutes(app, { control, now: () => current });
@@ -513,6 +524,99 @@ describe('маршруты семьи', () => {
         pinConfigured: false,
       });
       await bare.close();
+    });
+  });
+
+  describe('заход оператора', () => {
+    /**
+     * Заход в семью с ролью родителя. Второй замок (`PRAGMA query_only`) сюда
+     * не достаёт вовсе: состав семьи, устройства и PIN лежат в `control.db`, а
+     * не в базе ребёнка, — значит проверять первый замок надо именно здесь и
+     * отдельно от аренды.
+     */
+    async function impersonatedParent(email: string): Promise<{
+      headers: Record<string, string>;
+      childId: string;
+      parentToken: string;
+    }> {
+      const parentToken = await parentSession(email);
+      const childId = await addChild(parentToken);
+      const adminId = createAdmin(control, 'оператор@example.com', current);
+      const started = startImpersonation(control, { adminId, childId, role: 'parent' }, current);
+      expect(started.ok).toBe(true);
+      const token = started.ok ? started.session.token : '';
+      return {
+        headers: { ...SAME_ORIGIN, cookie: `${IMPERSONATION_COOKIE}=${token}` },
+        childId,
+        parentToken,
+      };
+    }
+
+    it('читать чужую семью оператору можно', async () => {
+      const { headers, parentToken } = await impersonatedParent('семья@example.com');
+
+      const response = await get('/api/family', headers);
+
+      expect(response.statusCode).toBe(200);
+      expect((response.json() as { email: string }).email).toBe('семья@example.com');
+      expect(refusals).toEqual([]);
+      expect(parentToken).not.toBe('');
+    });
+
+    it('заводить чужого ребёнка — нет', async () => {
+      const { headers, parentToken } = await impersonatedParent('семья@example.com');
+
+      const response = await post('/api/family/children', headers, { name: 'Подложенный' });
+
+      expect(response.statusCode).toBe(403);
+      // Код едет рядом с текстом: по одному 403 клиент не отличит работающий
+      // замок от закрытого доступа и показал бы экран поломки.
+      expect((response.json() as { code: string }).code).toBe('read-only');
+      expect(refusals).toHaveLength(1);
+      // В семье остаётся ровно тот ребёнок, которого завёл сам родитель.
+      const family = (await get('/api/family', asParent(parentToken))).json() as {
+        children: { name: string }[];
+      };
+      expect(family.children.map((child) => child.name)).toEqual(['Ученик']);
+    });
+
+    it('выпускать ссылку на чужое устройство — нет', async () => {
+      const { headers, childId } = await impersonatedParent('семья@example.com');
+
+      const response = await post(`/api/family/children/${childId}/devices`, headers, {
+        kind: 'browser',
+        label: 'Подложенный',
+      });
+
+      // Ссылка тут была бы хуже прочего: она гасится в постоянный токен
+      // устройства и пережила бы пятнадцатиминутный срок захода.
+      expect(response.statusCode).toBe(403);
+      expect((response.json() as { code: string }).code).toBe('read-only');
+      expect(listDevices(control, childId)).toEqual([]);
+      expect(refusals).toHaveLength(1);
+    });
+
+    it('менять чужой PIN — нет', async () => {
+      const { headers, parentToken } = await impersonatedParent('семья@example.com');
+
+      const response = await post('/api/family/pin', headers, { pin: '135790' });
+
+      expect(response.statusCode).toBe(403);
+      expect((response.json() as { code: string }).code).toBe('read-only');
+      expect((await get('/api/family', asParent(parentToken))).json()).toMatchObject({
+        pinConfigured: false,
+      });
+      expect(refusals).toHaveLength(1);
+    });
+
+    it('повторять заведение чужой базы — нет', async () => {
+      const { headers, childId } = await impersonatedParent('семья@example.com');
+
+      const response = await post(`/api/family/children/${childId}/provision`, headers);
+
+      expect(response.statusCode).toBe(403);
+      expect((response.json() as { code: string }).code).toBe('read-only');
+      expect(refusals).toHaveLength(1);
     });
   });
 });

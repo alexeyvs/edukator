@@ -94,3 +94,54 @@ test('оператор входит в админку, смотрит чужую
     await harness.close();
   }
 });
+
+/**
+ * Заход ролью родителя. Он опаснее детского: экран семьи меняет **не** базу
+ * ребёнка, а `control.db`, куда `PRAGMA query_only` второго замка не достаёт
+ * вовсе. Держит его поэтому один замок — выписанный руками в `requireParent`, —
+ * и цена пропуска здесь выше обычной: выпущенная ссылка гасится в постоянный
+ * токен устройства и переживает пятнадцатиминутный срок захода.
+ */
+test('заход ролью родителя не заводит детей и не выпускает ссылок', async ({ page }) => {
+  const harness = await startE2eHarness();
+  try {
+    await page.goto(`${harness.url}/admin`);
+    await page.getByLabel('Электронная почта').fill(E2E_ADMIN.email);
+    await page.getByLabel('Пароль').fill(E2E_ADMIN.password);
+    await page.getByRole('button', { name: 'Войти' }).click();
+    await expect(page.getByText('Админка оператора')).toBeVisible();
+
+    const family = page.locator('.admin-family').filter({ hasText: E2E_PARENT.email });
+    await family.locator('.admin-children li').filter({ hasText: 'Тимофей' })
+      .getByRole('button', { name: 'Войти как родитель' }).click();
+
+    const banner = page.locator('.impersonation-banner');
+    await expect(banner).toContainText('как родитель');
+    // Экран семьи настоящий: оператор пришёл смотреть ровно то, что видит
+    // родитель.
+    await expect(page.getByRole('heading', { name: 'Дети' })).toBeVisible();
+    await expect(page.getByText(E2E_PARENT.email)).toBeVisible();
+    // «Выйти» под заходом не предлагается: он читает **собственную** cookie
+    // оператора и унёс бы вместе с ней несъёмную полосу — единственную кнопку
+    // возврата в админку.
+    await expect(page.getByRole('button', { name: 'Выйти', exact: true })).toHaveCount(0);
+
+    await page.getByLabel('Имя ребёнка').fill('Подложенный');
+    await page.getByRole('button', { name: 'Завести ребёнка' }).click();
+
+    await expect(banner.locator('.impersonation-refusal')).toContainText('Только просмотр');
+    expect(harness.children().map(({ name }) => name)).toEqual(['Тимофей']);
+
+    await banner.getByRole('button', { name: 'Выйти в админку' }).click();
+    await expect(page.getByText('Админка оператора')).toBeVisible();
+
+    expect(harness.adminAudit().map((entry) => entry.action)).toEqual([
+      'impersonation-end',
+      'impersonation-start',
+      'login',
+    ]);
+    harness.assertCodexNotCalled();
+  } finally {
+    await harness.close();
+  }
+});

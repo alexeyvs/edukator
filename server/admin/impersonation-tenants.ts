@@ -16,16 +16,53 @@
  *
  * Аренда при этом открывается обычным путём, через реестр: миграция, посев и
  * координаторы отрабатывают так же, как для настоящего входа. Маршруту
- * достаётся та же аренда со вторым handle вместо `db`.
+ * достаётся та же аренда со вторым handle вместо `db` — и **со своими**
+ * координаторами: `disputes` и `integrity` реестра держат пишущее соединение,
+ * и `query_only` до них не достаёт. Одного `GET` хватило бы, чтобы обойти оба
+ * замка: `integrity.status` ставит незакрытую проверку на разбор, а тот пишет
+ * в чужую базу и тратит слот codex.
  */
 import type Database from 'better-sqlite3';
 import { IMPERSONATION_TTL_MS } from '../control-db.js';
+import type { TopicGraph } from '../curriculum.js';
+import type { DisputeScheduler } from '../dispute-coordinator.js';
+import { readIntegrityStatus, type IntegrityCoordinator } from '../integrity.js';
 import {
   openSessionDatabase,
   TenantError,
   type SessionDatabase,
   type Tenant,
 } from '../tenant-registry.js';
+
+/**
+ * Отказ координатора под заходом. `TenantError('read-only')` здесь не годится:
+ * его код маршруты переводят в ответ допуска, а сюда попадает только то, что
+ * первый замок уже пропустил, — то есть ошибка кода, а не состояние.
+ */
+function refuseWrite(what: string): never {
+  throw new Error(`Оператор смотрит чужую семью: ${what} под заходом недоступен`);
+}
+
+/** Разбор споров, который ничего не ставит в очередь. */
+const READ_ONLY_DISPUTES: DisputeScheduler = {
+  restore: () => refuseWrite('разбор спора'),
+  schedule: () => refuseWrite('разбор спора'),
+  stop: async () => {},
+};
+
+/**
+ * Проверка осмысленности, которая только читает. `status` у настоящего
+ * координатора не безобиден: незакрытую проверку он тут же ставит на разбор.
+ */
+function readOnlyIntegrity(db: Database.Database, graph: TopicGraph): IntegrityCoordinator {
+  return {
+    begin: () => refuseWrite('проверка осмысленности'),
+    status: (runId) => readIntegrityStatus(db, graph, runId),
+    retry: () => refuseWrite('повтор отмеченного вопроса'),
+    approve: () => refuseWrite('подтверждение ответа'),
+    stop: async () => {},
+  };
+}
 
 /** Открытый handle только для чтения вместе с арендой, поверх которой он открыт. */
 interface ReadOnlyHandle {
@@ -41,6 +78,8 @@ interface ReadOnlyHandle {
 }
 
 export interface ImpersonationTenantsOptions {
+  /** Карта тем: по ней читается состояние проверки осмысленности. */
+  graph: TopicGraph;
   /**
    * Насколько handle переживает последний запрос оператора. Умолчание — срок
    * самого захода: не тронутое дольше него соединение принадлежит заходу,
@@ -67,12 +106,14 @@ export interface ImpersonationTenantsOptions {
  */
 export class ImpersonationTenants {
   readonly #handles = new Map<string, ReadOnlyHandle>();
+  readonly #graph: TopicGraph;
   readonly #ttlMs: number;
   readonly #openSession: (path: string) => SessionDatabase | undefined;
   readonly #now: () => Date;
   readonly #log: (message: string) => void;
 
-  constructor(options: ImpersonationTenantsOptions = {}) {
+  constructor(options: ImpersonationTenantsOptions) {
+    this.#graph = options.graph;
     const ttlMs = options.ttlMs ?? IMPERSONATION_TTL_MS;
     // Ноль или отрицательное значение снимали бы handle раньше, чем им успели
     // воспользоваться, — то есть превращали бы кеш в открытие на каждый запрос.
@@ -104,7 +145,7 @@ export class ImpersonationTenants {
     const cached = this.#handles.get(tenant.childId);
     if (cached !== undefined && cached.source === tenant) {
       cached.touchedAt = this.#now().getTime();
-      return { ...tenant, db: cached.db };
+      return this.#readOnlyTenant(tenant, cached.db);
     }
     // Аренду переоткрыли: прежний handle привязан к соединению, которого уже
     // нет, и переиспользовать его нельзя.
@@ -142,7 +183,21 @@ export class ImpersonationTenants {
       source: tenant,
       touchedAt: this.#now().getTime(),
     });
-    return { ...tenant, db: opened.db };
+    return this.#readOnlyTenant(tenant, opened.db);
+  }
+
+  /**
+   * Аренда без единого пишущего пути. Соединение подменяется целиком, а не
+   * только `db`: координаторы реестра носят своё, пишущее, и оставленные как
+   * есть они снимали бы второй замок ровно там, где первый забыт.
+   */
+  #readOnlyTenant(tenant: Tenant, db: Database.Database): Tenant {
+    return {
+      ...tenant,
+      db,
+      disputes: READ_ONLY_DISPUTES,
+      integrity: readOnlyIntegrity(db, this.#graph),
+    };
   }
 
   /** Закрывает соединение одного ребёнка. Отсутствующее — не ошибка. */

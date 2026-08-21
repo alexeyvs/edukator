@@ -15,6 +15,7 @@ import {
   openControlDatabase,
   redeemParentInvite,
   retireChild,
+  revokeImpersonation,
   setAdminPassword,
   type AdminAuditEntry,
 } from '../server/control-db.js';
@@ -103,7 +104,7 @@ describe('маршруты захода оператора в семью', () =>
     provisionChildDatabase(control, childId, dir);
 
     tenants = new TenantRegistry({ control, dataDir: dir, graph: GRAPH, seedDir, log: () => undefined });
-    impersonations = new ImpersonationTenants({ now: () => NOW, log: () => undefined });
+    impersonations = new ImpersonationTenants({ graph: GRAPH, now: () => NOW, log: () => undefined });
     refusals = new ImpersonationRefusals();
     const opener = createTenantOpener({ tenants, impersonations });
     context = createTenantContext({
@@ -277,6 +278,30 @@ describe('маршруты захода оператора в семью', () =>
     const second = await start({ childId, role: 'browser' });
     await leave(`${adminCookie}; ${IMPERSONATION_COOKIE}=${cookieValue(second)}`);
     expect(audit()[0]).toMatchObject({ action: 'impersonation-end', detail: 'browser, отказов записи: 0' });
+  });
+
+  it('не приписывает новому заходу отказы истёкшего', async () => {
+    const first = await start({ childId, role: 'browser' });
+    const refused = await app.inject({
+      method: 'PUT',
+      url: '/api/profile',
+      headers: { ...SAME_ORIGIN, cookie: `${IMPERSONATION_COOKIE}=${cookieValue(first)}` },
+      payload: { interests: ['раз'] },
+    });
+    expect(refused.statusCode).toBe(403);
+
+    // Срок захода вышел, и выхода не было: `resolveImpersonation` просроченную
+    // строку уже не отдаёт, так что закрыть её и забрать счётчик было некому.
+    // Счётчик процессный — не сброшенный, он приписал бы попытки записи в
+    // прошлой семье записи о конце захода в следующей.
+    revokeImpersonation(control, cookieValue(first), NOW);
+    const second = await start({ childId, role: 'browser' });
+    await leave(`${adminCookie}; ${IMPERSONATION_COOKIE}=${cookieValue(second)}`);
+
+    expect(audit()[0]).toMatchObject({
+      action: 'impersonation-end',
+      detail: 'browser, отказов записи: 0',
+    });
   });
 
   it('повторный старт гасит первый заход и закрывает его записью', async () => {

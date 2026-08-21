@@ -169,7 +169,12 @@ function readRunProgress(db: Database, runId: number): RunProgress {
 /** Возвращает сохранённые сервером счётчики забега и его готовность к закрытию. */
 export function runProgress(db: Database, runId: number): RunProgress {
   if (db.inTransaction) return readRunProgress(db, runId);
-  return db.transaction(() => readRunProgress(db, runId)).immediate();
+  // Транзакция отложенная, а не `immediate`: читать здесь нечего писать, а
+  // `BEGIN IMMEDIATE` берёт замок записи и на соединении с `PRAGMA query_only`
+  // отказывает целиком. Под заходом оператора этим соединением открывается
+  // `GET /api/run/plan`, и незакрытый забег в семье превращал бы первый же
+  // экран в пятисотку — ровно там, куда оператор и пришёл смотреть.
+  return db.transaction(() => readRunProgress(db, runId))();
 }
 
 /**

@@ -602,6 +602,29 @@ describe('App', () => {
 
     expect(await screen.findByRole('heading', { name: 'Дети' })).toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent('как родитель');
+    // «Выйти» под заходом не предлагается вовсе: он читает **собственную**
+    // cookie оператора, гасит его же родительскую сессию и уводит корень на
+    // экран входа — вместе с несъёмной полосой, то есть с единственной кнопкой
+    // возврата в админку.
+    expect(screen.queryByRole('button', { name: 'Выйти' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Выйти в админку' })).toBeInTheDocument();
+  });
+
+  it('оставляет «Выйти» родителю без захода', async () => {
+    vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(url.startsWith('/api/family')
+        ? { email: 'свой@example.org', pinConfigured: false, children: [] }
+        : DASHBOARD),
+    })));
+
+    render(<App authApi={authApi({
+      me: vi.fn().mockResolvedValue({ kind: 'parent', email: 'свой@example.org' }),
+    })} />);
+
+    expect(await screen.findByRole('heading', { name: 'Дети' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Выйти' })).toBeInTheDocument();
   });
 
   it('не рисует полосы там, где захода нет', async () => {

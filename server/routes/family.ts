@@ -9,6 +9,12 @@
  * PIN сюда тоже не пускает: он подтверждает действие уже вошедшего родителя, а
  * не заменяет вход.
  *
+ * Оператор под заходом сюда тоже не пишет. Аренды у этих маршрутов нет, и
+ * второй замок имперсонации (`PRAGMA query_only` на соединении с базой ребёнка)
+ * их не прикрывает: семья, устройства и PIN лежат в `control.db`. Поэтому
+ * первый замок выписан здесь руками — и проверять его обязательно отдельным
+ * тестом, потому что общая матрица допуска этих маршрутов не видит.
+ *
  * Открытый токен приглашения виден ровно в одном ответе — на создание
  * устройства. Повторно его не покажет ни список, ни отдельное чтение: в базе
  * лежит только отпечаток, и «показать ссылку ещё раз» здесь невозможно не по
@@ -39,7 +45,9 @@ import {
   AuthError,
   assertSameOrigin,
   authorizeChild,
+  isMutating,
   resolveBearer,
+  type ImpersonationMark,
 } from '../auth.js';
 import { hashParentPin, readParentPin, readPinPepper } from '../parent-pin.js';
 import { provisionChildDatabase } from '../data-dir.js';
@@ -53,6 +61,11 @@ export interface FamilyRoutesOptions {
    * нибудь», перебирается по дампу базы за секунды.
    */
   pinPepper?: string;
+  /**
+   * Отказ первого замка имперсонации. Проброшен насквозь по той же причине, что
+   * и у аренды: считает отказы тот, кто пишет запись о конце захода.
+   */
+  onReadOnly?: (impersonation: ImpersonationMark) => void;
   now?: () => Date;
 }
 
@@ -126,11 +139,36 @@ export function registerFamilyRoutes(app: FastifyInstance, options: FamilyRoutes
       fail(reply, new AuthError('forbidden', `Предъявителю ${bearer.kind} сюда нельзя`));
       return undefined;
     }
+    // Первый замок имперсонации стоит и здесь, хотя аренды у этих маршрутов
+    // нет. Второй замок их не прикрывает вовсе: `PRAGMA query_only` стоит на
+    // соединении с базой ребёнка, а состав семьи, устройства и PIN живут в
+    // `control.db`. Без этой проверки оператор под заходом заводил бы чужих
+    // детей и выпускал бы ссылки на чужие устройства — то есть выдавал бы себе
+    // постоянный токен, переживающий пятнадцатиминутный срок захода.
+    if (bearer.impersonation !== undefined && isMutating(request.method)) {
+      options.onReadOnly?.(bearer.impersonation);
+      fail(
+        reply,
+        new AuthError(
+          'read-only',
+          `Оператор ${bearer.impersonation.adminId} смотрит чужую семью и не меняет её`,
+        ),
+      );
+      return undefined;
+    }
     return bearer.parent;
   }
 
+  /**
+   * Отказ допуска. Код едет рядом с текстом по той же причине, что и у
+   * `failAuth`: «только просмотр», «доступ закрыт» и «запрос пришёл не со
+   * страницы» отвечают одним 403, и без кода клиент показал бы работающий
+   * замок экраном поломки.
+   */
   function fail(reply: FastifyReply, error: AuthError): FastifyReply {
-    return reply.code(AUTH_STATUS[error.code]).send({ error: AUTH_MESSAGE[error.code] });
+    return reply
+      .code(AUTH_STATUS[error.code])
+      .send({ error: AUTH_MESSAGE[error.code], code: error.code });
   }
 
   /** Ребёнок со своими устройствами. Отпечатков и токенов в этом виде нет. */

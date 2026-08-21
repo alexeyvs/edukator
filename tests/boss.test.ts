@@ -142,6 +142,20 @@ describe('доменная модель босса', () => {
     expect(nextBossTask(db, graph, runId).position).toBe(2);
   });
 
+  it('выдаёт позицию и на соединении только для чтения', () => {
+    const { runId } = active();
+
+    // Так чужую семью смотрит оператор (второй замок имперсонации). Снимок
+    // здесь нужен, замок записи — нет: `BEGIN IMMEDIATE` под `query_only`
+    // отказывает целиком, и `GET /api/boss/:id/next` отвечал бы пятисоткой.
+    db.pragma('query_only = ON');
+    try {
+      expect(nextBossTask(db, graph, runId).position).toBe(1);
+    } finally {
+      db.pragma('query_only = OFF');
+    }
+  });
+
   it('запрещает подсказку, чужое задание и следующий ответ после ошибки', () => {
     const { runId } = active();
     const first = nextBossTask(db, graph, runId);

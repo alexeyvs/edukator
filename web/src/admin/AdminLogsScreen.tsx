@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ADMIN_LOG_EVENTS,
   browserAdminApi,
@@ -114,11 +114,21 @@ export function AdminLogsScreen({ api = browserAdminApi, onBack, onSignedOut }: 
   // Новая попытка после сорвавшейся и перезапуск ленты по фильтру: эффект сам
   // не повторится, и без счётчика обрыв сети запирал бы оператора навсегда.
   const [attempt, setAttempt] = useState(0);
+  /**
+   * Номер последнего запроса. Без него догрузка «Показать ещё», доехавшая
+   * после смены фильтра, дописала бы нефильтрованный хвост к свежему списку и
+   * вернула бы его курсор — то есть показала бы смесь двух разных вопросов,
+   * ровно ту, которую отдельный `applied` и заведён предотвращать.
+   */
+  const generation = useRef(0);
 
   const load = useCallback((query: AdminLogQuery, append: boolean) => {
+    const mine = generation.current + 1;
+    generation.current = mine;
     setBusy(true);
     api.logs(query)
       .then((page) => {
+        if (generation.current !== mine) return;
         setEntries((previous) => (append && previous !== null
           ? [...previous, ...page.entries]
           : page.entries));
@@ -126,6 +136,7 @@ export function AdminLogsScreen({ api = browserAdminApi, onBack, onSignedOut }: 
         setProblem(null);
       })
       .catch((error: unknown) => {
+        if (generation.current !== mine) return;
         // 401 — не поломка, а кончившаяся сессия оператора: «Повторить» здесь
         // повторяло бы отказ, а пускает обратно только форма входа.
         if (error instanceof HttpError && error.status === 401) {
@@ -134,7 +145,9 @@ export function AdminLogsScreen({ api = browserAdminApi, onBack, onSignedOut }: 
         }
         setProblem(error instanceof Error ? error.message : 'Не получилось загрузить журнал');
       })
-      .finally(() => setBusy(false));
+      .finally(() => {
+        if (generation.current === mine) setBusy(false);
+      });
   }, [api, onSignedOut]);
 
   useEffect(() => {
@@ -190,6 +203,11 @@ export function AdminLogsScreen({ api = browserAdminApi, onBack, onSignedOut }: 
             onChange={(input) => setChild(input.target.value)}
           />
         </label>
+        {/*
+          Кнопка не запирается на время загрузки намеренно: медленный запрос
+          иначе запирал бы и форму, а от смеси двух ответов защищает не запрет
+          спрашивать, а номер запроса.
+        */}
         <button type="submit">Показать</button>
       </form>
 

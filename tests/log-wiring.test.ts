@@ -174,6 +174,31 @@ describe('разводка журнала аварий', () => {
       expect(entry?.childId).toBe(server.childId);
       expect(entry?.message).toContain('перезапуск');
     });
+
+    it('пишет аварию health один раз на состояние, а не на опрос', async () => {
+      const dataDir = join(tempDir, 'повторный-health');
+      const server = await startTenantServer({ dataDir, worker: false });
+      try {
+        for (const suffix of ['', '-wal', '-shm']) {
+          rmSync(`${server.dbPath}${suffix}`, { force: true });
+        }
+        openDatabase(server.dbPath).close();
+
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          const response = await server.app.inject({ method: 'GET', url: '/api/health' });
+          expect(response.statusCode).toBe(503);
+        }
+      } finally {
+        await server.close();
+      }
+
+      // Маршрут здоровья не авторизован, а оба его состояния держатся до
+      // перезапуска: запись на каждый опрос — не диагностика, а её
+      // уничтожение. Весь ретеншен журнала — 4 файла по 8 МБ, и монитор,
+      // опрашивающий раз в минуту, вытеснил бы из них ровно ту запись, которая
+      // называет причину.
+      expect(journal(dataDir).filter((item) => item.event === 'tenant-detached')).toHaveLength(1);
+    });
   });
 
   describe('реестр арендаторов', () => {

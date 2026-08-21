@@ -9,16 +9,19 @@ import {
   LOGIN_EMAIL_FAILURE_LIMIT,
   LOGIN_LOCKOUT_MS,
   createAdmin,
+  createChild,
   createParent,
   disableAdmin,
   issueParentInvite,
   listAdminAudit,
   openControlDatabase,
   redeemParentInvite,
+  resolveImpersonation,
   setAdminPassword,
+  startImpersonation,
 } from '../server/control-db.js';
-import { controlDatabasePath, ensureDataDir } from '../server/data-dir.js';
-import { ADMIN_COOKIE, resolveAdminBearer } from '../server/auth.js';
+import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
+import { ADMIN_COOKIE, IMPERSONATION_COOKIE, resolveAdminBearer } from '../server/auth.js';
 import { registerAuthRoutes } from '../server/routes/auth.js';
 import {
   registerAdminAuthRoutes,
@@ -157,6 +160,38 @@ describe('маршруты входа оператора', () => {
       expect(cookie).toContain('Max-Age=0');
       expect(resolveAdminBearer(control, { cookie: `${ADMIN_COOKIE}=${token}` }, current)).toBeUndefined();
       expect(audit()).toEqual([
+        { action: 'logout', adminId },
+        { action: 'login', adminId },
+      ]);
+    });
+
+    it('выход из админки закрывает и живой заход в семью', async () => {
+      const adminId = admin();
+      const token = cookieValue(setCookie((await login()).headers));
+      const parentId = createParent(control, 'семья@example.com', current);
+      const childId = createChild(control, parentId, 'Ученик', current);
+      // Заход пускают только к обслуживаемому ребёнку: без готовой базы
+      // `startImpersonation` отказывает, и тест проверял бы не тот отказ.
+      provisionChildDatabase(control, childId, dir);
+      const started = startImpersonation(control, { adminId, childId, role: 'browser' }, current);
+      expect(started.ok).toBe(true);
+      const impersonation = started.ok ? started.session.token : '';
+
+      const response = await logout({
+        cookie: `${ADMIN_COOKIE}=${token}; ${IMPERSONATION_COOKIE}=${impersonation}`,
+      });
+
+      expect(response.statusCode).toBe(200);
+      // Заход, переживший выход, был бы хуже незакрытой сессии: `resolveBearer`
+      // проверяет его первым, так что собственное приложение оператора молча
+      // показывало бы чужую семью, а снять заход стало бы нечем — явный выход
+      // требует админской cookie, которую этот же выход и погасил.
+      expect(resolveImpersonation(control, impersonation, current)).toBeUndefined();
+      const cookies = response.headers['set-cookie'] as string[];
+      expect(cookies.some((value) => value.includes(`${IMPERSONATION_COOKIE}=;`))).toBe(true);
+      expect(cookies.every((value) => value.includes('Max-Age=0'))).toBe(true);
+      expect(audit()).toEqual([
+        { action: 'impersonation-end', adminId, detail: 'browser, отказов записи: 0' },
         { action: 'logout', adminId },
         { action: 'login', adminId },
       ]);

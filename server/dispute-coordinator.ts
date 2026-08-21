@@ -63,7 +63,19 @@ function defaultLog(message: string): void {
   process.stderr.write(`${message}\n`);
 }
 
-export class DisputeCoordinator {
+/**
+ * Что аренда обещает про разбор споров. Интерфейс, а не сам класс, ради
+ * второго замка имперсонации: под заходом оператора аренда обязана отдать
+ * разбор, который ничего не ставит в очередь, а подставить такой на месте
+ * класса с приватными полями нечем.
+ */
+export interface DisputeScheduler {
+  restore(): void;
+  schedule(id: number): void;
+  stop(): Promise<void>;
+}
+
+export class DisputeCoordinator implements DisputeScheduler {
   readonly #db: Database;
   readonly #graph: TopicGraph;
   readonly #review: DisputeReviewer;

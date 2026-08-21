@@ -143,6 +143,38 @@ describe('лента аварий', () => {
     expect(screen.queryByRole('button', { name: 'Показать ещё' })).toBeNull();
   });
 
+  it('не досыпает отставшую догрузку в свежеотфильтрованную ленту', async () => {
+    let releaseAppend = (): void => {};
+    const logs = vi.fn()
+      .mockResolvedValueOnce({
+        entries: [entry({ message: 'нефильтрованная' })],
+        nextBefore: '2026-08-21T09:00:00.000Z#1',
+      } satisfies AdminLogPage)
+      .mockReturnValueOnce(new Promise<AdminLogPage>((resolve) => {
+        releaseAppend = () => resolve({
+          entries: [entry({ message: 'отставшая' })],
+          nextBefore: '2026-08-21T08:00:00.000Z#1',
+        });
+      }))
+      .mockResolvedValueOnce({ entries: [entry({ message: 'отфильтрованная' })] } satisfies AdminLogPage);
+    render(<AdminLogsScreen api={adminApi({ logs })} onSignedOut={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Показать ещё' }));
+    // Фильтр применяется, пока догрузка ещё в пути.
+    fireEvent.change(screen.getByLabelText('Событие'), { target: { value: 'backup-failed' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Показать' }));
+    await screen.findByText('отфильтрованная');
+
+    releaseAppend();
+
+    // Ответ прошлого вопроса не дописывается к новому: дописать
+    // нефильтрованное к отфильтрованному значило бы показать смесь двух разных
+    // вопросов, а восстановленный курсор увёл бы и следующую страницу.
+    await waitFor(() => expect(screen.queryByText('отставшая')).toBeNull());
+    expect(screen.queryByText('нефильтрованная')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Показать ещё' })).toBeNull();
+  });
+
   it('несёт применённый фильтр в запрос следующей страницы', async () => {
     const logs = vi.fn().mockResolvedValue({
       entries: [entry()],

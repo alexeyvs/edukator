@@ -276,7 +276,8 @@ npm run admin -- disable  --email оператор@example.com   # отключ�
 открываться ровно тогда, когда с базами что-то не так. Статистика
 (`GET /api/admin/stats`) обходит все детские базы `readonly`, поэтому её ответ
 кешируется на 5 минут и показывается с отметкой времени; пересчёт — кнопкой
-(`?refresh=1`). Карточка ребёнка (`/admin/child/:childId`) кеша не имеет: по
+(`?refresh=1`). Карточка ребёнка (`/admin/child/:childId`,
+`GET /api/admin/children/:childId`) кеша не имеет: по
 жалобе смотрят состояние сейчас. Содержания не читает ни один слой — ни текстов
 ответов, ни формулировок споров, ни теории.
 
@@ -284,8 +285,11 @@ npm run admin -- disable  --email оператор@example.com   # отключ�
 (`POST /api/admin/impersonate`): оператор смотрит детский или родительский экран
 так, как его видит семья, с несъёмной полосой поверх. Заход живёт 15 минут,
 держится двумя независимыми замками на запись — отказ 403 «Только просмотр» и
-`PRAGMA query_only = ON` на отдельном соединении, — не двигает отметки
-активности ребёнка и не будит фоновую генерацию. Начало и конец захода, вход и
+`PRAGMA query_only = ON` на отдельном соединении (вместе с координаторами спора
+и проверки осмысленности: они носят своё, пишущее, и подменяются
+отказывающими), — не двигает отметки активности ребёнка и не будит фоновую
+генерацию. Выход из самой админки заход тоже закрывает: переживший его заход
+выигрывал бы у собственных cookie оператора, а снять его было бы уже нечем. Начало и конец захода, вход и
 отказ входа попадают в `admin_audit` (`GET /api/admin/audit`); в записи о конце
 стоит счётчик отказанных попыток записи.
 
@@ -440,11 +444,13 @@ Family Safety-контроллером и требует заданного `EDU
 | `GET /api/health` | состояние управляющей базы, карты тем и открытых детских баз |
 | `GET /api/auth/me` | кто предъявитель: родитель, ребёнок, оба или никто; токенов и чужих адресов не отдаёт |
 | `POST /api/auth/parent/login`, `POST /api/auth/parent/logout` | вход по email и паролю, выход |
+| `POST /api/auth/persona` | переключить активную роль там, где в одном браузере живы обе сессии: `{ kind: "child" }` — свободно, `{ kind: "parent", password }` — с подтверждением пароля |
 | `GET /api/auth/parent/invite/:token` | проверить приглашение, **не гася** его |
 | `POST /api/auth/parent/invite/:token` | погасить приглашение, поставить пароль и получить сессию |
 | `POST /api/auth/child/claim/:token` | погасить ссылку устройства на детской машине |
 | `GET /api/family` | дети, их устройства и признак настроенного PIN |
 | `POST /api/family/children` | завести ребёнка вместе с его базой |
+| `POST /api/family/children/:id/provision` | повторить заведение базы ребёнка, застрявшего в `provisioning`/`failed` |
 | `POST /api/family/children/:id/devices` | выпустить устройству одноразовую ссылку: браузеру она даёт cookie, агенту — постоянный токен |
 | `POST /api/family/devices/:id/revoke` | отозвать устройство |
 | `POST /api/family/pin` | сменить родительский PIN |
@@ -538,10 +544,22 @@ Family Safety-контроллером и требует заданного `EDU
   на адрес), ненастроенный PIN, отсутствующий pepper, недоступный счётчик или
   недоступная база — 503;
 - `GET /api/auth/me` → `{ kind: "anonymous" }`, `{ kind: "parent", email }`,
-  `{ kind: "agent", childId }` либо `{ kind: "child", childId, name }`. Детскому
+  `{ kind: "agent", childId }`, `{ kind: "child", childId, name }` либо
+  `{ kind: "both", active: "parent" | "child", parent: { email },
+  child: { childId, name } }` — последнее, когда в одном браузере живы обе
+  сессии; `active` показывает сохранённый выбор роли. Детскому
   предъявителю ни родительского адреса, ни токенов не видно: за детской машиной
-  сидит ученик, и учётная запись родителя — не его дело. 401 здесь не бывает:
-  «никто не вошёл» — обычное состояние страницы входа, а не ошибка;
+  сидит ученик, и учётная запись родителя — не его дело. Под заходом оператора
+  ответ приходит от **целевой** семьи и несёт `impersonation: { adminEmail,
+  childName, role, expiresAt }`; заход проверяется раньше собственных cookie
+  оператора, иначе полоса не появлялась бы ровно там, где нужна. 401 здесь не
+  бывает: «никто не вошёл» — обычное состояние страницы входа, а не ошибка;
+- `POST /api/auth/persona` с `{ kind: "child" }` или `{ kind: "parent",
+  password }` → тот же ответ `both` с новым `active` и cookie
+  `__Host-edu_actor` (`HttpOnly`, `SameSite=Strict`). Cookie прав не даёт: обе
+  сессии проверяются серверно на каждом запросе, а выбор роли `parent`
+  подтверждается паролем — это единственное место, где родительская сессия
+  переспрашивается. Живы не обе сессии — 409;
 - `POST /api/auth/parent/login` с `{ email, password }` →
   `{ kind: "parent", email }` и cookie `__Host-edu_parent`;
   `POST /api/auth/parent/logout` → `{ kind: "anonymous" }` и погашенная cookie;
@@ -556,6 +574,9 @@ Family Safety-контроллером и требует заданного `EDU
   createdAt, devices: [{ id, kind, label, claimedAt?, revokedAt?,
   inviteExpiresAt }] }] }`;
 - `POST /api/family/children` с `{ name }` → заведённый ребёнок;
+  `POST /api/family/children/:id/provision` → тот же ребёнок с готовой базой.
+  Общий `authorizeChild` здесь намеренно не используется: он допускает только
+  `ready`, а повтор нужен как раз `provisioning` и `failed`;
   `POST /api/family/children/:id/devices` с `{ kind, label }` →
   `{ device, invite: { path, token, expiresAt } }`, где `token` — токен
   **приглашения** и виден один раз;
@@ -639,24 +660,34 @@ codex на минуты. У споров есть **один отдельный 
 фоновый воркер занять не может. Поэтому спор стартует сразу, даже если заняты оба
 места прогрева. Второй одновременный спор остаётся открытым и повторяется автоматически.
 
-Без предъявителя не отвечает ни один арендный маршрут. Предъявителей три:
+Без предъявителя не отвечает ни один арендный маршрут. Предъявителей четыре:
 **родитель** (cookie `__Host-edu_parent`, `SameSite=Strict`, выдаётся по
 паролю), **браузер ребёнка** (cookie `__Host-edu_child`, `SameSite=Lax`,
-выдаётся погашением ссылки) и **агент** (токен устройства заголовком
-`Authorization: Bearer`, ровно один маршрут `GET /api/gate/status`). Агент — не
+выдаётся погашением ссылки), **агент** (токен устройства заголовком
+`Authorization: Bearer`, ровно один маршрут `GET /api/gate/status`) и
+**оператор** (cookie `__Host-edu_admin`, `SameSite=Strict`, выдаётся по паролю
+оператора; аренды у его маршрутов нет вовсе — см. «Оператор»). Агент — не
 детская сессия: он лежит файлом на детской машине, и допуск его к обычным
-маршрутам означал бы, что этот файл умеет сдавать ответы. `SameSite` за защиту
-от CSRF не считается: изменяющие запросы дополнительно требуют совпадения
+маршрутам означал бы, что этот файл умеет сдавать ответы. Оператор — не
+родитель: ни одна строка матрицы значением `admin` не пополняется. `SameSite` за
+защиту от CSRF не считается: изменяющие запросы дополнительно требуют совпадения
 `Origin` либо `Sec-Fetch-Site: same-origin`. Cookie идут с `Secure`, который
 снимается только явным `EDUKATOR_INSECURE_COOKIES=1` для локального http.
 
-| Маршруты | родитель | ребёнок | агент |
-|---|---|---|---|
-| `/api/session`, `/api/run`, `/api/triage`, `/api/boss`, `/api/learning`, `/api/profile` | нет | да | нет |
-| `GET /api/gate/status` | нет | да | **да** |
-| `GET /api/parents/:childId` | да | да, только свой | нет |
-| `PUT /api/parents/:childId/computer-access` | да, без PIN | да, свой и с PIN | нет |
-| `/api/family/*`, `/api/auth/parent/*` | да | нет | нет |
+| Маршруты | родитель | ребёнок | агент | оператор |
+|---|---|---|---|---|
+| `/api/session`, `/api/run`, `/api/triage`, `/api/boss`, `/api/learning`, `/api/profile` | нет | да | нет | нет |
+| `GET /api/gate/status` | нет | да | **да** | нет |
+| `GET /api/parents/:childId` | да | да, только свой | нет | нет |
+| `PUT /api/parents/:childId/computer-access` | да, без PIN | да, свой и с PIN | нет | нет |
+| `/api/family/*`, `/api/auth/parent/*` | да | нет | нет | нет |
+| `/api/admin/*`, `/api/auth/admin/*` | нет | нет | нет | **да** |
+
+Под заходом оператора (`__Host-edu_impersonation`) предъявителем становится
+родитель или браузер **целевой** семьи — но только на чтение. Изменяющий запрос
+отвергается 403 с кодом `read-only`, и это касается и `/api/family/*`, у которых
+аренды нет: состав семьи, устройства и PIN лежат в `control.db`, куда
+`PRAGMA query_only` не достаёт, поэтому первый замок у них выписан отдельно.
 
 Чтение сводки ребёнком — не послабление, а исполнение принципиального
 ограничения: ученик видит тот же дашборд и знает о нём.
@@ -882,10 +913,11 @@ npm run family:test   # pytest контроллера Family Safety; npm test е
 `curriculum`, `db`, `json-schema`), забеге и триаже (`run`, `triage`, `xp`,
 `session-error`), игровом слое (`streak`, `boss`, `boss-prep`, `parents`),
 маршрутах, семафорах codex, генерации, многоарендности (`control-db`, `secrets`,
-`auth`, `tenant-registry`, `data-dir`, `data-lock`, `client-address`, `backup`,
-`dispute-coordinator`, `routes/{auth,family,gate,tenant-context,token-privacy}`),
+`parent-pin`, `auth`, `tenant-registry`, `data-dir`, `data-lock`,
+`client-address`, `backup`, `dispute-coordinator`,
+`routes/{auth,family,gate,tenant-context,token-privacy}`),
 её клиентских экранах (`App`, `LoginScreen`, `FamilyScreen`, `InviteScreen`,
-`JoinScreen`, `auth-api`, `family-api`), админке (`server/admin/**`,
+`JoinScreen`, `auth-api`, `family-api`, `http`), админке (`server/admin/**`,
 `server/routes/admin/**`, `server/log.ts`, `server/tenant-opener.ts`,
 `web/src/admin/**`, `web/src/admin-api.ts`, `web/src/app-route.ts`) и каркасе
 (`index`, `run-child`, `atomic-write`). Пороги висят именно на них: всё это

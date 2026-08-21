@@ -37,6 +37,7 @@ describe('remote-helper деплоя', () => {
         `HTTP_PROXY=${proxy}`,
         `HTTPS_PROXY=${proxy}`,
         'NO_PROXY=127.0.0.1,localhost',
+        `EDUKATOR_DATA_DIR=${join(root, 'data')}`,
         '',
       ].join('\n'),
       { mode: 0o600 },
@@ -122,6 +123,34 @@ describe('remote-helper деплоя', () => {
     expect(result.stderr).toContain('предыдущая версия восстановлена');
     expect(existsSync(join(root, 'home', 'deploy-backups', releaseId, 'control.db'))).toBe(true);
     expect(`${result.stdout}${result.stderr}`).not.toContain('deploy-secret');
+  });
+
+  it('отказывается деплоить без каталога данных и с каталогом внутри релиза', () => {
+    const proxyLines = [
+      `http_proxy=${proxy}`,
+      `https_proxy=${proxy}`,
+      `HTTP_PROXY=${proxy}`,
+      `HTTPS_PROXY=${proxy}`,
+    ];
+
+    // Без переменной приложение берёт умолчание `<корень проекта>/data`, то
+    // есть каталог внутри `app`: деплой унёс бы живые базы вместе с прежней
+    // версией, поднял бы пустую `control.db` и отчитался успехом.
+    writeFileSync(envFile, [...proxyLines, ''].join('\n'), { mode: 0o600 });
+    const missing = deploy('ok');
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain('EDUKATOR_DATA_DIR');
+    expect(readFileSync(join(appRoot, 'app', 'version'), 'utf8')).toBe('old\n');
+
+    writeFileSync(
+      envFile,
+      [...proxyLines, `EDUKATOR_DATA_DIR=${join(appRoot, 'app', 'data')}`, ''].join('\n'),
+      { mode: 0o600 },
+    );
+    const inside = deploy('ok');
+    expect(inside.status).toBe(1);
+    expect(inside.stderr).toContain('унёс бы данные вместе с версией');
+    expect(readFileSync(join(appRoot, 'app', 'version'), 'utf8')).toBe('old\n');
   });
 
   it('отвергает идентификатор релиза, который можно использовать как путь', () => {

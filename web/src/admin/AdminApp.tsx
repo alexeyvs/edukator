@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AdminChildScreen } from './AdminChildScreen';
 import { AdminHomeScreen, type AdminSignOutReason } from './AdminHomeScreen';
 import { AdminLoginScreen } from './AdminLoginScreen';
@@ -65,10 +65,30 @@ export function AdminApp({ api }: { api?: AdminApi } = {}) {
    */
   const entered = useRef(false);
 
-  /** Переход между экранами вместе с адресом: карточка обязана быть ссылкой. */
+  /**
+   * Переход между экранами вместе с адресом: карточка обязана быть ссылкой.
+   *
+   * Запись в историю только там, где адрес действительно меняется. Сводка и
+   * лента живут по тому же `/admin`, и `pushState` на них клал бы в историю
+   * повторы одного адреса: «назад» тогда не делает ничего видимого столько
+   * раз, сколько оператор нажал кнопок, а потом уводит со страницы целиком.
+   */
   const go = useCallback((next: AdminPage) => {
     setPage(next);
-    window.history.pushState(null, '', pathOf(next));
+    const path = pathOf(next);
+    if (path === window.location.pathname) window.history.replaceState(null, '', path);
+    else window.history.pushState(null, '', path);
+  }, []);
+
+  /**
+   * «Назад» браузера. Без слушателя адрес и экран расходятся: возврат с
+   * карточки оставлял бы её нарисованной поверх `/admin`, а следующий возврат
+   * уводил бы с админки, показывая её же.
+   */
+  useEffect(() => {
+    const onPop = (): void => setPage(readAdminPage(window.location.pathname));
+    window.addEventListener('popstate', onPop);
+    return () => { window.removeEventListener('popstate', onPop); };
   }, []);
 
   const signedOut = useCallback((reason: AdminSignOutReason) => {
@@ -80,9 +100,12 @@ export function AdminApp({ api }: { api?: AdminApi } = {}) {
     );
     entered.current = false;
     setEmail(undefined);
-    setPage({ kind: 'home' });
+    // Адрес возвращается вместе с экраном: форма входа, оставленная на
+    // `/admin/child/<id>`, по «обновить» вернула бы карточку, которой
+    // вышедшему оператору уже не покажут.
+    go({ kind: 'home' });
     setSignedIn(false);
-  }, []);
+  }, [go]);
 
   if (!signedIn) {
     return (
