@@ -176,7 +176,7 @@ describe('openControlDatabase', () => {
   });
 
   it('держит константы спеки: номер версии и состав таблиц', () => {
-    expect(CONTROL_SCHEMA_VERSION).toBe(1);
+    expect(CONTROL_SCHEMA_VERSION).toBe(2);
     expect([...CONTROL_TABLES]).toEqual([
       'parents',
       'parent_invites',
@@ -185,6 +185,10 @@ describe('openControlDatabase', () => {
       'child_devices',
       'codex_quota',
       'login_attempts',
+      'admins',
+      'admin_sessions',
+      'admin_impersonations',
+      'admin_audit',
     ]);
   });
 });
@@ -345,6 +349,186 @@ describe('ошибочные пути', () => {
     other.close();
 
     expect(() => open()).toThrow(/содержит объект «parents»/);
+  });
+});
+
+/**
+ * База версии 1: управляющая база без админских таблиц и со старым `CHECK` у
+ * счётчиков перебора. Админские объекты вычитаются из актуальной схемы, а DDL
+ * счётчиков вписан руками — ровно тем текстом, который стоял в версии 1: копия,
+ * собранная из нынешней константы, приняла бы `kind = 'admin'` ещё до миграции
+ * и проверять было бы нечего.
+ */
+function createVersionOneDatabase(target: string): Database {
+  openControlDatabase(target).close();
+  const legacy = new BetterSqlite3(target);
+  legacy.exec(`
+    DROP TABLE admin_audit;
+    DROP TABLE admin_impersonations;
+    DROP TABLE admin_sessions;
+    DROP TABLE admins;
+    DROP TABLE login_attempts;
+    CREATE TABLE login_attempts (
+      scope           TEXT    NOT NULL CHECK (scope IN ('email', 'address')),
+      kind            TEXT    NOT NULL CHECK (kind IN ('password', 'pin')),
+      key             TEXT    NOT NULL,
+      failures        INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0),
+      first_failed_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      last_failed_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      PRIMARY KEY (scope, kind, key)
+    );
+  `);
+  legacy.pragma('user_version = 1');
+  return legacy;
+}
+
+describe('обновление управляющей базы до версии 2', () => {
+  it('заводит админские таблицы и сохраняет счётчики перебора', () => {
+    const legacy = createVersionOneDatabase(path);
+    legacy
+      .prepare(
+        `INSERT INTO login_attempts (scope, kind, key, failures, first_failed_at, last_failed_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run('email', 'password', 'mama@example.com', 3, '2026-08-20T10:00:00.000Z', '2026-08-20T10:05:00.000Z');
+    // Версия 1 третьего вида не знала: без миграции запись оператора отвергалась.
+    expect(() =>
+      legacy
+        .prepare('INSERT INTO login_attempts (scope, kind, key) VALUES (?, ?, ?)')
+        .run('email', 'admin', 'operator@example.com'),
+    ).toThrow(/CHECK/i);
+    legacy.close();
+
+    const db = open();
+
+    const [version] = db.pragma('user_version') as [{ user_version: number }];
+    expect(version.user_version).toBe(2);
+    expect(tableNames(db)).toEqual([...CONTROL_TABLES].sort());
+
+    // Обнулить счётчики миграцией значит открыть окно перебора в предсказуемое
+    // время — в момент обновления, поэтому строки обязаны доехать целиком.
+    const attempt = db
+      .prepare<[], { failures: number; first_failed_at: string; last_failed_at: string }>(
+        'SELECT failures, first_failed_at, last_failed_at FROM login_attempts WHERE key = ?',
+      )
+      .get('mama@example.com');
+    expect(attempt).toEqual({
+      failures: 3,
+      first_failed_at: '2026-08-20T10:00:00.000Z',
+      last_failed_at: '2026-08-20T10:05:00.000Z',
+    });
+
+    // Третий вид счётчика теперь принимается, а посторонний — по-прежнему нет.
+    db.prepare('INSERT INTO login_attempts (scope, kind, key) VALUES (?, ?, ?)').run(
+      'email',
+      'admin',
+      'operator@example.com',
+    );
+    expect(() =>
+      db
+        .prepare('INSERT INTO login_attempts (scope, kind, key) VALUES (?, ?, ?)')
+        .run('email', 'totp', 'operator@example.com'),
+    ).toThrow(/CHECK/i);
+
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+  });
+
+  it('ставит на админские таблицы ограничения и ISO-умолчания', () => {
+    createVersionOneDatabase(path).close();
+    const db = open();
+    const parentId = seedParent(db);
+    const childId = seedChild(db, parentId);
+
+    db.prepare('INSERT INTO admins (id, email) VALUES (?, ?)').run('a1', 'operator@example.com');
+    // Адрес хранится приведённым к нижнему регистру: сравнение точное.
+    expect(() =>
+      db.prepare('INSERT INTO admins (id, email) VALUES (?, ?)').run('a2', 'Operator@Example.com'),
+    ).toThrow(/CHECK/i);
+
+    db.prepare(
+      'INSERT INTO admin_sessions (admin_id, token_hash, expires_at) VALUES (?, ?, ?)',
+    ).run('a1', 'хеш-сессии', '2026-08-21T12:00:00.000Z');
+    db.prepare(
+      `INSERT INTO admin_impersonations (admin_id, child_id, role, token_hash, expires_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run('a1', childId, 'browser', 'хеш-имперсонации', '2026-08-21T12:15:00.000Z');
+    // Роль имперсонации закрыта схемой: чужое значение не должно доехать до кода.
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO admin_impersonations (admin_id, child_id, role, token_hash, expires_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run('a1', childId, 'agent', 'другой хеш', '2026-08-21T12:15:00.000Z'),
+    ).toThrow(/CHECK/i);
+
+    db.prepare(
+      'INSERT INTO admin_audit (admin_id, action, child_id, parent_id) VALUES (?, ?, ?, ?)',
+    ).run('a1', 'impersonation-start', childId, parentId);
+
+    for (const table of ['admins', 'admin_sessions', 'admin_impersonations']) {
+      const row = db
+        .prepare<[], { created_at: string }>(`SELECT created_at FROM ${table}`)
+        .get();
+      expect(row?.created_at).toMatch(ISO_STAMP);
+    }
+    const audit = db.prepare<[], { at: string }>('SELECT at FROM admin_audit').get();
+    expect(audit?.at).toMatch(ISO_STAMP);
+  });
+
+  it('оставляет след в журнале, когда семья уходит, но не даёт удалить оператора', () => {
+    createVersionOneDatabase(path).close();
+    const db = open();
+    const parentId = seedParent(db);
+    const childId = seedChild(db, parentId);
+    db.prepare('INSERT INTO admins (id, email) VALUES (?, ?)').run('a1', 'operator@example.com');
+    db.prepare(
+      'INSERT INTO admin_audit (admin_id, action, child_id, parent_id) VALUES (?, ?, ?, ?)',
+    ).run('a1', 'impersonation-start', childId, parentId);
+
+    // Семья названа значениями: запись о заходе обязана пережить её удаление.
+    db.prepare('DELETE FROM parents WHERE id = ?').run(parentId);
+    const rows = db.prepare<[], { child_id: string | null }>('SELECT child_id FROM admin_audit').all();
+    expect(rows).toEqual([{ child_id: childId }]);
+
+    // А сам оператор из-под собственного журнала не удаляется.
+    expect(() => db.prepare('DELETE FROM admins WHERE id = ?').run('a1')).toThrow(/FOREIGN KEY/i);
+  });
+
+  it('повторная миграция версии 1 идемпотентна', () => {
+    createVersionOneDatabase(path).close();
+    const db = open();
+    db.prepare('INSERT INTO admins (id, email) VALUES (?, ?)').run('a1', 'operator@example.com');
+
+    expect(() => migrateControl(db)).not.toThrow();
+
+    const [version] = db.pragma('user_version') as [{ user_version: number }];
+    expect(version.user_version).toBe(CONTROL_SCHEMA_VERSION);
+    const admins = db.prepare<[], { email: string }>('SELECT email FROM admins').all();
+    expect(admins).toEqual([{ email: 'operator@example.com' }]);
+  });
+
+  it('отвергает управляющую базу версии 3', () => {
+    const legacy = createVersionOneDatabase(path);
+    legacy.pragma('user_version = 3');
+    legacy.close();
+
+    expect(() => open()).toThrow(/более новой версией схемы \(3 > 2\)/);
+  });
+
+  it('отвергает базу версии 2 без админской таблицы и без её индекса', () => {
+    open().close();
+    const raw = new BetterSqlite3(path);
+    raw.exec('DROP TABLE admin_sessions');
+    raw.close();
+    expect(() => open()).toThrow(/admin_sessions не содержит/);
+
+    const other = join(dir, 'без-индекса.db');
+    openControlDatabase(other).close();
+    const rawOther = new BetterSqlite3(other);
+    rawOther.exec('DROP INDEX admin_audit_at');
+    rawOther.close();
+    expect(() => openControlDatabase(other)).toThrow(/отсутствуют admin_audit_at/);
   });
 });
 

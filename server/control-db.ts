@@ -10,7 +10,7 @@ import { MAX_SECRET_LENGTH, hashSecret, verifySecret } from './secrets.js';
  * и живёт отдельно от `SCHEMA_VERSION` детской базы: это разные файлы с разной
  * историей, и общий номер заставлял бы мигрировать одну ради изменений другой.
  */
-export const CONTROL_SCHEMA_VERSION = 1;
+export const CONTROL_SCHEMA_VERSION = 2;
 
 /** Таблицы управляющей базы. Тесты сверяют состав файла именно с этим списком. */
 export const CONTROL_TABLES = [
@@ -21,6 +21,10 @@ export const CONTROL_TABLES = [
   'child_devices',
   'codex_quota',
   'login_attempts',
+  'admins',
+  'admin_sessions',
+  'admin_impersonations',
+  'admin_audit',
 ] as const;
 
 export type ControlTable = (typeof CONTROL_TABLES)[number];
@@ -37,6 +41,98 @@ const NOW_ISO = `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
  * канонизации однажды ошибётся, `..` и разделитель пути в базу не попадут.
  */
 const CHILD_ID_CHECK = `id NOT GLOB '*[^0-9a-f]*' AND length(id) BETWEEN 8 AND 64`;
+
+/**
+ * Счётчики перебора вынесены отдельной строкой: `CHECK` в SQLite на месте не
+ * меняется, поэтому переход к версии 2 пересоздаёт таблицу этим же текстом —
+ * вторая, разошедшаяся с этой копия DDL дала бы базу, собранную миграцией, и
+ * базу, собранную с нуля, с разными ограничениями.
+ */
+const LOGIN_ATTEMPTS_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS login_attempts (
+    -- Счётчики раздельные: по адресу электронной почты и по адресу клиента.
+    scope           TEXT    NOT NULL CHECK (scope IN ('email', 'address')),
+    -- Вид перебора: пароль родителя, PIN родителя и пароль оператора. Оператор
+    -- считается отдельно намеренно — общий счётчик означал бы, что перебор
+    -- чужого родительского пароля запирает вход оператору.
+    kind            TEXT    NOT NULL CHECK (kind IN ('password', 'pin', 'admin')),
+    key             TEXT    NOT NULL,
+    failures        INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0),
+    first_failed_at TEXT    NOT NULL DEFAULT (${NOW_ISO}),
+    last_failed_at  TEXT    NOT NULL DEFAULT (${NOW_ISO}),
+    PRIMARY KEY (scope, kind, key)
+  );
+`;
+
+/** Ограничение роли имперсонации: оператор входит в семью либо ребёнком, либо родителем. */
+const IMPERSONATION_ROLE_CHECK = `role IN ('browser', 'parent')`;
+
+/**
+ * Таблицы админки оператора. Появились в версии 2 и держатся отдельно от
+ * семейной части: доменного отношения к ней у них нет, а миграция обязана
+ * выполнить ровно этот текст.
+ */
+const ADMIN_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS admins (
+    id                     TEXT PRIMARY KEY,
+    -- Как у родителя: адрес уже приведён к нижнему регистру, сравнение точное.
+    email                  TEXT NOT NULL UNIQUE CHECK (email = lower(email) AND email <> ''),
+    -- Пусто, пока пароль не установлен CLI. Приглашений по ссылке у оператора
+    -- нет вовсе: одноразовая ссылка ко всем семьям сразу не нужна ни в одном
+    -- сценарии, а стоит ровно того, что даёт.
+    password_hash          TEXT,
+    -- Гасит и сессии оператора, и его живые имперсонации.
+    credentials_changed_at TEXT,
+    disabled_at            TEXT,
+    created_at             TEXT NOT NULL DEFAULT (${NOW_ISO})
+  );
+
+  CREATE TABLE IF NOT EXISTS admin_sessions (
+    id           INTEGER PRIMARY KEY,
+    admin_id     TEXT NOT NULL REFERENCES admins (id) ON DELETE CASCADE,
+    token_hash   TEXT NOT NULL UNIQUE,
+    -- Как у родительской сессии: бездействие считается от last_seen_at,
+    -- абсолютный потолок — от expires_at, проверяются оба.
+    last_seen_at TEXT NOT NULL DEFAULT (${NOW_ISO}),
+    expires_at   TEXT NOT NULL,
+    revoked_at   TEXT,
+    created_at   TEXT NOT NULL DEFAULT (${NOW_ISO})
+  );
+
+  CREATE INDEX IF NOT EXISTS admin_sessions_admin ON admin_sessions (admin_id);
+
+  CREATE TABLE IF NOT EXISTS admin_impersonations (
+    id         INTEGER PRIMARY KEY,
+    admin_id   TEXT NOT NULL REFERENCES admins (id) ON DELETE CASCADE,
+    child_id   TEXT NOT NULL REFERENCES children (id) ON DELETE CASCADE,
+    role       TEXT NOT NULL CHECK (${IMPERSONATION_ROLE_CHECK}),
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (${NOW_ISO})
+  );
+
+  CREATE INDEX IF NOT EXISTS admin_impersonations_admin ON admin_impersonations (admin_id);
+
+  CREATE TABLE IF NOT EXISTS admin_audit (
+    id        INTEGER PRIMARY KEY,
+    -- Без ON DELETE CASCADE намеренно: у журнала действий смысл ровно в том,
+    -- что удаление оператора его не стирает, а упирается во внешний ключ.
+    admin_id  TEXT NOT NULL REFERENCES admins (id),
+    at        TEXT NOT NULL DEFAULT (${NOW_ISO}),
+    action    TEXT NOT NULL,
+    -- Семья названа значениями, а не ссылками: запись обязана пережить и
+    -- ушедшего ребёнка, и удалённого родителя, иначе след заходов в семью
+    -- исчезает вместе с самой семьёй.
+    child_id  TEXT,
+    parent_id TEXT,
+    detail    TEXT
+  );
+
+  -- Чтение идёт страницей «новые сверху» с курсором по (at, id); по одному at
+  -- порядок неоднозначен, поэтому в индексе оба поля.
+  CREATE INDEX IF NOT EXISTS admin_audit_at ON admin_audit (at, id);
+`;
 
 const CONTROL_SCHEMA = `
   CREATE TABLE IF NOT EXISTS parents (
@@ -122,16 +218,9 @@ const CONTROL_SCHEMA = `
     PRIMARY KEY (child_id, day)
   );
 
-  CREATE TABLE IF NOT EXISTS login_attempts (
-    -- Счётчики раздельные: по адресу электронной почты и по адресу клиента.
-    scope           TEXT    NOT NULL CHECK (scope IN ('email', 'address')),
-    kind            TEXT    NOT NULL CHECK (kind IN ('password', 'pin')),
-    key             TEXT    NOT NULL,
-    failures        INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0),
-    first_failed_at TEXT    NOT NULL DEFAULT (${NOW_ISO}),
-    last_failed_at  TEXT    NOT NULL DEFAULT (${NOW_ISO}),
-    PRIMARY KEY (scope, kind, key)
-  );
+  ${LOGIN_ATTEMPTS_SCHEMA}
+
+  ${ADMIN_SCHEMA}
 `;
 
 /**
@@ -186,11 +275,28 @@ export function migrateControl(db: Database.Database): void {
       return;
     }
 
-    // Переходы с прошлых версий появятся здесь; пока их нет, но молчаливое
-    // «ничего не делаем» превратило бы пропущенный переход в порчу данных.
-    throw new Error(
-      `Управляющая база версии ${version} не имеет перехода к ${CONTROL_SCHEMA_VERSION}`,
-    );
+    if (version !== 1) {
+      // Молчаливое «ничего не делаем» превратило бы пропущенный переход в
+      // порчу данных, поэтому неизвестная версия — отказ, а не умолчание.
+      throw new Error(
+        `Управляющая база версии ${version} не имеет перехода к ${CONTROL_SCHEMA_VERSION}`,
+      );
+    }
+
+    db.exec(ADMIN_SCHEMA);
+
+    // `kind` получил третье значение, а `CHECK` в SQLite на месте не меняется.
+    // Строки переносятся: обнулить счётчики перебора миграцией значит открыть
+    // окно подбора в предсказуемое время — в момент обновления приложения.
+    db.exec(`
+      ALTER TABLE login_attempts RENAME TO login_attempts_v1;
+      ${LOGIN_ATTEMPTS_SCHEMA}
+      INSERT INTO login_attempts (scope, kind, key, failures, first_failed_at, last_failed_at)
+        SELECT scope, kind, key, failures, first_failed_at, last_failed_at FROM login_attempts_v1;
+      DROP TABLE login_attempts_v1;
+    `);
+
+    db.pragma(`user_version = ${CONTROL_SCHEMA_VERSION}`);
   }).immediate();
 }
 
@@ -238,6 +344,27 @@ const REQUIRED_CONTROL_COLUMNS: Record<ControlTable, readonly string[]> = {
   ],
   codex_quota: ['child_id', 'day', 'calls'],
   login_attempts: ['scope', 'kind', 'key', 'failures', 'first_failed_at', 'last_failed_at'],
+  admins: ['id', 'email', 'password_hash', 'credentials_changed_at', 'disabled_at', 'created_at'],
+  admin_sessions: [
+    'id',
+    'admin_id',
+    'token_hash',
+    'last_seen_at',
+    'expires_at',
+    'revoked_at',
+    'created_at',
+  ],
+  admin_impersonations: [
+    'id',
+    'admin_id',
+    'child_id',
+    'role',
+    'token_hash',
+    'expires_at',
+    'revoked_at',
+    'created_at',
+  ],
+  admin_audit: ['id', 'admin_id', 'at', 'action', 'child_id', 'parent_id', 'detail'],
 };
 
 /** Индексы, на которых держатся выборки по родителю и ребёнку. */
@@ -246,6 +373,9 @@ const REQUIRED_CONTROL_INDEXES = [
   'parent_sessions_parent',
   'children_parent',
   'child_devices_child',
+  'admin_sessions_admin',
+  'admin_impersonations_admin',
+  'admin_audit_at',
 ] as const;
 
 /**
@@ -258,7 +388,9 @@ const REQUIRED_CONTROL_FRAGMENTS: Partial<Record<ControlTable, readonly string[]
   children: ["'provisioning', 'ready', 'failed'", CHILD_ID_CHECK],
   child_devices: ["'browser', 'agent'", '(claimed_at IS NULL) = (token_hash IS NULL)'],
   codex_quota: ['PRIMARY KEY (child_id, day)'],
-  login_attempts: ["'email', 'address'", "'password', 'pin'"],
+  login_attempts: ["'email', 'address'", "'password', 'pin', 'admin'"],
+  admins: ['email = lower(email)'],
+  admin_impersonations: [IMPERSONATION_ROLE_CHECK],
 };
 
 /** Не даёт базе с актуальным номером версии скрыть удалённую или чужую схему. */
