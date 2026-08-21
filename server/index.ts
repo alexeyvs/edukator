@@ -26,6 +26,10 @@ import {
   registerAdminAuthRoutes,
   registerUnavailableAdminAuth,
 } from './routes/admin/auth.js';
+import {
+  registerAdminOverviewRoutes,
+  registerUnavailableAdminOverview,
+} from './routes/admin/overview.js';
 import { registerFamilyRoutes, registerUnavailableFamily } from './routes/family.js';
 import { codexConcurrency, disputeConcurrency, type CodexConcurrency } from './codex/concurrency.js';
 import { createQuotedRunner } from './codex/quota.js';
@@ -42,7 +46,7 @@ import { openControlDatabase, validateControlSchema } from './control-db.js';
 import { fileIdentity, TenantRegistry, type Tenant } from './tenant-registry.js';
 import type { DisputeCoordinatorOptions } from './dispute-coordinator.js';
 import type { IntegrityCoordinatorOptions } from './integrity.js';
-import { createTenantContext } from './routes/tenant-context.js';
+import { createAdminContext, createTenantContext } from './routes/tenant-context.js';
 import { redactTokenUrl, registerTokenPrivacy } from './routes/token-privacy.js';
 import type { BearerKind, TenantOpener } from './auth.js';
 
@@ -366,6 +370,18 @@ export function buildServer(
           ? { insecureCookies: process.env['EDUKATOR_INSECURE_COOKIES'] === '1' }
           : { insecureCookies: options.insecureCookies }),
       });
+      // Админка разрешается своим резолвером и реестра не получает: её первый
+      // экран обязан открываться и тогда, когда с детскими базами беда.
+      const adminContext = createAdminContext({
+        control,
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
+      registerAdminOverviewRoutes(app, {
+        context: adminContext,
+        control,
+        dataDir,
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
       registerFamilyRoutes(app, {
         control,
         dataDir,
@@ -437,6 +453,7 @@ export function buildServer(
       const reason = graph === undefined ? 'карта тем не загружена' : 'управляющая база недоступна';
       registerUnavailableAuth(app, reason);
       registerUnavailableAdminAuth(app, reason);
+      registerUnavailableAdminOverview(app, reason);
       registerUnavailableFamily(app, reason);
       registerUnavailableSession(app, reason);
       registerUnavailableRun(app, reason);

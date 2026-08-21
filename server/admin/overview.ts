@@ -1,0 +1,345 @@
+/**
+ * Слой 1 статистики оператора: всё, что видно из одной `control.db`.
+ *
+ * Ни одной детской базы этот обход не открывает — и это его главное свойство, а
+ * не экономия. Это первый экран админки, и открыть он обязан ровно тогда, когда
+ * с детскими базами что-то не так: испорченный файл, база новее приложения,
+ * пропавший каталог. Обход, который ради двух цифр открывает тридцать баз,
+ * отказал бы вместе с первой из них — то есть ровно в тот момент, ради которого
+ * оператор в админку и заходит.
+ *
+ * Размеры баз поэтому берутся `statSync` по вычисленному из `id` пути: файл на
+ * диске измеряется, не открываясь, и подменённый или битый ничем не отличается
+ * от исправного.
+ */
+import { statSync, statfsSync } from 'node:fs';
+import type { Database } from 'better-sqlite3';
+import {
+  CODEX_DAILY_QUOTA,
+  childDatabasePath,
+  countLiveAdminSessions,
+  countLiveParentSessions,
+  listActiveLockouts,
+  type ChildStatus,
+  type LoginLockout,
+} from '../control-db.js';
+import { controlDatabasePath } from '../data-dir.js';
+import { moscowDate } from '../moscow-time.js';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Окна «заведено недавно». Оба задают спека и первый экран, а не расчёт. */
+export const OVERVIEW_WINDOW_DAYS = [7, 30] as const;
+
+/**
+ * С какого возраста незавершённое заведение считается застрявшим. Протокол
+ * `provisioning` → `ready` проходит за секунды: час здесь не порог терпения, а
+ * заведомо недостижимый для исправного заведения срок, после которого строка
+ * означает оборванный процесс, а не идущую работу.
+ */
+export const STUCK_PROVISIONING_MS = 60 * 60 * 1000;
+
+/** Сколько заведено всего и за оба окна. */
+export interface AdminCreatedCounts {
+  total: number;
+  last7Days: number;
+  last30Days: number;
+}
+
+export interface AdminParentsOverview extends AdminCreatedCounts {
+  disabled: number;
+}
+
+export interface AdminChildrenOverview extends AdminCreatedCounts {
+  ready: number;
+  provisioning: number;
+  failed: number;
+  retired: number;
+}
+
+/** Ребёнок, чьё заведение не доехало: базы у него либо нет, либо она неизвестна. */
+export interface AdminStuckChild {
+  childId: string;
+  parentId: string;
+  name: string;
+  status: Exclude<ChildStatus, 'ready'>;
+  createdAt: string;
+}
+
+/** Расход суточной квоты одним ребёнком. Нулевые в список не попадают. */
+export interface AdminQuotaChild {
+  childId: string;
+  used: number;
+}
+
+export interface AdminQuotaOverview {
+  /** Московские сутки, за которые считан расход. */
+  day: string;
+  /** Предел на одного ребёнка, а не на сервер: квота именно такая. */
+  limit: number;
+  /** Сумма по всем детям. */
+  used: number;
+  children: AdminQuotaChild[];
+}
+
+export interface AdminSessionsOverview {
+  parents: number;
+  admins: number;
+}
+
+export interface AdminDevicesOverview {
+  browser: number;
+  agent: number;
+  /** Выпущенные и ещё не погашенные приглашения устройств. */
+  pendingInvites: number;
+}
+
+/** Размер одной базы на диске. Отсутствие файла — это состояние, а не ноль. */
+export interface AdminDatabaseSize {
+  childId: string;
+  bytes: number;
+  /** `false` — файла нет вовсе: у застрявшего заведения так и должно быть. */
+  present: boolean;
+}
+
+export interface AdminStorageOverview {
+  controlBytes: number;
+  childrenBytes: number;
+  totalBytes: number;
+  /** Свободное место каталога данных; `undefined` — файловая система не ответила. */
+  freeBytes?: number;
+  children: AdminDatabaseSize[];
+}
+
+export interface AdminOverview {
+  generatedAt: string;
+  parents: AdminParentsOverview;
+  children: AdminChildrenOverview;
+  stuck: AdminStuckChild[];
+  quota: AdminQuotaOverview;
+  sessions: AdminSessionsOverview;
+  devices: AdminDevicesOverview;
+  lockouts: LoginLockout[];
+  storage: AdminStorageOverview;
+}
+
+export interface AdminOverviewOptions {
+  /** Каталог данных: по нему считаются пути детских баз и свободное место. */
+  dataDir: string;
+  now?: Date;
+  /** Предел суточной квоты, если он переопределён вызывающим. */
+  quotaLimit?: number;
+}
+
+interface ParentsRow {
+  total: number;
+  last7: number;
+  last30: number;
+  disabled: number;
+}
+
+interface ChildrenRow extends Omit<ParentsRow, 'disabled'> {
+  ready: number;
+  provisioning: number;
+  failed: number;
+  retired: number;
+}
+
+interface StuckRow {
+  id: string;
+  parent_id: string;
+  name: string;
+  status: Exclude<ChildStatus, 'ready'>;
+  created_at: string;
+}
+
+/**
+ * Спутники WAL. Считаются вместе с основным файлом: под WAL часть зафиксированных
+ * транзакций лежит именно в `-wal`, и размер одного файла занижал бы то, что
+ * база на самом деле занимает на диске.
+ */
+const DATABASE_SUFFIXES = ['', '-wal', '-shm'] as const;
+
+/** Размер базы вместе со спутниками. `undefined` — основного файла нет. */
+function databaseSize(path: string): number | undefined {
+  let total = 0;
+  let present = false;
+  for (const suffix of DATABASE_SUFFIXES) {
+    try {
+      total += statSync(`${path}${suffix}`).size;
+      if (suffix === '') present = true;
+    } catch {
+      // Пропавший спутник — обычное дело у закрытой базы; пропавший основной
+      // файл разбирается вызывающим по `present`.
+    }
+  }
+  return present ? total : undefined;
+}
+
+/**
+ * Строка агрегата. `COUNT` возвращает её всегда, даже по пустой таблице, но
+ * типы `better-sqlite3` об этом не знают. Подставленный вместо неё ноль сделал
+ * бы «родителей нет» и «база не ответила» одинаковыми на экране, поэтому здесь
+ * отказ, а не умолчание.
+ */
+function requireAggregate<T>(row: T | undefined, what: string): T {
+  if (row === undefined) throw new Error(`Управляющая база не ответила на подсчёт: ${what}`);
+  return row;
+}
+
+/** Свободное место каталога данных. Отказ — не повод не отдать всю сводку. */
+function freeSpace(dir: string): number | undefined {
+  try {
+    const stats = statfsSync(dir);
+    return stats.bsize * stats.bavail;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Сводка первого экрана. Одно чтение управляющей базы плюс `stat` файлов: ни
+ * одного соединения к детской базе здесь не открывается.
+ */
+export function buildAdminOverview(
+  control: Database,
+  options: AdminOverviewOptions,
+): AdminOverview {
+  const now = options.now ?? new Date();
+  const stamp = now.toISOString();
+  const [days7, days30] = OVERVIEW_WINDOW_DAYS;
+  const since7 = new Date(now.getTime() - days7 * DAY_MS).toISOString();
+  const since30 = new Date(now.getTime() - days30 * DAY_MS).toISOString();
+  const quotaLimit = options.quotaLimit ?? CODEX_DAILY_QUOTA;
+
+  const parents = requireAggregate(
+    control
+      .prepare<[string, string], ParentsRow>(
+        `SELECT COUNT(*) AS total,
+                COALESCE(SUM(created_at >= ?), 0) AS last7,
+                COALESCE(SUM(created_at >= ?), 0) AS last30,
+                COALESCE(SUM(disabled_at IS NOT NULL), 0) AS disabled
+           FROM parents`,
+      )
+      .get(since7, since30),
+    'родители',
+  );
+
+  const children = requireAggregate(
+    control
+      .prepare<[string, string], ChildrenRow>(
+        `SELECT COUNT(*) AS total,
+                COALESCE(SUM(created_at >= ?), 0) AS last7,
+                COALESCE(SUM(created_at >= ?), 0) AS last30,
+                COALESCE(SUM(status = 'ready'), 0) AS ready,
+                COALESCE(SUM(status = 'provisioning'), 0) AS provisioning,
+                COALESCE(SUM(status = 'failed'), 0) AS failed,
+                COALESCE(SUM(retired_at IS NOT NULL), 0) AS retired
+           FROM children`,
+      )
+      .get(since7, since30),
+    'дети',
+  );
+
+  // Выведенный ребёнок в застрявших не значится ни при каком статусе: его
+  // заведение уже никого не ждёт, и чинить там нечего.
+  const stuck = control
+    .prepare<[string], StuckRow>(
+      `SELECT id, parent_id, name, status, created_at
+         FROM children
+        WHERE retired_at IS NULL
+          AND (status = 'failed' OR (status = 'provisioning' AND created_at <= ?))
+        ORDER BY created_at, id`,
+    )
+    .all(new Date(now.getTime() - STUCK_PROVISIONING_MS).toISOString());
+
+  const day = moscowDate(now);
+  const quotaRows = control
+    .prepare<[string], { child_id: string; calls: number }>(
+      `SELECT child_id, calls FROM codex_quota
+        WHERE day = ? AND calls > 0
+        ORDER BY calls DESC, child_id`,
+    )
+    .all(day);
+
+  const deviceRows = control
+    .prepare<[], { kind: 'browser' | 'agent'; live: number }>(
+      `SELECT kind, COUNT(*) AS live FROM child_devices
+        WHERE claimed_at IS NOT NULL AND revoked_at IS NULL
+        GROUP BY kind`,
+    )
+    .all();
+  const pendingInvites = requireAggregate(
+    control
+      .prepare<[string], { pending: number }>(
+        `SELECT COUNT(*) AS pending FROM child_devices
+          WHERE claimed_at IS NULL AND revoked_at IS NULL AND invite_expires_at > ?`,
+      )
+      .get(stamp),
+    'приглашения устройств',
+  ).pending;
+
+  // Список берётся полным, вместе с выведенными: место на диске они занимают
+  // так же, а «куда делись гигабайты» — вопрос как раз к ним.
+  const childIds = control
+    .prepare<[], { id: string }>('SELECT id FROM children ORDER BY created_at, id')
+    .all();
+  const sizes: AdminDatabaseSize[] = childIds.map((row) => {
+    const bytes = databaseSize(childDatabasePath(options.dataDir, row.id));
+    return bytes === undefined
+      ? { childId: row.id, bytes: 0, present: false }
+      : { childId: row.id, bytes, present: true };
+  });
+  const controlBytes = databaseSize(controlDatabasePath(options.dataDir)) ?? 0;
+  const childrenBytes = sizes.reduce((sum, size) => sum + size.bytes, 0);
+  const free = freeSpace(options.dataDir);
+
+  return {
+    generatedAt: stamp,
+    parents: {
+      total: parents.total,
+      last7Days: parents.last7,
+      last30Days: parents.last30,
+      disabled: parents.disabled,
+    },
+    children: {
+      total: children.total,
+      last7Days: children.last7,
+      last30Days: children.last30,
+      ready: children.ready,
+      provisioning: children.provisioning,
+      failed: children.failed,
+      retired: children.retired,
+    },
+    stuck: stuck.map((row) => ({
+      childId: row.id,
+      parentId: row.parent_id,
+      name: row.name,
+      status: row.status,
+      createdAt: row.created_at,
+    })),
+    quota: {
+      day,
+      limit: quotaLimit,
+      used: quotaRows.reduce((sum, row) => sum + row.calls, 0),
+      children: quotaRows.map((row) => ({ childId: row.child_id, used: row.calls })),
+    },
+    sessions: {
+      parents: countLiveParentSessions(control, now),
+      admins: countLiveAdminSessions(control, now),
+    },
+    devices: {
+      browser: deviceRows.find((row) => row.kind === 'browser')?.live ?? 0,
+      agent: deviceRows.find((row) => row.kind === 'agent')?.live ?? 0,
+      pendingInvites,
+    },
+    lockouts: listActiveLockouts(control, now),
+    storage: {
+      controlBytes,
+      childrenBytes,
+      totalBytes: controlBytes + childrenBytes,
+      ...(free === undefined ? {} : { freeBytes: free }),
+      children: sizes,
+    },
+  };
+}

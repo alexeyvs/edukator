@@ -888,10 +888,23 @@ interface ParentSessionRow {
   email: string;
   last_seen_at: string;
   expires_at: string;
-  created_at: string;
-  disabled_at: string | null;
-  credentials_changed_at: string | null;
 }
+
+/**
+ * Живая сессия родителя одним текстом SQL — всё, что не зависит от текущего
+ * времени: не погашена, родитель не отключён, пароль после её выдачи не менялся.
+ *
+ * Отдельным фрагментом по той же причине, что и `ADMIN_SESSION_ALIVE`: это же
+ * условие считает живые сессии сводке оператора, и вторая его копия там
+ * означала бы, что показанное число описывает не то множество, которое пускают.
+ */
+const PARENT_SESSION_ALIVE = `
+  parent_sessions.revoked_at IS NULL
+  AND parent_sessions.created_at >= COALESCE(
+        (SELECT p.credentials_changed_at FROM parents p WHERE p.id = parent_sessions.parent_id), '')
+  AND NOT EXISTS (
+        SELECT 1 FROM parents p
+         WHERE p.id = parent_sessions.parent_id AND p.disabled_at IS NOT NULL)`;
 
 /**
  * Разрешает cookie родителя в предъявителя. `undefined` — это отказ по любой
@@ -904,15 +917,14 @@ export function resolveParentSession(
 ): ParentPrincipal | undefined {
   const row = db
     .prepare<[string], ParentSessionRow>(
-      `SELECT s.id, s.parent_id, s.last_seen_at, s.expires_at, s.created_at,
-              p.email, p.disabled_at, p.credentials_changed_at
-         FROM parent_sessions s
-         JOIN parents p ON p.id = s.parent_id
-        WHERE s.token_hash = ? AND s.revoked_at IS NULL`,
+      `SELECT parent_sessions.id, parent_sessions.parent_id, parent_sessions.last_seen_at,
+              parent_sessions.expires_at, parents.email
+         FROM parent_sessions
+         JOIN parents ON parents.id = parent_sessions.parent_id
+        WHERE parent_sessions.token_hash = ? AND ${PARENT_SESSION_ALIVE}`,
     )
     .get(hashToken(token));
   if (row === undefined) return undefined;
-  if (row.disabled_at !== null) return undefined;
 
   const stamp = now.toISOString();
   // Оба срока проверяются на каждом обращении: потолок гасит сессию даже у
@@ -922,16 +934,28 @@ export function resolveParentSession(
   if (!Number.isFinite(lastSeen) || now.getTime() - lastSeen >= PARENT_SESSION_IDLE_MS) {
     return undefined;
   }
-  // Смена пароля гасит всё, что было выдано до неё: иначе увод cookie не
-  // лечится ничем, кроме ручной чистки таблицы.
-  if (row.credentials_changed_at !== null && row.credentials_changed_at > row.created_at) {
-    return undefined;
-  }
 
   if (now.getTime() - lastSeen >= SESSION_TOUCH_MS) {
     db.prepare('UPDATE parent_sessions SET last_seen_at = ? WHERE id = ?').run(stamp, row.id);
   }
   return { parentId: row.parent_id, email: row.email };
+}
+
+/**
+ * Сколько родительских сессий сейчас живы. Считается тем же условием, что и
+ * разрешение cookie, плюс оба срока: сводке оператора нужно число тех, кого
+ * сервер прямо сейчас пустит, а не число строк в таблице.
+ */
+export function countLiveParentSessions(db: Database.Database, now: Date = new Date()): number {
+  const row = db
+    .prepare<[string, string], { live: number }>(
+      `SELECT COUNT(*) AS live FROM parent_sessions
+        WHERE ${PARENT_SESSION_ALIVE}
+          AND parent_sessions.expires_at > ?
+          AND parent_sessions.last_seen_at > ?`,
+    )
+    .get(now.toISOString(), new Date(now.getTime() - PARENT_SESSION_IDLE_MS).toISOString());
+  return row?.live ?? 0;
 }
 
 /** Выход. Строка остаётся для разбора, но предъявителем уже не служит. */
@@ -1948,6 +1972,50 @@ export function clearLoginFailures(db: Database.Database, target: LoginTarget): 
   }
 }
 
+/** Действующая пауза входа: строка счётчика, чей предел уже сработал. */
+export interface LoginLockout {
+  scope: LoginScope;
+  kind: LoginKind;
+  /** Адрес почты либо адрес клиента — то, по чему счётчик и заведён. */
+  key: string;
+  failures: number;
+  lastFailedAt: string;
+  /** Сколько паузы осталось. Всегда больше нуля: остывшие строки сюда не попадают. */
+  retryAfterMs: number;
+}
+
+/**
+ * Все действующие паузы входа. Отбор идёт тем же `lockoutLeftMs`, что и сама
+ * проверка: свой порог в сводке разошёлся бы с настоящим молча, и оператор
+ * искал бы причину отказа там, где её нет.
+ *
+ * Испорченная отметка времени в список не попадает, хотя вход по ней и
+ * закрывает: `checkLoginGate` считает её неизвестным состоянием счётчика, а не
+ * паузой, и назвать её сводке нечем — ни начала, ни остатка у неё нет.
+ */
+export function listActiveLockouts(db: Database.Database, now: Date = new Date()): LoginLockout[] {
+  const rows = db
+    .prepare<[], { scope: LoginScope; kind: LoginKind; key: string; failures: number; last_failed_at: string }>(
+      `SELECT scope, kind, key, failures, last_failed_at FROM login_attempts
+        ORDER BY last_failed_at DESC, scope, kind, key`,
+    )
+    .all();
+  const lockouts: LoginLockout[] = [];
+  for (const row of rows) {
+    const left = lockoutLeftMs(row, row.scope, now);
+    if (left === undefined || left <= 0) continue;
+    lockouts.push({
+      scope: row.scope,
+      kind: row.kind,
+      key: row.key,
+      failures: row.failures,
+      lastFailedAt: row.last_failed_at,
+      retryAfterMs: left,
+    });
+  }
+  return lockouts;
+}
+
 /* ─── Оператор админки ──────────────────────────────────────────────────── */
 
 /**
@@ -2249,6 +2317,22 @@ export function revokeAdminSession(
     .prepare('UPDATE admin_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL')
     .run(now.toISOString(), hashToken(token));
   return result.changes > 0;
+}
+
+/**
+ * Сколько сессий оператора сейчас живы. Тем же условием и с теми же сроками,
+ * что и разрешение cookie: сводка показывает открытые двери, а не строки.
+ */
+export function countLiveAdminSessions(db: Database.Database, now: Date = new Date()): number {
+  const row = db
+    .prepare<[string, string], { live: number }>(
+      `SELECT COUNT(*) AS live FROM admin_sessions
+        WHERE ${ADMIN_SESSION_ALIVE}
+          AND admin_sessions.expires_at > ?
+          AND admin_sessions.last_seen_at > ?`,
+    )
+    .get(now.toISOString(), new Date(now.getTime() - ADMIN_SESSION_IDLE_MS).toISOString());
+  return row?.live ?? 0;
 }
 
 /**
