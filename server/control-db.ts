@@ -2250,3 +2250,149 @@ export function revokeAdminSession(
     .run(now.toISOString(), hashToken(token));
   return result.changes > 0;
 }
+
+/**
+ * Что оператор сделал. Список закрыт объединением типов, а не свободной
+ * строкой: фильтр по действию имеет смысл, только если множество конечно, а
+ * опечатка в имени иначе заводит новое «действие», которого не видно ни в
+ * одном фильтре.
+ */
+export const ADMIN_AUDIT_ACTIONS = [
+  'login',
+  'login-failed',
+  'logout',
+  'impersonation-start',
+  'impersonation-end',
+] as const;
+
+export type AdminAuditAction = (typeof ADMIN_AUDIT_ACTIONS)[number];
+
+const ADMIN_AUDIT_ACTION_SET: ReadonlySet<string> = new Set(ADMIN_AUDIT_ACTIONS);
+
+/** Действие ли это из закрытого списка. Тем же предикатом маршрут проверяет фильтр. */
+export function isAdminAuditAction(value: string): value is AdminAuditAction {
+  return ADMIN_AUDIT_ACTION_SET.has(value);
+}
+
+/** Что пишется в журнал действий. Время ставит сама запись. */
+export interface AdminAuditRecord {
+  adminId: string;
+  action: AdminAuditAction;
+  /** Ребёнок и родитель названы значениями: запись переживает уход семьи. */
+  childId?: string;
+  parentId?: string;
+  detail?: string;
+}
+
+export interface AdminAuditEntry extends AdminAuditRecord {
+  id: number;
+  at: string;
+}
+
+/** Курсор страницы: обе половины, потому что по одному `at` порядок неоднозначен. */
+export interface AdminAuditCursor {
+  at: string;
+  id: number;
+}
+
+export interface AdminAuditPage {
+  entries: AdminAuditEntry[];
+  /** Курсор следующей страницы; `undefined` — дальше ничего нет. */
+  next?: AdminAuditCursor;
+}
+
+interface AdminAuditRow {
+  id: number;
+  admin_id: string;
+  at: string;
+  action: string;
+  child_id: string | null;
+  parent_id: string | null;
+  detail: string | null;
+}
+
+function toAuditEntry(row: AdminAuditRow): AdminAuditEntry {
+  // Действие читается обратно с проверкой: строку в таблице пишем только мы,
+  // но выпавшее из списка значение обязано быть видно здесь, а не разъезжаться
+  // с фильтром молча уже на экране.
+  if (!isAdminAuditAction(row.action)) {
+    throw new Error(`Журнал действий содержит неизвестное действие «${row.action}»`);
+  }
+  return {
+    id: row.id,
+    adminId: row.admin_id,
+    at: row.at,
+    action: row.action,
+    ...(row.child_id === null ? {} : { childId: row.child_id }),
+    ...(row.parent_id === null ? {} : { parentId: row.parent_id }),
+    ...(row.detail === null ? {} : { detail: row.detail }),
+  };
+}
+
+/**
+ * Пишет действие оператора. Отметка ставится явно, а не умолчанием схемы:
+ * страница читается курсором по этому же полю, и расхождение часов SQLite с
+ * нашими переставило бы записи местами ровно на границе страницы.
+ */
+export function recordAdminAudit(
+  db: Database.Database,
+  record: AdminAuditRecord,
+  now: Date = new Date(),
+): number {
+  if (!isAdminAuditAction(record.action)) {
+    throw new Error(`Действие «${record.action}» не входит в журнал действий оператора`);
+  }
+  const result = db
+    .prepare(
+      `INSERT INTO admin_audit (admin_id, at, action, child_id, parent_id, detail)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      record.adminId,
+      now.toISOString(),
+      record.action,
+      record.childId ?? null,
+      record.parentId ?? null,
+      record.detail ?? null,
+    );
+  return Number(result.lastInsertRowid);
+}
+
+/**
+ * Страница журнала, новые сверху. Читается на строку больше запрошенного: так
+ * «дальше ничего нет» отличается от «страница кончилась ровно» без второго
+ * запроса `COUNT`, который под записью показал бы уже другое число.
+ */
+export function listAdminAudit(
+  db: Database.Database,
+  // Курсор объявлен принимающим `undefined` явно: страницу продолжают тем же
+  // `next`, которого у последней страницы нет, и `exactOptionalPropertyTypes`
+  // иначе заставлял бы каждого вызывающего разбирать этот случай спредом.
+  options: { limit: number; before?: AdminAuditCursor | undefined },
+): AdminAuditPage {
+  const { limit, before } = options;
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new Error(`Размер страницы журнала должен быть положительным целым, а не ${limit}`);
+  }
+  const rows =
+    before === undefined
+      ? db
+          .prepare<[number], AdminAuditRow>(
+            `SELECT id, admin_id, at, action, child_id, parent_id, detail
+               FROM admin_audit ORDER BY at DESC, id DESC LIMIT ?`,
+          )
+          .all(limit + 1)
+      : db
+          .prepare<[string, string, number, number], AdminAuditRow>(
+            `SELECT id, admin_id, at, action, child_id, parent_id, detail
+               FROM admin_audit
+              WHERE at < ? OR (at = ? AND id < ?)
+              ORDER BY at DESC, id DESC LIMIT ?`,
+          )
+          .all(before.at, before.at, before.id, limit + 1);
+
+  const entries = rows.slice(0, limit).map(toAuditEntry);
+  const last = entries[entries.length - 1];
+  if (rows.length <= limit || last === undefined) return { entries };
+  return { entries, next: { at: last.at, id: last.id } };
+}

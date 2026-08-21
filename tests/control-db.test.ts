@@ -6,6 +6,7 @@ import type { Database } from 'better-sqlite3';
 import BetterSqlite3 from 'better-sqlite3';
 import { MAX_SECRET_LENGTH } from '../server/secrets.js';
 import {
+  ADMIN_AUDIT_ACTIONS,
   ADMIN_SESSION_IDLE_MS,
   ADMIN_SESSION_MAX_MS,
   CHILDREN_DIR,
@@ -36,8 +37,10 @@ import {
   findAdminByEmail,
   findParentByEmail,
   hashToken,
+  isAdminAuditAction,
   issueDeviceInvite,
   issueParentInvite,
+  listAdminAudit,
   listAllChildren,
   listServiceableChildren,
   listChildren,
@@ -54,6 +57,7 @@ import {
   readDevice,
   readParentInvite,
   readParentPinHash,
+  recordAdminAudit,
   recordLoginFailure,
   redeemDeviceInvite,
   redeemParentInvite,
@@ -70,7 +74,12 @@ import {
   revokeParentSession,
   validateControlSchema,
 } from '../server/control-db.js';
-import type { IssuedToken, LoginGate, LoginTarget } from '../server/control-db.js';
+import type {
+  AdminAuditAction,
+  IssuedToken,
+  LoginGate,
+  LoginTarget,
+} from '../server/control-db.js';
 import { UNKNOWN_ADDRESS } from '../server/client-address.js';
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -2090,5 +2099,154 @@ describe('оператор админки', () => {
     expect(MIN_ADMIN_PASSWORD_LENGTH).toBe(16);
     expect(ADMIN_SESSION_IDLE_MS).toBe(30 * 60 * 1000);
     expect(ADMIN_SESSION_MAX_MS).toBe(8 * 60 * 60 * 1000);
+  });
+});
+
+describe('журнал действий оператора', () => {
+  const NOW = new Date('2026-08-21T09:00:00.000Z');
+
+  function seedAdmin(db: Database, id = 'a1', email = 'operator@example.com'): string {
+    db.prepare('INSERT INTO admins (id, email) VALUES (?, ?)').run(id, email);
+    return id;
+  }
+
+  function at(ms: number): Date {
+    return new Date(NOW.getTime() + ms);
+  }
+
+  it('пишет действие целиком и читает его обратно', () => {
+    const db = open();
+    const adminId = seedAdmin(db);
+    const parentId = seedParent(db);
+    const childId = seedChild(db, parentId);
+
+    const id = recordAdminAudit(
+      db,
+      {
+        adminId,
+        action: 'impersonation-start',
+        childId,
+        parentId,
+        detail: 'role=browser',
+      },
+      NOW,
+    );
+
+    expect(listAdminAudit(db, { limit: 10 })).toEqual({
+      entries: [
+        {
+          id,
+          adminId,
+          at: NOW.toISOString(),
+          action: 'impersonation-start',
+          childId,
+          parentId,
+          detail: 'role=browser',
+        },
+      ],
+    });
+  });
+
+  it('не заводит пустых полей у записи без семьи и подробностей', () => {
+    const db = open();
+    const adminId = seedAdmin(db);
+    recordAdminAudit(db, { adminId, action: 'login' }, NOW);
+
+    const [entry] = listAdminAudit(db, { limit: 10 }).entries;
+    // `undefined` в необязательных полях, а не `null`: экран отличает «не было»
+    // от «пусто», и `null` пролез бы в текст фильтра как значение.
+    expect(entry).toEqual({ id: entry?.id, adminId, at: NOW.toISOString(), action: 'login' });
+    expect(Object.keys(entry ?? {})).not.toContain('childId');
+  });
+
+  it('отдаёт новые сверху и разводит одинаковые отметки по номеру', () => {
+    const db = open();
+    const adminId = seedAdmin(db);
+    recordAdminAudit(db, { adminId, action: 'login', detail: 'первый' }, NOW);
+    // Две записи в одну миллисекунду: без номера в порядке они шли бы как
+    // попадётся, и страница теряла бы одну из них на границе.
+    recordAdminAudit(db, { adminId, action: 'logout', detail: 'второй' }, NOW);
+    recordAdminAudit(db, { adminId, action: 'login', detail: 'третий' }, at(1000));
+
+    expect(listAdminAudit(db, { limit: 10 }).entries.map((entry) => entry.detail)).toEqual([
+      'третий',
+      'второй',
+      'первый',
+    ]);
+  });
+
+  it('режет страницу и продолжает её курсором без потерь и повторов', () => {
+    const db = open();
+    const adminId = seedAdmin(db);
+    for (let index = 0; index < 5; index += 1) {
+      // Первые две — в одну отметку: курсор обязан пережить именно этот случай.
+      recordAdminAudit(db, { adminId, action: 'login', detail: `№${index}` }, at(index < 2 ? 0 : index));
+    }
+
+    const first = listAdminAudit(db, { limit: 2 });
+    expect(first.entries.map((entry) => entry.detail)).toEqual(['№4', '№3']);
+    expect(first.next).toEqual({ at: at(3).toISOString(), id: first.entries[1]?.id });
+
+    const second = listAdminAudit(db, { limit: 2, before: first.next });
+    expect(second.entries.map((entry) => entry.detail)).toEqual(['№2', '№1']);
+
+    const third = listAdminAudit(db, { limit: 2, before: second.next });
+    expect(third.entries.map((entry) => entry.detail)).toEqual(['№0']);
+    // Хвост ровно кончился — курсора дальше нет, иначе экран просил бы пустую
+    // страницу вечно.
+    expect(third.next).toBeUndefined();
+  });
+
+  it('не обещает следующей страницы, когда записей ровно на страницу', () => {
+    const db = open();
+    const adminId = seedAdmin(db);
+    recordAdminAudit(db, { adminId, action: 'login' }, NOW);
+    recordAdminAudit(db, { adminId, action: 'logout' }, at(1));
+
+    expect(listAdminAudit(db, { limit: 2 }).next).toBeUndefined();
+  });
+
+  it('отдаёт пустую страницу и пустой журнал, и пустой хвост за курсором', () => {
+    const db = open();
+    expect(listAdminAudit(db, { limit: 10 })).toEqual({ entries: [] });
+    expect(listAdminAudit(db, { limit: 10, before: { at: NOW.toISOString(), id: 1 } })).toEqual({
+      entries: [],
+    });
+  });
+
+  it('отвергает действие вне списка и нецелый размер страницы', () => {
+    const db = open();
+    const adminId = seedAdmin(db);
+
+    expect(() =>
+      recordAdminAudit(db, { adminId, action: 'выгрузка' as AdminAuditAction }, NOW),
+    ).toThrow(/не входит в журнал действий/);
+    expect(db.prepare<[], { count: number }>('SELECT COUNT(*) AS count FROM admin_audit').get()).toEqual(
+      { count: 0 },
+    );
+
+    for (const limit of [0, -1, 2.5]) {
+      expect(() => listAdminAudit(db, { limit })).toThrow(/положительным целым/);
+    }
+  });
+
+  it('не молчит о записи с неизвестным действием, попавшей в таблицу мимо кода', () => {
+    const db = open();
+    const adminId = seedAdmin(db);
+    db.prepare('INSERT INTO admin_audit (admin_id, action) VALUES (?, ?)').run(adminId, 'выгрузка');
+
+    expect(() => listAdminAudit(db, { limit: 10 })).toThrow(/неизвестное действие/);
+  });
+
+  it('держит закрытый список действий: имена вписаны руками', () => {
+    expect([...ADMIN_AUDIT_ACTIONS]).toEqual([
+      'login',
+      'login-failed',
+      'logout',
+      'impersonation-start',
+      'impersonation-end',
+    ]);
+    expect(isAdminAuditAction('impersonation-end')).toBe(true);
+    expect(isAdminAuditAction('impersonation')).toBe(false);
   });
 });

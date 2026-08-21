@@ -29,6 +29,7 @@ npm run parent -- create|invite|password|pin|disable --email <адрес>  # р�
 npm run adopt -- --email <адрес> --name <имя>   # однопользовательская база → первый ребёнок
 npm run backup -- --out <каталог> # копия каталога данных через VACUUM INTO
 npm run prefetch -- --child <id>|--all  # ручной прогрев/экспорт банка; аргумент обязателен
+./deploy.sh                       # проверка и атомарный деплой чистого HEAD на edukator.ru
 ```
 
 Перед коммитом обязаны быть чистыми все пять: `test`, `coverage`, `typecheck`,
