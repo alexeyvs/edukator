@@ -6,8 +6,42 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+
+/**
+ * Подстроенная гонка двух писателей: следующая прокрутка застаёт файл уже
+ * уехавшим в архив.
+ *
+ * Писать в журнал могут два процесса сразу — сервер и `scripts/backup.ts`,
+ * который замка каталога намеренно не берёт, — и настоящей гонкой это не
+ * проверить: она случается на границе в восемь мегабайт и не по расписанию.
+ */
+const race = vi.hoisted(() => ({
+  neighbour: undefined as (() => void) | undefined,
+  breakRename: undefined as ((from: string) => void) | undefined,
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...real,
+    default: real,
+    renameSync(from: string, to: string): void {
+      const neighbour = race.neighbour;
+      // Захват текущего файла — то самое место, где сосед успевает вклиниться:
+      // до него прокрутка ещё ничего не решила, после — файл уже наш.
+      if (neighbour !== undefined && String(from).endsWith('/app.jsonl')) {
+        race.neighbour = undefined;
+        neighbour();
+      }
+      race.breakRename?.(String(from));
+      real.renameSync(from, to);
+    },
+  };
+});
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -18,6 +52,9 @@ import {
   LOG_MAX_BYTES,
   LOG_FIELD_LIMIT,
   LOG_TAIL_BYTES,
+  ROTATION_CLAIM_FILE,
+  ROTATION_LOCK_FILE,
+  ROTATION_LOCK_STALE_MS,
   logFailure,
   logFilePath,
   readFailureLog,
@@ -34,9 +71,21 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  race.neighbour = undefined;
+  race.breakRename = undefined;
   rmSync(dir, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
+
+/** Путь захвата прокрутки: имя одно на каталог. */
+function claimPath(): string {
+  return resolve(dir, LOGS_DIR, ROTATION_CLAIM_FILE);
+}
+
+/** Путь замка прокрутки. */
+function lockPath(): string {
+  return resolve(dir, LOGS_DIR, ROTATION_LOCK_FILE);
+}
 
 /** Разбирает текущий файл журнала построчно. */
 function readEntries(): LogEntry[] {
@@ -123,6 +172,191 @@ describe('журнал аварий', () => {
     expect(readEntries()).toHaveLength(1);
     expect(readEntries()[0]?.message).toBe('после границы');
     expect(readFileSync(rotatedLogPath(1, dir), 'utf8')).toBe(`${filler}\n`);
+  });
+
+  it('не теряет запись, когда журнал прокрутил сосед', () => {
+    // `ENOENT` на прокрутке — не отказ, а «эту работу сделали за нас». Вылетев
+    // наружу, он унёс бы с собой саму запись об аварии: она ушла бы в stderr,
+    // то есть потерялась ровно там, ради чего журнал и заведён.
+    const filler = 'x'.repeat(LOG_MAX_BYTES - 10);
+    mkdirSync(resolve(dir, LOGS_DIR), { recursive: true });
+    writeFileSync(logFilePath(dir), `${filler}\n`);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    // Сосед перешагнул предел первым и успел унести файл к себе.
+    race.neighbour = () => {
+      writeFileSync(`${logFilePath(dir)}.сосед`, readFileSync(logFilePath(dir)));
+      rmSync(logFilePath(dir));
+    };
+
+    logFailure({ event: 'sweep-failed', message: 'после чужой прокрутки' }, dir, NOW);
+
+    expect(stderr).not.toHaveBeenCalled();
+    expect(readEntries()).toHaveLength(1);
+    expect(readEntries()[0]?.message).toBe('после чужой прокрутки');
+  });
+
+  it('не крутит журнал вторым заходом следом за соседом', () => {
+    // Оба писателя перешагнули предел на одном и том же файле, но сосед успел
+    // прокрутить журнал первым. Прокрученный вслед за ним, журнал сдвинул бы
+    // архивы дважды — то есть выдавил бы из хранимых лишние восемь мегабайт
+    // ровно потому, что аварии писали двое.
+    const filler = 'x'.repeat(LOG_MAX_BYTES - 10);
+    const older = `${JSON.stringify({ at: '2026-08-21T09:00:00.000Z', event: 'sweep-failed', message: 'архив' })}\n`;
+    mkdirSync(resolve(dir, LOGS_DIR), { recursive: true });
+    writeFileSync(logFilePath(dir), `${filler}\n`);
+    writeFileSync(rotatedLogPath(1, dir), older);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const neighbourLine = `${JSON.stringify({ at: '2026-08-21T09:29:00.000Z', event: 'sweep-failed', message: 'сосед' })}\n`;
+    race.neighbour = () => {
+      writeFileSync(rotatedLogPath(2, dir), readFileSync(rotatedLogPath(1, dir)));
+      writeFileSync(rotatedLogPath(1, dir), readFileSync(logFilePath(dir)));
+      writeFileSync(logFilePath(dir), neighbourLine);
+    };
+
+    logFailure({ event: 'sweep-failed', message: 'после чужой прокрутки' }, dir, NOW);
+
+    expect(stderr).not.toHaveBeenCalled();
+    // Архивы сдвинуты ровно один раз: третьего файла не появилось, а самый
+    // старый архив остался на своём месте.
+    expect(existsSync(rotatedLogPath(3, dir))).toBe(false);
+    expect(readFileSync(rotatedLogPath(1, dir), 'utf8')).toBe(`${filler}\n`);
+    expect(readFileSync(rotatedLogPath(2, dir), 'utf8')).toBe(older);
+    // Запись соседа, попавшая в захваченный файл, возвращается в ленту, а не
+    // пропадает вместе с ним.
+    expect(readEntries().map((entry) => entry.message)).toEqual(['сосед', 'после чужой прокрутки']);
+    // Захват после себя ничего не оставляет.
+    expect(readdirSync(resolve(dir, LOGS_DIR)).sort()).toEqual([
+      'app.1.jsonl',
+      'app.2.jsonl',
+      LOG_FILE,
+    ]);
+  });
+
+  it('возвращает захват в ленту, когда прокрутка сорвалась после него', () => {
+    // Захваченный файл читателю ленты не виден: он смотрит только `app.jsonl` и
+    // архивы. Оставленный после сорвавшейся прокрутки, он превращает восемь
+    // мегабайт аварий в «аварий не было» — и это ещё до того, как следующая
+    // прокрутка перепишет его тем же именем.
+    const filler = 'x'.repeat(LOG_MAX_BYTES - 10);
+    mkdirSync(resolve(dir, LOGS_DIR), { recursive: true });
+    writeFileSync(logFilePath(dir), `${filler}\n`);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    // На диске кончилось место ровно между захватом и сдвигом архивов.
+    race.breakRename = (from) => {
+      if (!from.includes('/app.rotating.')) return;
+      throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+    };
+
+    logFailure({ event: 'sweep-failed', message: 'после срыва' }, dir, NOW);
+
+    // Причина уходит в stderr, но лента остаётся целой: захвата в каталоге нет,
+    // а его содержимое вернулось в текущий файл.
+    expect(stderr).toHaveBeenCalledTimes(1);
+    expect(readdirSync(resolve(dir, LOGS_DIR))).toEqual([LOG_FILE]);
+    expect(readFileSync(logFilePath(dir), 'utf8')).toBe(`${filler}\n`);
+  });
+
+  it('подбирает захват, брошенный убитым процессом, и не переименовывает поверх него', () => {
+    // Имя захвата одно на каталог, а не на процесс: заводит его только держатель
+    // замка. Имя с PID отвечало бы иначе — процесс, убитый посреди прокрутки,
+    // уносил бы восемь мегабайт аварий навсегда, потому что у следующего
+    // запуска PID другой и своим этот захват он не считает никогда. Следующая
+    // прокрутка вдобавок унесла бы текущий файл поверх брошенного.
+    const stale = `${JSON.stringify({ at: '2026-08-21T09:00:00.000Z', event: 'sweep-failed', message: 'из брошенного захвата' })}\n`;
+    const filler = 'x'.repeat(LOG_MAX_BYTES - 10);
+    mkdirSync(resolve(dir, LOGS_DIR), { recursive: true });
+    writeFileSync(claimPath(), stale);
+    writeFileSync(logFilePath(dir), `${filler}\n`);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    logFailure({ event: 'sweep-failed', message: 'после подбора' }, dir, NOW);
+
+    expect(stderr).not.toHaveBeenCalled();
+    expect(readdirSync(resolve(dir, LOGS_DIR)).sort()).toEqual(['app.1.jsonl', LOG_FILE]);
+    // Брошенные записи вернулись в ленту и уехали в архив вместе с ней.
+    expect(readFileSync(rotatedLogPath(1, dir), 'utf8')).toBe(`${filler}\n${stale}`);
+    expect(readEntries().map((entry) => entry.message)).toEqual(['после подбора']);
+  });
+
+  it('показывает брошенный захват в ленте, не дожидаясь следующей прокрутки', () => {
+    // Подбор захвата случается на прокрутке, то есть когда журнал снова дорос
+    // до восьми мегабайт. Ждать её — значит прятать записи ровно после аварии,
+    // которая прокрутку и оборвала: до неё захват не читает никто.
+    const stale = `${JSON.stringify({ at: '2026-08-21T09:00:00.000Z', event: 'tenant-detached', message: 'из брошенного захвата' })}\n`;
+    mkdirSync(resolve(dir, LOGS_DIR), { recursive: true });
+    writeFileSync(claimPath(), stale);
+
+    logFailure({ event: 'sweep-failed', message: 'свежая' }, dir, NOW);
+
+    expect(readFailureLog(dir, {}).entries.map((entry) => entry.message)).toEqual([
+      'свежая',
+      'из брошенного захвата',
+    ]);
+  });
+
+  it('не крутит журнал, пока замок держит живой сосед', () => {
+    // Замок берётся на всю прокрутку, а не только на захват: сдвиг архивов —
+    // отдельная череда `rename`, и две прокрутки соседних поколений,
+    // наложившись, переставляли бы файлы вперемешку, выдавливая из хранимых
+    // лишний архив. Пропущенная прокрутка дешевле: строка уходит в переросший
+    // предел текущий файл, а следующая запись попробует снова.
+    const filler = 'x'.repeat(LOG_MAX_BYTES - 10);
+    mkdirSync(resolve(dir, LOGS_DIR), { recursive: true });
+    writeFileSync(logFilePath(dir), `${filler}\n`);
+    // Замок живого владельца: свой же PID и свежая отметка времени.
+    writeFileSync(lockPath(), String(process.pid));
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    logFailure({ event: 'sweep-failed', message: 'мимо чужой прокрутки' }, dir, NOW);
+
+    expect(stderr).not.toHaveBeenCalled();
+    expect(existsSync(rotatedLogPath(1, dir))).toBe(false);
+    // Строка не потерялась: она дописана в текущий файл, временно переросший
+    // предел.
+    expect(readFailureLog(dir, {}).entries.map((entry) => entry.message)).toEqual([
+      'мимо чужой прокрутки',
+    ]);
+  });
+
+  it('подбирает замок умершего владельца', () => {
+    // Замок, оставленный убитым процессом, иначе запирал бы прокрутку навсегда,
+    // а весь ретеншен журнала на прокрутке и держится: не крутится — растёт без
+    // предела.
+    const filler = 'x'.repeat(LOG_MAX_BYTES - 10);
+    mkdirSync(resolve(dir, LOGS_DIR), { recursive: true });
+    writeFileSync(logFilePath(dir), `${filler}\n`);
+    // PID уже завершившегося процесса: живым его не считает никто.
+    const dead = spawnSync(process.execPath, ['-e', '']).pid;
+    writeFileSync(lockPath(), String(dead));
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    logFailure({ event: 'sweep-failed', message: 'после подбора замка' }, dir, NOW);
+
+    expect(stderr).not.toHaveBeenCalled();
+    expect(readFileSync(rotatedLogPath(1, dir), 'utf8')).toBe(`${filler}\n`);
+    expect(readdirSync(resolve(dir, LOGS_DIR)).sort()).toEqual(['app.1.jsonl', LOG_FILE]);
+  });
+
+  it('не подбирает старый замок живого владельца', () => {
+    // Возраст не доказывает смерть владельца: процесс мог быть остановлен
+    // сборщиком мусора или ОС. Подобрав его замок, сосед заведёт новый, а
+    // проснувшийся первый процесс удалит этот новый замок в своём `finally`.
+    const filler = 'x'.repeat(LOG_MAX_BYTES - 10);
+    mkdirSync(resolve(dir, LOGS_DIR), { recursive: true });
+    writeFileSync(logFilePath(dir), `${filler}\n`);
+    writeFileSync(lockPath(), String(process.pid));
+    const aged = (Date.now() - ROTATION_LOCK_STALE_MS - 1000) / 1000;
+    utimesSync(lockPath(), aged, aged);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    logFailure({ event: 'sweep-failed', message: 'мимо старого живого замка' }, dir, NOW);
+
+    expect(stderr).not.toHaveBeenCalled();
+    expect(existsSync(rotatedLogPath(1, dir))).toBe(false);
+    expect(existsSync(lockPath())).toBe(true);
+    expect(readFailureLog(dir, {}).entries.map((entry) => entry.message)).toEqual([
+      'мимо старого живого замка',
+    ]);
   });
 
   it('не крутит файл, которому строка ещё влезает', () => {
@@ -254,5 +488,8 @@ describe('журнал аварий', () => {
     expect(LOG_MAX_BYTES * LOG_KEEP_FILES).toBe(33554432);
     expect(LOGS_DIR).toBe('logs');
     expect(LOG_FILE).toBe('app.jsonl');
+    expect(ROTATION_CLAIM_FILE).toBe('app.rotating.jsonl');
+    expect(ROTATION_LOCK_FILE).toBe('app.rotating.lock');
+    expect(ROTATION_LOCK_STALE_MS).toBe(60000);
   });
 });

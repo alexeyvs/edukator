@@ -323,6 +323,39 @@ describe('разрешение предъявителя и аренды', () => 
       expect(isSameOrigin({ origin: `https://${HOST}` })).toBe(false);
     });
 
+    it('отклоняет тот же хост по голому http: схема — часть источника', () => {
+      // `Host` схемы не содержит, поэтому страница, отданная по http под тем же
+      // именем, иначе выглядела бы своей — а изменяющий запрос она шлёт по
+      // https, и cookie с ним уезжают.
+      expect(isSameOrigin({ host: HOST, origin: `http://${HOST}` })).toBe(false);
+      expect(
+        isSameOrigin({ host: HOST, origin: `http://${HOST}`, 'sec-fetch-site': 'same-origin' }),
+      ).toBe(false);
+      const error = catchAuth(() => {
+        assertSameOrigin('POST', { host: HOST, origin: `http://${HOST}` });
+      });
+      expect(error.code).toBe('cross-origin');
+    });
+
+    it('принимает голый http на петле и по явному разрешению', () => {
+      // Дев-сервер отдаёт страницу с `http://localhost:5173`, и браузер сам
+      // считает петлю защищённым источником.
+      expect(isSameOrigin({ host: 'localhost:3000', origin: 'http://localhost:5173' })).toBe(false);
+      expect(isSameOrigin({ host: 'localhost:5173', origin: 'http://localhost:5173' })).toBe(true);
+      expect(isSameOrigin({ host: '127.0.0.1:3000', origin: 'http://127.0.0.1:3000' })).toBe(true);
+      expect(isSameOrigin({ host: '[::1]:3000', origin: 'http://[::1]:3000' })).toBe(true);
+      // Не петля — только явным выключателем, тем же, что снимает `Secure`.
+      expect(isSameOrigin({ host: HOST, origin: `http://${HOST}` }, true)).toBe(true);
+      expect(() => {
+        assertSameOrigin('POST', { host: HOST, origin: `http://${HOST}` }, false, true);
+      }).not.toThrow();
+    });
+
+    it('отклоняет чужую схему целиком, а не только http', () => {
+      expect(isSameOrigin({ host: HOST, origin: `ftp://${HOST}` })).toBe(false);
+      expect(isSameOrigin({ host: 'localhost:3000', origin: 'ftp://localhost:3000' })).toBe(false);
+    });
+
     it('отклоняет изменяющий запрос без обоих заголовков', () => {
       expect(isSameOrigin({ host: HOST })).toBe(false);
       expect(isSameOrigin({ host: HOST, 'sec-fetch-site': 'cross-site' })).toBe(false);

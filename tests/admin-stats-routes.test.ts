@@ -150,6 +150,31 @@ describe('маршрут статистики оператора', () => {
     expect(freshBody.generatedAt).toBe(clock.toISOString());
   });
 
+  it('требует свой источник только для принудительного пересчёта', async () => {
+    child('Ученик');
+
+    const cached = await app.inject({
+      method: 'GET',
+      url: '/api/admin/stats',
+      headers: { cookie: adminCookie },
+    });
+    expect(cached.statusCode).toBe(200);
+
+    const forced = await app.inject({
+      method: 'GET',
+      url: '/api/admin/stats?refresh=1',
+      headers: { cookie: adminCookie },
+    });
+    expect(forced.statusCode).toBe(403);
+    expect(forced.json()).toEqual({
+      error: 'Запрос пришёл не со страницы приложения',
+      code: 'cross-origin',
+    });
+
+    const sameOrigin = await get('/api/admin/stats?refresh=1', { cookie: adminCookie });
+    expect(sameOrigin.statusCode).toBe(200);
+  });
+
   it('отдаёт неполный отчёт признаком неполноты, а не пятисоткой', async () => {
     const целый = child('Целый');
     const битый = child('Битый');

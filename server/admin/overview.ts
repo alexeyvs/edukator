@@ -232,7 +232,7 @@ function freeSpace(dir: string): number | undefined {
  * Сводка первого экрана. Одно чтение управляющей базы плюс `stat` файлов: ни
  * одного соединения к детской базе здесь не открывается.
  */
-export function buildAdminOverview(
+function buildAdminOverviewSnapshot(
   control: Database,
   options: AdminOverviewOptions,
 ): AdminOverview {
@@ -431,4 +431,16 @@ export function buildAdminOverview(
       children: sizes,
     },
   };
+}
+
+/**
+ * Builds every control-db part of one response from the same WAL snapshot.
+ * Separate autocommit SELECTs could otherwise mix totals from before a
+ * concurrent provisioning transaction with family rows from after it.
+ */
+export function buildAdminOverview(
+  control: Database,
+  options: AdminOverviewOptions,
+): AdminOverview {
+  return control.transaction(() => buildAdminOverviewSnapshot(control, options))();
 }

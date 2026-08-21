@@ -674,6 +674,70 @@ describe('App', () => {
     expect(screen.queryByText(/Срок захода в семью вышел/u)).toBeNull();
   });
 
+  it('спрашивает сервер и до срока: отставшие часы оператора решать не должны', async () => {
+    // Часы машины оператора могут отставать сколько угодно, а `expiresAt`
+    // считал сервер. Спрашивать только по достижении срока значило бы отдать
+    // решение именно им: до `expiresAt` отставшие часы не доходят вовсе, и
+    // чужая семья оставалась бы на экране после конца пятнадцати минут — ровно
+    // тот случай, ради которого срок и заведён.
+    vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(url.startsWith('/api/family')
+        ? { email: 'чужой@example.org', pinConfigured: false, children: [] }
+        : DASHBOARD),
+    })));
+
+    const living: Principal = {
+      kind: 'parent',
+      email: 'чужой@example.org',
+      impersonation: {
+        adminEmail: 'оператор@example.com',
+        childName: 'Тимофей',
+        role: 'parent',
+        // По здешним часам до конца захода ещё пятнадцать минут.
+        expiresAt: '2026-08-21T09:15:00.000Z',
+      },
+    };
+    const me = vi.fn()
+      .mockResolvedValueOnce(living)
+      // Сервер уже считает заход кончившимся: его часы шли вперёд наших.
+      .mockResolvedValue({ kind: 'parent', email: 'свой@example.org' });
+
+    render(<App authApi={authApi({ me })} now={() => Date.parse('2026-08-21T09:00:00.000Z')} />);
+
+    expect(await screen.findByText(/Срок захода в семью вышел/u)).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Дети' })).toBeNull();
+  });
+
+  it('не наслаивает проверки срока, пока предыдущая не ответила', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(url.startsWith('/api/family')
+          ? { email: 'чужой@example.org', pinConfigured: false, children: [] }
+          : DASHBOARD),
+      })));
+      const living = expiredImpersonation();
+      const pending = new Promise<Principal>(() => undefined);
+      const me = vi.fn()
+        .mockResolvedValueOnce(living)
+        .mockImplementation(() => pending);
+
+      render(<App authApi={authApi({ me })} />);
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(5 * 30_000); });
+
+      // Первый вызов загружает предъявителя, второй стережёт срок. Следующие
+      // тики не заводят новые запросы, пока второй не закончен.
+      expect(me).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('оставляет «Выйти» родителю без захода', async () => {
     vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve({
       ok: true,

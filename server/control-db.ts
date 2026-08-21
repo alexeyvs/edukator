@@ -2544,6 +2544,122 @@ export function resolveImpersonation(
   };
 }
 
+/**
+ * Заход по его токену для **закрытия**: истёкший срок не отказ.
+ *
+ * Отдельная от `resolveImpersonation` дверь намеренно. Тот отвечает на вопрос
+ * «пускать ли», и просроченную строку не отдаёт; закрытию же нужен ровно
+ * противоположный ответ — «чей это был заход», — иначе оператор, который просто
+ * закрыл вкладку, оставлял бы в `admin_audit` начало без конца, а вместе с
+ * концом терялся бы и счётчик отказанных попыток записи в чужую семью, то есть
+ * самое содержательное число этой пары.
+ *
+ * Обслуживаемость ребёнка и отключение родителя здесь не проверяются по той же
+ * причине: заход, оборванный выводом семьи, закрыть нужно тем более. Погашенная
+ * строка (`revoked_at`) не возвращается — её конец уже записан, и второй раз
+ * писать его значит удваивать заходы в ленте.
+ */
+export function readCarriedImpersonation(
+  db: Database.Database,
+  token: string,
+): ImpersonationPrincipal | undefined {
+  const row = db
+    .prepare<[string], ImpersonationRow>(
+      `SELECT admin_impersonations.admin_id, admin_impersonations.child_id,
+              admin_impersonations.role, admin_impersonations.expires_at, admins.email
+         FROM admin_impersonations JOIN admins ON admins.id = admin_impersonations.admin_id
+        WHERE admin_impersonations.token_hash = ? AND admin_impersonations.revoked_at IS NULL`,
+    )
+    .get(hashToken(token));
+  if (row === undefined) return undefined;
+  return impersonationOf(db, row);
+}
+
+/**
+ * Незакрытый заход вместе с номером строки.
+ *
+ * Номер здесь потому, что закрывающей двери может не достаться токена: cookie
+ * захода живёт ровно столько же, сколько сам заход, и вкладка, брошенная на
+ * час, возвращается уже без неё. Гасить строку тогда нечем, кроме её `id`:
+ * гашение «всех незакрытых у этого оператора» задело бы и ту, которую в этот
+ * же момент завёл старт.
+ */
+export interface UnfinishedImpersonation {
+  id: number;
+  session: ImpersonationPrincipal;
+}
+
+/**
+ * Незакрытый заход оператора по его собственному `id`.
+ *
+ * Ищется он так, а не по cookie, ровно по той причине, по какой заведён
+ * `readCarriedImpersonation`: заход, который просто бросили, обязан получить
+ * запись о конце. Но `Max-Age` его cookie равен `IMPERSONATION_TTL_MS`, то есть
+ * браузер выбрасывает её в ту же минуту, когда истекает строка, — и вернувшийся
+ * оператор приносит с собой уже пустую банку. Названная только токеном, строка
+ * оставалась бы в ленте началом без пары, а вместе с концом пропадал бы счётчик
+ * отказанных попыток записи в чужую семью.
+ *
+ * `expiredAt` сужает ответ до просроченных: живой заход может идти в другой
+ * вкладке, и закрывать его входом или выходом из админки — не то же самое, что
+ * подобрать за собой брошенный.
+ *
+ * Живая имперсонация у оператора ровно одна (старт гасит предыдущую тем же
+ * `UPDATE`), поэтому берётся самая свежая незакрытая. Ни срок, ни
+ * обслуживаемость ребёнка здесь не проверяются — по той же причине, что и в
+ * `readCarriedImpersonation`.
+ */
+export function readAdminImpersonation(
+  db: Database.Database,
+  adminId: string,
+  expiredAt?: Date,
+): UnfinishedImpersonation | undefined {
+  const columns = `SELECT admin_impersonations.id, admin_impersonations.admin_id,
+              admin_impersonations.child_id, admin_impersonations.role,
+              admin_impersonations.expires_at, admins.email
+         FROM admin_impersonations JOIN admins ON admins.id = admin_impersonations.admin_id
+        WHERE admin_impersonations.admin_id = ? AND admin_impersonations.revoked_at IS NULL`;
+  const order = `ORDER BY admin_impersonations.created_at DESC, admin_impersonations.id DESC
+        LIMIT 1`;
+  const row =
+    expiredAt === undefined
+      ? db.prepare<[string], ImpersonationRow & { id: number }>(`${columns} ${order}`).get(adminId)
+      : db
+          .prepare<[string, string], ImpersonationRow & { id: number }>(
+            `${columns} AND admin_impersonations.expires_at <= ? ${order}`,
+          )
+          .get(adminId, expiredAt.toISOString());
+  if (row === undefined) return undefined;
+  const session = impersonationOf(db, row);
+  return session === undefined ? undefined : { id: row.id, session };
+}
+
+/**
+ * Строка захода как предъявитель. Общая у обеих закрывающих дверей: одна
+ * находит строку по токену, другая по оператору, но «чей это был заход»
+ * отвечается одинаково, и разошедшиеся копии дали бы разный ответ на один и тот
+ * же вопрос.
+ */
+function impersonationOf(
+  db: Database.Database,
+  row: ImpersonationRow,
+): ImpersonationPrincipal | undefined {
+  if (!isImpersonationRole(row.role)) {
+    throw new Error(`Имперсонация содержит неизвестную роль «${row.role}»`);
+  }
+  const child = readChild(db, row.child_id);
+  if (child === undefined) return undefined;
+  return {
+    adminId: row.admin_id,
+    adminEmail: row.email,
+    childId: child.id,
+    parentId: child.parentId,
+    childName: child.name,
+    role: row.role,
+    expiresAt: row.expires_at,
+  };
+}
+
 /** Выход из имперсонации. Строка остаётся для разбора, но заходом уже не служит. */
 export function revokeImpersonation(
   db: Database.Database,
@@ -2555,6 +2671,23 @@ export function revokeImpersonation(
       'UPDATE admin_impersonations SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL',
     )
     .run(now.toISOString(), hashToken(token));
+  return result.changes > 0;
+}
+
+/**
+ * То же гашение, но по номеру строки: токена у двери может не быть вовсе (см.
+ * `readAdminImpersonation`). Гасится ровно одна строка, а не все незакрытые
+ * этого оператора: старт зовёт закрытие после того, как завёл новую, и «все
+ * незакрытые» унесли бы вместе с брошенной и её.
+ */
+export function revokeImpersonationRow(
+  db: Database.Database,
+  id: number,
+  now: Date = new Date(),
+): boolean {
+  const result = db
+    .prepare('UPDATE admin_impersonations SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
+    .run(now.toISOString(), id);
   return result.changes > 0;
 }
 

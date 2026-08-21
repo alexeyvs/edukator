@@ -297,31 +297,38 @@ export function App({
   }, [authApi, personaPassword, personaPending]);
 
   const route = appRoute({ link, pathname: window.location.pathname, principal });
+  const impersonationPollPending = useRef(false);
 
-  // Срок захода стережётся здешними часами, а решает — сервер.
+  // Конец захода объявляет сервер, а здешние часы только задают частоту вопроса.
   //
-  // Часы оператора могут отставать и спешить, а `expiresAt` считал сервер:
-  // поверив своим часам напрямую, экран выгонял бы из живого захода по чужому
-  // расхождению. Поэтому истёкший по здешним часам срок означает не «конец», а
-  // «переспроси»: `me` под живым заходом снова назовёт чужую семью (и заодно
-  // обновит `expiresAt`), а под кончившимся — уже собственного предъявителя
-  // оператора, и вот это и есть конец.
+  // `expiresAt` считал сервер, и часы оператора могут отставать сколько угодно.
+  // Спрашивать только по достижении срока значило бы отдать решение именно им:
+  // отставшие часы до `expiresAt` не доходят вовсе, и чужая семья оставалась бы
+  // на экране после конца пятнадцати минут — ровно тот случай, ради которого
+  // срок и заведён. Поэтому `me` спрашивается каждый тик, пока заход виден: под
+  // живым он снова назовёт чужую семью, под кончившимся — уже собственного
+  // предъявителя оператора, и вот это и есть конец.
   const expiresAt = 'impersonation' in route ? route.impersonation?.expiresAt : undefined;
   useEffect(() => {
-    if (expiresAt === undefined || Date.parse(expiresAt) > tick) return;
+    if (expiresAt === undefined || impersonationPollPending.current) return;
     let active = true;
-    authApi.me()
+    impersonationPollPending.current = true;
+    void authApi.me()
       .then((who) => {
         if (!active) return;
         const still = 'impersonation' in who ? who.impersonation : undefined;
         if (still === undefined) setImpersonationEnded(true);
-        else setPrincipal(who);
+        // Предъявитель переставляется только на изменившемся сроке: тот же
+        // ответ каждые полминуты заводил бы новый объект состояния на пустом
+        // месте, а вместе с ним — перерисовку чужого экрана.
+        else if (still.expiresAt !== expiresAt) setPrincipal(who);
       })
       .catch(() => {
         // Обрыв связи концом захода не считается: сервер не ответил ничего, а
         // выгонять из чужой семьи по неотвеченному запросу значит показать
         // конец, которого могло и не быть. Следующий тик переспросит.
-      });
+      })
+      .finally(() => { impersonationPollPending.current = false; });
     return () => { active = false; };
   }, [authApi, expiresAt, tick]);
 

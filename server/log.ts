@@ -14,12 +14,16 @@
 import {
   appendFileSync,
   closeSync,
+  existsSync,
   fstatSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readSync,
   renameSync,
   statSync,
+  unlinkSync,
+  writeSync,
 } from 'node:fs';
 import { resolve } from 'node:path';
 import { dataDir } from './data-dir.js';
@@ -130,17 +134,291 @@ function sizeOf(path: string): number {
 }
 
 /**
+ * Пора ли крутить журнал: строка не влезает в остаток предела.
+ *
+ * Пустой файл не крутится — строка длиннее предела иначе прокручивала бы
+ * журнал на каждой записи, стирая всё, что в нём было.
+ *
+ * Ответ здесь предварительный: писать в журнал могут два процесса сразу
+ * (сервер и `scripts/backup.ts`, который замка каталога намеренно не берёт), и
+ * между этим замером и самой прокруткой сосед успевает прокрутить журнал сам.
+ * Окончательное решение принимает `rotate` — уже на захваченном файле.
+ */
+function overflows(path: string, line: string): boolean {
+  const size = sizeOf(path);
+  return size > 0 && size + Buffer.byteLength(line) > LOG_MAX_BYTES;
+}
+
+/**
+ * Имя, которым процесс забирает текущий файл себе на время прокрутки, и имя
+ * замка самой прокрутки.
+ *
+ * Захват один на каталог, а не на процесс: заводит его только держатель замка,
+ * поэтому найденный под замком захват брошен **всегда** — чей бы процесс его ни
+ * оставил. Имя с PID отвечало бы на этот вопрос иначе: захват, брошенный
+ * убитым процессом, следующий запуск не узнавал бы вовсе (PID другой), и восемь
+ * мегабайт аварий оставались бы невидимыми навсегда.
+ */
+export const ROTATION_CLAIM_FILE = 'app.rotating.jsonl';
+export const ROTATION_LOCK_FILE = 'app.rotating.lock';
+
+/**
+ * Сколько замок прокрутки считается живым по одному своему возрасту.
+ *
+ * Прокрутка — это несколько `rename`, то есть миллисекунды; минута отличает
+ * брошенный пустой или повреждённый замок от файла, который настоящий владелец
+ * ещё не успел заполнить. Разборчивый живой PID возрастом не перебивается:
+ * безопасно отличить переиспользованный PID от долгой паузы владельца нельзя.
+ */
+export const ROTATION_LOCK_STALE_MS = 60_000;
+
+function rotationClaimPath(dir: string): string {
+  return resolve(dir, LOGS_DIR, ROTATION_CLAIM_FILE);
+}
+
+function rotationLockPath(dir: string): string {
+  return resolve(dir, LOGS_DIR, ROTATION_LOCK_FILE);
+}
+
+/** Имя, которым процесс уносит брошенный замок: убрать его должен ровно один. */
+function lockTakeoverPath(dir: string): string {
+  return resolve(dir, LOGS_DIR, `app.rotating.${process.pid}.lock`);
+}
+
+/**
+ * Заводит замок исключительным созданием файла.
+ *
+ * `wx` атомарен, поэтому из писателей, перешагнувших предел одновременно,
+ * крутит журнал ровно один, а остальные получают `EEXIST` и уходят писать в
+ * текущий файл. Замка мало для захвата, но именно он держит **всю** прокрутку
+ * целиком: сдвиг архивов состоит из отдельных `rename`, и наложение двух
+ * прокруток разных поколений переставляло бы их вперемешку, выдавливая из
+ * хранимых лишний архив.
+ *
+ * Любой другой отказ создания — тоже «не наш ход», а не авария: прокрутка
+ * вспомогательна, строка уйдёт в переросший предел текущий файл, и настоящую
+ * причину назовёт уже дозапись, упав на том же каталоге.
+ */
+function createRotationLock(lock: string): boolean {
+  let fd: number;
+  try {
+    fd = openSync(lock, 'wx');
+  } catch {
+    return false;
+  }
+  try {
+    // В замке лежит PID владельца: по нему брошенный замок узнаётся сразу, а не
+    // через минуту его срока.
+    writeSync(fd, String(process.pid));
+  } catch {
+    /* пустой замок не хуже: возраст у него всё равно есть */
+  } finally {
+    closeSync(fd);
+  }
+  return true;
+}
+
+/** Жив ли владелец замка. `EPERM` — процесс есть, просто чужой. */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * Брошен ли замок. Живой владелец всегда сильнее возраста: иначе процесс A,
+ * остановленный дольше минуты, мог проснуться после подбора его замка процессом
+ * B и удалить уже новый замок B в своём `finally`. Возраст применяется только
+ * к замку без разборчивого живого PID. Ошибиться в сторону «занят» безопасно —
+ * прокрутка просто откладывается до следующей записи.
+ */
+function lockAbandoned(lock: string, now: number): boolean {
+  let mtimeMs: number;
+  try {
+    mtimeMs = statSync(lock).mtimeMs;
+  } catch {
+    // Замок исчез сам: подбирать нечего, хватит обычной попытки его завести.
+    return false;
+  }
+  let owner: number;
+  try {
+    owner = Number(readFileSync(lock, 'utf8').trim());
+  } catch {
+    return false;
+  }
+  // Замок без разборчивого PID нельзя ни подтвердить, ни опровергнуть, и до
+  // истечения срока он считается живым: пустым его оставляет отказ записи сразу
+  // после создания, то есть у настоящего владельца.
+  if (!Number.isInteger(owner) || owner <= 0) {
+    return now - mtimeMs > ROTATION_LOCK_STALE_MS;
+  }
+  return !processAlive(owner);
+}
+
+/** Берёт замок прокрутки, подбирая брошенный. Не взяли — крутит сосед. */
+function acquireRotationLock(dir: string): boolean {
+  const lock = rotationLockPath(dir);
+  if (createRotationLock(lock)) return true;
+  if (!lockAbandoned(lock, Date.now())) return false;
+  // Брошенный замок уносится **переименованием** в своё имя, а не удаляется:
+  // `rename` атомарен, так что из двоих подобравших его получает ровно один, а
+  // второй, дошедший до `unlink` позже, снял бы с прокрутки уже новый, живой
+  // замок первого.
+  const takeover = lockTakeoverPath(dir);
+  try {
+    renameSync(lock, takeover);
+  } catch {
+    return false;
+  }
+  try {
+    unlinkSync(takeover);
+  } catch {
+    /* уносили не мы */
+  }
+  return createRotationLock(lock);
+}
+
+/** Отпускает замок. Его отсутствие — не беда: значит, его подобрали как брошенный. */
+function releaseRotationLock(dir: string): void {
+  try {
+    unlinkSync(rotationLockPath(dir));
+  } catch {
+    /* замка уже нет */
+  }
+}
+
+/**
+ * Возвращает захваченный файл в общую ленту.
+ *
+ * Переименовать его назад нельзя: сосед, прокрутивший журнал первым, уже пишет
+ * в новый текущий файл, и `rename` поверх стёр бы его записи. Порядок строк от
+ * дозаписи не страдает — страница читается устойчивой сортировкой по `at`, а не
+ * порядком в файле.
+ */
+function restoreClaim(claim: string, current: string): void {
+  const kept = readFileSync(claim);
+  if (kept.length > 0) appendFileSync(current, kept);
+  unlinkSync(claim);
+}
+
+/**
+ * Переименовывает, прощая исчезнувший источник.
+ *
+ * Архивы сдвигает только тот, кто захватил текущий файл, но захваты соседних
+ * поколений теоретически накладываются, и тогда второму файл под руками
+ * переименовывает первый. `ENOENT` здесь — не отказ, а «эту работу сделали за
+ * нас»: вылетев наружу, он уносил бы с собой и саму запись об аварии — она
+ * уходила бы в stderr, то есть терялась ровно там, ради чего журнал и заведён.
+ */
+function renameIfPresent(from: string, to: string): void {
+  try {
+    renameSync(from, to);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+/**
+ * Крутит журнал под замком.
+ *
+ * Замок берётся на **всю** прокрутку, а не только на захват текущего файла:
+ * захват отвечает лишь за то, чей это файл, а сдвиг архивов — отдельная череда
+ * `rename`, и две прокрутки соседних поколений, наложившись, переставляли бы их
+ * вперемешку. Один архив при этом уезжает поверх другого, то есть из хранимых
+ * пропадают восемь мегабайт аварий ровно потому, что их писали двое.
+ *
+ * Не взяли замок — прокрутки не будет: строка уйдёт в текущий файл, временно
+ * переросший предел, а следующая запись попробует снова. Пропущенная прокрутка
+ * дешевле наложившейся.
+ */
+function rotate(dir: string, line: string): void {
+  if (!acquireRotationLock(dir)) return;
+  try {
+    rotateLocked(dir, line);
+  } finally {
+    releaseRotationLock(dir);
+  }
+}
+
+/**
  * Сдвигает файлы на один номер вперёд. Самый старый не убирается отдельно:
  * `rename` поверх него и есть его удаление, а отдельный `rm` оставил бы окно, в
  * котором хранимых файлов на один меньше обещанного.
+ *
+ * Начинается прокрутка с **захвата** текущего файла отдельным именем, и это не
+ * лишний шаг: `rename` атомарен, так что текущий файл уходит из ленты целиком и
+ * сразу, а писатель, дозаписывающий в этот момент строку, заводит новый файл, а
+ * не пишет в уезжающий архив. Проверки размера перед прокруткой для этого мало:
+ * она отвечает на вопрос о файле, который к моменту сдвига может быть уже чужим
+ * архивом.
  */
-function rotate(dir: string): void {
-  for (let index = LOG_KEEP_FILES - 2; index >= 1; index -= 1) {
-    const from = rotatedLogPath(index, dir);
-    if (sizeOf(from) === 0) continue;
-    renameSync(from, rotatedLogPath(index + 1, dir));
+function rotateLocked(dir: string, line: string): void {
+  const current = logFilePath(dir);
+  const claim = rotationClaimPath(dir);
+  // Под замком чужой прокрутки не идёт, поэтому найденный здесь захват брошен
+  // всегда — своей прерванной прокруткой или убитым процессом, безразлично.
+  if (!recoverStaleClaim(claim, current)) return;
+  try {
+    renameSync(current, claim);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    // Файл под руками уже переименовал сосед: крутить нечего, строка уйдёт в
+    // заведённый им новый.
+    return;
   }
-  renameSync(logFilePath(dir), rotatedLogPath(1, dir));
+
+  try {
+    // Размер меряется заново и уже на своём файле: сосед мог прокрутить журнал
+    // между проверкой и захватом, и тогда в руках оказался бы новый, почти
+    // пустой текущий файл. Прокрученный, он выдавил бы из хранимых лишний архив.
+    if (sizeOf(claim) + Buffer.byteLength(line) <= LOG_MAX_BYTES) {
+      restoreClaim(claim, current);
+      return;
+    }
+
+    for (let index = LOG_KEEP_FILES - 2; index >= 1; index -= 1) {
+      const from = rotatedLogPath(index, dir);
+      if (sizeOf(from) === 0) continue;
+      renameIfPresent(from, rotatedLogPath(index + 1, dir));
+    }
+    renameSync(claim, rotatedLogPath(1, dir));
+  } catch (error) {
+    // Всё, что после захвата, обязано либо доехать, либо вернуть файл в ленту:
+    // брошенный захват читателю не виден вовсе, и до следующей прокрутки
+    // восемь мегабайт аварий читаются как «аварий не было». Возврат идёт своим
+    // `try` — его отказ не имеет права заслонить причину, ради которой сюда и
+    // попали, а не вернувшийся захват подберёт `recoverStaleClaim`.
+    try {
+      restoreClaim(claim, current);
+    } catch {
+      /* захват остаётся до следующей прокрутки */
+    }
+    throw error;
+  }
+}
+
+/**
+ * Возвращает в ленту захват, брошенный прерванной прокруткой — своей или
+ * умершего вместе с ней процесса.
+ *
+ * Имя захвата одно на каталог, поэтому следующая прокрутка переименовала бы
+ * текущий файл **поверх** него, и брошенные восемь мегабайт исчезли бы
+ * навсегда. Отказ самого возврата отменяет прокрутку, а не летит наружу: захват
+ * пережил уже одну аварию и обязан пережить эту, а строка уйдёт в переросший
+ * предел текущий файл (перерастание временное — следующая прокрутка попробует
+ * снова). Настоящую причину назовёт та же запись, упав уже на дозаписи.
+ */
+function recoverStaleClaim(claim: string, current: string): boolean {
+  if (!existsSync(claim)) return true;
+  try {
+    restoreClaim(claim, current);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -171,10 +449,7 @@ export function logFailure(
   try {
     const path = logFilePath(dir);
     mkdirSync(resolve(dir, LOGS_DIR), { recursive: true });
-    const size = sizeOf(path);
-    // Пустой файл не крутится: строка длиннее предела иначе прокручивала бы
-    // журнал на каждой записи, стирая всё, что в нём было.
-    if (size > 0 && size + Buffer.byteLength(line) > LOG_MAX_BYTES) rotate(dir);
+    if (overflows(path, line)) rotate(dir, line);
     appendFileSync(path, line);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -318,6 +593,21 @@ export function readFailureTail(dir: string = dataDir(), budget: number = LOG_TA
   const current = readTail(logFilePath(dir), budget);
   const entries = entriesOf(current);
   let rest = budget - current.bytes;
+  // Брошенный захват читается наравне с лентой, хотя подберёт его и следующая
+  // прокрутка: ждать её — значит держать записи невидимыми до тех пор, пока
+  // журнал снова не дорастёт до восьми мегабайт, то есть прятать аварию ровно
+  // после аварии, которая прокрутку и оборвала. Лежит он между архивом и
+  // текущим файлом: захватывается именно текущий, а архивы к этому моменту
+  // уже сдвинуты. Живая прокрутка на миллисекунды показывает его записи дважды
+  // — возврат в ленту дозаписью успевает опередить `unlink`; повтор пары строк
+  // в ленте несравним с восемью мегабайтами, которых в ней нет.
+  if (rest > 0) {
+    const claimed = readTail(rotationClaimPath(dir), rest);
+    if (claimed.bytes > 0) {
+      entries.unshift(...entriesOf(claimed));
+      rest -= claimed.bytes;
+    }
+  }
   for (let index = 1; index < LOG_KEEP_FILES && rest > 0; index += 1) {
     const older = readTail(rotatedLogPath(index, dir), rest);
     if (older.bytes === 0) break;

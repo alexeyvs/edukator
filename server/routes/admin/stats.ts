@@ -33,13 +33,17 @@ export function registerAdminStatsRoutes(
   options: AdminStatsRoutesOptions,
 ): void {
   app.get('/api/admin/stats', (request, reply) => {
+    const query = request.query as Record<string, unknown>;
+    const refresh = query['refresh'] === '1';
     try {
-      options.context(request, { allow: ROUTE_ACCESS.admin });
+      // Принудительный пересчёт синхронно обходит все детские базы. Хотя HTTP-
+      // метод безопасный, чужая страница не должна уметь обходить пятиминутный
+      // кеш и занимать цикл событий серией запросов с админской cookie.
+      options.context(request, { allow: ROUTE_ACCESS.admin, mutating: refresh });
     } catch (error) {
       return failAuth(reply, error);
     }
-    const query = request.query as Record<string, unknown>;
-    const stats = options.cache.read({ refresh: query['refresh'] === '1' });
+    const stats = options.cache.read({ refresh });
     const response: AdminStatsResponse = {
       ...stats,
       partial: stats.failed.length > 0 || stats.stale.length > 0,

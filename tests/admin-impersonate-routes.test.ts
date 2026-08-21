@@ -14,6 +14,7 @@ import {
   loginAdmin,
   openControlDatabase,
   redeemParentInvite,
+  resolveImpersonation,
   retireChild,
   revokeImpersonation,
   setAdminPassword,
@@ -64,6 +65,8 @@ interface Injected {
 }
 
 describe('маршруты захода оператора в семью', () => {
+  /** Часы теста: срок захода отмеряется от них, и его надо уметь перешагнуть. */
+  let current: Date;
   let dir: string;
   let control: Database;
   let tenants: TenantRegistry;
@@ -80,6 +83,7 @@ describe('маршруты захода оператора в семью', () =>
   let context: TenantContextResolver;
 
   beforeEach(async () => {
+    current = NOW;
     dir = mkdtempSync(join(tmpdir(), 'edukator-admin-impersonate-'));
     ensureDataDir(dir);
     const seedDir = join(dir, 'посев');
@@ -104,23 +108,27 @@ describe('маршруты захода оператора в семью', () =>
     provisionChildDatabase(control, childId, dir);
 
     tenants = new TenantRegistry({ control, dataDir: dir, graph: GRAPH, seedDir, log: () => undefined });
-    impersonations = new ImpersonationTenants({ graph: GRAPH, now: () => NOW, log: () => undefined });
+    impersonations = new ImpersonationTenants({
+      graph: GRAPH,
+      now: () => current,
+      log: () => undefined,
+    });
     refusals = new ImpersonationRefusals();
     const opener = createTenantOpener({ tenants, impersonations });
     context = createTenantContext({
       control,
       tenants: opener,
       onReadOnly: (impersonation) => refusals.record(impersonation.adminId),
-      now: () => NOW,
+      now: () => current,
     });
 
     app = Fastify();
     registerAdminImpersonateRoutes(app, {
-      context: createAdminContext({ control, now: () => NOW }),
+      context: createAdminContext({ control, now: () => current }),
       control,
       refusals,
       impersonations,
-      now: () => NOW,
+      now: () => current,
     });
     // Настоящий детский маршрут рядом: счётчик отказов считает первый замок, и
     // проверять его на выдуманном отказе значило бы проверять сам тест.
@@ -135,6 +143,11 @@ describe('маршруты захода оператора в семью', () =>
     control.close();
     rmSync(dir, { recursive: true, force: true });
   });
+
+  /** Переводит часы теста вперёд: срок захода отмеряется от них. */
+  function advance(ms: number): void {
+    current = new Date(current.getTime() + ms);
+  }
 
   function enter(email: string): string {
     const login = loginAdmin(control, email, ADMIN_PASSWORD, NOW);
@@ -280,7 +293,46 @@ describe('маршруты захода оператора в семью', () =>
     expect(audit()[0]).toMatchObject({ action: 'impersonation-end', detail: 'browser, отказов записи: 0' });
   });
 
-  it('не приписывает новому заходу отказы истёкшего', async () => {
+  it('закрывает истёкший заход записью с его же счётчиком отказов', async () => {
+    const first = await start({ childId, role: 'browser' });
+    const firstToken = cookieValue(first);
+    const refused = await app.inject({
+      method: 'PUT',
+      url: '/api/profile',
+      headers: { ...SAME_ORIGIN, cookie: `${IMPERSONATION_COOKIE}=${firstToken}` },
+      payload: { interests: ['раз'] },
+    });
+    expect(refused.statusCode).toBe(403);
+
+    // Срок вышел, а выхода не было: оператор просто закрыл вкладку. Конец
+    // захода от этого не отменяется — вместе с ним терялся бы и счётчик
+    // отказанных попыток записи в чужую семью, то есть самое содержательное
+    // число этой пары.
+    advance(16 * 60 * 1000);
+    const second = await start(
+      { childId, role: 'browser' },
+      `${adminCookie}; ${IMPERSONATION_COOKIE}=${firstToken}`,
+    );
+    expect(audit().map((entry) => entry.action)).toEqual([
+      'impersonation-start',
+      'impersonation-end',
+      'impersonation-start',
+    ]);
+    expect(audit()[1]).toMatchObject({
+      action: 'impersonation-end',
+      detail: 'browser, отказов записи: 1',
+    });
+
+    // И счётчик следующего захода начинается с нуля: отказы прошлой семьи
+    // уехали в её же запись.
+    await leave(`${adminCookie}; ${IMPERSONATION_COOKIE}=${cookieValue(second)}`);
+    expect(audit()[0]).toMatchObject({
+      action: 'impersonation-end',
+      detail: 'browser, отказов записи: 0',
+    });
+  });
+
+  it('закрывает брошенный заход, у которого браузер выбросил cookie', async () => {
     const first = await start({ childId, role: 'browser' });
     const refused = await app.inject({
       method: 'PUT',
@@ -290,10 +342,83 @@ describe('маршруты захода оператора в семью', () =>
     });
     expect(refused.statusCode).toBe(403);
 
-    // Срок захода вышел, и выхода не было: `resolveImpersonation` просроченную
-    // строку уже не отдаёт, так что закрыть её и забрать счётчик было некому.
-    // Счётчик процессный — не сброшенный, он приписал бы попытки записи в
-    // прошлой семье записи о конце захода в следующей.
+    // `Max-Age` cookie захода равен его сроку, так что браузер выбрасывает её
+    // ровно тогда, когда истекает строка: вернувшийся оператор приносит одну
+    // админскую. Названная только токеном, строка осталась бы в ленте началом
+    // без пары, а вместе с концом пропал бы счётчик отказанных попыток записи.
+    advance(16 * 60 * 1000);
+    await start({ childId, role: 'browser' }, adminCookie);
+
+    expect(audit().map((entry) => entry.action)).toEqual([
+      'impersonation-start',
+      'impersonation-end',
+      'impersonation-start',
+    ]);
+    expect(audit()[1]).toMatchObject({
+      action: 'impersonation-end',
+      detail: 'browser, отказов записи: 1',
+    });
+  });
+
+  it('выход без cookie закрывает брошенный заход и не удваивает его', async () => {
+    await start({ childId, role: 'browser' });
+    advance(16 * 60 * 1000);
+
+    await leave(adminCookie);
+    expect(audit().map((entry) => entry.action)).toEqual([
+      'impersonation-end',
+      'impersonation-start',
+    ]);
+
+    // Второй выход ничего не пишет: строка погашена, и `readAdminImpersonation`
+    // её уже не отдаёт.
+    await leave(adminCookie);
+    expect(audit()).toHaveLength(2);
+  });
+
+  it('выход не закрывает чужой заход по одному лишь оператору', async () => {
+    // Заход другого оператора живёт своей жизнью: выход первого не имеет права
+    // приписать себе его конец вместе с его счётчиком отказов.
+    await start({ childId, role: 'browser' }, otherAdminCookie);
+    advance(16 * 60 * 1000);
+
+    await leave(adminCookie);
+
+    expect(audit().map((entry) => entry.action)).toEqual(['impersonation-start']);
+  });
+
+  it('выход закрывает истёкший заход, а погашенный — не закрывает дважды', async () => {
+    const first = await start({ childId, role: 'browser' });
+    const token = cookieValue(first);
+    advance(16 * 60 * 1000);
+
+    // Явный выход из уже истёкшего захода: запись о конце обязана появиться.
+    await leave(`${adminCookie}; ${IMPERSONATION_COOKIE}=${token}`);
+    // Лента отдаётся свежим вперёд.
+    expect(audit().map((entry) => entry.action)).toEqual([
+      'impersonation-end',
+      'impersonation-start',
+    ]);
+
+    // Второй выход по той же cookie ничего не пишет: строка погашена, и её
+    // конец уже записан — иначе один заход множился бы в ленте.
+    await leave(`${adminCookie}; ${IMPERSONATION_COOKIE}=${token}`);
+    expect(audit()).toHaveLength(2);
+  });
+
+  it('не приписывает новому заходу отказы погашенного', async () => {
+    const first = await start({ childId, role: 'browser' });
+    const refused = await app.inject({
+      method: 'PUT',
+      url: '/api/profile',
+      headers: { ...SAME_ORIGIN, cookie: `${IMPERSONATION_COOKIE}=${cookieValue(first)}` },
+      payload: { interests: ['раз'] },
+    });
+    expect(refused.statusCode).toBe(403);
+
+    // Погашенная строка свой конец уже пережила, и повторно писать его нельзя;
+    // счётчик при этом процессный — не сброшенный, он приписал бы попытки
+    // записи в прошлой семье записи о конце захода в следующей.
     revokeImpersonation(control, cookieValue(first), NOW);
     const second = await start({ childId, role: 'browser' });
     await leave(`${adminCookie}; ${IMPERSONATION_COOKIE}=${cookieValue(second)}`);
@@ -329,6 +454,26 @@ describe('маршруты захода оператора в семью', () =>
     });
     expect(profile.statusCode).toBe(401);
   });
+
+  it.each(['impersonation-end', 'impersonation-start'] as const)(
+    'откатывает замену захода при отказе аудита %s',
+    async (action) => {
+      const first = await start({ childId, role: 'browser' });
+      const firstToken = cookieValue(first);
+      control.exec(`CREATE TRIGGER fail_replacement_audit BEFORE INSERT ON admin_audit
+        WHEN NEW.action = '${action}'
+        BEGIN SELECT RAISE(ABORT, 'audit failed'); END`);
+
+      const response = await start({ childId, role: 'parent' });
+
+      expect(response.statusCode).toBe(500);
+      expect(resolveImpersonation(control, firstToken, current)).toBeDefined();
+      expect(control.prepare(
+        'SELECT COUNT(*) AS total FROM admin_impersonations WHERE revoked_at IS NULL',
+      ).get()).toEqual({ total: 1 });
+      expect(audit().map((entry) => entry.action)).toEqual(['impersonation-start']);
+    },
+  );
 
   it('не приписывает чужой заход себе', async () => {
     const foreign = await start({ childId, role: 'browser' }, otherAdminCookie);

@@ -98,11 +98,9 @@ export interface ImpersonationTenantsOptions {
  * Кеш по ребёнку, а не по заходу: соединение к одной базе одно, и оператор,
  * листающий чужой дашборд, не заводит его на каждый запрос.
  *
- * Таймера здесь нет намеренно. Истёкший заход до `view` не доезжает вовсе — его
- * отвергает разбор предъявителя, — так что снимать просроченный handle некому,
- * кроме подметания при следующем заходе и общего закрытия. Заводить ради этого
- * будильник значило бы держать процесс живым ради соединения, которое ничего не
- * пишет и никого не блокирует.
+ * Таймер подметает истёкшие handle независимо от следующего захода. Без него
+ * последний просмотр перед истечением TTL оставлял SQLite-соединение открытым
+ * до остановки сервера; `unref` не даёт самому таймеру держать процесс живым.
  */
 export class ImpersonationTenants {
   readonly #handles = new Map<string, ReadOnlyHandle>();
@@ -111,6 +109,7 @@ export class ImpersonationTenants {
   readonly #openSession: (path: string) => SessionDatabase | undefined;
   readonly #now: () => Date;
   readonly #log: (message: string) => void;
+  readonly #sweepTimer: ReturnType<typeof setInterval>;
 
   constructor(options: ImpersonationTenantsOptions) {
     this.#graph = options.graph;
@@ -124,6 +123,8 @@ export class ImpersonationTenants {
     this.#openSession = options.openSession ?? ((path) => openSessionDatabase(path));
     this.#now = options.now ?? ((): Date => new Date());
     this.#log = options.log ?? ((message) => process.stderr.write(`${message}\n`));
+    this.#sweepTimer = setInterval(() => { this.sweep(); }, Math.min(this.#ttlMs, 30_000));
+    this.#sweepTimer.unref();
   }
 
   /** Сколько соединений открыто сейчас. */
@@ -140,7 +141,7 @@ export class ImpersonationTenants {
    * реестра.
    */
   view(tenant: Tenant): Tenant {
-    this.#sweep();
+    this.sweep();
 
     const cached = this.#handles.get(tenant.childId);
     if (cached !== undefined && cached.source === tenant) {
@@ -210,11 +211,12 @@ export class ImpersonationTenants {
 
   /** Закрывает все соединения: остановка сервера проходит через неё. */
   closeAll(): void {
+    clearInterval(this.#sweepTimer);
     for (const childId of [...this.#handles.keys()]) this.close(childId);
   }
 
   /** Снимает handle, не тронутые дольше срока захода. */
-  #sweep(): void {
+  sweep(): void {
     const deadline = this.#now().getTime() - this.#ttlMs;
     for (const [childId, handle] of [...this.#handles]) {
       if (handle.touchedAt <= deadline) this.close(childId);

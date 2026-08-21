@@ -377,8 +377,27 @@ export function isMutating(method: string): boolean {
  * Присланный `Origin` проверяется всегда, даже когда `Sec-Fetch-Site` говорит
  * `same-origin`: одновременно эти два заголовка расходятся только у того, кто
  * их подделывает, и верить в такой паре надо более строгому.
+ *
+ * Схема — часть источника, и сверяется наравне с хостом. Один только `host`
+ * принимал бы `http://edukator.ru` за свою страницу: `Host` схемы не содержит,
+ * так что страница, отданная по голому http под тем же именем (перехваченный
+ * первый запрос, подставленный прокси), проходила бы проверку — а сам
+ * изменяющий запрос она отправляет по https, и cookie с ним уезжают.
+ *
+ * Исключений у `https:` два, и оба — про разработку. Петлевой адрес браузер сам
+ * считает защищённым (там же и `__Host-`-cookie без TLS), а `npm run dev`
+ * отдаёт страницу с `http://localhost:5173`: без этого исключения каждый вход,
+ * ответ и смена PIN в dev получали бы 403. `insecure` — тот же выключатель, что
+ * снимает `Secure` с cookie (`EDUKATOR_INSECURE_COOKIES=1`), для голого http не
+ * на петле.
  */
-export function isSameOrigin(headers: RequestHeaders): boolean {
+const LOCAL_HOSTNAMES = /^(localhost|127(?:\.\d{1,3}){3}|\[::1\]|::1)$/u;
+
+function isLoopbackOrigin(parsed: URL): boolean {
+  return LOCAL_HOSTNAMES.test(parsed.hostname.toLowerCase());
+}
+
+export function isSameOrigin(headers: RequestHeaders, insecure = false): boolean {
   const origin = headerValue(headers, 'origin');
   if (origin !== undefined && origin !== '') {
     // `null` — непрозрачный источник (sandbox, `data:`), то есть заведомо чужой.
@@ -391,8 +410,14 @@ export function isSameOrigin(headers: RequestHeaders): boolean {
     } catch {
       return false;
     }
+    if (parsed.protocol !== 'https:') {
+      if (parsed.protocol !== 'http:') return false;
+      if (!insecure && !isLoopbackOrigin(parsed)) return false;
+    }
     return parsed.host.toLowerCase() === host.toLowerCase();
   }
+  // `Sec-Fetch-Site` схему учитывает сам: `same-origin` браузер ставит только
+  // при совпадении схемы, хоста и порта.
   return headerValue(headers, 'sec-fetch-site') === 'same-origin';
 }
 
@@ -409,9 +434,10 @@ export function assertSameOrigin(
   method: string,
   headers: RequestHeaders,
   mutating = false,
+  insecure = false,
 ): void {
   if (!mutating && !isMutating(method)) return;
-  if (isSameOrigin(headers)) return;
+  if (isSameOrigin(headers, insecure)) return;
   throw new AuthError('cross-origin', `Изменяющий запрос ${method} без подтверждённого источника`);
 }
 
@@ -520,6 +546,8 @@ export interface ResolveTenantOptions {
    * считает их тот, кто эту запись потом и пишет.
    */
   onReadOnly?: (impersonation: ImpersonationMark) => void;
+  /** Разрешить источник по голому http. Только локальная разработка. */
+  insecureOrigin?: boolean;
   now?: Date;
 }
 
@@ -532,7 +560,12 @@ export interface ResolveTenantOptions {
  */
 export function resolveTenant(options: ResolveTenantOptions): ResolvedTenant {
   const allow = options.allow;
-  assertSameOrigin(options.method, options.headers, options.mutating === true);
+  assertSameOrigin(
+    options.method,
+    options.headers,
+    options.mutating === true,
+    options.insecureOrigin === true,
+  );
 
   const bearer = resolveBearer(options.control, options.headers, options.now ?? new Date());
   if (bearer === undefined) throw new AuthError('unauthenticated', 'Предъявитель не разобран');
@@ -589,6 +622,8 @@ export interface ResolveAdminOptions {
   allow: readonly BearerKind[];
   /** Маршрут меняет состояние независимо от метода. */
   mutating?: boolean;
+  /** Разрешить источник по голому http. Только локальная разработка. */
+  insecureOrigin?: boolean;
   now?: Date;
 }
 
@@ -604,7 +639,12 @@ export interface ResolveAdminOptions {
  * это сделать.
  */
 export function resolveAdmin(options: ResolveAdminOptions): AdminBearer {
-  assertSameOrigin(options.method, options.headers, options.mutating === true);
+  assertSameOrigin(
+    options.method,
+    options.headers,
+    options.mutating === true,
+    options.insecureOrigin === true,
+  );
   if (!options.allow.includes('admin')) {
     throw new AuthError('forbidden', 'Маршрут не открыт оператору');
   }

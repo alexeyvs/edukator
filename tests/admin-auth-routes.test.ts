@@ -6,11 +6,13 @@ import type { Database } from 'better-sqlite3';
 import Fastify, { type FastifyInstance } from 'fastify';
 import {
   ADMIN_SESSION_MAX_MS,
+  IMPERSONATION_TTL_MS,
   LOGIN_EMAIL_FAILURE_LIMIT,
   LOGIN_LOCKOUT_MS,
   createAdmin,
   createChild,
   createParent,
+  countLiveAdminSessions,
   disableAdmin,
   issueParentInvite,
   listAdminAudit,
@@ -195,6 +197,111 @@ describe('маршруты входа оператора', () => {
       expect(cookies.every((value) => value.includes('Max-Age=0'))).toBe(true);
       expect(audit()).toEqual([
         { action: 'impersonation-end', adminId, detail: 'browser, отказов записи: 0' },
+        { action: 'logout', adminId },
+        { action: 'login', adminId },
+      ]);
+    });
+
+    it('откатывает вход целиком, когда обязательный аудит не записался', async () => {
+      admin();
+      control.exec(`CREATE TRIGGER fail_admin_audit BEFORE INSERT ON admin_audit
+        BEGIN SELECT RAISE(ABORT, 'audit failed'); END`);
+
+      const response = await login();
+
+      expect(response.statusCode).toBe(500);
+      expect(countLiveAdminSessions(control, current)).toBe(0);
+      expect(audit()).toEqual([]);
+    });
+
+    it('не гасит сессию и заход, когда аудит выхода не записался', async () => {
+      const adminId = admin();
+      const token = cookieValue(setCookie((await login()).headers));
+      const parentId = createParent(control, 'семья-отката@example.com', current);
+      const childId = createChild(control, parentId, 'Ученик', current);
+      provisionChildDatabase(control, childId, dir);
+      const started = startImpersonation(control, { adminId, childId, role: 'browser' }, current);
+      const impersonation = started.ok ? started.session.token : '';
+      control.exec(`CREATE TRIGGER fail_logout_audit BEFORE INSERT ON admin_audit
+        WHEN NEW.action = 'logout'
+        BEGIN SELECT RAISE(ABORT, 'audit failed'); END`);
+
+      const response = await logout({
+        cookie: `${ADMIN_COOKIE}=${token}; ${IMPERSONATION_COOKIE}=${impersonation}`,
+      });
+
+      expect(response.statusCode).toBe(500);
+      expect(resolveAdminBearer(control, { cookie: `${ADMIN_COOKIE}=${token}` }, current)).toBeDefined();
+      expect(resolveImpersonation(control, impersonation, current)).toBeDefined();
+      expect(audit().map((entry) => entry.action)).toEqual(['login']);
+    });
+
+    it('выход из админки закрывает и истёкший заход', async () => {
+      const adminId = admin();
+      const token = cookieValue(setCookie((await login()).headers));
+      const parentId = createParent(control, 'семья@example.com', current);
+      const childId = createChild(control, parentId, 'Ученик', current);
+      provisionChildDatabase(control, childId, dir);
+      const started = startImpersonation(control, { adminId, childId, role: 'browser' }, current);
+      expect(started.ok).toBe(true);
+      const impersonation = started.ok ? started.session.token : '';
+
+      // Срок вышел, и прав заход больше не даёт — но конец его от этого не
+      // отменяется: начало без конца читается в ленте как заход, который всё
+      // ещё идёт, и счётчик отказанных попыток записи пропадает вместе с ним.
+      current = new Date(current.getTime() + IMPERSONATION_TTL_MS + 1000);
+
+      const response = await logout({
+        cookie: `${ADMIN_COOKIE}=${token}; ${IMPERSONATION_COOKIE}=${impersonation}`,
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(audit()).toEqual([
+        { action: 'impersonation-end', adminId, detail: 'browser, отказов записи: 0' },
+        { action: 'logout', adminId },
+        { action: 'login', adminId },
+      ]);
+    });
+
+    it('выход из админки подбирает брошенный заход без его cookie', async () => {
+      const adminId = admin();
+      const token = cookieValue(setCookie((await login()).headers));
+      const parentId = createParent(control, 'семья@example.com', current);
+      const childId = createChild(control, parentId, 'Ученик', current);
+      provisionChildDatabase(control, childId, dir);
+      expect(startImpersonation(control, { adminId, childId, role: 'browser' }, current).ok).toBe(true);
+
+      // `Max-Age` cookie захода равен его сроку: браузер выбрасывает её вместе
+      // с ним, и «просто закрыл вкладку» — тот самый случай, ради которого
+      // запись о конце и заводили. Строку тогда называет только `admin_id`.
+      current = new Date(current.getTime() + IMPERSONATION_TTL_MS + 1000);
+
+      const response = await logout({ cookie: `${ADMIN_COOKIE}=${token}` });
+
+      expect(response.statusCode).toBe(200);
+      expect(audit()).toEqual([
+        { action: 'impersonation-end', adminId, detail: 'browser, отказов записи: 0' },
+        { action: 'logout', adminId },
+        { action: 'login', adminId },
+      ]);
+    });
+
+    it('выход из админки не трогает свой же живой заход из другой вкладки', async () => {
+      const adminId = admin();
+      const token = cookieValue(setCookie((await login()).headers));
+      const parentId = createParent(control, 'семья@example.com', current);
+      const childId = createChild(control, parentId, 'Ученик', current);
+      provisionChildDatabase(control, childId, dir);
+      const started = startImpersonation(control, { adminId, childId, role: 'browser' }, current);
+      const impersonation = started.ok ? started.session.token : '';
+
+      // Выход из админки на одной машине — не повод объявить законченным
+      // заход, который в эту минуту идёт на другой: гасит живой только старт
+      // следующего захода, он же и пишет его конец.
+      await logout({ cookie: `${ADMIN_COOKIE}=${token}` });
+
+      expect(resolveImpersonation(control, impersonation, current)).toBeDefined();
+      expect(audit()).toEqual([
         { action: 'logout', adminId },
         { action: 'login', adminId },
       ]);

@@ -228,7 +228,7 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
    * через эту проверку проходят только POST, и вопрос имел бы один ответ.
    */
   function crossOrigin(request: FastifyRequest, reply: FastifyReply): FastifyReply | undefined {
-    if (isSameOrigin(request.headers)) return undefined;
+    if (isSameOrigin(request.headers, options.insecureCookies === true)) return undefined;
     return reply
       .code(AUTH_STATUS['cross-origin'])
       .send({ error: AUTH_MESSAGE['cross-origin'] });

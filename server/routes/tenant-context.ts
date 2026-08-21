@@ -115,6 +115,13 @@ export interface CreateTenantContextOptions {
    * второй счётчик рядом с ним разъехался бы с ней молча.
    */
   onReadOnly?: (impersonation: ImpersonationMark) => void;
+  /**
+   * Голый http разрешён как свой источник. Тот же выключатель, что снимает
+   * `Secure` с cookie: без него дев-сервер по http получал бы 403 на каждый
+   * изменяющий запрос, а боевой сервер обязан отвергать `http://` под своим же
+   * именем.
+   */
+  insecureCookies?: boolean;
   now?: () => Date;
 }
 
@@ -129,6 +136,7 @@ export function createTenantContext(options: CreateTenantContextOptions): Tenant
       method: request.method,
       now: now(),
       allow: context.allow,
+      insecureOrigin: options.insecureCookies === true,
       ...(options.onReadOnly === undefined ? {} : { onReadOnly: options.onReadOnly }),
       ...(context.childId === undefined ? {} : { childId: context.childId }),
       ...(context.mutating === undefined ? {} : { mutating: context.mutating }),
@@ -155,6 +163,8 @@ export type AdminContextResolver = (
 export interface CreateAdminContextOptions {
   /** Управляющая база: в ней живут операторы и их сессии. */
   control: Database.Database;
+  /** Голый http разрешён как свой источник. Только локальная разработка. */
+  insecureCookies?: boolean;
   now?: () => Date;
 }
 
@@ -173,6 +183,7 @@ export function createAdminContext(options: CreateAdminContextOptions): AdminCon
       method: request.method,
       now: now(),
       allow: context.allow,
+      insecureOrigin: options.insecureCookies === true,
       ...(context.mutating === undefined ? {} : { mutating: context.mutating }),
     });
 }

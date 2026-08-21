@@ -417,9 +417,17 @@ export function buildServer(
       // помнит ничего.
       const refusals = new ImpersonationRefusals();
 
+      // Один выключатель на cookie и на проверку источника: и `Secure`, и
+      // требование `https://` у `Origin` снимаются только ради локальной
+      // разработки по голому http, и разъехавшись они дали бы сервер, который
+      // ставит незащищённые cookie, но отвергает собственную страницу.
+      const insecureCookies =
+        options.insecureCookies ?? process.env['EDUKATOR_INSECURE_COOKIES'] === '1';
+
       const context = createTenantContext({
         control,
         tenants: opener,
+        insecureCookies,
         onReadOnly: (impersonation) => refusals.record(impersonation.adminId),
         ...(options.now === undefined ? {} : { now: options.now }),
       });
@@ -429,9 +437,7 @@ export function buildServer(
         failures,
         ...(options.now === undefined ? {} : { now: options.now }),
         ...(options.trustedProxies === undefined ? {} : { trustedProxies: options.trustedProxies }),
-        ...(options.insecureCookies === undefined
-          ? { insecureCookies: process.env['EDUKATOR_INSECURE_COOKIES'] === '1' }
-          : { insecureCookies: options.insecureCookies }),
+        insecureCookies,
       });
       registerAdminAuthRoutes(app, {
         control,
@@ -443,14 +449,13 @@ export function buildServer(
         impersonations,
         ...(options.now === undefined ? {} : { now: options.now }),
         ...(options.trustedProxies === undefined ? {} : { trustedProxies: options.trustedProxies }),
-        ...(options.insecureCookies === undefined
-          ? { insecureCookies: process.env['EDUKATOR_INSECURE_COOKIES'] === '1' }
-          : { insecureCookies: options.insecureCookies }),
+        insecureCookies,
       });
       // Админка разрешается своим резолвером и реестра не получает: её первый
       // экран обязан открываться и тогда, когда с детскими базами беда.
       const adminContext = createAdminContext({
         control,
+        insecureCookies,
         ...(options.now === undefined ? {} : { now: options.now }),
       });
       registerAdminOverviewRoutes(app, {
@@ -485,9 +490,7 @@ export function buildServer(
         refusals,
         impersonations,
         ...(options.now === undefined ? {} : { now: options.now }),
-        ...(options.insecureCookies === undefined
-          ? { insecureCookies: process.env['EDUKATOR_INSECURE_COOKIES'] === '1' }
-          : { insecureCookies: options.insecureCookies }),
+        insecureCookies,
       });
       registerAdminAuditRoutes(app, { context: adminContext, control });
       registerFamilyRoutes(app, {
@@ -496,6 +499,7 @@ export function buildServer(
         // Аренды у этих маршрутов нет, а замок имперсонации нужен: состав
         // семьи лежит в управляющей базе, до которой `query_only` не достаёт.
         onReadOnly: (impersonation) => refusals.record(impersonation.adminId),
+        insecureCookies,
         ...(pinPepper === undefined ? {} : { pinPepper }),
         ...(options.now === undefined ? {} : { now: options.now }),
       });

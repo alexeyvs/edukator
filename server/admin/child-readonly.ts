@@ -22,7 +22,7 @@
  * оператора без всей статистики из-за одного испорченного файла, то есть ровно
  * тогда, когда она нужнее всего.
  */
-import { closeSync, existsSync, openSync, readSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { childDatabasePath } from '../control-db.js';
 import { SCHEMA_VERSION } from '../db.js';
@@ -42,8 +42,48 @@ import { SCHEMA_VERSION } from '../db.js';
  * `undefined` — «это вообще не база»: короткий файл или чужая подпись. Такой
  * файл не «схема не та», а отказ, и называть его должен драйвер — у него для
  * этого есть внятный текст, а у четырёх байт заголовка его нет.
+ *
+ * Заголовок отстаёт, пока рядом лежит непустой `-wal`: страницу с новым
+ * `user_version` миграция кладёт в журнал, а в главный файл её переносит
+ * чекпойнт. Поэтому число отсюда — не приговор, а быстрый ответ для базы без
+ * журнала; см. `hasPendingWal`.
  */
 const SQLITE_MAGIC = 'SQLite format 3\0';
+
+/**
+ * Отказ без путей на диске.
+ *
+ * `reason` уезжает в тело HTTP-ответа обоим отчётам оператора, а сообщения
+ * `node:fs` и драйвера несут в себе абсолютный путь к файлу. Ребёнок в отказе
+ * назван по `id`, и путь по нему считается однозначно, — так что назвать его
+ * ещё и вслух значит только рассказать про машину.
+ *
+ * Заменяется и сам путь, и каталог данных: из него считаются и `-wal`, и
+ * `-shm`, и всё, что драйвер припишет к имени файла.
+ */
+function hidePaths(error: unknown, dataDir: string, path: string): Error {
+  const text = error instanceof Error ? error.message : String(error);
+  const hidden = text.split(path).join('<база ребёнка>').split(dataDir).join('<каталог данных>');
+  return hidden === text && error instanceof Error ? error : new Error(hidden);
+}
+
+/**
+ * Есть ли рядом журнал WAL с неприменёнными страницами.
+ *
+ * Пустой (или отсутствующий) `-wal` означает, что всё зафиксированное лежит в
+ * самом файле и его заголовку можно верить. Непустой — что верить нельзя, и
+ * настоящий номер знает только движок; тогда версию досматривает уже
+ * соединение (`PRAGMA user_version` ниже). Обещание «базу не той версии обход
+ * не трогает» это не снимает: непустой `-wal` и сам стоит рядом с базой, а его
+ * `-shm` при живом писателе уже существует.
+ */
+function hasPendingWal(path: string): boolean {
+  try {
+    return statSync(`${path}-wal`).size > 0;
+  } catch {
+    return false;
+  }
+}
 
 function fileSchemaVersion(path: string): number | undefined {
   const handle = openSync(path, 'r');
@@ -109,6 +149,11 @@ export interface ChildrenSweep<T> {
  * (`failed[].reason` у обоих отчётов оператора), а каталог данных — подробность
  * машины, которой в ответе не место. Ребёнок назван, а путь по нему считается
  * однозначно.
+ *
+ * Своих текстов для этого мало: путь пишут в сообщение и `node:fs` (`EACCES:
+ * permission denied, open '/…/children/….db'`), и драйвер. Такой отказ уезжал
+ * бы наружу дословно, обходя ровно ту сдержанность, ради которой свои тексты и
+ * писались, — поэтому чужие сообщения проходят через `hidePaths`.
  */
 export function readChildDatabase<T>(
   dataDir: string,
@@ -121,13 +166,31 @@ export function readChildDatabase<T>(
   if (!existsSync(path)) {
     throw new Error(`Базы ребёнка ${childId} нет`);
   }
+  try {
+    return openChildDatabase(path, childId, read);
+  } catch (error) {
+    throw hidePaths(error, dataDir, path);
+  }
+}
 
+/** Собственно открытие. Вынесено, чтобы `hidePaths` накрыл его целиком. */
+function openChildDatabase<T>(
+  path: string,
+  childId: string,
+  read: ChildReader<T>,
+): ChildReadResult<T> {
   // Версия узнаётся до соединения: базу не той версии обход обязан оставить
   // ровно такой, какой нашёл, — вплоть до отсутствия спутников рядом с ней.
   const schemaVersion = fileSchemaVersion(path);
   // База новее приложения попадает сюда же: откатили версию — читать её
   // нынешними запросами так же нельзя, и молчаливый нуль был бы враньём.
-  if (schemaVersion !== undefined && schemaVersion !== SCHEMA_VERSION) {
+  //
+  // Но заголовок главного файла говорит за всю базу только тогда, когда рядом
+  // нет непустого `-wal`: миграция под WAL кладёт новую страницу с
+  // `user_version` в журнал, и до чекпойнта в заголовке лежит **прежний**
+  // номер. Ребёнок, чью базу только что мигрировал первый заход, оказывался бы
+  // «схема 16, ждёт первого захода» ровно тогда, когда он за ней и сидит.
+  if (schemaVersion !== undefined && schemaVersion !== SCHEMA_VERSION && !hasPendingWal(path)) {
     return { state: 'stale', childId, path, schemaVersion };
   }
 

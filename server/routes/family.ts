@@ -66,6 +66,8 @@ export interface FamilyRoutesOptions {
    * и у аренды: считает отказы тот, кто пишет запись о конце захода.
    */
   onReadOnly?: (impersonation: ImpersonationMark) => void;
+  /** Голый http разрешён как свой источник. Только локальная разработка. */
+  insecureCookies?: boolean;
   now?: () => Date;
 }
 
@@ -125,7 +127,7 @@ export function registerFamilyRoutes(app: FastifyInstance, options: FamilyRoutes
     reply: FastifyReply,
   ): ParentPrincipal | undefined {
     try {
-      assertSameOrigin(request.method, request.headers);
+      assertSameOrigin(request.method, request.headers, false, options.insecureCookies === true);
     } catch (error) {
       fail(reply, error as AuthError);
       return undefined;

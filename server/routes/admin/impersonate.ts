@@ -19,13 +19,20 @@ import type { Database } from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import {
   IMPERSONATION_ROLES,
+  readAdminImpersonation,
+  readCarriedImpersonation,
   recordAdminAudit,
-  resolveImpersonation,
   revokeImpersonation,
+  revokeImpersonationRow,
   startImpersonation,
   type ImpersonationPrincipal,
 } from '../../control-db.js';
-import { finishImpersonation } from '../../admin/impersonation-finish.js';
+import {
+  finishExpiredImpersonation,
+  finishImpersonation,
+  mutateImpersonationFinish,
+  type ImpersonationFinishCleanup,
+} from '../../admin/impersonation-finish.js';
 import { AUTH_MESSAGE, AUTH_STATUS, IMPERSONATION_COOKIE, parseCookies } from '../../auth.js';
 import type { ImpersonationRefusals } from '../../admin/impersonation-refusals.js';
 import { ROUTE_ACCESS, failAuth, type AdminContextResolver } from '../tenant-context.js';
@@ -66,26 +73,35 @@ export function registerAdminImpersonateRoutes(
   const control = options.control;
   const secure = options.insecureCookies !== true;
 
-  /** Живой заход из cookie запроса. Им закрывают прежний и выходят из текущего. */
-  function currentSession(request: FastifyRequest, at: Date): ImpersonationPrincipal | undefined {
+  /**
+   * Заход из cookie запроса — тот, который предстоит закрыть. Берётся
+   * `readCarriedImpersonation`, а не разбор предъявителя: истёкший срок конца
+   * захода не отменяет, а только лишает его записи в `admin_audit` вместе со
+   * счётчиком отказов записи.
+   */
+  function currentSession(request: FastifyRequest): ImpersonationPrincipal | undefined {
     const token = parseCookies(request.headers.cookie).get(IMPERSONATION_COOKIE);
-    return token === undefined ? undefined : resolveImpersonation(control, token, at);
+    return token === undefined ? undefined : readCarriedImpersonation(control, token);
   }
 
   /**
    * Закрывает заход: запись о конце со счётчиком и своё соединение. Общая с
    * выходом из самой админки: он закрывает живой заход тем же порядком.
    */
-  function finish(session: ImpersonationPrincipal, at: Date): void {
-    finishImpersonation(
-      {
-        control,
-        refusals: options.refusals,
-        ...(options.impersonations === undefined ? {} : { impersonations: options.impersonations }),
-      },
-      session,
-      at,
-    );
+  function deps(): Parameters<typeof finishImpersonation>[0] {
+    return {
+      control,
+      refusals: options.refusals,
+      ...(options.impersonations === undefined ? {} : { impersonations: options.impersonations }),
+    };
+  }
+
+  function finish(
+    session: ImpersonationPrincipal,
+    at: Date,
+    revoke: (control: Database) => void,
+  ): void {
+    finishImpersonation(deps(), session, at, revoke);
   }
 
   app.post('/api/admin/impersonate', (request, reply) => {
@@ -105,13 +121,47 @@ export function registerAdminImpersonateRoutes(
     // Прежний заход читается **до** старта: старт гасит его строку тем же
     // `UPDATE`, и после него сказать, из какой семьи оператор только что
     // вышел, было бы уже нечем.
-    const previous = currentSession(request, at);
+    //
+    // Ищется он по `admin_id`, а не по cookie: `Max-Age` cookie захода равен
+    // его сроку, так что вкладка, брошенная дольше чем на пятнадцать минут,
+    // возвращается уже без неё — а строку старт всё равно гасит, и без записи
+    // о конце в ленте оставалось бы начало без пары. Тот же ответ и там, где
+    // прежний заход начат в другом браузере: гасит его старт, значит и
+    // закрывать его записью — ему.
+    const outcome = control.transaction((): {
+      started: ReturnType<typeof startImpersonation>;
+      cleanup?: ImpersonationFinishCleanup;
+    } => {
+      const previous = readAdminImpersonation(control, admin.admin.adminId);
+      const started = startImpersonation(
+        control,
+        { adminId: admin.admin.adminId, childId: body.childId, role: body.role },
+        at,
+      );
+      if (!started.ok) return { started };
 
-    const started = startImpersonation(
-      control,
-      { adminId: admin.admin.adminId, childId: body.childId, role: body.role },
-      at,
-    );
+      let cleanup: ImpersonationFinishCleanup;
+      if (previous !== undefined) {
+        cleanup = mutateImpersonationFinish(deps(), previous.session, at, (db) => {
+          revokeImpersonationRow(db, previous.id, at);
+        });
+      } else {
+        cleanup = () => { options.refusals.take(admin.admin.adminId); };
+      }
+      recordAdminAudit(
+        control,
+        {
+          adminId: admin.admin.adminId,
+          action: 'impersonation-start',
+          childId: started.childId,
+          parentId: started.parentId,
+          detail: started.role,
+        },
+        at,
+      );
+      return { started, cleanup };
+    }).immediate();
+    const { started, cleanup } = outcome;
     if (!started.ok) {
       if (started.reason === 'bad-role') {
         return reply.code(400).send({ error: `Роль захода — одна из: ${IMPERSONATION_ROLES.join(', ')}` });
@@ -120,30 +170,7 @@ export function registerAdminImpersonateRoutes(
       // неразличимы, и перебор `id` не должен превращаться в список семей.
       return reply.code(AUTH_STATUS['no-child']).send({ error: AUTH_MESSAGE['no-child'] });
     }
-
-    // Конец прежнего захода пишется только у своего же оператора: чужая cookie
-    // в браузере оператора его заходом не является, и запись о её конце
-    // приписала бы отказы не тому.
-    if (previous !== undefined && previous.adminId === admin.admin.adminId) {
-      finish(previous, at);
-    } else {
-      // Счётчик отказов процессный и переживает истёкший заход: закрывать его
-      // было некому, потому что `resolveImpersonation` просроченную строку уже
-      // не отдаёт. Не сброшенный здесь, он приписал бы попытки записи в прошлой
-      // семье записи о конце захода в **следующей**.
-      options.refusals.take(admin.admin.adminId);
-    }
-    recordAdminAudit(
-      control,
-      {
-        adminId: admin.admin.adminId,
-        action: 'impersonation-start',
-        childId: started.childId,
-        parentId: started.parentId,
-        detail: started.role,
-      },
-      at,
-    );
+    cleanup?.();
 
     return reply
       .header('set-cookie', serializeCookie('impersonation', started.session.token, { secure }))
@@ -155,19 +182,27 @@ export function registerAdminImpersonateRoutes(
   });
 
   app.delete('/api/admin/impersonate', (request, reply) => {
+    let admin;
     try {
-      options.context(request, { allow: ROUTE_ACCESS.admin });
+      admin = options.context(request, { allow: ROUTE_ACCESS.admin });
     } catch (error) {
       return failAuth(reply, error);
     }
 
     const at = now();
-    const session = currentSession(request, at);
+    const session = currentSession(request);
     if (session !== undefined) {
       const token = parseCookies(request.headers.cookie).get(IMPERSONATION_COOKIE) ?? '';
-      revokeImpersonation(control, token, at);
-      finish(session, at);
+      finish(session, at, (db) => {
+        revokeImpersonation(db, token, at);
+      });
     }
+    // Cookie захода живёт ровно столько же, сколько сам заход, и «выйти» после
+    // истечения срока приходит уже без неё. Свой брошенный заход оператор
+    // закрывает и в этом случае — по `admin_id`. Свой же, но живой и пришедший
+    // с cookie, закрыт строкой выше и вторым концом в ленте не удвоится:
+    // погашенную строку `readAdminImpersonation` не отдаёт.
+    finishExpiredImpersonation(deps(), admin.admin.adminId, at);
     // Cookie гасится и тогда, когда живого захода не нашлось: иначе браузер
     // носил бы мёртвый токен на каждом запросе, а тот выигрывает у собственных
     // cookie оператора первым же разбором предъявителя.

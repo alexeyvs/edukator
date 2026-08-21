@@ -24,12 +24,14 @@ import {
   findAdminByEmail,
   loginAdmin,
   normalizeEmail,
+  readAdminImpersonation,
+  readCarriedImpersonation,
   recordAdminAudit,
   recordLoginFailure,
   resolveAdminSession,
-  resolveImpersonation,
   revokeAdminSession,
   revokeImpersonation,
+  revokeImpersonationRow,
   type LoginGate,
   type LoginTarget,
 } from '../../control-db.js';
@@ -42,7 +44,11 @@ import {
   isSameOrigin,
   parseCookies,
 } from '../../auth.js';
-import { finishImpersonation } from '../../admin/impersonation-finish.js';
+import {
+  mutateImpersonationFinish,
+  type ImpersonationFinishCleanup,
+  type ImpersonationFinishDeps,
+} from '../../admin/impersonation-finish.js';
 import { ImpersonationRefusals } from '../../admin/impersonation-refusals.js';
 import { clientAddress, readTrustedProxies } from '../../client-address.js';
 import { LOGIN_REJECTED, readLoginBody, serializeCookie } from '../auth.js';
@@ -94,7 +100,7 @@ export function registerAdminAuthRoutes(
    * страницы — способ выкинуть его из собственной.
    */
   function crossOrigin(request: FastifyRequest, reply: FastifyReply): FastifyReply | undefined {
-    if (isSameOrigin(request.headers)) return undefined;
+    if (isSameOrigin(request.headers, options.insecureCookies === true)) return undefined;
     return reply.code(AUTH_STATUS['cross-origin']).send({ error: AUTH_MESSAGE['cross-origin'] });
   }
 
@@ -121,21 +127,54 @@ export function registerAdminAuthRoutes(
    * конец в `admin_audit` и закрывает соединение только для чтения. Общая у
    * входа и выхода: обе двери обязаны оставлять браузер без живого захода.
    */
-  function closeCarriedImpersonation(request: FastifyRequest, at: Date): void {
+  function mutateCarriedImpersonation(
+    request: FastifyRequest,
+    at: Date,
+  ): ImpersonationFinishCleanup | undefined {
     const token = parseCookies(request.headers.cookie).get(IMPERSONATION_COOKIE);
-    if (token === undefined) return;
-    const session = resolveImpersonation(control, token, at);
-    revokeImpersonation(control, token, at);
-    if (session === undefined) return;
-    finishImpersonation(
-      {
-        control,
-        refusals,
-        ...(options.impersonations === undefined ? {} : { impersonations: options.impersonations }),
-      },
-      session,
-      at,
-    );
+    if (token === undefined) return undefined;
+    // Истёкший заход закрывается наравне с живым: срок лишает его прав, но не
+    // отменяет записи о конце — вместе с ней иначе терялся бы и счётчик
+    // отказанных попыток записи в чужую семью.
+    const session = readCarriedImpersonation(control, token);
+    if (session === undefined) {
+      // Строки за токеном нет (её уже погасили или её не было вовсе): гасить
+      // нечего, а cookie обе двери и так снимают ответом.
+      revokeImpersonation(control, token, at);
+      return undefined;
+    }
+    // Гашение идёт одной транзакцией с записью о конце: погашенную строку
+    // закрывающие двери не находят, и отказ записи после отдельного гашения
+    // оставил бы заход без пары в `admin_audit` навсегда — вместе со счётчиком
+    // отказанных попыток записи в чужую семью.
+    return mutateImpersonationFinish(finishDeps(), session, at, (db) => {
+      revokeImpersonation(db, token, at);
+    });
+  }
+
+  /**
+   * Подбирает брошенный заход самого оператора. Закрытия по cookie мало: её
+   * `Max-Age` равен сроку захода, и вернувшийся через час оператор приносит
+   * пустую банку — то есть в самом частом случае («закрыл вкладку») строку
+   * назвать было бы нечем, и начало осталось бы в ленте без пары.
+   */
+  function mutateOwnExpiredImpersonation(
+    adminId: string,
+    at: Date,
+  ): ImpersonationFinishCleanup | undefined {
+    const unfinished = readAdminImpersonation(control, adminId, at);
+    if (unfinished === undefined) return undefined;
+    return mutateImpersonationFinish(finishDeps(), unfinished.session, at, (db) => {
+      revokeImpersonationRow(db, unfinished.id, at);
+    });
+  }
+
+  function finishDeps(): ImpersonationFinishDeps {
+    return {
+      control,
+      refusals,
+      ...(options.impersonations === undefined ? {} : { impersonations: options.impersonations }),
+    };
   }
 
   app.post('/api/auth/admin/login', (request, reply) => {
@@ -163,7 +202,18 @@ export function registerAdminAuthRoutes(
     }
 
     const at = now();
-    const result = email === undefined ? undefined : loginAdmin(control, email, body.password, at);
+    let result: ReturnType<typeof loginAdmin> | undefined;
+    const cleanups: ImpersonationFinishCleanup[] = [];
+    control.transaction(() => {
+      result = email === undefined ? undefined : loginAdmin(control, email, body.password, at);
+      if (result === undefined || !result.ok) return;
+      clearLoginFailures(control, target);
+      recordAdminAudit(control, { adminId: result.adminId, action: 'login' }, at);
+      const carried = mutateCarriedImpersonation(request, at);
+      if (carried !== undefined) cleanups.push(carried);
+      const own = mutateOwnExpiredImpersonation(result.adminId, at);
+      if (own !== undefined) cleanups.push(own);
+    }).immediate();
     if (result === undefined || !result.ok) {
       const counted = recordLoginFailure(control, target, at);
       noteLoginGate(options.failures, target, counted);
@@ -184,15 +234,7 @@ export function registerAdminAuthRoutes(
       if (counted.reason === 'unavailable') return refuseByGate(reply, counted);
       return reply.code(401).send({ error: LOGIN_REJECTED });
     }
-    clearLoginFailures(control, target);
-    recordAdminAudit(control, { adminId: result.adminId, action: 'login' }, at);
-
-    // Вход гасит заход так же, как выход, и по той же причине: `resolveBearer`
-    // проверяет заход **первым**, а машина у операторов бывает общей. Оставленный
-    // здесь, чужой заход встретил бы вошедшего оператора чужой семьёй под чужим
-    // именем на полосе, а его «выйти» закрыло бы и записало в `admin_audit`
-    // заход **другого** оператора — вместе с его счётчиком отказов записи.
-    closeCarriedImpersonation(request, at);
+    for (const cleanup of cleanups) cleanup();
 
     return reply
       .header('set-cookie', [
@@ -209,21 +251,28 @@ export function registerAdminAuthRoutes(
     const at = now();
     const jar = parseCookies(request.headers.cookie);
     const token = jar.get(ADMIN_COOKIE);
-    if (token !== undefined) {
-      // Предъявитель читается **до** гашения: после него сессия уже не
-      // разбирается, и записать в журнал было бы некого.
-      const admin = resolveAdminSession(control, token, at);
-      revokeAdminSession(control, token, at);
-      if (admin !== undefined) {
-        recordAdminAudit(control, { adminId: admin.adminId, action: 'logout' }, at);
+    const cleanups: ImpersonationFinishCleanup[] = [];
+    control.transaction(() => {
+      if (token !== undefined) {
+        // Предъявитель читается **до** гашения: после него сессия уже не
+        // разбирается, и записать в журнал было бы некого.
+        const admin = resolveAdminSession(control, token, at);
+        revokeAdminSession(control, token, at);
+        if (admin !== undefined) {
+          recordAdminAudit(control, { adminId: admin.adminId, action: 'logout' }, at);
+          const own = mutateOwnExpiredImpersonation(admin.adminId, at);
+          if (own !== undefined) cleanups.push(own);
+        }
       }
-    }
+      const carried = mutateCarriedImpersonation(request, at);
+      if (carried !== undefined) cleanups.push(carried);
+    }).immediate();
     // Живой заход гасится тем же выходом. Оставленный, он пережил бы админскую
     // сессию: `resolveBearer` проверяет его **первым**, так что собственное
     // приложение оператора молча показывало бы чужую семью, а снять заход было
     // бы уже нечем — `DELETE /api/admin/impersonate` требует админской cookie,
     // которую этот же выход только что погасил.
-    closeCarriedImpersonation(request, at);
+    for (const cleanup of cleanups) cleanup();
     // Обе cookie гасятся и тогда, когда сессии в базе не нашлось: иначе браузер
     // продолжал бы носить мёртвый токен на каждом запросе.
     return reply

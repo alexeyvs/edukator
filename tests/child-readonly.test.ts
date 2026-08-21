@@ -1,5 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import BetterSqlite3 from 'better-sqlite3';
@@ -16,6 +27,18 @@ import {
 const FIRST = 'a1b2c3d4';
 const SECOND = 'b2c3d4e5';
 const THIRD = 'c3d4e5f6';
+
+/** `user_version` прямо из заголовка файла: тем же способом, что и опенер. */
+function headerVersion(path: string): number {
+  const handle = openSync(path, 'r');
+  try {
+    const header = Buffer.alloc(64);
+    readSync(handle, header, 0, 64, 0);
+    return header.readUInt32BE(60);
+  } finally {
+    closeSync(handle);
+  }
+}
 
 describe('опенер детских баз для отчётов оператора', () => {
   let dir: string;
@@ -140,6 +163,39 @@ describe('опенер детских баз для отчётов операт�
     expect(existsSync(`${path}-wal`)).toBe(false);
   });
 
+  it('читает базу, у которой новая версия ещё лежит в WAL', () => {
+    // Миграция под WAL кладёт страницу с `user_version` в журнал, а в главный
+    // файл её переносит только чекпойнт. Заголовок при этом показывает прежний
+    // номер, и ребёнок, чью базу первый заход только что мигрировал, выглядел
+    // бы «схема прошлой версии, ждёт первого захода» ровно тогда, когда он за
+    // ней и сидит.
+    const path = childDatabasePath(dir, FIRST);
+    const writer = openDatabase(path);
+    try {
+      writeProfile(writer, { name: 'Тимофей', interests: [], partnerName: 'Напарник' });
+      // Заголовок отстал: настоящий номер знает только движок.
+      expect(headerVersion(path)).not.toBe(SCHEMA_VERSION);
+      expect(statSync(`${path}-wal`).size).toBeGreaterThan(0);
+
+      const result = readChildDatabase(dir, FIRST, readName());
+
+      expect(result.state).toBe('read');
+      expect(result.schemaVersion).toBe(SCHEMA_VERSION);
+      expect(result.state === 'read' ? result.value : '').toBe('Тимофей');
+    } finally {
+      writer.close();
+    }
+  });
+
+  it('отложенной по схеме признаёт только базу без непустого WAL', () => {
+    // Обратная сторона того же: без журнала рядом заголовку верить можно, и
+    // лишнего соединения база не получает.
+    const path = staleDatabase(SECOND, SCHEMA_VERSION - 1);
+    expect(existsSync(`${path}-wal`)).toBe(false);
+
+    expect(readChildDatabase(dir, SECOND, () => 'нельзя').state).toBe('stale');
+  });
+
   it('не мигрирует: `user_version` и содержимое базы после обхода те же', () => {
     const path = staleDatabase(SECOND, SCHEMA_VERSION - 1);
     const before = readFileSync(path);
@@ -173,6 +229,25 @@ describe('опенер детских баз для отчётов операт�
     expect(thrown).toContain(FIRST);
     expect(thrown).not.toContain(childDatabasePath(dir, FIRST));
     expect(thrown).not.toContain(dir);
+  });
+
+  it('не пересказывает путь и в чужих отказах', () => {
+    // Свой текст пути не содержит, но сообщения `node:fs` и драйвера содержат:
+    // `EACCES: permission denied, open '/…/children/….db'` уезжает в тело
+    // ответа дословно, обходя ровно ту сдержанность, ради которой свой текст и
+    // писался.
+    const path = childDatabase(FIRST, 'Тимофей');
+    chmodSync(path, 0o000);
+    try {
+      const sweep = sweepChildDatabases(dir, [FIRST], readName());
+      expect(sweep.failed).toHaveLength(1);
+      const reason = sweep.failed[0]?.reason ?? '';
+      expect(reason).not.toBe('');
+      expect(reason).not.toContain(path);
+      expect(reason).not.toContain(dir);
+    } finally {
+      chmodSync(path, 0o600);
+    }
   });
 
   it('чужой формат `id` до открытия файла не доходит', () => {

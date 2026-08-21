@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -211,6 +211,24 @@ describe('соединение имперсонации только для чт
 
     expect(stale.db.open).toBe(false);
     expect(impersonations.size).toBe(1);
+  });
+
+  it('снимает истёкшее соединение таймером без следующего захода', async () => {
+    vi.useFakeTimers();
+    try {
+      const alpha = tenantOf('alpha-timer');
+      let now = NOW;
+      const impersonations = tracked({ now: () => now });
+      const stale = impersonations.view(alpha);
+
+      now = new Date(NOW.getTime() + IMPERSONATION_TTL_MS);
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(stale.db.open).toBe(false);
+      expect(impersonations.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('не снимает соединение, которое трогали внутри срока', () => {
