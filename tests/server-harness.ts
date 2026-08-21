@@ -16,16 +16,19 @@ import type { Database } from 'better-sqlite3';
 import type { FastifyInstance } from 'fastify';
 import {
   childDatabasePath,
+  createAdmin,
   createChild,
   createParent,
   issueDeviceInvite,
   issueParentInvite,
+  loginAdmin,
   openControlDatabase,
   redeemDeviceInvite,
   redeemParentInvite,
+  setAdminPassword,
   type DeviceKind,
 } from '../server/control-db.js';
-import { CHILD_COOKIE, PARENT_COOKIE } from '../server/auth.js';
+import { ADMIN_COOKIE, CHILD_COOKIE, PARENT_COOKIE } from '../server/auth.js';
 import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
 import { buildServer, type ServerOptions } from '../server/index.js';
 
@@ -34,6 +37,27 @@ export const HARNESS_PASSWORD = 'пароль-подлиннее';
 
 /** Изменяющий запрос обязан подтвердить источник: без этого он не пройдёт. */
 export const SAME_ORIGIN = 'same-origin';
+
+/**
+ * Пароль оператора. Длиннее родительского намеренно: `setAdminPassword` не
+ * принимает короче `MIN_ADMIN_PASSWORD_LENGTH` — шестнадцати знаков.
+ */
+export const HARNESS_ADMIN_PASSWORD = 'пароль-оператора-подлиннее';
+
+/** Заведённый оператор: чем его звать и чем ему входить. */
+export interface HarnessAdmin {
+  adminId: string;
+  email: string;
+  password: string;
+}
+
+/** Вошедший оператор: токен сессии и заголовки, с которыми он ходит. */
+export interface HarnessAdminSession {
+  adminId: string;
+  /** Токен сессии: он же значение админской cookie. */
+  token: string;
+  headers: Record<string, string>;
+}
 
 /** Заведённый ребёнок: чем ходить от его имени и где лежит его база. */
 export interface HarnessChild {
@@ -104,6 +128,52 @@ export function childHeaders(token: string): Record<string, string> {
 /** Заголовки запроса от имени вошедшего родителя. */
 export function parentHeaders(token: string): Record<string, string> {
   return { cookie: `${PARENT_COOKIE}=${token}`, 'sec-fetch-site': SAME_ORIGIN };
+}
+
+/** Заголовки запроса от имени вошедшего оператора. */
+export function adminHeaders(token: string): Record<string, string> {
+  return { cookie: `${ADMIN_COOKIE}=${token}`, 'sec-fetch-site': SAME_ORIGIN };
+}
+
+/**
+ * Заводит оператора прямо в `control.db` — тем же путём, каким его заводит CLI:
+ * приглашений по ссылке у админки нет вовсе. Подложенная строка `admins` не
+ * прошла бы ни проверки длины пароля, ни `scrypt`, и тест на ней проверял бы
+ * вход, которого не бывает.
+ *
+ * Сессии здесь нет намеренно: заводить её и входить — разные события, и
+ * сценарию, который входит формой, лишняя живая дверь испортила бы и сводку
+ * сессий, и журнал действий.
+ */
+export function createAdminAccount(
+  control: Database,
+  options: { email?: string; password?: string; now?: Date } = {},
+): HarnessAdmin {
+  const email = options.email ?? 'оператор@example.com';
+  const password = options.password ?? HARNESS_ADMIN_PASSWORD;
+  const at = options.now ?? new Date();
+  const adminId = createAdmin(control, email, at);
+  setAdminPassword(control, adminId, password, at);
+  return { adminId, email, password };
+}
+
+/**
+ * Входит оператором. Часы передаются те же, что и заведению: `setAdminPassword`
+ * двигает `credentials_changed_at`, и сессия, выданная часами позади него,
+ * мертва с первого же запроса.
+ */
+export function signInAdmin(
+  control: Database,
+  admin: HarnessAdmin,
+  now: Date = new Date(),
+): HarnessAdminSession {
+  const login = loginAdmin(control, admin.email, admin.password, now);
+  if (!login.ok) throw new Error(`тестовый оператор ${admin.email} не вошёл: ${login.reason}`);
+  return {
+    adminId: login.adminId,
+    token: login.session.token,
+    headers: adminHeaders(login.session.token),
+  };
 }
 
 /** Заголовки запроса от имени агента доступа к компьютеру. */

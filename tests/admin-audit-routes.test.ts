@@ -6,11 +6,8 @@ import type { Database } from 'better-sqlite3';
 import Fastify, { type FastifyInstance } from 'fastify';
 import {
   ADMIN_AUDIT_PAGE,
-  createAdmin,
-  loginAdmin,
   openControlDatabase,
   recordAdminAudit,
-  setAdminPassword,
   type AdminAuditAction,
   type AdminAuditCursor,
   type AdminAuditEntry,
@@ -18,14 +15,13 @@ import {
 import { controlDatabasePath, ensureDataDir } from '../server/data-dir.js';
 import { ADMIN_COOKIE, PARENT_COOKIE } from '../server/auth.js';
 import { createAdminContext } from '../server/routes/tenant-context.js';
+import { createAdminAccount, signInAdmin } from './server-harness.js';
 import {
   registerAdminAuditRoutes,
   registerUnavailableAdminAudit,
 } from '../server/routes/admin/audit.js';
 
 const NOW = new Date('2026-08-21T09:00:00.000Z');
-/** Нижняя граница пароля оператора — 16 знаков. */
-const ADMIN_PASSWORD = 'пароль-оператора-подлиннее';
 const SAME_ORIGIN = { 'sec-fetch-site': 'same-origin' };
 
 interface Injected {
@@ -45,11 +41,9 @@ describe('маршрут журнала действий оператора', ()
     ensureDataDir(dir);
     control = openControlDatabase(controlDatabasePath(dir));
 
-    adminId = createAdmin(control, 'оператор@example.com', NOW);
-    setAdminPassword(control, adminId, ADMIN_PASSWORD, NOW);
-    const login = loginAdmin(control, 'оператор@example.com', ADMIN_PASSWORD, NOW);
-    if (!login.ok) throw new Error('оператор не вошёл');
-    adminCookie = `${ADMIN_COOKIE}=${login.session.token}`;
+    const admin = signInAdmin(control, createAdminAccount(control, { now: NOW }), NOW);
+    adminId = admin.adminId;
+    adminCookie = `${ADMIN_COOKIE}=${admin.token}`;
 
     app = Fastify();
     registerAdminAuditRoutes(app, {

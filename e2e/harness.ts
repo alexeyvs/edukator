@@ -11,11 +11,13 @@ import type { LearningProducer } from '../server/learning-prep.js';
 import { openDatabase, SUBJECTS, writeProfile, type Subject } from '../server/db.js';
 import { buildServer } from '../server/index.js';
 import {
+  ADMIN_AUDIT_PAGE,
   childDatabasePath,
   createChild,
   createParent,
   issueDeviceInvite,
   issueParentInvite,
+  listAdminAudit,
   listServiceableChildren,
   openControlDatabase,
   redeemDeviceInvite,
@@ -23,8 +25,14 @@ import {
   redeemParentInvite,
   resolveChildDevice,
   setParentPin,
+  type AdminAuditEntry,
 } from '../server/control-db.js';
 import { CHILD_COOKIE, PARENT_COOKIE } from '../server/auth.js';
+import {
+  createAdminAccount,
+  HARNESS_ADMIN_PASSWORD,
+  type HarnessAdmin,
+} from '../tests/server-harness.js';
 import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
 import { hashParentPin } from '../server/parent-pin.js';
 import { loadCurriculum, syncTopicState, type TopicGraph } from '../server/curriculum.js';
@@ -53,6 +61,17 @@ const CHILD_NAME = 'Тимофей';
 export const E2E_PARENT = {
   email: 'parent@example.com',
   password: 'пароль-подлиннее',
+} as const;
+
+/**
+ * Оператор сценария. Пароль настоящий и не короче
+ * `MIN_ADMIN_PASSWORD_LENGTH`: им же проверяется форма входа в админку. Адрес
+ * латиницей по той же причине, что и у родителя: `input type=email` в браузере
+ * отвергает кириллицу в имени ящика.
+ */
+export const E2E_ADMIN = {
+  email: 'admin@example.com',
+  password: HARNESS_ADMIN_PASSWORD,
 } as const;
 
 /** Кем сценарий смотрит на сервер: вошедшим родителем или машиной ученика. */
@@ -85,6 +104,8 @@ export interface E2eHarness {
   url: string;
   /** Ребёнок сценария: его `id` стоит в адресах родительской сводки. */
   childId: string;
+  /** Оператор сценария: его `id` стоит в каждой записи журнала действий. */
+  adminId: string;
   /**
    * Заголовок `Cookie` для запросов мимо интерфейса. Он нужен потому, что
    * `page.request` ходит не браузером, а узлом, и cookie с `Secure` по голому
@@ -104,6 +125,12 @@ export interface E2eHarness {
    */
   seedChild(childId: string, seed?: SeedChildOptions): void;
   assertCodexNotCalled(): void;
+  /**
+   * Журнал действий оператора, новые сверху. Экрана у него нет вовсе, а
+   * проверять запись о заходе в чужую семью надо: без неё имперсонация не
+   * оставляет следа, ради которого её и записывают.
+   */
+  adminAudit(): AdminAuditEntry[];
   /**
    * Постоянный токен агентского устройства: его выпуск и погашение идут тем же
    * путём, каким их проходит контроллер доступа. Заголовком `Authorization` он
@@ -364,6 +391,10 @@ export async function startE2eHarness(
   if (options.parentPin !== undefined) {
     setParentPin(control, parentId, hashParentPin(options.parentPin, pepper));
   }
+  // Оператор заводится теми же часами, что и всё остальное: `setAdminPassword`
+  // двигает `credentials_changed_at`, а сервер сценария живёт на `NOW`, и
+  // заведённый настоящими часами оператор не смог бы войти вовсе.
+  const admin: HarnessAdmin = createAdminAccount(control, { ...E2E_ADMIN, now: NOW });
   const childId = createChild(control, parentId, CHILD_NAME, NOW);
   provisionChildDatabase(control, childId, dataDir);
   // Устройство ученика гасится сразу: сценарию нужна не ссылка, а готовая
@@ -448,8 +479,12 @@ export async function startE2eHarness(
       db,
       url,
       childId,
+      adminId: admin.adminId,
       children(): Array<{ id: string; name: string }> {
         return listServiceableChildren(control).map(({ id, name }) => ({ id, name }));
+      },
+      adminAudit(): AdminAuditEntry[] {
+        return listAdminAudit(control, { limit: ADMIN_AUDIT_PAGE }).entries;
       },
       cookieHeader(side: E2eSide): string {
         const cookie = cookieFor(side);

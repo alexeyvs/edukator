@@ -6,29 +6,25 @@ import type { Database } from 'better-sqlite3';
 import Fastify, { type FastifyInstance } from 'fastify';
 import {
   childDatabasePath,
-  createAdmin,
   createChild,
   createParent,
   issueParentInvite,
-  loginAdmin,
   markChildReady,
   openControlDatabase,
   redeemParentInvite,
-  setAdminPassword,
 } from '../server/control-db.js';
 import { controlDatabasePath, ensureDataDir } from '../server/data-dir.js';
 import { ADMIN_COOKIE, PARENT_COOKIE } from '../server/auth.js';
 import { buildTopicGraph, syncTopicState, type Topic, type TopicGraph } from '../server/curriculum.js';
 import { openDatabase } from '../server/db.js';
 import { createAdminContext } from '../server/routes/tenant-context.js';
+import { createAdminAccount, signInAdmin } from './server-harness.js';
 import {
   registerAdminChildrenRoutes,
   registerUnavailableAdminChildren,
 } from '../server/routes/admin/children.js';
 
 const NOW = new Date('2026-08-21T09:00:00.000Z');
-/** Нижняя граница пароля оператора — 16 знаков. */
-const ADMIN_PASSWORD = 'пароль-оператора-подлиннее';
 const PARENT_PASSWORD = 'пароль-родителя';
 const SAME_ORIGIN = { 'sec-fetch-site': 'same-origin' };
 
@@ -66,11 +62,8 @@ describe('маршрут карточки ребёнка', () => {
     ensureDataDir(dir);
     control = openControlDatabase(controlDatabasePath(dir));
 
-    const adminId = createAdmin(control, 'оператор@example.com', NOW);
-    setAdminPassword(control, adminId, ADMIN_PASSWORD, NOW);
-    const entered = loginAdmin(control, 'оператор@example.com', ADMIN_PASSWORD, NOW);
-    if (!entered.ok) throw new Error('оператор не вошёл');
-    adminCookie = `${ADMIN_COOKIE}=${entered.session.token}`;
+    const admin = signInAdmin(control, createAdminAccount(control, { now: NOW }), NOW);
+    adminCookie = `${ADMIN_COOKIE}=${admin.token}`;
 
     parentId = createParent(control, 'родитель@example.com', NOW);
     const invite = issueParentInvite(control, parentId, NOW);
