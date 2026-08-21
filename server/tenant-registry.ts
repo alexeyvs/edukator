@@ -27,6 +27,7 @@ import {
 import { finishRun } from './run.js';
 import { finishLearningMaterial } from './learning.js';
 import { readDailyGate } from './daily-gate.js';
+import { failureLogFor, type FailureLog } from './log.js';
 
 /**
  * Отпечаток файла базы: устройство и inode. Нужен, чтобы отличить тот файл, с
@@ -173,6 +174,8 @@ export interface TenantRegistryOptions {
   openSession?: (path: string) => SessionDatabase | undefined;
   /** Куда писать о происходящем; по умолчанию stderr. */
   log?: (message: string) => void;
+  /** Журнал аварий; по умолчанию — файл в том же каталоге данных. */
+  failures?: FailureLog;
   /** Разбирающий спор; по умолчанию — вызов codex. */
   review?: DisputeCoordinatorOptions['review'];
   /** Запуск фоновой работы разбора; тесты его дожидаются. */
@@ -208,6 +211,7 @@ export class TenantRegistry {
   readonly #seedDir: string | undefined;
   readonly #openSession: (path: string) => SessionDatabase | undefined;
   readonly #log: (message: string) => void;
+  readonly #failures: FailureLog;
   readonly #disputeOptions: Omit<DisputeCoordinatorOptions, 'db' | 'graph' | 'available'>;
   readonly #integrityOptions: Pick<
     IntegrityCoordinatorOptions,
@@ -231,6 +235,9 @@ export class TenantRegistry {
     this.#seedDir = options.seedDir;
     this.#openSession = options.openSession ?? ((path) => openSessionDatabase(path));
     this.#log = options.log ?? ((message) => process.stderr.write(`${message}\n`));
+    // Умолчание настоящее, а не пустышка: каталог данных реестр знает, и
+    // молчаливая потеря аварии — ровно то, чего журнал заведён не допускать.
+    this.#failures = options.failures ?? failureLogFor(options.dataDir);
     this.#disputeOptions = {
       log: this.#log,
       ...(options.review === undefined ? {} : { review: options.review }),
@@ -295,10 +302,11 @@ export class TenantRegistry {
 
     // Потолок проверяется после кеша: уже открытому ребёнку он не мешает.
     if (this.#tenants.size >= this.#maxOpen) {
-      this.#log(
+      const overflow =
         `открыто ${String(this.#tenants.size)} баз при потолке ${String(this.#maxOpen)}: ` +
-          `ребёнку ${childId} отказано, открытые базы не тронуты`,
-      );
+        `ребёнку ${childId} отказано, открытые базы не тронуты`;
+      this.#log(overflow);
+      this.#failures({ event: 'tenant-open-failed', message: overflow, childId });
       throw new TenantError('too-many-open', `Потолок открытых баз исчерпан: ${childId}`);
     }
 
@@ -308,6 +316,25 @@ export class TenantRegistry {
     try {
       opened = this.#openSession(path);
       if (opened === undefined) {
+        // Файл на месте, а соединение не открылось, — значит, его подменили в
+        // окно открытия: `openSessionDatabase` отказывает либо по пропавшему
+        // файлу, либо по разошедшимся отпечаткам, и разделить их постфактум
+        // можно только тем, есть ли файл сейчас. Проверка вероятностная, как и
+        // сам отпечаток, но авария «базу подменили» и авария «базы нет» зовут к
+        // разным действиям, и одно название на обе прятало бы первую.
+        this.#failures(
+          fileIdentity(path) === undefined
+            ? {
+                event: 'tenant-open-failed',
+                message: 'файл базы не открылся',
+                childId,
+              }
+            : {
+                event: 'tenant-detached',
+                message: 'файл базы подменён в момент открытия',
+                childId,
+              },
+        );
         throw new TenantError('unavailable', `База ребёнка ${childId} недоступна: ${path}`);
       }
       // Темы заводятся до посева: без строк `topic_state` вставка заданий упала
@@ -323,7 +350,17 @@ export class TenantRegistry {
       // отсюда: остальные дети при этом работают, и по одному 503 их не
       // различить.
       this.#log(`база ребёнка ${childId} недоступна: ${(error as Error).message}`);
+      // Отказ, уже названный выше своим именем, второй раз не пишется: подмену
+      // файла и переполнение потолка журнал получил там, где они и различимы.
       if (error instanceof TenantError) throw error;
+      // Сюда доезжает и отказ миграции: она идёт внутри `openDatabase`, и база
+      // новее приложения либо не поддающаяся обновлению видна только отсюда.
+      this.#failures({
+        event: 'tenant-open-failed',
+        message: 'база ребёнка не открыта',
+        detail: (error as Error).message,
+        childId,
+      });
       throw new TenantError('unavailable', `База ребёнка ${childId} недоступна: ${path}`);
     } finally {
       this.#opening.delete(childId);

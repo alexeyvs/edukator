@@ -36,6 +36,7 @@ import {
   type SweepReport,
 } from '../server/codex/dispatcher.js';
 import { TASK_BATCH_SIZE } from '../server/codex/prompt.js';
+import type { FailureRecord } from '../server/log.js';
 import {
   MAX_BATCHES_PER_TOPIC,
   QUEUE_TARGET,
@@ -119,6 +120,10 @@ describe('диспетчер прогрева', () => {
   const log = (message: string): void => {
     logged.push(message);
   };
+  const failed: FailureRecord[] = [];
+  const failures = (record: FailureRecord): void => {
+    failed.push(record);
+  };
 
   /** Заводит ребёнка с готовой базой и отметкой активности возрастом `ageMs`. */
   function addKid(name: string, ageMs: number | undefined = 0): Kid {
@@ -150,6 +155,7 @@ describe('диспетчер прогрева', () => {
       control,
       graph,
       log,
+      failures,
       open: (childId) => kids.find((kid) => kid.id === childId)?.db,
       now: options.now ?? ((): Date => NOW),
       ...(options.cycle === undefined ? {} : { cycle: options.cycle }),
@@ -167,6 +173,7 @@ describe('диспетчер прогрева', () => {
     graph = buildTopicGraph(TOPICS);
     kids.length = 0;
     logged.length = 0;
+    failed.length = 0;
   });
 
   afterEach(() => {
@@ -384,6 +391,7 @@ describe('диспетчер прогрева', () => {
         control,
         graph,
         log,
+        failures,
         now: () => NOW,
         open: (childId) => (childId === broken.id ? undefined : healthy.db),
         worker: {
@@ -415,6 +423,7 @@ describe('диспетчер прогрева', () => {
         control,
         graph,
         log,
+        failures,
         now: () => NOW,
         quotaLimit: 3,
         open: (childId) => kids.find((kid) => kid.id === childId)?.db,
@@ -447,6 +456,7 @@ describe('диспетчер прогрева', () => {
         control,
         graph,
         log,
+        failures,
         now: () => NOW,
         quotaLimit: 1,
         open: (childId) => kids.find((kid) => kid.id === childId)?.db,
@@ -495,6 +505,7 @@ describe('диспетчер прогрева', () => {
         control,
         graph,
         log,
+        failures,
         now: () => NOW,
         // База не открывается: пропуск «unavailable» ставится уже после
         // предпроверки квоты, и повторный заход отличим по второму `open`.

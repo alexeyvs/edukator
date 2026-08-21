@@ -48,6 +48,7 @@ import type { DisputeCoordinatorOptions } from './dispute-coordinator.js';
 import type { IntegrityCoordinatorOptions } from './integrity.js';
 import { createAdminContext, createTenantContext } from './routes/tenant-context.js';
 import { redactTokenUrl, registerTokenPrivacy } from './routes/token-privacy.js';
+import { failureLogFor, type FailureLog } from './log.js';
 import type { BearerKind, TenantOpener } from './auth.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -124,6 +125,8 @@ export type ServerOptions =
   trustedProxies?: Set<string>;
   /** Снять `Secure` с cookie. Только для разработки по голому http. */
   insecureCookies?: boolean;
+  /** Журнал аварий; по умолчанию — файл в каталоге данных. */
+  failures?: FailureLog;
 };
 
 /**
@@ -140,15 +143,25 @@ export type ServerOptions =
  * есть полный `request.url` означал бы вход в чужую учётную запись, лежащий в
  * файле. Отдельной функцией это вынесено потому, что проверить запись можно
  * только на маршруте, который бросает, а таких в самом сервере нет.
+ *
+ * Пишется и в stderr, и в журнал: журнал лежит в каталоге данных, а процесс,
+ * упавший до того, как каталог известен, виден только в stderr. Журнал
+ * передаётся обязательным аргументом — умолчание писало бы в каталог по
+ * умолчанию из любого теста, поднявшего свой Fastify.
  */
-export function registerErrorHandler(app: FastifyInstance): void {
+export function registerErrorHandler(app: FastifyInstance, failures: FailureLog): void {
   app.setErrorHandler((error: FastifyError, request, reply) => {
     const status = error.statusCode ?? 500;
     if (status < 500) return reply.code(status).send({ error: error.message });
 
-    process.stderr.write(
-      `${request.method} ${redactTokenUrl(request.url)}: ${error.message}\n`,
-    );
+    const route = redactTokenUrl(request.url);
+    process.stderr.write(`${request.method} ${route}: ${error.message}\n`);
+    failures({
+      event: 'server-error',
+      message: `${request.method} ${route}: ${error.message}`,
+      route: request.url,
+      status,
+    });
     return reply.code(500).send({ error: 'Внутренняя ошибка сервера' });
   });
 }
@@ -171,6 +184,10 @@ export function buildServer(
   const log = options.log ?? ((message: string): void => {
     process.stderr.write(`${message}\n`);
   });
+  // Журнал заводится до первой возможной аварии: каталог данных известен уже
+  // здесь, а незаписываемый каталог журнал переживает сам — запись отказывает в
+  // stderr и на этом заканчивается.
+  const failures = options.failures ?? failureLogFor(dataDir);
   const pinPepper = readPinPepper(options.pinPepper ?? process.env['EDUKATOR_PIN_PEPPER']);
   const webDist = options.webDist
     ?? (process.env.EDUKATOR_WEB_DEV === '1' ? false : WEB_DIST_DIR);
@@ -200,6 +217,11 @@ export function buildServer(
   } catch (error) {
     if (error instanceof DataLockBusyError) throw error;
     log(`замок каталога данных не взят: ${(error as Error).message}`);
+    failures({
+      event: 'startup-failed',
+      message: 'замок каталога данных не взят',
+      detail: (error as Error).message,
+    });
   }
 
   // Управляющая база объявляется снаружи сборки: если та сорвётся после
@@ -220,7 +242,7 @@ export function buildServer(
       lock?.release();
     });
 
-    registerErrorHandler(app);
+    registerErrorHandler(app, failures);
     registerTokenPrivacy(app);
 
     let curriculum: CurriculumStatus = 'ok';
@@ -234,6 +256,11 @@ export function buildServer(
     } catch (error) {
       curriculum = 'error';
       log(`карта тем не загружена: ${(error as Error).message}`);
+      failures({
+        event: 'startup-failed',
+        message: 'карта тем не загружена',
+        detail: (error as Error).message,
+      });
     }
 
     /**
@@ -247,6 +274,11 @@ export function buildServer(
         return openControlDatabase(controlPath);
       } catch (error) {
         log(`управляющая база недоступна: ${(error as Error).message}`);
+        failures({
+          event: 'control-error',
+          message: 'управляющая база не открыта',
+          detail: (error as Error).message,
+        });
         return undefined;
       }
     }
@@ -271,6 +303,7 @@ export function buildServer(
         dataDir,
         graph: loaded,
         log,
+        failures,
         ...(options.maxOpenTenants === undefined ? {} : { maxOpen: options.maxOpenTenants }),
         ...(options.seedDir === undefined ? {} : { seedDir: options.seedDir }),
         ...(options.review === undefined ? {} : { review: options.review }),
@@ -299,6 +332,7 @@ export function buildServer(
               control,
               graph: loaded,
               log,
+              failures,
               budget,
               // Отказ базы одного ребёнка обход не останавливает: причину уже
               // назвал реестр, диспетчер просто идёт к следующему.
@@ -489,6 +523,11 @@ export function buildServer(
         return 'ok';
       } catch (error) {
         log(`управляющая база ${controlPath} недоступна: ${(error as Error).message}`);
+        failures({
+          event: 'control-error',
+          message: 'управляющая база недоступна',
+          detail: (error as Error).message,
+        });
         return 'error';
       }
     }
@@ -511,6 +550,15 @@ export function buildServer(
       const detached = open.filter((tenant) => !tenant.available()).map((tenant) => tenant.childId);
       if (detached.length > 0) {
         log(`файл базы заменён после старта у детей: ${detached.join(', ')}; нужен перезапуск`);
+        // Запись на ребёнка, а не одна на всех: фильтр админки ищет по
+        // `childId`, и список в тексте сообщения ему не виден.
+        for (const childId of detached) {
+          failures({
+            event: 'tenant-detached',
+            message: 'файл базы заменён после старта, нужен перезапуск',
+            childId,
+          });
+        }
       }
 
       const status: DatabaseStatus =

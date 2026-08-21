@@ -95,7 +95,7 @@ describe('обработчик отказов не пишет токен', () =>
       return true;
     });
     app = Fastify();
-    registerErrorHandler(app);
+    registerErrorHandler(app, () => {});
     app.get('/join/:token', () => {
       throw new Error('база недоступна');
     });

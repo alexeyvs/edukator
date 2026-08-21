@@ -26,6 +26,7 @@ import {
   type ChildSummary,
 } from '../control-db.js';
 import type { TopicGraph } from '../curriculum.js';
+import type { FailureLog } from '../log.js';
 import type { CodexRunner } from './client.js';
 import type { CodexConcurrency } from './concurrency.js';
 import {
@@ -101,6 +102,12 @@ export interface WarmupDispatcherOptions {
   runFor?: (childId: string) => CodexRunner;
   now?: () => Date;
   log?: WorkerLog;
+  /**
+   * Журнал аварий. Обязателен: каталога данных диспетчер не знает, а умолчание
+   * «никуда» теряло бы отступ по недоступной модели молча — то есть ровно ту
+   * аварию, из-за которой у всей семьи стынет банк.
+   */
+  failures: FailureLog;
   /** Подменяемый цикл; по умолчанию `runWarmupCycle`. */
   cycle?: CycleRunner;
   /** Окно свежести отметки активности; по умолчанию `ACTIVE_WINDOW_MS`. */
@@ -274,6 +281,7 @@ export class WarmupDispatcher {
   readonly #log: WorkerLog;
   readonly #now: () => Date;
   readonly #cycle: CycleRunner;
+  readonly #failures: FailureLog;
   readonly #wait: (ms: number) => Promise<void>;
   /** С кого начинать следующий обход; переживает цикл. */
   #cursor: string | undefined;
@@ -308,6 +316,7 @@ export class WarmupDispatcher {
     this.#log = options.log ?? defaultLog;
     this.#now = options.now ?? ((): Date => new Date());
     this.#cycle = options.cycle ?? runWarmupCycle;
+    this.#failures = options.failures;
     this.#wait = options.worker?.wait ?? sleep;
   }
 
@@ -420,6 +429,8 @@ export class WarmupDispatcher {
 
     while (!this.#stopped) {
       let unavailable = false;
+      /** Почему обход считается провалившимся; по нему пишется авария. */
+      let reason: string | undefined;
       // Флаг гасится перед обходом, а не после паузы: он означает «будильник
       // прозвонил после того, как этот обход начался». Иначе запрос, пришедший
       // до самого первого обхода, съедал бы первую паузу — и второй обход шёл бы
@@ -434,23 +445,43 @@ export class WarmupDispatcher {
             (total, child) => total + child.cycles.reduce((sum, cycle) => sum + cycleAttempts(cycle).length, 0),
             0,
           );
-          this.#log(
-            `диспетчер: за обход ${String(report.children.length)} ребёнка(детей) ` +
-              `ни одна из ${String(attempts)} фоновых подготовок не дала заданий, пауза увеличена`,
-          );
+          reason =
+            `за обход ${String(report.children.length)} ребёнка(детей) ` +
+            `ни одна из ${String(attempts)} фоновых подготовок не дала заданий`;
+          this.#log(`диспетчер: ${reason}, пауза увеличена`);
+        } else if (unavailable) {
+          reason = 'codex не запускается';
         }
       } catch (error) {
         // Обход не должен уронить сервер: ошибка сюда доходит только
         // неожиданная, и следующий обход — единственный способ узнать, что она
         // прошла.
         unavailable = true;
-        this.#log(`диспетчер: обход провалился: ${(error as Error).message}`);
+        reason = `обход провалился: ${(error as Error).message}`;
+        this.#log(`диспетчер: ${reason}`);
+        this.#failures({
+          event: 'sweep-failed',
+          message: 'обход прогрева провалился',
+          detail: (error as Error).message,
+        });
       }
 
       failures = unavailable ? failures + 1 : 0;
-      if (this.#stopped) break;
-
       const delay = backoffDelay(failures);
+      // Авария пишется на каждый отступ, а не только на первый: по журналу
+      // видно, сколько обходов подряд легло и до какой паузы дошло удвоение.
+      // И до проверки остановки: обход лёг независимо от того, закрывают ли
+      // сервер следом, а запись, пропущенная на закрытии, унесла бы с собой
+      // причину, по которой его и перезапускают.
+      if (unavailable) {
+        this.#failures({
+          event: 'codex-unavailable',
+          message: `прогрев отложен на ${String(Math.round(delay / 1000))} с ` +
+            `после ${String(failures)} неудачного(ых) обхода(ов)`,
+          ...(reason === undefined ? {} : { detail: reason }),
+        });
+      }
+      if (this.#stopped) break;
       // Здоровый обход будильник снимает целиком: греть некому только что
       // появившемуся ребёнку незачем ждать минуту.
       if (this.#woken && failures === 0) continue;
@@ -552,6 +583,12 @@ export class WarmupDispatcher {
     } catch (error) {
       report.skipped = 'error';
       this.#log(`диспетчер: обход ребёнка ${childId} провалился: ${(error as Error).message}`);
+      this.#failures({
+        event: 'sweep-failed',
+        message: 'заход прогрева по ребёнку провалился',
+        detail: (error as Error).message,
+        childId,
+      });
     }
   }
 

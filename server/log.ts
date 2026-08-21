@@ -142,3 +142,18 @@ export function logFailure(
     process.stderr.write(`не удалось записать журнал (${record.event}): ${reason}\n`);
   }
 }
+
+/**
+ * Куда модуль сообщает об аварии. Отдельный тип, а не прямой вызов
+ * `logFailure`, потому что каталог данных знает не всякий модуль: диспетчер
+ * прогрева процессный и о путях не знает вовсе, а тест обязан получать записи
+ * во временный каталог, а не в `data/` рядом с кодом.
+ */
+export type FailureLog = (record: FailureRecord) => void;
+
+/** Журнал, привязанный к каталогу данных. */
+export function failureLogFor(dir: string): FailureLog {
+  return (record) => {
+    logFailure(record, dir);
+  };
+}
