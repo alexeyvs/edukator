@@ -273,6 +273,21 @@ describe('слой 2 статистики оператора', () => {
     expect(report.children.find((row) => row.childId === молчун)?.lastAttemptAt).toBeUndefined();
   });
 
+  it('не записывает в ушедшие того, кого только что завели', () => {
+    const родитель = parent('родитель@example.com', ago(MINUTE));
+    // Ни одного ответа — но и молчания ещё нет: ребёнок заведён минуту назад.
+    // Без окна, отмеряемого от заведения, вся сегодняшняя когорта попадала бы в
+    // «отвалившиеся» в ту же минуту, и число, по которому судят как раз о первом
+    // занятии, росло бы от удачных регистраций.
+    child(родитель, 'Только завели', ago(MINUTE));
+    // А молчащий дольше двух недель — попадает: окно у обоих одно.
+    child(родитель, 'Молчит с весны', ago(CHURN_SILENCE_DAYS * DAY + DAY));
+
+    const report = stats();
+    expect(report.engagement.churned).toBe(1);
+    expect(report.engagement.churnByWeek).toEqual([{ week: 0, children: 1 }]);
+  });
+
   it('собирает учебную картину: забеги, точность, mastery, боссы, споры и integrity', () => {
     const родитель = parent('родитель@example.com');
     const первый = child(родитель, 'Первый');

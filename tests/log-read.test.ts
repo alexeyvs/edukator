@@ -77,6 +77,19 @@ describe('чтение журнала аварий', () => {
     expect(entries.map((entry) => entry.message)).toEqual(['ровно с начала']);
   });
 
+  it('не теряет первую запись, когда бюджет короче файла ровно на байт', () => {
+    const first = line({ at: '2026-08-21T09:00:00.000Z', message: 'первая' });
+    const second = line({ at: '2026-08-21T09:00:01.000Z', message: 'вторая' });
+    write(first + second);
+    // Байт «сверх бюджета» здесь оказывается самым первым байтом файла: прочитано
+    // всё, и резать нечего. Признак среза, посчитанный по `start`, а не по
+    // фактическому началу чтения, выбрасывал бы здесь целую первую запись — по
+    // разу на каждый файл ротации, то есть четырежды за чтение.
+    const budget = Buffer.byteLength(first + second) - 1;
+    const entries = readFailureTail(dir, budget);
+    expect(entries.map((entry) => entry.message)).toEqual(['первая', 'вторая']);
+  });
+
   it('битая строка не закрывает соседние', () => {
     write(
       line({ at: '2026-08-21T09:00:00.000Z', message: 'до' })

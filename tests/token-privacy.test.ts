@@ -19,6 +19,7 @@ import {
   registerTokenPrivacy,
 } from '../server/routes/token-privacy.js';
 import { buildServer, registerErrorHandler } from '../server/index.js';
+import { recordingFailureLog } from './server-harness.js';
 
 const TOKEN = 'НЕ-должен-попасть-в-лог-0123456789';
 const SAME_ORIGIN = { 'sec-fetch-site': 'same-origin' };
@@ -143,7 +144,7 @@ describe('заголовки приватности на маршрутах по
     control = openControlDatabase(controlDatabasePath(dir));
     app = Fastify();
     registerTokenPrivacy(app);
-    registerAuthRoutes(app, { control });
+    registerAuthRoutes(app, { control, failures: recordingFailureLog() });
     await app.ready();
   });
 

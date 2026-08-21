@@ -50,6 +50,13 @@ export interface AdminParentsOverview extends AdminCreatedCounts {
   disabled: number;
 }
 
+/**
+ * Четыре состояния разбивают `total` без пересечений: выведенный ребёнок
+ * считается только в `retired`, каким бы ни был его `status`. `retireChild`
+ * трогает лишь `retired_at`, так что без этой оговорки выведенный при
+ * `provisioning` ребёнок вечно висел бы на главном экране заведением, которое
+ * никто не чинит, — а в списке застрявших его законно нет.
+ */
 export interface AdminChildrenOverview extends AdminCreatedCounts {
   ready: number;
   provisioning: number;
@@ -255,9 +262,9 @@ export function buildAdminOverview(
         `SELECT COUNT(*) AS total,
                 COALESCE(SUM(created_at >= ?), 0) AS last7,
                 COALESCE(SUM(created_at >= ?), 0) AS last30,
-                COALESCE(SUM(status = 'ready'), 0) AS ready,
-                COALESCE(SUM(status = 'provisioning'), 0) AS provisioning,
-                COALESCE(SUM(status = 'failed'), 0) AS failed,
+                COALESCE(SUM(status = 'ready' AND retired_at IS NULL), 0) AS ready,
+                COALESCE(SUM(status = 'provisioning' AND retired_at IS NULL), 0) AS provisioning,
+                COALESCE(SUM(status = 'failed' AND retired_at IS NULL), 0) AS failed,
                 COALESCE(SUM(retired_at IS NOT NULL), 0) AS retired
            FROM children`,
       )

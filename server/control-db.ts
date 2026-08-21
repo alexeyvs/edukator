@@ -1855,7 +1855,13 @@ interface LoginEntry {
  * попытки обязаны считаться тоже. Обрезка по длине — чтобы ключом не служила
  * присланная снаружи строка любого размера.
  */
-function loginEntries(target: LoginTarget): LoginEntry[] {
+/**
+ * Ключи счётчика по одной попытке: почта (если вход по ней идёт) и адрес, оба
+ * приведённые и обрезанные. Экспортируется ради журнала аварий: запись о
+ * сработавшем запрете обязана называть тот же ключ, что и панель живых
+ * запретов, — своя нормализация рядом с ней разъехалась бы с этой молча.
+ */
+export function loginEntries(target: LoginTarget): LoginEntry[] {
   const entries: LoginEntry[] = [];
   const email = (target.email ?? '').trim().toLowerCase().slice(0, MAX_EMAIL_LENGTH);
   if (email.length > 0) entries.push({ scope: 'email', key: email });

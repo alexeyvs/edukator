@@ -21,6 +21,14 @@ export function minutesLeft(expiresAt: string, at: number): number {
 /** Как часто пересчитывается остаток. Минуту показываем — минутой и считаем. */
 const TICK_MS = 30 * 1000;
 
+/**
+ * Умолчание вынесено из списка параметров намеренно: значением по умолчанию
+ * стрелка получала бы новую личность на каждый рендер, а она стоит в зависимостях
+ * таймера. Отсчёт перезапускался бы с нуля при каждом отказе записи — то есть
+ * ровно на той полосе, чья работа и есть сказать правду о сроке захода.
+ */
+const systemNow = (): number => Date.now();
+
 export interface ImpersonationBannerProps {
   impersonation: Impersonation;
   api?: AdminApi;
@@ -50,7 +58,7 @@ export function ImpersonationBanner({
   impersonation,
   api = browserAdminApi,
   onLeft = (): void => { window.location.assign('/admin'); },
-  now = (): number => Date.now(),
+  now = systemNow,
 }: ImpersonationBannerProps) {
   const [left, setLeft] = useState(() => minutesLeft(impersonation.expiresAt, now()));
   const [refusal, setRefusal] = useState<string | null>(null);

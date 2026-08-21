@@ -24,6 +24,7 @@ import { controlDatabasePath, ensureDataDir } from '../server/data-dir.js';
 import { CHILD_COOKIE, IMPERSONATION_COOKIE, PARENT_COOKIE } from '../server/auth.js';
 import { registerAuthRoutes } from '../server/routes/auth.js';
 import { registerFamilyRoutes } from '../server/routes/family.js';
+import { recordingFailureLog } from './server-harness.js';
 
 const NOW = new Date('2026-08-19T09:00:00.000Z');
 const PASSWORD = 'пароль-подлиннее';
@@ -61,7 +62,7 @@ describe('маршруты семьи', () => {
     });
     // Маршруты входа поднимаются рядом: полный путь семьи кончается погашением
     // детской ссылки, а его умеет только вход.
-    registerAuthRoutes(app, { control, now: () => current });
+    registerAuthRoutes(app, { control, failures: recordingFailureLog(), now: () => current });
     await app.ready();
   });
 

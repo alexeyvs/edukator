@@ -16,6 +16,8 @@
  */
 import type { Database } from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FailureLog } from '../../log.js';
+import { noteLoginLockout } from '../login-lockout.js';
 import {
   checkLoginGate,
   clearLoginFailures,
@@ -47,6 +49,11 @@ import { LOGIN_REJECTED, readLoginBody, serializeCookie } from '../auth.js';
 
 export interface AdminAuthRoutesOptions {
   control: Database;
+  /**
+   * Куда писать сработавший запрет входа. Обязателен намеренно: забытая
+   * передача обязана падать на сборке, а не молча оставлять перебор без следа.
+   */
+  failures: FailureLog;
   now?: () => Date;
   /** Кому верить в `X-Forwarded-For`: иначе счётчик считает присланный адрес. */
   trustedProxies?: Set<string>;
@@ -134,6 +141,7 @@ export function registerAdminAuthRoutes(
     const result = email === undefined ? undefined : loginAdmin(control, email, body.password, at);
     if (result === undefined || !result.ok) {
       const counted = recordLoginFailure(control, target, at);
+      noteLoginLockout(options.failures, target, counted);
       // Отказ виден в журнале действий только тогда, когда есть чей: строка
       // `admin_audit` называет оператора, и перебор несуществующих адресов
       // иначе давал бы кому угодно возможность писать в этот журнал.

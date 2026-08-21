@@ -73,7 +73,12 @@ export interface ChildrenSweep<T> {
  *
  * Пропажа файла — отказ, а не пустой отчёт: `fileMustExist` у голого соединения
  * бросает сам, но проверка стоит отдельно ради внятного текста — у
- * `SQLITE_CANTOPEN` в сообщении нет ни ребёнка, ни пути.
+ * `SQLITE_CANTOPEN` в сообщении нет ребёнка.
+ *
+ * Путь в текст отказа не попадает: он доезжает до тела HTTP-ответа
+ * (`failed[].reason` у обоих отчётов оператора), а каталог данных — подробность
+ * машины, которой в ответе не место. Ребёнок назван, а путь по нему считается
+ * однозначно.
  */
 export function readChildDatabase<T>(
   dataDir: string,
@@ -84,7 +89,7 @@ export function readChildDatabase<T>(
   // отчёт оператора не имеет права открыть файл по имени, пришедшему снаружи.
   const path = childDatabasePath(dataDir, childId);
   if (!existsSync(path)) {
-    throw new Error(`Базы ребёнка ${childId} нет: ${path}`);
+    throw new Error(`Базы ребёнка ${childId} нет`);
   }
 
   const db = new Database(path, { fileMustExist: true, readonly: true });
@@ -124,7 +129,9 @@ export function sweepChildDatabases<T>(
       if (result.state === 'read') reports.push({ ...meta, value: result.value });
       else stale.push(meta);
     } catch (error) {
-      failed.push({ childId, reason: (error as Error).message });
+      // Не-`Error` даёт `undefined`, а `JSON.stringify` его выбрасывает: строка
+      // отказа приехала бы на экран вовсе без причины.
+      failed.push({ childId, reason: error instanceof Error ? error.message : String(error) });
     }
   }
 

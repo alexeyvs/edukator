@@ -106,13 +106,32 @@ describe('сводка оператора по управляющей базе',
 
     const summary = overview();
     expect(summary.parents.disabled).toBe(1);
+    // Выведенный ребёнок заведён и остался `provisioning`, но в этой строке он
+    // считается ровно один раз — выведенным. Иначе главный экран вечно показывал
+    // бы заведение, которое никто не чинит (в списке застрявших его законно нет),
+    // а четыре числа перестали бы разбивать `total`.
     expect(summary.children).toMatchObject({
       total: 3,
       ready: 1,
-      provisioning: 1,
+      provisioning: 0,
       failed: 1,
       retired: 1,
     });
+    const { ready, provisioning, failed, retired, total } = summary.children;
+    expect(ready + provisioning + failed + retired).toBe(total);
+  });
+
+  it('выведенный ребёнок не считается готовым, каким бы ни был его статус', () => {
+    const родитель = parent('родитель@example.com');
+    const ушедший = child(родитель, 'Ушедшая');
+    control.prepare('UPDATE children SET status = ? WHERE id = ?').run('ready', ушедший);
+    retireChild(control, ушедший, NOW);
+
+    // `retireChild` трогает только `retired_at`, и без оговорки в запросе
+    // выведенный попадал бы и в `ready`, и в `retired` разом — а клиент по
+    // `status === 'ready'` предлагал бы заход, который `isChildServiceable`
+    // отвергает.
+    expect(overview().children).toMatchObject({ total: 1, ready: 0, retired: 1 });
   });
 
   it('называет застрявших: `failed` и `provisioning` дольше часа', () => {

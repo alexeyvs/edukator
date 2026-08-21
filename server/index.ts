@@ -418,6 +418,7 @@ export function buildServer(
 
       registerAuthRoutes(app, {
         control,
+        failures,
         ...(options.now === undefined ? {} : { now: options.now }),
         ...(options.trustedProxies === undefined ? {} : { trustedProxies: options.trustedProxies }),
         ...(options.insecureCookies === undefined
@@ -426,6 +427,7 @@ export function buildServer(
       });
       registerAdminAuthRoutes(app, {
         control,
+        failures,
         // Выход из админки закрывает и живой заход: счётчик отказов и
         // соединения имперсонации нужны ему по той же причине, что и явному
         // выходу из семьи.
@@ -520,6 +522,7 @@ export function buildServer(
         context,
         graph: loaded,
         control,
+        failures,
         ...(pinPepper === undefined ? {} : { pinPepper }),
         ...(options.trustedProxies === undefined ? {} : { trustedProxies: options.trustedProxies }),
         ...(options.now === undefined ? {} : { now: options.now }),

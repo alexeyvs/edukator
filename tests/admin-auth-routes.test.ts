@@ -27,6 +27,7 @@ import {
   registerAdminAuthRoutes,
   registerUnavailableAdminAuth,
 } from '../server/routes/admin/auth.js';
+import { recordingFailureLog } from './server-harness.js';
 
 const NOW = new Date('2026-08-21T09:00:00.000Z');
 const EMAIL = 'Оператор@Example.COM';
@@ -49,17 +50,19 @@ describe('маршруты входа оператора', () => {
   let control: Database;
   let app: FastifyInstance;
   let current: Date;
+  let failures: ReturnType<typeof recordingFailureLog>;
 
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'edukator-admin-auth-'));
     ensureDataDir(dir);
     control = openControlDatabase(controlDatabasePath(dir));
     current = NOW;
+    failures = recordingFailureLog();
     app = Fastify();
-    registerAdminAuthRoutes(app, { control, now: () => current });
+    registerAdminAuthRoutes(app, { control, failures, now: () => current });
     // Родительский вход поднимается рядом намеренно: счётчики перебора у двух
     // входов обязаны быть раздельными, и проверить это можно только вдвоём.
-    registerAuthRoutes(app, { control, now: () => current });
+    registerAuthRoutes(app, { control, failures, now: () => current });
     await app.ready();
   });
 
@@ -208,7 +211,7 @@ describe('маршруты входа оператора', () => {
 
     it('снимает `Secure` только явным выключателем', async () => {
       const insecure = Fastify();
-      registerAdminAuthRoutes(insecure, { control, now: () => current, insecureCookies: true });
+      registerAdminAuthRoutes(insecure, { control, failures, now: () => current, insecureCookies: true });
       await insecure.ready();
       try {
         admin();

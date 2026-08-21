@@ -48,6 +48,7 @@ import {
   readCodexQuota,
 } from '../server/control-db.js';
 import { controlDatabasePath, dataDir as resolveDataDir } from '../server/data-dir.js';
+import { failureLogFor } from '../server/log.js';
 import { acquireDataLock, DataLockBusyError, PREFETCH_LOCK_OWNER } from '../server/data-lock.js';
 import { CURRICULUM_DIR, loadCurriculum, syncTopicState } from '../server/curriculum.js';
 import type { CodexRunner } from '../server/codex/client.js';
@@ -667,6 +668,28 @@ async function main(): Promise<void> {
   if (prefetchChildrenFailed(result)) {
     process.stderr.write('prefetch: наполнение не удалось, подробности выше\n');
     process.exitCode = 1;
+    // Ручной прогрев зовут перед занятием всей семьи, и его отказ виден только
+    // тому, кто смотрел на терминал. Оператор про этот запуск не знает вовсе,
+    // поэтому неудача обязана дойти до журнала: без записи пустая очередь у
+    // ребёнка назавтра не имеет объяснения.
+    const failures = failureLogFor(resolveDataDir(options.dataDir));
+    for (const child of result.failed) {
+      failures({
+        event: 'prefetch-failed',
+        message: 'ручной прогрев ребёнка не состоялся',
+        detail: child.reason,
+        childId: child.childId,
+      });
+    }
+    for (const child of result.children) {
+      if (!prefetchFailed(child)) continue;
+      failures({
+        event: 'prefetch-failed',
+        message: 'ручной прогрев не наполнил очередь',
+        detail: child.quotaExhausted ? 'суточная квота исчерпана' : 'ни один долив не дал заданий',
+        childId: child.childId,
+      });
+    }
   }
 }
 

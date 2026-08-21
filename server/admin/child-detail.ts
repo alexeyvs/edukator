@@ -315,7 +315,11 @@ export function readChildDetail(
   } catch (error) {
     // Отказ базы одного ребёнка — сама жалоба, а не помеха отчёту: карточка
     // остаётся с тем, что знает `control.db`, и называет причину.
-    return { ...card, state: 'failed', reason: (error as Error).message };
+    return {
+      ...card,
+      state: 'failed',
+      reason: error instanceof Error ? error.message : String(error),
+    };
   }
 
   if (result.state === 'stale') {

@@ -131,10 +131,11 @@ function Family({
                     Карточка
                   </button>
                 )}
-                {/* Заход предлагается только готовому ребёнку: у застрявшего
-                    заведения базы ещё нет вовсе, и заход в него кончился бы
-                    отказом на первом же экране. */}
-                {child.status === 'ready' && (
+                {/* Заход предлагается только готовому и не выведенному: у
+                    застрявшего заведения базы ещё нет вовсе, а выведенного
+                    `isChildServiceable` не отдаёт, — и обе кнопки кончились бы
+                    отказом «Ребёнок не найден» на первом же нажатии. */}
+                {child.status === 'ready' && child.retiredAt === undefined && (
                   <div className="admin-enter">
                     <button
                       disabled={entering !== null}
@@ -264,30 +265,13 @@ export function AdminHomeScreen({
       .finally(() => setLeaving(false));
   }
 
-  if (problem !== null) {
-    return (
-      <main className="admin-shell">
-        <p className="auth-message error" role="alert">{problem}</p>
-        <button
-          type="button"
-          onClick={() => { setProblem(null); setAttempt((value) => value + 1); }}
-        >
-          Повторить
-        </button>
-      </main>
-    );
-  }
-
-  if (overview === null) {
-    return (
-      <main className="admin-shell" role="status">
-        <p>Загружаю сводку…</p>
-      </main>
-    );
-  }
-
-  return (
-    <main className="admin-shell">
+  // Шапка рисуется и над отказом, и над загрузкой. Сводка ломается ровно тогда,
+  // когда беда с управляющей базой, — а лента аварий заведена файлом именно
+  // ради этого случая и от `control.db` не зависит. Оставить оператора наедине
+  // с «Повторить» значило бы отнять у него и ленту, и выход в единственный
+  // момент, ради которого они и нужны.
+  const header = (
+    <>
       <header className="admin-header">
         <div>
           <span>Админка оператора</span>
@@ -306,6 +290,36 @@ export function AdminHomeScreen({
       {logoutProblem !== null && (
         <p className="auth-message error" role="alert">{logoutProblem}</p>
       )}
+    </>
+  );
+
+  if (problem !== null) {
+    return (
+      <main className="admin-shell">
+        {header}
+        <p className="auth-message error" role="alert">{problem}</p>
+        <button
+          type="button"
+          onClick={() => { setProblem(null); setAttempt((value) => value + 1); }}
+        >
+          Повторить
+        </button>
+      </main>
+    );
+  }
+
+  if (overview === null) {
+    return (
+      <main className="admin-shell">
+        {header}
+        <p role="status">Загружаю сводку…</p>
+      </main>
+    );
+  }
+
+  return (
+    <main className="admin-shell">
+      {header}
       <p className="admin-stamp">Данные на {when(overview.generatedAt)}</p>
       <Numbers overview={overview} />
       {overview.stuck.length > 0 && (

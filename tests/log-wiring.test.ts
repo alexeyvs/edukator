@@ -366,5 +366,36 @@ describe('разводка журнала аварий', () => {
       expect(written[0]?.message).toContain('60 с');
       expect(written[1]?.message).toContain('120 с');
     });
+
+    it('пишет codex-run-failed, когда codex запустился, но не дал ничего', async () => {
+      // Отдельное событие от `codex-unavailable`: сюда попадает codex, который
+      // **стартовал** и вышел с ненулевым кодом — просроченная авторизация,
+      // кончившийся баланс, обрыв сети. Снаружи это выглядит работающей моделью,
+      // и без своей категории причина простоя очереди терялась бы.
+      const worker = dispatcher({
+        cycle: () => Promise.resolve({
+          topics: ['math.a'],
+          refilled: [{
+            topicId: 'math.a',
+            stored: 0,
+            batches: 1,
+            available: 0,
+            error: 'codex вышел с кодом 1',
+          }],
+          codexUnavailable: false,
+        }),
+        wait: async () => { void worker.stop(); },
+      });
+
+      worker.start();
+      await worker.done;
+
+      const written = journal(dataDir).filter((item) => item.event === 'codex-run-failed');
+      expect(written).toHaveLength(1);
+      // Текст ошибки, а не только число попыток: по «ни одна из 12» видно, что
+      // очередь стоит, и не видно почему.
+      expect(written[0]?.detail).toBe('codex вышел с кодом 1');
+      expect(journal(dataDir).some((item) => item.event === 'codex-unavailable')).toBe(true);
+    });
   });
 });

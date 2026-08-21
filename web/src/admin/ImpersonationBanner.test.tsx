@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ImpersonationBanner, minutesLeft } from './ImpersonationBanner';
 import type { AdminApi } from '../admin-api';
@@ -8,7 +8,7 @@ import type { Impersonation } from '../auth-api';
 import { requestJson } from '../http';
 import '../test-setup';
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 const NOW = new Date('2026-08-21T09:00:00.000Z').getTime();
 
@@ -52,6 +52,32 @@ describe('полоса захода оператора', () => {
     expect(banner).toHaveTextContent('Тимофей');
     expect(banner).toHaveTextContent('как ученик');
     expect(banner).toHaveTextContent('Осталось 15 мин');
+  });
+
+  it('отсчитывает срок и через перерисовки, которых больше, чем тиков', () => {
+    // Отказ записи под заходом — обычное дело, и каждый из них перерисовывает
+    // полосу. Умолчание `now`, записанное значением параметра, получало бы новую
+    // личность на каждый такой рендер, а оно стоит в зависимостях таймера: тик
+    // не наступал бы никогда, и полоса врала бы о сроке ровно там, где она за
+    // правду о нём и отвечает.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const props = {
+      api: adminApi(),
+      impersonation: impersonation(),
+      onLeft: vi.fn(),
+    };
+    const { rerender } = render(<ImpersonationBanner {...props} />);
+    expect(screen.getByRole('alert')).toHaveTextContent('Осталось 15 мин');
+
+    // Сто секунд по двадцать, и перерисовка между каждыми: тик в тридцать
+    // секунд не успевает наступить ни разу, если его каждый раз заводить заново.
+    for (let step = 0; step < 5; step += 1) {
+      act(() => { vi.advanceTimersByTime(20_000); });
+      rerender(<ImpersonationBanner {...props} />);
+    }
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Осталось 14 мин');
   });
 
   it('называет роль родителя её словом, а не словом протокола', () => {

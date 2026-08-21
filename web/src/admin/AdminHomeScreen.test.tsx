@@ -127,6 +127,40 @@ describe('главный экран админки', () => {
     expect(screen.getByText('Младшая')).toBeInTheDocument();
   });
 
+  it('не предлагает захода в выведенного ребёнка', async () => {
+    // `retireChild` трогает только `retired_at` и оставляет `status = 'ready'`,
+    // а `isChildServiceable` требует обоих. Кнопка по одному `status` обещала бы
+    // заход, который сервер отвергает «Ребёнок не найден».
+    const retired = overview({
+      families: [
+        {
+          parentId: 'p-1',
+          email: 'первый@example.com',
+          createdAt: '2026-08-01T09:00:00.000Z',
+          children: [
+            {
+              childId: 'ребёнок-1',
+              name: 'Выведенный',
+              status: 'ready',
+              createdAt: '2026-08-01T09:00:00.000Z',
+              retiredAt: '2026-08-15T09:00:00.000Z',
+            },
+          ],
+        },
+      ],
+    });
+    render(
+      <AdminHomeScreen
+        api={adminApi({ overview: vi.fn().mockResolvedValue(retired) })}
+        onSignedOut={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText('Выведенный')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Войти как ребёнок' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Войти как родитель' })).toBeNull();
+  });
+
   it('называет отказ захода и оставляет оператора в админке', async () => {
     const entered = vi.fn();
     render(
@@ -214,6 +248,25 @@ describe('главный экран админки', () => {
 
     expect(await screen.findByText('Семьи')).toBeInTheDocument();
     expect(overviewCall).toHaveBeenCalledTimes(2);
+  });
+
+  it('оставляет ленту аварий и выход достижимыми, когда сводка не загрузилась', async () => {
+    // Сводка ломается ровно тогда, когда беда с управляющей базой, — а лента
+    // аварий заведена файлом именно ради этого случая и от неё не зависит.
+    // Экран с одной кнопкой «Повторить» отнимал бы у оператора и ленту, и выход
+    // в единственный момент, ради которого они и нужны.
+    const onLogs = vi.fn();
+    const onStats = vi.fn();
+    const api = adminApi({ overview: vi.fn().mockRejectedValue(new Error('control.db не читается')) });
+    render(
+      <AdminHomeScreen api={api} onSignedOut={vi.fn()} onLogs={onLogs} onStats={onStats} />,
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('control.db не читается');
+    fireEvent.click(screen.getByRole('button', { name: 'Аварии' }));
+    expect(onLogs).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Статистика' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Выйти' })).toBeInTheDocument();
   });
 
   it('выходит по кнопке и оставляет экран, если выход не доехал', async () => {

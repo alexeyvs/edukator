@@ -33,6 +33,8 @@ import {
   type LoginTarget,
 } from '../control-db.js';
 import { clientAddress, readTrustedProxies } from '../client-address.js';
+import type { FailureLog } from '../log.js';
+import { noteLoginLockout } from './login-lockout.js';
 import { headerValue, type Bearer } from '../auth.js';
 import { integrityPublicJson } from './integrity.js';
 import {
@@ -60,6 +62,11 @@ export interface ParentsRoutesOptions {
    * него счётчик по адресу считал бы адрес, присланный самим подбирающим.
    */
   trustedProxies?: Set<string>;
+  /**
+   * Куда писать сработавший запрет ввода PIN. Обязателен намеренно: забытая
+   * передача обязана падать на сборке, а не молча оставлять перебор без следа.
+   */
+  failures: FailureLog;
   now?: () => Date;
 }
 
@@ -169,6 +176,7 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
 
     if (!verifyParentPin(expected, bearerPin(request), pepper)) {
       const counted = recordLoginFailure(control, target, current);
+      noteLoginLockout(options.failures, target, counted);
       if (counted.reason === 'unavailable') {
         const retryAfter = Math.max(1, Math.ceil(counted.retryAfterMs / 1000));
         return reply.header('retry-after', retryAfter).code(503).send({

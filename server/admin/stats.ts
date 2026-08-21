@@ -197,6 +197,13 @@ export interface AdminContentQuality {
   worstTopics: AdminWorstTopic[];
 }
 
+/** База, отложенная по версии схемы, как её видит оператор. Пути здесь нет. */
+export interface AdminStaleDatabase {
+  childId: string;
+  /** `user_version` файла как есть, без миграции. */
+  schemaVersion: number;
+}
+
 export interface AdminStats {
   generatedAt: string;
   /** Московские сутки, за которые считаны расход квоты и прирост банка. */
@@ -206,7 +213,7 @@ export interface AdminStats {
   content: AdminContentQuality;
   children: AdminChildStats[];
   /** Базы со схемой не той версии: не читались и не менялись. */
-  stale: ChildDatabaseMeta[];
+  stale: AdminStaleDatabase[];
   failed: ChildReadFailure[];
   skipped: AdminSkippedChild[];
 }
@@ -463,8 +470,13 @@ export function collectAdminStats(control: Database, options: AdminStatsOptions)
   for (const report of reports) {
     // Молчащий дольше двух недель ребёнок считается ушедшим, а никогда не
     // отвечавший — ушедшим на нулевой неделе: заведён и не начал.
+    //
+    // Окно молчания отмеряется и ему — от заведения. Без этого вся сегодняшняя
+    // когорта заведённых попадала бы в «отвалившиеся» в ту же минуту, и число,
+    // по которому судят как раз о первом занятии, росло бы ровно от удачных
+    // регистраций.
     const last = report.lastAttemptAt;
-    if (last !== undefined && last >= churnBefore) continue;
+    if ((last ?? report.createdAt) >= churnBefore) continue;
     churned += 1;
     const until = last === undefined ? report.createdAt : last;
     const lived = Date.parse(until) - Date.parse(report.createdAt);
@@ -613,7 +625,9 @@ export function collectAdminStats(control: Database, options: AdminStatsOptions)
       worstTopics,
     },
     children: reports,
-    stale: sweep.stale,
+    // Путь файла наружу не уходит: в ответе он не нужен ничему, а каталог
+    // данных — это подробность машины, которой в теле HTTP не место.
+    stale: sweep.stale.map(({ childId, schemaVersion }) => ({ childId, schemaVersion })),
     failed: sweep.failed,
     skipped,
   };

@@ -38,6 +38,7 @@ import {
   createTenantContext,
   failAuth,
 } from '../server/routes/tenant-context.js';
+import { recordingFailureLog } from './server-harness.js';
 
 const NOW = new Date('2026-08-19T09:00:00.000Z');
 const PASSWORD = 'пароль-подлиннее';
@@ -148,6 +149,7 @@ describe('контекст арендатора', () => {
       context,
       graph: GRAPH,
       control,
+      failures: recordingFailureLog(),
       pinPepper: PEPPER,
       now: () => NOW,
     });

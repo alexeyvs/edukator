@@ -27,6 +27,7 @@ import {
   PARENT_COOKIE,
 } from '../server/auth.js';
 import { CHILD_COOKIE_MAX_AGE_SECONDS, registerAuthRoutes } from '../server/routes/auth.js';
+import { recordingFailureLog } from './server-harness.js';
 
 const NOW = new Date('2026-08-19T09:00:00.000Z');
 const EMAIL = 'Родитель@Example.COM';
@@ -40,14 +41,16 @@ describe('маршруты входа', () => {
   let control: Database;
   let app: FastifyInstance;
   let current: Date;
+  let failures: ReturnType<typeof recordingFailureLog>;
 
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'edukator-auth-routes-'));
     ensureDataDir(dir);
     control = openControlDatabase(controlDatabasePath(dir));
     current = NOW;
+    failures = recordingFailureLog();
     app = Fastify();
-    registerAuthRoutes(app, { control, now: () => current });
+    registerAuthRoutes(app, { control, failures, now: () => current });
     await app.ready();
   });
 
@@ -362,7 +365,7 @@ describe('маршруты входа', () => {
     it('снимает Secure только явным выключателем', async () => {
       const insecure = Fastify();
       // Ни `now`, ни списка прокси: заодно проверяется, что умолчания живые.
-      registerAuthRoutes(insecure, { control, insecureCookies: true });
+      registerAuthRoutes(insecure, { control, failures, insecureCookies: true });
       await insecure.ready();
       const parentId = createParent(control, 'второй@example.com');
       const invite = { token: issueParentInvite(control, parentId).token };
@@ -725,6 +728,26 @@ describe('маршруты входа', () => {
       expect(locked.headers['set-cookie']).toBeUndefined();
       current = new Date(NOW.getTime() + LOGIN_LOCKOUT_MS + 1000);
       expect((await login()).statusCode).toBe(200);
+    });
+
+    it('пишет в журнал переход в запрет, а не каждый отказ', async () => {
+      await parentWithPassword();
+      for (let attempt = 0; attempt < LOGIN_EMAIL_FAILURE_LIMIT; attempt += 1) {
+        await login(EMAIL, 'не тот пароль');
+      }
+      // Ещё три отказа под уже действующим запретом: `checkLoginGate`
+      // отказывает раньше счётчика, и записи они не добавляют. Строка на каждый
+      // отказ была бы не диагностикой, а её уничтожением — подбирающий выдавил
+      // бы из хвоста журнала всё остальное.
+      for (let attempt = 0; attempt < 3; attempt += 1) await login(EMAIL, 'не тот пароль');
+
+      const locked = failures.records.filter((record) => record.event === 'login-lockout');
+      expect(locked).toHaveLength(1);
+      expect(locked[0]?.message).toContain('пароль родителя');
+      expect(locked[0]?.detail).toContain(EMAIL.toLowerCase());
+      // Секрета в журнале нет ни в каком виде.
+      expect(JSON.stringify(failures.records)).not.toContain(PASSWORD);
+      expect(JSON.stringify(failures.records)).not.toContain('не тот пароль');
     });
 
     it('выход без cookie отвечает тем же, что и с ней: сессии наружу не видно', async () => {

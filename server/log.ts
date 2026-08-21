@@ -219,7 +219,11 @@ function readTail(path: string, budget: number): { text: string; bytes: number; 
     readSync(fd, buffer, 0, length, from);
     // Срез мог разрубить и многобайтный знак, но он попал в первую строку, а её
     // всё равно выбрасывают: она оборвана самим срезом.
-    return { text: buffer.toString('utf8'), bytes: size - start, cut: start > 0 };
+    // Признак среза считается по `from`, а не по `start`: при `start === 1`
+    // байт «сверх бюджета» оказывается самым первым байтом файла, то есть
+    // прочитано всё и резать нечего, — а `start > 0` заставлял бы выбросить
+    // целую первую запись.
+    return { text: buffer.toString('utf8'), bytes: size - start, cut: from > 0 };
   } finally {
     closeSync(fd);
   }

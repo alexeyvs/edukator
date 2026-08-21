@@ -31,6 +31,7 @@ import {
   dataDir as resolveDataDir,
 } from '../server/data-dir.js';
 import { SCHEMA_VERSION, validateSchema } from '../server/db.js';
+import { failureLogFor } from '../server/log.js';
 
 /**
  * Проверка копии составом схемы — только на копии своей версии.
@@ -200,8 +201,20 @@ function main(): void {
     process.stderr.write(`backup: базы нет у ${result.missing.join(', ')}\n`);
   }
   if (result.failed.length > 0) {
+    // Журнал ведётся в исходном каталоге данных, а не в каталоге копии: копию
+    // уносят с машины, и запись о том, что она неполна, уехала бы вместе с ней.
+    const failures = failureLogFor(dir);
     for (const failure of result.failed) {
       process.stderr.write(`backup: ${failure.childId} не скопирован: ${failure.reason}\n`);
+      // Копию снимают из cron, и её отказ не видит никто. Без записи в журнале
+      // экран аварий молчал бы ровно про то состояние, ради которого копии и
+      // снимают, — а молчание там читается как «копии в порядке».
+      failures({
+        event: 'backup-failed',
+        message: 'база ребёнка не скопирована',
+        detail: failure.reason,
+        childId: failure.childId,
+      });
     }
     // Неполная копия обязана отличаться кодом возврата: в цепочке `&&` она
     // иначе читается как удачно снятая.

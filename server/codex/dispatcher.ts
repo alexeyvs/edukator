@@ -232,6 +232,23 @@ export function orderChildren(
  * него весь обход из-за одного ребёнка, у которого проверяющий забраковал батч,
  * значило бы морозить остальных.
  */
+/**
+ * Первая внятная причина отказа за обход. Нужна журналу: числа «ни одна из 12
+ * подготовок» хватает, чтобы понять, что очередь стоит, и не хватает, чтобы
+ * понять почему, — а текст ошибки называет и просроченную авторизацию, и
+ * кончившийся баланс.
+ */
+function firstCycleError(sweep: SweepReport): string | undefined {
+  for (const child of sweep.children) {
+    for (const cycle of child.cycles) {
+      for (const attempt of cycleAttempts(cycle)) {
+        if (attempt.error !== undefined) return attempt.error;
+      }
+    }
+  }
+  return undefined;
+}
+
 export function everySweepFailed(sweep: SweepReport): boolean {
   const attempts = sweep.children.flatMap((child) => {
     // Исчерпавший квоту и недоступный ребёнок не участвуют неудачами — ни
@@ -449,6 +466,16 @@ export class WarmupDispatcher {
             `за обход ${String(report.children.length)} ребёнка(детей) ` +
             `ни одна из ${String(attempts)} фоновых подготовок не дала заданий`;
           this.#log(`диспетчер: ${reason}, пауза увеличена`);
+          // Отдельное событие от `codex-unavailable`: сюда попадает codex,
+          // который **запустился** и вышел с ненулевым кодом — просроченная
+          // авторизация, кончившийся баланс, обрыв сети. Снаружи это выглядит
+          // работающей моделью, и без своей категории причина простоя очереди
+          // терялась бы среди «codex не запускается».
+          this.#failures({
+            event: 'codex-run-failed',
+            message: 'ни один вызов codex за обход не дал заданий',
+            detail: firstCycleError(report) ?? reason,
+          });
         } else if (unavailable) {
           reason = 'codex не запускается';
         }

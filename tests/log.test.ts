@@ -196,6 +196,29 @@ describe('журнал аварий', () => {
     expect(copy).toEqual([...LOG_EVENTS]);
   });
 
+  it('у каждого события списка есть место вызова', () => {
+    // Событие, которое никто не пишет, — это вариант фильтра, всегда дающий
+    // пустую ленту, а пустая лента читается как «аварий такого рода не было».
+    // Выбрав `backup-failed`, оператор получал бы утверждение, что с копиями всё
+    // в порядке, вообще ни на чём не основанное.
+    const sources: string[] = [];
+    const walk = (from: string): void => {
+      for (const entry of readdirSync(from, { withFileTypes: true })) {
+        const full = join(from, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith('.ts') && full !== resolve('server/log.ts')) {
+          sources.push(readFileSync(full, 'utf8'));
+        }
+      }
+    };
+    walk(resolve('server'));
+    walk(resolve('scripts'));
+    const text = sources.join('\n');
+
+    const orphans = LOG_EVENTS.filter((event) => !text.includes(`event: '${event}'`));
+    expect(orphans).toEqual([]);
+  });
+
   it('держит калибровочные константы спеки: предел файла и число файлов', () => {
     expect(LOG_MAX_BYTES).toBe(8 * 1024 * 1024);
     expect(LOG_KEEP_FILES).toBe(4);

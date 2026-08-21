@@ -11,7 +11,7 @@ import { openControlDatabase, setParentPin } from '../server/control-db.js';
 import { controlDatabasePath, ensureDataDir } from '../server/data-dir.js';
 import { registerParentsRoutes, registerUnavailableParents } from '../server/routes/parents.js';
 import { fakeContext, FAKE_CHILD_ID } from './tenant-context-helper.js';
-import { startTenantServer, type TenantServer } from './server-harness.js';
+import { recordingFailureLog, startTenantServer, type TenantServer } from './server-harness.js';
 
 const NOW = new Date('2026-08-08T12:00:00.000Z');
 const PARENT_PIN = '123456';
@@ -334,6 +334,7 @@ describe('маршрут родителей', () => {
       context: fakeContext(db),
       graph: loadCurriculum(curriculumDir),
       control,
+      failures: recordingFailureLog(),
       pinPepper: PIN_PEPPER,
       now: () => NOW,
     });
@@ -364,6 +365,7 @@ describe('маршрут родителей', () => {
       context: fakeContext(db, { available: () => false }),
       graph: loadCurriculum(curriculumDir),
       control,
+      failures: recordingFailureLog(),
     });
     const unavailable = Fastify();
     registerUnavailableParents(unavailable, 'карта тем не загружена');

@@ -13,6 +13,7 @@
  * запуске. Подменяется отправитель, а не проверка.
  */
 import type { Database } from 'better-sqlite3';
+import type { FailureRecord } from '../server/log.js';
 import type { FastifyInstance } from 'fastify';
 import {
   childDatabasePath,
@@ -266,4 +267,18 @@ export async function startTenantServer(options: TenantServerOptions): Promise<T
       control.close();
     },
   };
+}
+
+/**
+ * Журнал аварий, который никуда не пишет, но всё помнит. Маршрутные тесты
+ * поднимают вход без каталога данных, а `failures` у него обязателен: настоящий
+ * `failureLogFor` завёл бы файл в каталоге, которого у теста нет.
+ */
+export function recordingFailureLog(): {
+  (record: FailureRecord): void;
+  records: FailureRecord[];
+} {
+  const records: FailureRecord[] = [];
+  const log = (record: FailureRecord): void => { records.push(record); };
+  return Object.assign(log, { records });
 }

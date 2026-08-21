@@ -925,6 +925,16 @@ describe('prefetch', () => {
       expect(result.status).toBe(1);
       expect(result.stdout).toMatch(/посев выгружен в 0 файл/u);
       expect(result.stderr).toMatch(/наполнение не удалось/u);
+
+      // Ручной прогрев зовут перед занятием всей семьи, и его отказ виден только
+      // тому, кто смотрел на терминал. Оператор про этот запуск не знает вовсе:
+      // без записи пустая очередь у ребёнка назавтра не имеет объяснения.
+      const journal = readFileSync(join(cliDataDir, 'logs', 'app.jsonl'), 'utf8')
+        .split('\n')
+        .filter((line) => line !== '')
+        .map((line) => JSON.parse(line) as { event: string; childId?: string });
+      expect(journal.map((entry) => entry.event)).toContain('prefetch-failed');
+      expect(journal.map((entry) => entry.childId)).toContain(cliChildId);
     });
 
     // Без выбора ребёнка запуск обязан кончиться до первого вызова модели:

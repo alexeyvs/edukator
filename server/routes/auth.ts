@@ -29,6 +29,8 @@ import {
   verifyParentPassword,
   type LoginTarget,
 } from '../control-db.js';
+import type { FailureLog } from '../log.js';
+import { noteLoginLockout } from './login-lockout.js';
 import {
   ADMIN_COOKIE,
   AUTH_MESSAGE,
@@ -66,6 +68,11 @@ const LINK_REJECTED = 'Ссылка недействительна или уже
 
 export interface AuthRoutesOptions {
   control: Database;
+  /**
+   * Куда писать сработавший запрет входа. Обязателен намеренно: забытая
+   * передача обязана падать на сборке, а не молча оставлять перебор без следа.
+   */
+  failures: FailureLog;
   now?: () => Date;
   /**
    * Кому верить в `X-Forwarded-For`. По умолчанию — список из окружения: без
@@ -266,6 +273,7 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
       // тогда, когда их считать и нужно, — счётчик обязан быть fail-closed на
       // обоих концах.
       const counted = recordLoginFailure(control, target, now());
+      noteLoginLockout(options.failures, target, counted);
       if (counted.reason === 'unavailable') {
         const retryAfter = Math.max(1, Math.ceil(counted.retryAfterMs / 1000));
         return reply.header('retry-after', retryAfter).code(503).send({
@@ -393,6 +401,7 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
       }
       if (!verifyParentPassword(control, browser.parent.parentId, persona.password)) {
         const counted = recordLoginFailure(control, target, now());
+        noteLoginLockout(options.failures, target, counted);
         if (counted.reason === 'unavailable') {
           const retryAfter = Math.max(1, Math.ceil(counted.retryAfterMs / 1000));
           return reply.header('retry-after', retryAfter).code(503).send({ error: 'Вход временно недоступен' });

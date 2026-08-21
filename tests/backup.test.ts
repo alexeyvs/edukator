@@ -21,6 +21,9 @@ import { openDatabase, SCHEMA_VERSION, validateSchema, writeProfile } from '../s
 // файлам с одинаковым именем нечем.
 import { backupDataDir, parseArgs } from '../scripts/backup.js';
 
+const projectRoot = resolve(import.meta.dirname, '..');
+const tsxCli = join(projectRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+
 describe('снятие копии базы', () => {
   let dir: string;
   const opened: Database[] = [];
@@ -406,6 +409,33 @@ describe('снятие копии каталога данных', () => {
     } finally {
       rmSync(empty, { recursive: true, force: true });
     }
+  });
+
+  it('пишет неснятую копию ребёнка в журнал аварий каталога данных', () => {
+    const healthy = child('Тимофей');
+    const damaged = child('Ольга');
+    writeFileSync(join(dir, 'children', `${damaged}.db`), 'не база');
+    control.close();
+
+    // Скрипт целиком, а не `backupDataDir`: копию снимают из cron, и её отказ
+    // не видит никто. Без записи экран аварий молчал бы ровно про то состояние,
+    // ради которого копии и снимают, — а молчание там читается как «в порядке».
+    const backupCli = resolve(projectRoot, 'scripts', 'backup.ts');
+    const result = spawnSync(process.execPath, [tsxCli, backupCli, '--out', out, '--data-dir', dir], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: '' },
+    });
+
+    expect(result.status).toBe(1);
+    // Журнал лежит в исходном каталоге, а не в каталоге копии: копию уносят с
+    // машины, и запись о её неполноте уехала бы вместе с ней.
+    const journal = readFileSync(join(dir, 'logs', 'app.jsonl'), 'utf8')
+      .split('\n')
+      .filter((line) => line !== '')
+      .map((line) => JSON.parse(line) as { event: string; childId?: string });
+    expect(journal.map((entry) => entry.event)).toEqual(['backup-failed']);
+    expect(journal[0]?.childId).toBe(damaged);
+    expect(existsSync(join(out, 'children', `${healthy}.db`))).toBe(true);
   });
 
   describe('разбор аргументов', () => {

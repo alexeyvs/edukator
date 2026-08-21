@@ -135,10 +135,20 @@ describe('опенер детских баз для отчётов операт�
     }
   });
 
-  it('пропавшую базу отвергает с именем ребёнка и путём', () => {
-    expect(() => readChildDatabase(dir, FIRST, () => null)).toThrow(
-      new RegExp(`${FIRST}.*${childDatabasePath(dir, FIRST)}`, 'u'),
-    );
+  it('пропавшую базу отвергает с именем ребёнка, но без пути', () => {
+    // Ребёнок назван: без него у `SQLITE_CANTOPEN` не остаётся ничего, по чему
+    // жалобу можно узнать. Пути нет: этот текст доезжает до тела HTTP-ответа
+    // (`failed[].reason` обоих отчётов оператора), а каталог данных — подробность
+    // машины, которой в ответе не место.
+    let thrown = '';
+    try {
+      readChildDatabase(dir, FIRST, () => null);
+    } catch (error) {
+      thrown = (error as Error).message;
+    }
+    expect(thrown).toContain(FIRST);
+    expect(thrown).not.toContain(childDatabasePath(dir, FIRST));
+    expect(thrown).not.toContain(dir);
   });
 
   it('чужой формат `id` до открытия файла не доходит', () => {
