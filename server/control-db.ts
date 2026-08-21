@@ -1771,8 +1771,13 @@ export const LOGIN_ADDRESS_FAILURE_LIMIT = 20;
  */
 export const LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
 
-/** Что именно проверяется: пароль родителя или его PIN. Счётчики раздельные. */
-export type LoginKind = 'password' | 'pin';
+/**
+ * Что именно проверяется: пароль родителя, его PIN или пароль оператора.
+ * Счётчики раздельные — общий с родительским означал бы, что перебор чужого
+ * родительского пароля запирает вход оператору, то есть служит способом
+ * ослепить его перед следующим шагом.
+ */
+export type LoginKind = 'password' | 'pin' | 'admin';
 
 export type LoginScope = 'email' | 'address';
 
@@ -1941,4 +1946,307 @@ export function clearLoginFailures(db: Database.Database, target: LoginTarget): 
       entry.key,
     );
   }
+}
+
+/* ─── Оператор админки ──────────────────────────────────────────────────── */
+
+/**
+ * Нижняя граница пароля оператора. Она выше родительской (10) намеренно: один
+ * пароль родителя открывает одну семью, а пароль оператора — все сразу, и
+ * второго фактора у входа пока нет. Число задано спекой; меняете его — меняйте
+ * и её.
+ */
+export const MIN_ADMIN_PASSWORD_LENGTH = 16;
+
+/**
+ * Срок бездействия сессии оператора. Тридцать минут вместо родительских
+ * тридцати дней: у родителя долгая сессия — удобство, у оператора та же цифра
+ * означает открытую дверь в чужие семьи с забытого ноутбука.
+ */
+export const ADMIN_SESSION_IDLE_MS = 30 * 60 * 1000;
+
+/** Абсолютный потолок сессии оператора: рабочий день, и ни часом больше. */
+export const ADMIN_SESSION_MAX_MS = 8 * 60 * 60 * 1000;
+
+/**
+ * Живая сессия оператора одним текстом SQL. Он читается и при разрешении
+ * cookie, и погашающим `UPDATE` смены пароля: две разошедшиеся копии условия
+ * означали бы, что гасится не то множество строк, которое проверяется, а
+ * снимок между отдельными чтением и записью успел бы устареть.
+ *
+ * Отключение и смена пароля стоят здесь же, а не в JS: `disabled_at` гасит
+ * сессию, не переписывая ни одной её строки, а `credentials_changed_at`
+ * отсекает всё, что было выдано до неё.
+ */
+const ADMIN_SESSION_ALIVE = `
+  admin_sessions.revoked_at IS NULL
+  AND admin_sessions.created_at >= COALESCE(
+        (SELECT a.credentials_changed_at FROM admins a WHERE a.id = admin_sessions.admin_id), '')
+  AND NOT EXISTS (
+        SELECT 1 FROM admins a
+         WHERE a.id = admin_sessions.admin_id AND a.disabled_at IS NOT NULL)`;
+
+/** Причина отказа во входе оператора. Наружу маршрут отдаёт один общий текст. */
+export type AdminAuthFailure =
+  | 'unknown-email'
+  | 'no-password'
+  | 'bad-password'
+  | 'disabled'
+  | 'weak-password';
+
+export type AdminAuthResult =
+  | { ok: true; adminId: string; session: IssuedToken }
+  | { ok: false; reason: AdminAuthFailure };
+
+export interface AdminPrincipal {
+  adminId: string;
+  email: string;
+}
+
+/** Оператор так, как его видит обслуживание: без единого хеша наружу. */
+export interface AdminRecord {
+  id: string;
+  email: string;
+  /** Пароль уже поставлен CLI. Самого хеша здесь нет намеренно. */
+  hasPassword: boolean;
+  disabledAt?: string;
+  createdAt: string;
+}
+
+/**
+ * Заводит оператора. Пароля у него ещё нет: приглашений по ссылке у админки
+ * нет вовсе, и пароль ставит `setAdminPassword` на самой машине.
+ */
+export function createAdmin(db: Database.Database, email: string, now: Date = new Date()): string {
+  const normalized = normalizeEmail(email);
+  if (normalized === undefined) {
+    throw new Error(`Адрес оператора «${email}» не похож на электронную почту`);
+  }
+  const id = randomBytes(16).toString('hex');
+  try {
+    db.prepare('INSERT INTO admins (id, email, created_at) VALUES (?, ?, ?)').run(
+      id,
+      normalized,
+      now.toISOString(),
+    );
+  } catch (error) {
+    // «UNIQUE constraint failed» ничего не говорит тому, кто запустил CLI.
+    if (error instanceof Error && /UNIQUE/i.test(error.message)) {
+      throw new Error(`Оператор с адресом ${normalized} уже заведён`);
+    }
+    throw error;
+  }
+  return id;
+}
+
+/**
+ * Оператор по адресу. Отключённый тоже возвращается: CLI обязан сказать «он
+ * отключён», а не «такого нет» — иначе повторное заведение упало бы на
+ * `UNIQUE` без внятной причины. Неразобранный адрес — `undefined`: для поиска
+ * «не адрес» и «нет такого» один и тот же ответ.
+ */
+export function findAdminByEmail(db: Database.Database, email: string): AdminRecord | undefined {
+  const normalized = normalizeEmail(email);
+  if (normalized === undefined) return undefined;
+  const row = db
+    .prepare<[string], {
+      id: string;
+      email: string;
+      password_hash: string | null;
+      disabled_at: string | null;
+      created_at: string;
+    }>(
+      `SELECT id, email, password_hash, disabled_at, created_at
+         FROM admins WHERE email = ?`,
+    )
+    .get(normalized);
+  if (row === undefined) return undefined;
+  return {
+    id: row.id,
+    email: row.email,
+    hasPassword: row.password_hash !== null,
+    ...(row.disabled_at === null ? {} : { disabledAt: row.disabled_at }),
+    createdAt: row.created_at,
+  };
+}
+
+/**
+ * Ставит оператору пароль. Длина проверяется **до** KDF: иначе длинный пароль
+ * становится способом занять процессор, а короткий — сводит на нет `scrypt`.
+ *
+ * `credentials_changed_at` двигается, и это не побочный эффект, а смысл: смена
+ * пароля гасит все сессии оператора. Иначе смена пароля после кражи ноутбука
+ * ничего бы не меняла — украденная cookie продолжала бы работать.
+ */
+export function setAdminPassword(
+  db: Database.Database,
+  adminId: string,
+  password: string,
+  now: Date = new Date(),
+): void {
+  if (password.length < MIN_ADMIN_PASSWORD_LENGTH) {
+    throw new Error(`Пароль оператора короче ${MIN_ADMIN_PASSWORD_LENGTH} знаков`);
+  }
+  if (password.length > MAX_SECRET_LENGTH) {
+    throw new Error(`Пароль оператора длиннее ${MAX_SECRET_LENGTH} знаков`);
+  }
+  // Хеширование до записи: `scrypt` стоит десятки миллисекунд и под WAL всё это
+  // время держал бы запись в управляющей базе.
+  const passwordHash = hashSecret(password);
+  const stamp = now.toISOString();
+  db.transaction(() => {
+    // Гашение идёт **до** новой отметки: тот же текст `ADMIN_SESSION_ALIVE`
+    // после неё не выбрал бы ни одной строки, и сессии остались бы живыми по
+    // своим срокам. Одной отметки при этом мало: SQLite и `Date` хранят
+    // миллисекунды, и выданную в ту же миллисекунду сессию сравнение строк не
+    // упорядочивает.
+    db.prepare(
+      `UPDATE admin_sessions SET revoked_at = ?
+        WHERE admin_id = ? AND ${ADMIN_SESSION_ALIVE}`,
+    ).run(stamp, adminId);
+    const updated = db
+      .prepare(
+        'UPDATE admins SET password_hash = ?, credentials_changed_at = ? WHERE id = ? AND disabled_at IS NULL',
+      )
+      .run(passwordHash, stamp, adminId);
+    if (updated.changes === 0) {
+      throw new Error(`Оператора ${adminId} нет в управляющей базе или он отключён`);
+    }
+  }).immediate();
+}
+
+/**
+ * Отключает оператора. Сессии при этом не трогаются: их действительность
+ * проверяется тем же `ADMIN_SESSION_ALIVE`, и `disabled_at` гасит их этой же
+ * строкой.
+ *
+ * `false` — «уже был отключён»; строка не переписывается, чтобы отметка
+ * осталась от первого отключения.
+ */
+export function disableAdmin(
+  db: Database.Database,
+  adminId: string,
+  now: Date = new Date(),
+): boolean {
+  const updated = db
+    .prepare('UPDATE admins SET disabled_at = ? WHERE id = ? AND disabled_at IS NULL')
+    .run(now.toISOString(), adminId);
+  return updated.changes > 0;
+}
+
+/**
+ * Заводит сессию оператора. `created_at` пишется явно, а не умолчанием схемы:
+ * по нему сессия сравнивается с отметкой смены пароля, и расхождение часов
+ * SQLite с нашими на секунду погасило бы только что выданный вход.
+ */
+function insertAdminSession(db: Database.Database, adminId: string, now: Date): IssuedToken {
+  const token = createBearerToken();
+  const stamp = now.toISOString();
+  const expiresAt = new Date(now.getTime() + ADMIN_SESSION_MAX_MS).toISOString();
+  db.prepare(
+    `INSERT INTO admin_sessions (admin_id, token_hash, last_seen_at, expires_at, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(adminId, hashToken(token), stamp, expiresAt, stamp);
+  return { token, expiresAt };
+}
+
+interface AdminCredentialsRow {
+  id: string;
+  password_hash: string | null;
+  disabled_at: string | null;
+}
+
+/** Вход по паролю. Любой отказ стоит одного `scrypt`: см. `spendVerificationTime`. */
+export function loginAdmin(
+  db: Database.Database,
+  email: string,
+  password: string,
+  now: Date = new Date(),
+): AdminAuthResult {
+  const normalized = normalizeEmail(email);
+  const row =
+    normalized === undefined
+      ? undefined
+      : db
+          .prepare<[string], AdminCredentialsRow>(
+            'SELECT id, password_hash, disabled_at FROM admins WHERE email = ?',
+          )
+          .get(normalized);
+  if (row === undefined) {
+    spendVerificationTime();
+    return { ok: false, reason: 'unknown-email' };
+  }
+  if (row.disabled_at !== null) {
+    spendVerificationTime();
+    return { ok: false, reason: 'disabled' };
+  }
+  if (row.password_hash === null) {
+    spendVerificationTime();
+    return { ok: false, reason: 'no-password' };
+  }
+  // `verifySecret` отвергает пустые и слишком длинные строки до KDF. Без
+  // отдельной траты времени известный адрес отвечал бы на них мгновенно, а
+  // неизвестный проходил через dummy-scrypt и выдавал существование записи.
+  if (password.length === 0 || password.length > MAX_SECRET_LENGTH) {
+    spendVerificationTime();
+    return { ok: false, reason: 'bad-password' };
+  }
+  if (!verifySecret(row.password_hash, password)) {
+    return { ok: false, reason: 'bad-password' };
+  }
+  return { ok: true, adminId: row.id, session: insertAdminSession(db, row.id, now) };
+}
+
+interface AdminSessionRow {
+  id: number;
+  admin_id: string;
+  email: string;
+  last_seen_at: string;
+  expires_at: string;
+}
+
+/**
+ * Разрешает cookie оператора в предъявителя. `undefined` — отказ по любой
+ * причине: снаружи «нет такой сессии» и «сессия погасла» неразличимы.
+ */
+export function resolveAdminSession(
+  db: Database.Database,
+  token: string,
+  now: Date = new Date(),
+): AdminPrincipal | undefined {
+  const row = db
+    .prepare<[string], AdminSessionRow>(
+      `SELECT admin_sessions.id, admin_sessions.admin_id, admin_sessions.last_seen_at,
+              admin_sessions.expires_at, admins.email
+         FROM admin_sessions JOIN admins ON admins.id = admin_sessions.admin_id
+        WHERE admin_sessions.token_hash = ? AND ${ADMIN_SESSION_ALIVE}`,
+    )
+    .get(hashToken(token));
+  if (row === undefined) return undefined;
+
+  const stamp = now.toISOString();
+  // Оба срока проверяются на каждом обращении: потолок гасит сессию даже у
+  // того, кто работает не отрываясь, а бездействие — забытую вкладку.
+  if (row.expires_at <= stamp) return undefined;
+  const lastSeen = Date.parse(row.last_seen_at);
+  if (!Number.isFinite(lastSeen) || now.getTime() - lastSeen >= ADMIN_SESSION_IDLE_MS) {
+    return undefined;
+  }
+
+  if (now.getTime() - lastSeen >= SESSION_TOUCH_MS) {
+    db.prepare('UPDATE admin_sessions SET last_seen_at = ? WHERE id = ?').run(stamp, row.id);
+  }
+  return { adminId: row.admin_id, email: row.email };
+}
+
+/** Выход. Строка остаётся для разбора, но предъявителем уже не служит. */
+export function revokeAdminSession(
+  db: Database.Database,
+  token: string,
+  now: Date = new Date(),
+): boolean {
+  const result = db
+    .prepare('UPDATE admin_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL')
+    .run(now.toISOString(), hashToken(token));
+  return result.changes > 0;
 }

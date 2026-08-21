@@ -6,6 +6,8 @@ import type { Database } from 'better-sqlite3';
 import BetterSqlite3 from 'better-sqlite3';
 import { MAX_SECRET_LENGTH } from '../server/secrets.js';
 import {
+  ADMIN_SESSION_IDLE_MS,
+  ADMIN_SESSION_MAX_MS,
   CHILDREN_DIR,
   CODEX_DAILY_QUOTA,
   CONTROL_SCHEMA_VERSION,
@@ -14,6 +16,7 @@ import {
   MAX_CHILD_NAME_LENGTH,
   MAX_DEVICE_LABEL_LENGTH,
   MAX_EMAIL_LENGTH,
+  MIN_ADMIN_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
   PARENT_INVITE_TTL_MS,
   PARENT_SESSION_IDLE_MS,
@@ -25,9 +28,12 @@ import {
   checkLoginGate,
   childDatabasePath,
   clearLoginFailures,
+  createAdmin,
   createChild,
   createParent,
+  disableAdmin,
   disableParent,
+  findAdminByEmail,
   findParentByEmail,
   hashToken,
   issueDeviceInvite,
@@ -36,6 +42,7 @@ import {
   listServiceableChildren,
   listChildren,
   listDevices,
+  loginAdmin,
   loginParent,
   markChildFailed,
   markChildReady,
@@ -51,11 +58,14 @@ import {
   redeemDeviceInvite,
   redeemParentInvite,
   reserveCodexCall,
+  resolveAdminSession,
   resolveChildDevice,
+  setAdminPassword,
   setParentPassword,
   setParentPin,
   resolveParentSession,
   retireChild,
+  revokeAdminSession,
   revokeDevice,
   revokeParentSession,
   validateControlSchema,
@@ -408,7 +418,7 @@ describe('обновление управляющей базы до версии
     // Обнулить счётчики миграцией значит открыть окно перебора в предсказуемое
     // время — в момент обновления, поэтому строки обязаны доехать целиком.
     const attempt = db
-      .prepare<[], { failures: number; first_failed_at: string; last_failed_at: string }>(
+      .prepare<[string], { failures: number; first_failed_at: string; last_failed_at: string }>(
         'SELECT failures, first_failed_at, last_failed_at FROM login_attempts WHERE key = ?',
       )
       .get('mama@example.com');
@@ -1819,5 +1829,266 @@ describe('обслуживание родителей', () => {
     expect(listServiceableChildren(db).map((child) => child.id)).toEqual([mine]);
     // Снятию копии отключённый родитель не помеха: его прогресс никуда не делся.
     expect(listAllChildren(db).map((child) => child.id)).toEqual([mine, other]);
+  });
+});
+
+describe('оператор админки', () => {
+  const NOW = new Date('2026-08-21T09:00:00.000Z');
+  const EMAIL = 'operator@example.com';
+  const PASSWORD = 'пароль-оператора-длинный';
+
+  function at(ms: number): Date {
+    return new Date(NOW.getTime() + ms);
+  }
+
+  /** Заведённый оператор с паролем: без него не проверить ни один вход. */
+  function seedAdmin(db: Database, email = EMAIL): string {
+    const adminId = createAdmin(db, email, NOW);
+    setAdminPassword(db, adminId, PASSWORD, NOW);
+    return adminId;
+  }
+
+  function loggedIn(db: Database, now: Date = NOW): { adminId: string; token: string } {
+    const adminId = seedAdmin(db);
+    const result = loginAdmin(db, EMAIL, PASSWORD, now);
+    if (!result.ok) throw new Error(`вход не прошёл: ${result.reason}`);
+    return { adminId, token: result.session.token };
+  }
+
+  it('заводит оператора и находит его по адресу в любом регистре без хешей', () => {
+    const db = open();
+    const adminId = createAdmin(db, ' Operator@Example.COM ', NOW);
+
+    const found = findAdminByEmail(db, 'OPERATOR@example.com');
+    expect(found).toEqual({
+      id: adminId,
+      email: EMAIL,
+      hasPassword: false,
+      createdAt: NOW.toISOString(),
+    });
+    // Хеши наружу не выходят вовсе: CLI они не нужны, а напечатать их проще
+    // всего именно из такой выборки.
+    expect(JSON.stringify(found)).not.toContain('scrypt');
+
+    setAdminPassword(db, adminId, PASSWORD, NOW);
+    expect(findAdminByEmail(db, EMAIL)).toMatchObject({ hasPassword: true });
+  });
+
+  it('отказывается заводить второго оператора с тем же адресом и не разбирает не адрес', () => {
+    const db = open();
+    createAdmin(db, EMAIL, NOW);
+
+    expect(() => createAdmin(db, EMAIL, NOW)).toThrow(/уже заведён/u);
+    expect(() => createAdmin(db, 'не адрес', NOW)).toThrow(/не похож на электронную почту/u);
+    expect(findAdminByEmail(db, 'не адрес')).toBeUndefined();
+    expect(findAdminByEmail(db, 'другой@example.com')).toBeUndefined();
+  });
+
+  it('показывает отключённого оператора, а не прячет его', () => {
+    const db = open();
+    const adminId = seedAdmin(db);
+    expect(disableAdmin(db, adminId, at(HOUR_MS))).toBe(true);
+    // Повторное отключение отметку не переписывает: она осталась от первого.
+    expect(disableAdmin(db, adminId, at(2 * HOUR_MS))).toBe(false);
+
+    expect(findAdminByEmail(db, EMAIL)).toMatchObject({
+      id: adminId,
+      disabledAt: at(HOUR_MS).toISOString(),
+    });
+  });
+
+  it('пускает верным паролем и разрешает выданную сессию в предъявителя', () => {
+    const db = open();
+    const adminId = seedAdmin(db);
+
+    const result = loginAdmin(db, ' OPERATOR@example.com ', PASSWORD, NOW);
+    expect(result).toMatchObject({ ok: true, adminId });
+    if (!result.ok) throw new Error('вход обязан пройти');
+    expect(result.session.expiresAt).toBe(at(ADMIN_SESSION_MAX_MS).toISOString());
+    // В базе — только отпечаток: её дамп войти не даёт.
+    const stored = db
+      .prepare<[string], { token_hash: string }>(
+        'SELECT token_hash FROM admin_sessions WHERE admin_id = ?',
+      )
+      .get(adminId);
+    expect(stored?.token_hash).toBe(hashToken(result.session.token));
+    expect(stored?.token_hash).not.toBe(result.session.token);
+
+    expect(resolveAdminSession(db, result.session.token, at(60_000))).toEqual({
+      adminId,
+      email: EMAIL,
+    });
+  });
+
+  it('отказывает неверным паролем, неизвестным адресом и оператором без пароля', () => {
+    const db = open();
+    seedAdmin(db);
+    const noPassword = createAdmin(db, 'second@example.com', NOW);
+
+    expect(loginAdmin(db, EMAIL, 'пароль-оператора-другой', NOW)).toEqual({
+      ok: false,
+      reason: 'bad-password',
+    });
+    expect(loginAdmin(db, EMAIL, '', NOW)).toEqual({ ok: false, reason: 'bad-password' });
+    expect(loginAdmin(db, EMAIL, 'я'.repeat(MAX_SECRET_LENGTH + 1), NOW)).toEqual({
+      ok: false,
+      reason: 'bad-password',
+    });
+    expect(loginAdmin(db, 'никто@example.com', PASSWORD, NOW)).toEqual({
+      ok: false,
+      reason: 'unknown-email',
+    });
+    expect(loginAdmin(db, 'не адрес', PASSWORD, NOW)).toEqual({
+      ok: false,
+      reason: 'unknown-email',
+    });
+    expect(loginAdmin(db, 'second@example.com', PASSWORD, NOW)).toEqual({
+      ok: false,
+      reason: 'no-password',
+    });
+    // Ни один отказ не завёл сессии — иначе отказ был бы входом.
+    expect(
+      db.prepare<[], { count: number }>('SELECT COUNT(*) AS count FROM admin_sessions').get(),
+    ).toEqual({ count: 0 });
+    expect(noPassword).toMatch(/^[0-9a-f]{32}$/u);
+  });
+
+  it('отказывает отключённому оператору и гасит его живую сессию', () => {
+    const db = open();
+    const { adminId, token } = loggedIn(db);
+    expect(resolveAdminSession(db, token, at(60_000))).toMatchObject({ adminId });
+
+    disableAdmin(db, adminId, at(2 * 60_000));
+
+    // Ни одной строки сессии отключение не переписывает: её гасит тот же текст
+    // условия, которым сессия и проверяется.
+    expect(
+      db
+        .prepare<[string], { revoked_at: string | null }>(
+          'SELECT revoked_at FROM admin_sessions WHERE admin_id = ?',
+        )
+        .get(adminId)?.revoked_at,
+    ).toBeNull();
+    expect(resolveAdminSession(db, token, at(3 * 60_000))).toBeUndefined();
+    expect(loginAdmin(db, EMAIL, PASSWORD, at(3 * 60_000))).toEqual({
+      ok: false,
+      reason: 'disabled',
+    });
+  });
+
+  it('гасит сессию бездействием и подновляет отметку не чаще SESSION_TOUCH_MS', () => {
+    const db = open();
+    const { token } = loggedIn(db);
+
+    // Раньше порога подновления отметка остаётся прежней: запись на каждый
+    // запрос — это запись в WAL на каждый опрос страницы.
+    expect(resolveAdminSession(db, token, at(SESSION_TOUCH_MS - 1000))).toBeDefined();
+    const lastSeen = (): string =>
+      db
+        .prepare<[], { last_seen_at: string }>('SELECT last_seen_at FROM admin_sessions')
+        .get()?.last_seen_at ?? '';
+    expect(lastSeen()).toBe(NOW.toISOString());
+
+    expect(resolveAdminSession(db, token, at(SESSION_TOUCH_MS))).toBeDefined();
+    expect(lastSeen()).toBe(at(SESSION_TOUCH_MS).toISOString());
+
+    // Отсчёт бездействия идёт от подновлённой отметки, а не от входа.
+    const busy = SESSION_TOUCH_MS + ADMIN_SESSION_IDLE_MS - 1000;
+    expect(resolveAdminSession(db, token, at(busy))).toBeDefined();
+    expect(lastSeen()).toBe(at(busy).toISOString());
+    expect(resolveAdminSession(db, token, at(busy + ADMIN_SESSION_IDLE_MS))).toBeUndefined();
+  });
+
+  it('гасит сессию потолком даже у того, кто не отрывается от экрана', () => {
+    const db = open();
+    const { token } = loggedIn(db);
+
+    // Шаг меньше срока бездействия: вкладка живая, и гасить её нечему, кроме
+    // потолка. Без него ежедневно открываемая вкладка держала бы вход вечно.
+    const step = 25 * 60 * 1000;
+    let elapsed = step;
+    for (; elapsed < ADMIN_SESSION_MAX_MS; elapsed += step) {
+      expect(resolveAdminSession(db, token, at(elapsed))).toMatchObject({ email: EMAIL });
+    }
+    expect(elapsed).toBeGreaterThanOrEqual(ADMIN_SESSION_MAX_MS);
+    expect(resolveAdminSession(db, token, at(elapsed))).toBeUndefined();
+  });
+
+  it('гасит сменой пароля даже сессию, выданную в ту же миллисекунду', () => {
+    const db = open();
+    const { adminId, token } = loggedIn(db);
+
+    // Отметка `credentials_changed_at` совпадает с `created_at` сессии, и
+    // сравнением строк их не упорядочить: без явного погашения украденная
+    // cookie пережила бы смену пароля, которую от неё и советуют.
+    setAdminPassword(db, adminId, 'пароль-оператора-новый!', NOW);
+
+    expect(resolveAdminSession(db, token, at(60_000))).toBeUndefined();
+    expect(loginAdmin(db, EMAIL, PASSWORD, at(60_000))).toEqual({
+      ok: false,
+      reason: 'bad-password',
+    });
+    const fresh = loginAdmin(db, EMAIL, 'пароль-оператора-новый!', at(60_000));
+    expect(fresh.ok).toBe(true);
+    if (!fresh.ok) throw new Error('вход новым паролем обязан пройти');
+    expect(resolveAdminSession(db, fresh.session.token, at(2 * 60_000))).toMatchObject({ adminId });
+  });
+
+  it('меряет длину пароля до KDF и не трогает отключённого', () => {
+    const db = open();
+    const adminId = createAdmin(db, EMAIL, NOW);
+
+    expect(() => setAdminPassword(db, adminId, 'к'.repeat(MIN_ADMIN_PASSWORD_LENGTH - 1), NOW)).toThrow(
+      /короче/u,
+    );
+    expect(() => setAdminPassword(db, adminId, 'д'.repeat(MAX_SECRET_LENGTH + 1), NOW)).toThrow(
+      /длиннее/u,
+    );
+    // Ни один из отказов ничего не записал: пароля у оператора по-прежнему нет.
+    expect(findAdminByEmail(db, EMAIL)).toMatchObject({ hasPassword: false });
+
+    disableAdmin(db, adminId, at(HOUR_MS));
+    expect(() => setAdminPassword(db, adminId, PASSWORD, at(2 * HOUR_MS))).toThrow(/отключён/u);
+    expect(() => setAdminPassword(db, 'нет такого', PASSWORD, NOW)).toThrow(/нет в управляющей базе/u);
+  });
+
+  it('выход гасит сессию и повторным не считается', () => {
+    const db = open();
+    const { token } = loggedIn(db);
+
+    expect(revokeAdminSession(db, token, at(60_000))).toBe(true);
+    expect(resolveAdminSession(db, token, at(2 * 60_000))).toBeUndefined();
+    expect(revokeAdminSession(db, token, at(3 * 60_000))).toBe(false);
+    // Неизвестный токен — тот же ответ, без исключения.
+    expect(revokeAdminSession(db, 'посторонний токен', NOW)).toBe(false);
+    expect(resolveAdminSession(db, 'посторонний токен', NOW)).toBeUndefined();
+  });
+
+  it('считает перебор пароля оператора отдельно от родительского', () => {
+    const db = open();
+    const target: LoginTarget = { kind: 'admin', email: EMAIL, address: '203.0.113.7' };
+
+    for (let i = 0; i < LOGIN_EMAIL_FAILURE_LIMIT; i += 1) {
+      recordLoginFailure(db, target, NOW);
+    }
+    expect(checkLoginGate(db, target, NOW)).toMatchObject({ allowed: false, reason: 'locked' });
+
+    // Общий счётчик означал бы, что перебор чужого родительского пароля
+    // запирает вход оператору, то есть служит способом ослепить его.
+    expect(
+      checkLoginGate(db, { kind: 'password', email: EMAIL, address: '198.51.100.4' }, NOW),
+    ).toMatchObject({ allowed: true });
+    expect(
+      checkLoginGate(db, { kind: 'pin', email: EMAIL, address: '198.51.100.4' }, NOW),
+    ).toMatchObject({ allowed: true });
+
+    clearLoginFailures(db, target);
+    expect(checkLoginGate(db, target, NOW)).toMatchObject({ allowed: true });
+  });
+
+  it('держит калибровочные константы спеки: пароль и сроки сессии оператора', () => {
+    expect(MIN_ADMIN_PASSWORD_LENGTH).toBe(16);
+    expect(ADMIN_SESSION_IDLE_MS).toBe(30 * 60 * 1000);
+    expect(ADMIN_SESSION_MAX_MS).toBe(8 * 60 * 60 * 1000);
   });
 });
