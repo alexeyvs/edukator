@@ -130,6 +130,8 @@ export interface AdminHomeScreenProps {
   api?: AdminApi;
   /** Адрес вошедшего оператора, если он известен: сразу после входа — известен. */
   email?: string;
+  /** Перейти к ленте аварий: второй экран админки выбирает корень, а не сводка. */
+  onLogs?: () => void;
   /** Сессии оператора больше нет: решение показать вход принимает корень. */
   onSignedOut: (reason: AdminSignOutReason) => void;
 }
@@ -141,7 +143,7 @@ export interface AdminHomeScreenProps {
  * при любом состоянии этих баз — в том числе когда сломаны все разом. Именно в
  * этот момент по нему и смотрят.
  */
-export function AdminHomeScreen({ api = browserAdminApi, email, onSignedOut }: AdminHomeScreenProps) {
+export function AdminHomeScreen({ api = browserAdminApi, email, onLogs, onSignedOut }: AdminHomeScreenProps) {
   const [overview, setOverview] = useState<AdminOverview | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   // Новая попытка после сорвавшейся: эффект сам не повторится (сводка так и
@@ -212,6 +214,9 @@ export function AdminHomeScreen({ api = browserAdminApi, email, onSignedOut }: A
           <span>Админка оператора</span>
           <strong>{email ?? 'Оператор'}</strong>
         </div>
+        {onLogs !== undefined && (
+          <button className="admin-header-link" type="button" onClick={onLogs}>Аварии</button>
+        )}
         <button disabled={leaving} type="button" onClick={logout}>
           {leaving ? 'Выхожу…' : 'Выйти'}
         </button>

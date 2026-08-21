@@ -67,6 +67,7 @@ function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
     login: vi.fn().mockResolvedValue({ kind: 'admin', email: 'operator@example.com' }),
     logout: vi.fn().mockResolvedValue(undefined),
     overview: vi.fn().mockResolvedValue(overview()),
+    logs: vi.fn().mockResolvedValue({ entries: [] }),
     ...overrides,
   };
 }

@@ -182,6 +182,20 @@ describe('журнал аварий', () => {
     ]);
   });
 
+  it('держит список событий продублированным на клиенте', () => {
+    // Импортировать `server/` клиенту нечем, а без списка на месте у фильтра
+    // админки нет ни одного варианта на пустом журнале. Разъехавшаяся копия не
+    // роняет ничего — она просто прячет от оператора целый род аварий, и
+    // заметить это можно только в день, когда авария случилась. Поэтому копия
+    // сверяется текстом файла: своего импорта у теста тоже нет.
+    const client = readFileSync(resolve('web/src/admin-api.ts'), 'utf8');
+    const start = client.indexOf('export const ADMIN_LOG_EVENTS = [');
+    expect(start).toBeGreaterThan(-1);
+    const listed = client.slice(start, client.indexOf('] as const;', start));
+    const copy = [...listed.matchAll(/'([a-z-]+)'/gu)].map((found) => found[1]);
+    expect(copy).toEqual([...LOG_EVENTS]);
+  });
+
   it('держит калибровочные константы спеки: предел файла и число файлов', () => {
     expect(LOG_MAX_BYTES).toBe(8 * 1024 * 1024);
     expect(LOG_KEEP_FILES).toBe(4);

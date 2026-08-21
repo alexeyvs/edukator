@@ -91,10 +91,62 @@ export interface AdminOverview {
   storage: AdminStorageOverview;
 }
 
+/**
+ * Закрытый список событий журнала — копия серверного `LOG_EVENTS`
+ * (`server/log.ts`): импортировать `server/` клиенту нечем, а без него у
+ * фильтра нет ни одного варианта на пустом журнале — то есть отфильтровать
+ * можно было бы ровно то, что и так видно.
+ *
+ * Копия ровно одна на весь клиент, и её синхронность держит
+ * `tests/log.test.ts`: разъехавшийся список не роняет ничего — он просто
+ * прячет от оператора целый род аварий, и заметить это можно только в тот
+ * день, когда авария случилась.
+ */
+export const ADMIN_LOG_EVENTS = [
+  'server-error',
+  'tenant-open-failed',
+  'tenant-detached',
+  'control-error',
+  'startup-failed',
+  'codex-unavailable',
+  'codex-run-failed',
+  'sweep-failed',
+  'prefetch-failed',
+  'backup-failed',
+  'login-lockout',
+] as const;
+
+export type AdminLogEvent = (typeof ADMIN_LOG_EVENTS)[number];
+
+/** Запись журнала: ровно то, что отдаёт `GET /api/admin/logs`. */
+export interface AdminLogEntry {
+  at: string;
+  event: AdminLogEvent;
+  message: string;
+  detail?: string;
+  childId?: string;
+  route?: string;
+  status?: number;
+}
+
+/** Страница журнала, новые сверху. */
+export interface AdminLogPage {
+  entries: AdminLogEntry[];
+  /** Курсор следующей страницы; его нет, когда отдано всё. */
+  nextBefore?: string;
+}
+
+export interface AdminLogQuery {
+  event?: AdminLogEvent;
+  child?: string;
+  before?: string;
+}
+
 export interface AdminApi {
   login(email: string, password: string): Promise<{ kind: 'admin'; email: string }>;
   logout(): Promise<void>;
   overview(): Promise<AdminOverview>;
+  logs(query?: AdminLogQuery): Promise<AdminLogPage>;
 }
 
 /**
@@ -111,6 +163,20 @@ const ADMIN_POLICY: { signedOutOn401: boolean } = { signedOutOn401: false };
 
 /** Отказ едет со статусом: 401 значит «войдите заново», прочее — «не доехало». */
 const adminError = (failure: HttpFailure): Error => new HttpError(failure);
+
+/**
+ * Адрес страницы журнала. Пустые поля не уезжают вовсе: `child=` сервер читает
+ * как «фильтра нет», но пустой `event=` он читает как неизвестное событие и
+ * отвечает 400 — то есть снятый фильтр ломал бы ленту.
+ */
+export function adminLogsUrl(query: AdminLogQuery = {}): string {
+  const params = new URLSearchParams();
+  if (query.event !== undefined) params.set('event', query.event);
+  if (query.child !== undefined && query.child !== '') params.set('child', query.child);
+  if (query.before !== undefined && query.before !== '') params.set('before', query.before);
+  const search = params.toString();
+  return search === '' ? '/api/admin/logs' : `/api/admin/logs?${search}`;
+}
 
 export const browserAdminApi: AdminApi = {
   login: (email, password) => requestJson<{ kind: 'admin'; email: string }>(
@@ -133,6 +199,13 @@ export const browserAdminApi: AdminApi = {
     '/api/admin/overview',
     undefined,
     'Не получилось загрузить сводку',
+    adminError,
+    ADMIN_POLICY,
+  ),
+  logs: (query = {}) => requestJson<AdminLogPage>(
+    adminLogsUrl(query),
+    undefined,
+    'Не получилось загрузить журнал',
     adminError,
     ADMIN_POLICY,
   ),

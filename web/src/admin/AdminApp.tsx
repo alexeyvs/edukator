@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { AdminHomeScreen, type AdminSignOutReason } from './AdminHomeScreen';
 import { AdminLoginScreen } from './AdminLoginScreen';
+import { AdminLogsScreen } from './AdminLogsScreen';
 import type { AdminApi } from '../admin-api';
 
 /**
@@ -14,6 +15,13 @@ import type { AdminApi } from '../admin-api';
  */
 export function AdminApp({ api }: { api?: AdminApi } = {}) {
   const [signedIn, setSignedIn] = useState(true);
+  /**
+   * Какой экран открыт. Адресом это не выбирается: `/admin` — единственная
+   * страница админки в `APP_PAGES`, а вторая ссылка потребовала бы её туда
+   * вписать, то есть лента аварий ломалась бы 404 статики ровно в тот день,
+   * когда её открывают.
+   */
+  const [page, setPage] = useState<'home' | 'logs'>('home');
   const [email, setEmail] = useState<string | undefined>(undefined);
   const [notice, setNotice] = useState<string | undefined>(undefined);
   /**
@@ -32,6 +40,7 @@ export function AdminApp({ api }: { api?: AdminApi } = {}) {
     );
     entered.current = false;
     setEmail(undefined);
+    setPage('home');
     setSignedIn(false);
   }, []);
 
@@ -49,10 +58,20 @@ export function AdminApp({ api }: { api?: AdminApi } = {}) {
       />
     );
   }
+  if (page === 'logs') {
+    return (
+      <AdminLogsScreen
+        {...(api === undefined ? {} : { api })}
+        onBack={() => setPage('home')}
+        onSignedOut={signedOut}
+      />
+    );
+  }
   return (
     <AdminHomeScreen
       {...(api === undefined ? {} : { api })}
       {...(email === undefined ? {} : { email })}
+      onLogs={() => setPage('logs')}
       onSignedOut={signedOut}
     />
   );
