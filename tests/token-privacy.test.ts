@@ -14,6 +14,7 @@ import { registerAuthRoutes } from '../server/routes/auth.js';
 import {
   TOKEN_PATH_PREFIXES,
   isTokenPath,
+  redactTokenText,
   redactTokenUrl,
   registerTokenPrivacy,
 } from '../server/routes/token-privacy.js';
@@ -57,6 +58,29 @@ describe('адреса с токеном', () => {
     // секрет там, где его не было.
     expect(redactTokenUrl('/join/')).toBe('/join/');
     expect(isTokenPath('/join/')).toBe(false);
+  });
+});
+
+describe('токен внутри текста', () => {
+  it('прячет токен в каждом начале пути, где бы он в тексте ни стоял', () => {
+    for (const prefix of TOKEN_PATH_PREFIXES) {
+      expect(redactTokenText(`отказ по ${prefix}${TOKEN} и всё`)).toBe(
+        `отказ по ${prefix}<token> и всё`,
+      );
+    }
+  });
+
+  it('оставляет хвостовую пунктуацию, но не остаток адреса', () => {
+    expect(redactTokenText(`погашение /join/${TOKEN}/дальше: поздно`)).toBe(
+      'погашение /join/<token>: поздно',
+    );
+    expect(redactTokenText(`погашение /join/${TOKEN}: поздно`)).toBe(
+      'погашение /join/<token>: поздно',
+    );
+  });
+
+  it('не трогает текст без адресов с токеном', () => {
+    expect(redactTokenText('обычный отказ на /api/run/plan')).toBe('обычный отказ на /api/run/plan');
   });
 });
 

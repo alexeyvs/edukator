@@ -84,3 +84,38 @@ export function registerTokenPrivacy(app: FastifyInstance): void {
     done(null, payload);
   });
 }
+
+/**
+ * Начала путей с токеном, собранные в одно чередование для поиска внутри
+ * произвольного текста.
+ */
+const TOKEN_TEXT_PATTERN = new RegExp(
+  `(${TOKEN_PATH_PREFIXES.map((prefix) => prefix.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join(
+    '|',
+  )})\\S+`,
+  'gu',
+);
+
+/** Знаки, которыми кончается предложение, а не токен. */
+const TRAILING_PUNCTUATION = /[.,;:!?)\]}»"']*$/u;
+
+/**
+ * Прячет токен всюду, где он встретился в тексте.
+ *
+ * `redactTokenUrl` берёт адрес целиком и потому умеет сохранить строку запроса;
+ * здесь адрес лежит внутри фразы («не удалось погасить /join/<токен>: причина»),
+ * и отличить `?` запроса от `?` предложения нечем — поэтому съедается весь
+ * непробельный остаток. Хвостовая пунктуация возвращается: она заведомо не часть
+ * токена, а без неё фраза в журнале теряет вид.
+ *
+ * Список начал — тот же `TOKEN_PATH_PREFIXES`: своя копия у журнала разъехалась
+ * бы с заголовками ответа молча, и следующий адрес с секретом защитили бы
+ * только наполовину.
+ */
+export function redactTokenText(text: string): string {
+  return text.replace(TOKEN_TEXT_PATTERN, (match: string, prefix: string) => {
+    const tail = match.slice(prefix.length);
+    const punctuation = TRAILING_PUNCTUATION.exec(tail)?.[0] ?? '';
+    return `${prefix}${TOKEN_PLACEHOLDER}${punctuation}`;
+  });
+}
