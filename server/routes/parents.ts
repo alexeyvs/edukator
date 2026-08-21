@@ -34,7 +34,8 @@ import {
 } from '../control-db.js';
 import { clientAddress, readTrustedProxies } from '../client-address.js';
 import type { FailureLog } from '../log.js';
-import { noteLoginLockout } from './login-lockout.js';
+import { IntegrityError } from '../integrity-error.js';
+import { noteLoginCounter, noteLoginGate } from './login-lockout.js';
 import { headerValue, type Bearer } from '../auth.js';
 import { integrityPublicJson } from './integrity.js';
 import {
@@ -163,6 +164,7 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
     const current = now();
     const gate = checkLoginGate(control, target, current);
     if (!gate.allowed) {
+      noteLoginCounter(options.failures, target, gate);
       const retryAfter = Math.max(1, Math.ceil(gate.retryAfterMs / 1000));
       return reply
         .header('retry-after', retryAfter)
@@ -176,7 +178,7 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
 
     if (!verifyParentPin(expected, bearerPin(request), pepper)) {
       const counted = recordLoginFailure(control, target, current);
-      noteLoginLockout(options.failures, target, counted);
+      noteLoginGate(options.failures, target, counted);
       if (counted.reason === 'unavailable') {
         const retryAfter = Math.max(1, Math.ceil(counted.retryAfterMs / 1000));
         return reply.header('retry-after', retryAfter).code(503).send({
@@ -299,7 +301,14 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
       try {
         return reply.send(integrityPublicJson(context.tenant.integrity.approve(runId, itemId)));
       } catch (error) {
-        return reply.code(409).send({ error: (error as Error).message });
+        // Тот же разбор, что и у детского маршрута: 409 полагается отказу по
+        // состоянию проверки, а не всякой ошибке подтверждения. Внутренняя
+        // поломка обязана остаться пятисоткой — иначе она уходит наружу своим
+        // текстом и мимо журнала аварий.
+        if (error instanceof IntegrityError) {
+          return reply.code(409).send({ error: error.message, code: error.code });
+        }
+        throw error;
       }
     },
   );

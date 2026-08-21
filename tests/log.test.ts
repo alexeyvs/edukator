@@ -16,8 +16,11 @@ import {
   LOG_FILE,
   LOG_KEEP_FILES,
   LOG_MAX_BYTES,
+  LOG_FIELD_LIMIT,
+  LOG_TAIL_BYTES,
   logFailure,
   logFilePath,
+  readFailureLog,
   rotatedLogPath,
   type LogEntry,
 } from '../server/log.js';
@@ -219,9 +222,35 @@ describe('журнал аварий', () => {
     expect(orphans).toEqual([]);
   });
 
+  it('обрезает длинные поля записи, а не кладёт в журнал строку длиннее хвоста', () => {
+    // В `detail` уезжает вывод codex — до мегабайта (`MAX_CHILD_OUTPUT_BYTES`).
+    // Одна запись длиннее видимого хвоста (`LOG_TAIL_BYTES`) не просто занимает
+    // место: срез хвоста целиком попадает внутрь неё, оборванная первая строка
+    // выбрасывается, бюджет на архивы уже потрачен — и лента оператора
+    // оказывается пустой ровно после большой аварии.
+    logFailure(
+      { event: 'codex-run-failed', message: 'ц'.repeat(50000), detail: 'д'.repeat(600000) },
+      dir,
+      NOW,
+    );
+    logFailure({ event: 'server-error', message: 'после большой' }, dir, NOW);
+
+    const written = readEntries();
+    expect(written[0]?.message.endsWith('… (обрезано)')).toBe(true);
+    expect(written[0]?.detail?.endsWith('… (обрезано)')).toBe(true);
+    expect(Buffer.byteLength(written[0]?.detail ?? '')).toBeLessThan(LOG_TAIL_BYTES);
+
+    // И главное: соседняя запись читается, а не пропадает вместе с хвостом.
+    expect(readFailureLog(dir, {}).entries.map((entry) => entry.event)).toEqual([
+      'server-error',
+      'codex-run-failed',
+    ]);
+  });
+
   it('держит калибровочные константы спеки: предел файла и число файлов', () => {
     expect(LOG_MAX_BYTES).toBe(8 * 1024 * 1024);
     expect(LOG_KEEP_FILES).toBe(4);
+    expect(LOG_FIELD_LIMIT).toBe(4096);
     expect(LOG_MAX_BYTES * LOG_KEEP_FILES).toBe(33554432);
     expect(LOGS_DIR).toBe('logs');
     expect(LOG_FILE).toBe('app.jsonl');

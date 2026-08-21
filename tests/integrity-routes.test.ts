@@ -17,6 +17,7 @@ import { hashParentPin } from '../server/parent-pin.js';
 import { setParentPin } from '../server/control-db.js';
 import { startTenantServer, type TenantServer } from './server-harness.js';
 import { fakeContext } from './tenant-context-helper.js';
+import { IntegrityError } from '../server/integrity-error.js';
 
 const NOW = new Date('2026-08-18T12:00:00.000Z');
 const PIN = '123456';
@@ -184,7 +185,7 @@ describe('HTTP-поток проверки осмысленности', () => {
 function coordinatorStub(
   state: IntegrityPublicStatus | null,
   retry: IntegrityCoordinator['retry'] = () => {
-    throw new Error('Повтор сейчас не ожидается');
+    throw new IntegrityError('item-not-pending', 'Повтор сейчас не ожидается');
   },
 ): IntegrityCoordinator {
   return {
@@ -269,12 +270,42 @@ describe('валидация HTTP-маршрутов проверки осмыс
         payload: { answer: '45', duration_ms: 8_000 },
       });
       expect(rejected.statusCode).toBe(409);
-      expect(rejected.json()).toEqual({ error: 'Повтор сейчас не ожидается' });
+      expect(rejected.json()).toEqual({ error: 'Повтор сейчас не ожидается', code: 'item-not-pending' });
     } finally {
       await success.close();
       await conflict.close();
       successDb.close();
       conflictDb.close();
+    }
+  });
+
+  it('оставляет внутреннюю поломку пятисоткой, а не выдаёт её за отказ состояния', async () => {
+    // 409 своим текстом — это утверждение «у занятия такое состояние». Отдав
+    // так пропавшее задание или отказ драйвера, маршрут и увёл бы поломку
+    // мимо обработчика ошибок: наружу уехало бы внутреннее сообщение, а в
+    // журнал аварий (`server-error`) не попало бы ничего.
+    const app = Fastify();
+    const db = new BetterSqlite3(':memory:');
+    registerIntegrityRoutes(app, {
+      context: fakeContext(db, {
+        integrity: coordinatorStub(null, () => {
+          throw new Error('Проверка осмысленности: задание 7 исчезло');
+        }),
+      }),
+    });
+    await app.ready();
+    try {
+      const response = await app.inject({
+        method: 'POST', url: '/api/integrity/1/retry/2',
+        payload: { answer: '45', duration_ms: 8_000 },
+      });
+      // Именно 500: наружу его текст редактирует общий `setErrorHandler`
+      // `buildServer`, а он же пишет запись `server-error` в журнал аварий, —
+      // и то и другое достаётся только тому, что не выдали за 4xx.
+      expect(response.statusCode).toBe(500);
+    } finally {
+      await app.close();
+      db.close();
     }
   });
 

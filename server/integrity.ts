@@ -12,6 +12,7 @@ import {
 import type { IntegrityPromptItem } from './codex/prompt.js';
 import { codexConcurrency, type CodexConcurrency } from './codex/concurrency.js';
 import { projectIssuedTask, type IssuedTask } from './issued-task.js';
+import { IntegrityError } from './integrity-error.js';
 
 export const INTEGRITY_JUNK_CONFIDENCE = 0.9;
 export const INTEGRITY_FAST_ANSWER_MS = 10_000;
@@ -231,13 +232,13 @@ function replaceIntegrityAttempt(
          FROM integrity_items WHERE id = ? AND run_id = ?`,
     ).get(itemId, runId);
     if (item === undefined || item.status !== 'retry_required') {
-      throw new Error('Этот вопрос больше не ожидает повторного ответа');
+      throw new IntegrityError('item-not-pending', 'Этот вопрос больше не ожидает повторного ответа');
     }
     const run = db.prepare<[number], { finished_at: string | null; kind: string }>(
       'SELECT finished_at, kind FROM runs WHERE id = ?',
     ).get(runId);
     if (run === undefined || run.finished_at !== null || (run.kind !== 'run' && run.kind !== 'lesson')) {
-      throw new Error('Занятие уже завершено или не поддерживает проверку');
+      throw new IntegrityError('run-not-reviewable', 'Занятие уже завершено или не поддерживает проверку');
     }
     const task = db.prepare<[number], {
       id: number; topic_id: string; answer: string; accept: string; choices: string | null;
@@ -247,7 +248,7 @@ function replaceIntegrityAttempt(
     }>('SELECT id, is_correct, affects_progress FROM attempts WHERE id = ? AND is_current = 1')
       .get(item.attempt_id);
     if (task === undefined || previous === undefined) {
-      throw new Error('Проверяемый ответ изменился до повторной попытки');
+      throw new IntegrityError('attempt-changed', 'Проверяемый ответ изменился до повторной попытки');
     }
     const topic = graph.byId.get(task.topic_id);
     if (topic === undefined) throw new Error(`Проверка осмысленности: темы «${task.topic_id}» нет`);
@@ -459,7 +460,7 @@ export function createIntegrityCoordinator(options: IntegrityCoordinatorOptions)
 
   function current(runId: number): IntegrityPublicStatus {
     const state = readIntegrityStatus(db, graph, runId);
-    if (state === null) throw new Error(`Проверка занятия ${runId} не найдена`);
+    if (state === null) throw new IntegrityError('review-not-found', `Проверка занятия ${runId} не найдена`);
     return state;
   }
 
@@ -477,7 +478,10 @@ export function createIntegrityCoordinator(options: IntegrityCoordinatorOptions)
       'SELECT kind, finished_at FROM runs WHERE id = ?',
     ).get(runId);
     if (run === undefined || run.finished_at !== null || (run.kind !== 'run' && run.kind !== 'lesson')) {
-      throw new Error('Проверка доступна только для незавершённого забега или разбора');
+      throw new IntegrityError(
+        'run-not-reviewable',
+        'Проверка доступна только для незавершённого забега или разбора',
+      );
     }
     const questions = questionsForRun(db, graph, runId);
     if (questions.length === 0) {
@@ -521,7 +525,9 @@ export function createIntegrityCoordinator(options: IntegrityCoordinatorOptions)
                 reason = 'Родитель подтвердил осмысленный ответ.', reviewed_by = 'parent', updated_at = ?
           WHERE id = ? AND run_id = ? AND status <> 'approved'`,
       ).run(at, itemId, runId);
-      if (changed.changes === 0) throw new Error('Отмеченный вопрос не найден или уже подтверждён');
+      if (changed.changes === 0) {
+        throw new IntegrityError('item-not-pending', 'Отмеченный вопрос не найден или уже подтверждён');
+      }
       const open = db.prepare<[number], { count: number }>(
         "SELECT COUNT(*) AS count FROM integrity_items WHERE run_id = ? AND status <> 'approved'",
       ).get(runId)?.count ?? 0;

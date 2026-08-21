@@ -59,24 +59,28 @@ export function backupDatabase(
   // снятие копии меняло бы оригинал ровно в том состоянии, ради которого копию и
   // снимают (оставшийся после аварии журнал). `VACUUM INTO` от `readonly` не
   // страдает: он источник только читает.
-  const db = new Database(from, { fileMustExist: true, readonly: true });
+  // Сам `VACUUM INTO` — внутри той же защиты, что и проверка: испорченный
+  // посередине источник валит его **после** того, как файл цели уже создан, и
+  // оставленный снаружи вызов клал бы нулевой огрызок под имя годной копии —
+  // ровно то, что защита ниже и не допускает.
   try {
-    db.prepare('VACUUM INTO ?').run(to);
-  } finally {
-    db.close();
-  }
+    const db = new Database(from, { fileMustExist: true, readonly: true });
+    try {
+      db.prepare('VACUUM INTO ?').run(to);
+    } finally {
+      db.close();
+    }
 
-  // Копию сбрасывают на диск сразу: снимок снимают перед тем, чем рискуют, и
-  // питание может уйти следующей же минутой.
-  const handle = openSync(to, 'r');
-  try {
-    fsyncSync(handle);
-  } finally {
-    closeSync(handle);
-  }
-  syncDirectory(to);
+    // Копию сбрасывают на диск сразу: снимок снимают перед тем, чем рискуют, и
+    // питание может уйти следующей же минутой.
+    const handle = openSync(to, 'r');
+    try {
+      fsyncSync(handle);
+    } finally {
+      closeSync(handle);
+    }
+    syncDirectory(to);
 
-  try {
     const copy = new Database(to, { fileMustExist: true, readonly: true });
     try {
       const [integrity] = copy.pragma('quick_check') as [{ quick_check: string }];
@@ -104,6 +108,10 @@ export function backupDatabase(
  * Своё `try`: отказ уборки не имеет права заслонить причину отказа копии.
  */
 function setAside(path: string): void {
+  // Отказ мог случиться и до создания файла (источника нет, открыть не вышло):
+  // отодвигать тогда нечего, а `rename` по пустому месту подменил бы причину
+  // отказа копии жалобой на ненайденный файл.
+  if (!existsSync(path)) return;
   const aside = `${path}.failed`;
   try {
     rmSync(aside, { force: true });

@@ -77,6 +77,36 @@ export const LOG_FILE = 'app.jsonl';
 export const LOG_MAX_BYTES = 8 * 1024 * 1024;
 export const LOG_KEEP_FILES = 4;
 
+/**
+ * Предел длины текстовых полей записи.
+ *
+ * Ни `message`, ни `detail` не приходят из кода целиком: в `detail` уезжает
+ * вывод codex (`MAX_CHILD_OUTPUT_BYTES` — мегабайт) и сообщения драйвера. Одна
+ * такая строка длиннее видимого хвоста (`LOG_TAIL_BYTES`) не просто занимает
+ * место — она **стирает ленту**: срез хвоста целиком попадает внутрь неё,
+ * оборванная первая строка выбрасывается, бюджет на архивы уже потрачен, и
+ * оператор читает «аварий не было» ровно в тот момент, когда случилась
+ * большая. Обрезка помечается явно: молча укороченный вывод модели читался бы
+ * как её настоящий ответ.
+ */
+export const LOG_FIELD_LIMIT = 4 * 1024;
+
+/** Обрезает текст записи до предела, называя обрезку. */
+function clampField(value: string): string {
+  if (Buffer.byteLength(value) <= LOG_FIELD_LIMIT) return value;
+  // Режется по знакам, а не по байтам: срез посреди многобайтного знака дал бы
+  // в файле битый UTF-8, который потом не разберёт `parseEntry`.
+  let kept = '';
+  let bytes = 0;
+  for (const symbol of value) {
+    const size = Buffer.byteLength(symbol);
+    if (bytes + size > LOG_FIELD_LIMIT) break;
+    kept += symbol;
+    bytes += size;
+  }
+  return `${kept}… (обрезано)`;
+}
+
 /** Путь текущего файла журнала. */
 export function logFilePath(dir: string = dataDir()): string {
   return resolve(dir, LOGS_DIR, LOG_FILE);
@@ -129,8 +159,8 @@ export function logFailure(
   const entry: LogEntry = {
     at: now.toISOString(),
     event: record.event,
-    message: redactTokenText(record.message),
-    ...(record.detail === undefined ? {} : { detail: redactTokenText(record.detail) }),
+    message: clampField(redactTokenText(record.message)),
+    ...(record.detail === undefined ? {} : { detail: clampField(redactTokenText(record.detail)) }),
     ...(record.childId === undefined ? {} : { childId: record.childId }),
     // Адрес приходит целиком, поэтому у него строка запроса сохраняется.
     ...(record.route === undefined ? {} : { route: redactTokenUrl(record.route) }),
@@ -318,6 +348,15 @@ export function readFailureLog(dir: string = dataDir(), query: LogQuery = {}): L
   const limit = query.limit ?? ADMIN_LOG_PAGE;
   const all = readFailureTail(dir);
   all.reverse();
+  // Файл лежит в порядке дозаписи, а не отметок: писать в него могут два
+  // процесса сразу (сервер и `scripts/backup.ts`, который замка каталога
+  // намеренно не берёт), и запись с более поздней отметкой попадает в файл
+  // раньше соседней. Курсор же ищет границу страницы одним проходом «пока
+  // `at` больше курсора» — на переставленной паре он останавливается раньше
+  // времени и отдаёт ту же запись страницу за страницей. Сортировка
+  // устойчивая: у записей одной отметки порядок дозаписи остаётся, и счётчик
+  // `#<сколько отдано>` в курсоре считает те же самые строки.
+  all.sort((left, right) => (left.at < right.at ? 1 : left.at > right.at ? -1 : 0));
   const list = all.filter((entry) => {
     if (query.event !== undefined && entry.event !== query.event) return false;
     if (query.childId !== undefined && entry.childId !== query.childId) return false;

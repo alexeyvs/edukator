@@ -662,6 +662,30 @@ describe('родители, приглашения и сессии', () => {
     });
   });
 
+  it('отключённость родителя решает погашающий `UPDATE`, а не снимок до него', () => {
+    // Между чтением приглашения и его погашением лежит `scrypt` — десятки
+    // миллисекунд, которых `disable` хватает с запасом. Решай отключённость
+    // снимок до KDF, погашение прошло бы по устаревшему состоянию; решай её
+    // возврат **после** удачного `UPDATE` — отказ зафиксировался бы вместе с
+    // погашением: ссылка сгорела бы, пароль остался бы незаданным, а нового
+    // приглашения отключённому родителю не выписать.
+    const db = open();
+    const parentId = createParent(db, 'mama@example.com', NOW);
+    const invite = issueParentInvite(db, parentId, NOW);
+    disableParent(db, parentId, NOW);
+
+    expect(redeemParentInvite(db, invite.token, PASSWORD, NOW)).toEqual({
+      ok: false,
+      reason: 'disabled',
+    });
+    // Ни сессии, ни пароля, ни погашенной ссылки: она заработает, как только
+    // родителя включат обратно.
+    expect(
+      db.prepare<[], { used_at: string | null }>('SELECT used_at FROM parent_invites').get()?.used_at,
+    ).toBeNull();
+    expect(db.prepare<[], { n: number }>('SELECT count(*) AS n FROM parent_sessions').get()?.n).toBe(0);
+  });
+
   it('отказывает по протухшему, чужому и уже погашенному приглашению', () => {
     const db = open();
     const parentId = createParent(db, 'mama@example.com', NOW);
@@ -2475,6 +2499,26 @@ describe('имперсонация оператора', () => {
     // Пятнадцать минут — долгий срок для «семья ушла»: обслуживаемость
     // проверяется на каждом обращении, а не только на старте.
     expect(resolveImpersonation(db, token, at(3 * 60_000))).toBeUndefined();
+  });
+
+  it('не заводит и не разрешает заход в семью отключённого родителя', () => {
+    const db = open();
+    const adminId = seedAdmin(db);
+    const childId = seedReadyChild(db);
+    const { token } = start(db, adminId, childId);
+    expect(resolveImpersonation(db, token, at(60_000))).toBeDefined();
+
+    disableParent(db, `p-${childId}`, at(2 * 60_000));
+
+    // `npm run parent -- disable` — единственный рычаг «перестать обслуживать
+    // семью», и на заходе он обязан действовать так же, как на её собственном
+    // входе: иначе отключение семьи оставляло бы её открытой ровно тому пути,
+    // который её и показывает.
+    expect(resolveImpersonation(db, token, at(3 * 60_000))).toBeUndefined();
+    expect(startImpersonation(db, { adminId, childId, role: 'browser' }, at(4 * 60_000))).toEqual({
+      ok: false,
+      reason: 'no-child',
+    });
   });
 
   it('знает закрытый список ролей имперсонации', () => {

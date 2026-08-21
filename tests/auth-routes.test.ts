@@ -750,6 +750,30 @@ describe('маршруты входа', () => {
       expect(JSON.stringify(failures.records)).not.toContain('не тот пароль');
     });
 
+    it('пишет в журнал сломанный счётчик — один раз, а не на каждую попытку', async () => {
+      await parentWithPassword();
+      // Обычный отказ до поломки: он снимает защёлку, оставленную соседним
+      // тестом, — она процессная намеренно.
+      await login(EMAIL, 'не тот пароль');
+      control.exec('DROP TABLE login_attempts');
+
+      const first = await login();
+      const second = await login();
+
+      // Fail-closed: секрет верный, но счётчик не отвечает — вход закрыт.
+      expect(first.statusCode).toBe(503);
+      expect(second.statusCode).toBe(503);
+      // Без этой записи «вход недоступен у всех и до починки» не оставляло бы в
+      // журнале ничего: `login-lockout` сюда не относится (это не перебор), а
+      // `/api/health` строк `login_attempts` не читает вовсе.
+      const broken = failures.records.filter(
+        (record) => record.event === 'control-error' && record.message.includes('счётчик'),
+      );
+      expect(broken).toHaveLength(1);
+      expect(broken[0]?.detail).toContain('пароль родителя');
+      expect(failures.records.some((record) => record.event === 'login-lockout')).toBe(false);
+    });
+
     it('выход без cookie отвечает тем же, что и с ней: сессии наружу не видно', async () => {
       const response = await app.inject({
         method: 'POST',

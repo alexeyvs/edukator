@@ -124,7 +124,13 @@ function ParentArea({
   );
 }
 
-export function App({ authApi = browserAuthApi }: { authApi?: AuthApi } = {}) {
+/** Как часто проверяется, не вышел ли срок захода. Полоса считает тем же шагом. */
+const IMPERSONATION_TICK_MS = 30 * 1000;
+
+export function App({
+  authApi = browserAuthApi,
+  now = (): number => Date.now(),
+}: { authApi?: AuthApi; now?: () => number } = {}) {
   const [link, setLink] = useState<LinkPage | null>(() => readLinkPage(window.location.pathname));
   const [principal, setPrincipal] = useState<AuthState | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -157,9 +163,20 @@ export function App({ authApi = browserAuthApi }: { authApi?: AuthApi } = {}) {
   // состояние, а не только `kind`: для `both` важно, чья именно сессия
   // отказала и есть ли вторая, которую можно перечитать у `me`.
   const lastPrincipal = useRef<AuthState | undefined>(undefined);
+  // Часы захода. Отдельным состоянием: срок кончается сам по себе, без единого
+  // запроса, — и без тика экран остался бы чужим до следующего действия
+  // оператора.
+  const [tick, setTick] = useState(now);
+  // Заход кончился — по ответу сервера, а не по здешним часам.
+  const [impersonationEnded, setImpersonationEnded] = useState(false);
   useEffect(() => {
     if (principal !== null) lastPrincipal.current = principal;
   }, [principal]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setTick(now()), IMPERSONATION_TICK_MS);
+    return () => clearInterval(timer);
+  }, [now]);
 
   // Токен уходит из адресной строки сразу после загрузки: адрес попадает в
   // историю браузера, в заголовок вкладки и в `Referer` на любой внешней
@@ -281,6 +298,33 @@ export function App({ authApi = browserAuthApi }: { authApi?: AuthApi } = {}) {
 
   const route = appRoute({ link, pathname: window.location.pathname, principal });
 
+  // Срок захода стережётся здешними часами, а решает — сервер.
+  //
+  // Часы оператора могут отставать и спешить, а `expiresAt` считал сервер:
+  // поверив своим часам напрямую, экран выгонял бы из живого захода по чужому
+  // расхождению. Поэтому истёкший по здешним часам срок означает не «конец», а
+  // «переспроси»: `me` под живым заходом снова назовёт чужую семью (и заодно
+  // обновит `expiresAt`), а под кончившимся — уже собственного предъявителя
+  // оператора, и вот это и есть конец.
+  const expiresAt = 'impersonation' in route ? route.impersonation?.expiresAt : undefined;
+  useEffect(() => {
+    if (expiresAt === undefined || Date.parse(expiresAt) > tick) return;
+    let active = true;
+    authApi.me()
+      .then((who) => {
+        if (!active) return;
+        const still = 'impersonation' in who ? who.impersonation : undefined;
+        if (still === undefined) setImpersonationEnded(true);
+        else setPrincipal(who);
+      })
+      .catch(() => {
+        // Обрыв связи концом захода не считается: сервер не ответил ничего, а
+        // выгонять из чужой семьи по неотвеченному запросу значит показать
+        // конец, которого могло и не быть. Следующий тик переспросит.
+      });
+    return () => { active = false; };
+  }, [authApi, expiresAt, tick]);
+
   if (route.kind === 'link') {
     return route.page.kind === 'invite'
       ? <InviteScreen api={authApi} token={route.page.token} onSignedIn={finishLink} />
@@ -333,6 +377,28 @@ export function App({ authApi = browserAuthApi }: { authApi?: AuthApi } = {}) {
     return (
       <main className="run-state">
         <p className="home-error" role="alert">Это устройство подключено как контроллер доступа, а не как компьютер ученика.</p>
+      </main>
+    );
+  }
+
+  // Кончившийся заход — смена состояния, а не строчка в полосе.
+  //
+  // Срок кончается на сервере молча: `resolveImpersonation` просроченную строку
+  // уже не отдаёт, и разбор предъявителя падает на **собственные** cookie
+  // оператора — они живы, машина-то его. Экраны ниже с этого мгновения
+  // показывают его семью, а полоса поверх них продолжала бы называть чужую и
+  // подписывать кадр чужим именем: ровно то, ради чего она и заведена, но
+  // наоборот.
+  if (impersonationEnded) {
+    return (
+      <main className="run-state">
+        <p className="home-error" role="alert">
+          Срок захода в семью вышел. Экраны семьи показывали бы уже вашу
+          собственную, а не чужую.
+        </p>
+        <button type="button" onClick={() => { window.location.assign('/admin'); }}>
+          Вернуться в админку
+        </button>
       </main>
     );
   }

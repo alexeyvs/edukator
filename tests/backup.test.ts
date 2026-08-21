@@ -207,6 +207,33 @@ describe('снятие копии базы', () => {
     expect(statSync(join(dir, 'копия.db.failed')).size).toBeGreaterThan(0);
   });
 
+  it('не оставляет огрызок под именем годной копии, когда падает сам VACUUM', () => {
+    // Источник, испорченный **посередине**: `VACUUM INTO` открывает его без
+    // жалоб, создаёт файл цели и валится уже на чтении страниц. Огрызок под
+    // именем годной копии неотличим от исправной ни на глаз, ни для
+    // `[[ -d ... ]]` серверной половины деплоя — то есть восстановление по
+    // нему стёрло бы прогресс ребёнка.
+    const source = join(dir, 'рваная.db');
+    const db = new BetterSqlite3(source);
+    opened.push(db);
+    db.pragma('journal_mode = WAL');
+    db.exec('CREATE TABLE t (x TEXT)');
+    const insert = db.prepare('INSERT INTO t VALUES (?)');
+    for (let index = 0; index < 500; index += 1) insert.run('x'.repeat(200));
+    db.close();
+    const bytes = readFileSync(source);
+    bytes.fill(0xff, 8192, 24576);
+    writeFileSync(source, bytes);
+
+    const target = join(dir, 'копия.db');
+    expect(() => {
+      backupDatabase(source, target);
+    }).toThrow();
+
+    expect(existsSync(target)).toBe(false);
+    expect(existsSync(`${target}.failed`)).toBe(true);
+  });
+
   it('повтор после непрошедшей копии проходит, а не упирается в её файл', () => {
     const source = join(dir, 'чужая.db');
     const foreign = new BetterSqlite3(source);

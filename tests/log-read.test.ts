@@ -206,6 +206,33 @@ describe('страница журнала', () => {
     expect(second.nextBefore).toBeUndefined();
   });
 
+  it('не зацикливается на записях, легших в файл не по порядку отметок', () => {
+    // Писать в журнал могут два процесса сразу: `scripts/backup.ts` замка
+    // каталога намеренно не берёт. Порядок дозаписи тогда не совпадает с
+    // порядком отметок, а курсор ищет границу страницы одним проходом «пока
+    // `at` больше курсора» — на переставленной паре он остановился бы раньше
+    // времени и отдавал одну и ту же запись страницу за страницей, никогда не
+    // доходя до конца.
+    write(
+      line({ at: '2026-08-21T09:00:03.000Z', message: 'третья' })
+      + line({ at: '2026-08-21T09:00:05.000Z', message: 'пятая' })
+      + line({ at: '2026-08-21T09:00:01.000Z', message: 'первая' }),
+    );
+
+    const seen: string[] = [];
+    let before: string | undefined;
+    for (let page = 0; page < 5; page += 1) {
+      const current = readFailureLog(dir, {
+        limit: 1,
+        ...(before === undefined ? {} : { before }),
+      });
+      seen.push(...current.entries.map((entry) => entry.message));
+      if (current.nextBefore === undefined) break;
+      before = current.nextBefore;
+    }
+    expect(seen).toEqual(['пятая', 'третья', 'первая']);
+  });
+
   it('курсор без числа понимается как отметка времени', () => {
     seed();
     const page = readFailureLog(dir, { limit: 2, before: '2026-08-21T09:00:05.000Z' });

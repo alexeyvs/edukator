@@ -224,7 +224,7 @@ describe('контекст арендатора', () => {
       { method: 'POST', url: '/api/run/:id/finish', allow: ['browser'] },
       { method: 'POST', url: '/api/triage/start', allow: ['browser'] },
       { method: 'GET', url: '/api/triage/:id/next', allow: ['browser'], mutating: true },
-      { method: 'GET', url: '/api/integrity/:runId', allow: ['browser'] },
+      { method: 'GET', url: '/api/integrity/:runId', allow: ['browser'], mutating: true },
       { method: 'POST', url: '/api/integrity/:runId/retry/:itemId', allow: ['browser'] },
       { method: 'GET', url: '/api/boss/topics', allow: ['browser'] },
       { method: 'GET', url: '/api/boss/:id/state', allow: ['browser'] },

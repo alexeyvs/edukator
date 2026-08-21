@@ -610,6 +610,70 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: 'Выйти в админку' })).toBeInTheDocument();
   });
 
+  /** Ответ `me` для семьи под заходом; `expiresAt` уже в прошлом. */
+  function expiredImpersonation(): Principal {
+    return {
+      kind: 'parent',
+      email: 'чужой@example.org',
+      impersonation: {
+        adminEmail: 'оператор@example.com',
+        childName: 'Тимофей',
+        role: 'parent',
+        expiresAt: '2026-08-21T09:00:00.000Z',
+      },
+    };
+  }
+
+  it('на кончившемся заходе показывает его конец вместо экранов семьи', async () => {
+    // Сервер срок кончает молча: просроченную строку `resolveImpersonation` уже
+    // не отдаёт, и разбор предъявителя падает на **собственные** cookie
+    // оператора — они живы, машина его. Экраны семьи с этого мгновения
+    // показывают его семью, а полоса поверх них называла бы чужую: подпись
+    // кадра оказалась бы ложной ровно там, где заводилась ради правды.
+    vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(url.startsWith('/api/family')
+        ? { email: 'чужой@example.org', pinConfigured: false, children: [] }
+        : DASHBOARD),
+    })));
+
+    const me = vi.fn()
+      .mockResolvedValueOnce(expiredImpersonation())
+      // Переспрос: заход кончился, и сервер отвечает уже собственным
+      // предъявителем оператора.
+      .mockResolvedValue({ kind: 'parent', email: 'свой@example.org' });
+
+    render(<App authApi={authApi({ me })} now={() => Date.parse('2026-08-21T09:00:01.000Z')} />);
+
+    expect(await screen.findByText(/Срок захода в семью вышел/u)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Вернуться в админку' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Дети' })).toBeNull();
+    expect(screen.queryByText(/Чужая семья/u)).toBeNull();
+  });
+
+  it('не выгоняет из живого захода по разошедшимся часам оператора', async () => {
+    // `expiresAt` считал сервер, а часы машины оператора могут спешить.
+    // Поверив им, экран закрывал бы работающий заход по чужому расхождению,
+    // поэтому истёкший здесь срок означает «переспроси», а не «конец».
+    vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(url.startsWith('/api/family')
+        ? { email: 'чужой@example.org', pinConfigured: false, children: [] }
+        : DASHBOARD),
+    })));
+
+    // Сервер обоими ответами подтверждает: заход жив.
+    const me = vi.fn().mockResolvedValue(expiredImpersonation());
+
+    render(<App authApi={authApi({ me })} now={() => Date.parse('2026-08-21T09:00:01.000Z')} />);
+
+    expect(await screen.findByRole('heading', { name: 'Дети' })).toBeInTheDocument();
+    expect(screen.getByText(/Чужая семья/u)).toBeInTheDocument();
+    expect(screen.queryByText(/Срок захода в семью вышел/u)).toBeNull();
+  });
+
   it('оставляет «Выйти» родителю без захода', async () => {
     vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve({
       ok: true,

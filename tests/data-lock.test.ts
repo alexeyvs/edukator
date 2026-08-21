@@ -9,8 +9,9 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   acquireDataLock,
   DATA_LOCK_FILE,
@@ -19,6 +20,9 @@ import {
   processAlive,
   type DataLockRecord,
 } from '../server/data-lock.js';
+
+const projectRoot = resolve(import.meta.dirname, '..');
+const tsxCli = join(projectRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 
 describe('замок каталога данных', () => {
   let tempDir: string;
@@ -222,6 +226,54 @@ describe('замок каталога данных', () => {
 
     expect(() => acquireDataLock(dataDir, 'prefetch')).toThrow(/выглядит брошенным.*удалите/u);
     expect(holder()).toMatchObject({ pid: process.pid, owner: 'сервер', nonce: 'чужой' });
+  });
+
+  describe('снятие на смерть по сигналу', () => {
+    // Сценарий целиком в отдельном процессе: проверяется именно смерть от
+    // сигнала и код возврата, а мокнуть их в своём процессе нечем.
+    function runScenario(body: string): { status: number | null; signal: string | null } {
+      const script = join(tempDir, 'сценарий.ts');
+      writeFileSync(
+        script,
+        `import { acquireDataLock, releaseDataLockOnSignals } from ${JSON.stringify(
+          resolve(projectRoot, 'server/data-lock.ts'),
+        )};\n`
+          + `const lock = acquireDataLock(${JSON.stringify(dataDir)}, 'prefetch');\n`
+          + `releaseDataLockOnSignals(lock);\n`
+          + `${body}\n`
+          + `process.stdout.write('готов\\n');\n`
+          + `setTimeout(() => { process.exit(7); }, 4000);\n`,
+      );
+      const child = spawnSync(
+        process.execPath,
+        [
+          '-e',
+          `const { spawn } = require('node:child_process');`
+            + `const kid = spawn(${JSON.stringify(process.execPath)}, [${JSON.stringify(tsxCli)}, ${JSON.stringify(script)}], { stdio: ['ignore', 'pipe', 'inherit'] });`
+            + `kid.stdout.on('data', () => { kid.kill('SIGINT'); });`
+            + `kid.on('exit', (code, signal) => { process.stdout.write(JSON.stringify({ status: code, signal })); });`,
+        ],
+        { encoding: 'utf8', timeout: 30000 },
+      );
+      return JSON.parse(child.stdout) as { status: number | null; signal: string | null };
+    }
+
+    it('снимает замок и уносит процесс, даже когда на сигнал подписан ещё и `runChild`', () => {
+      // `runChild` подписывается на те же сигналы, пока жив потомок codex, и
+      // сам сигнал себе **не** досылает — считает, что это сделает
+      // подписавшийся раньше. Досланный синхронно сигнал попадал бы в ещё
+      // живой сторож libuv и приезжал в `emit` уже без слушателей, то есть не
+      // делал ничего: замок снят, а многочасовой прогрев продолжает жечь codex
+      // и суточную квоту, будто Ctrl-C и не было.
+      const second = `const own = () => { process.off('SIGINT', own); };\nprocess.on('SIGINT', own);`;
+      const exit = runScenario(second);
+
+      // Обёртка `tsx` переводит смерть по сигналу в код 130 — он такой же
+      // сигнальный, по нему cron и отличает Ctrl-C от отказа. Дожил бы процесс
+      // до собственного таймера — вернул бы 7.
+      expect(exit.signal ?? exit.status).toBe(130);
+      expect(existsSync(dataLockPath(dataDir))).toBe(false);
+    });
   });
 
   describe('живость владельца', () => {

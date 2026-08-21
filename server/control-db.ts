@@ -789,11 +789,11 @@ export function redeemParentInvite(
     return { ok: false, reason: 'weak-password' };
   }
   // Дешёвый отказ до KDF — только на том, что транзакция не решает: нет такой
-  // ссылки, нет такого родителя. Погашенность и срок проверяет сам `UPDATE`,
-  // иначе решение принималось бы по снимку, устаревшему к моменту записи.
-  const known = selectInvite(db, token);
-  if (known === undefined) return { ok: false, reason: 'unknown-token' };
-  if (known.disabled_at !== null) return { ok: false, reason: 'disabled' };
+  // ссылки. Погашенность, срок и отключённость родителя проверяет сам
+  // `UPDATE`, иначе решение принималось бы по снимку, устаревшему к моменту
+  // записи: между этим чтением и погашением лежит `scrypt` — десятки
+  // миллисекунд, которых `disable` хватает с запасом.
+  if (selectInvite(db, token) === undefined) return { ok: false, reason: 'unknown-token' };
 
   const passwordHash = hashSecret(password);
   const stamp = now.toISOString();
@@ -807,16 +807,24 @@ export function redeemParentInvite(
       .prepare(
         `UPDATE parent_invites SET used_at = ?
           WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?
-            AND ${INVITE_AFTER_CREDENTIALS}`,
+            AND ${INVITE_AFTER_CREDENTIALS}
+            AND EXISTS (SELECT 1 FROM parents p
+                         WHERE p.id = parent_invites.parent_id AND p.disabled_at IS NULL)`,
       )
       .run(stamp, tokenHash, stamp);
     if (consumed.changes === 0) {
       return { ok: false, reason: inviteFailure(selectInvite(db, token), now) ?? 'used' };
     }
 
+    // Отключённость проверяет сам `UPDATE`, а не строка после него. Возврат
+    // отказа **после** удачного погашения — обычный возврат, то есть
+    // транзакция фиксируется: приглашение сгорело бы, пароль остался бы
+    // незаданным, а нового приглашения отключённому родителю не выписать —
+    // единственный вход в учётную запись исчез бы от гонки с `disable`.
     const row = selectInvite(db, token);
-    if (row === undefined) return { ok: false, reason: 'unknown-token' };
-    if (row.disabled_at !== null) return { ok: false, reason: 'disabled' };
+    // Строки после удачного `UPDATE` не быть не может; если она всё же
+    // пропала, состояние непонятно — и здесь нужен откат, а не отказ.
+    if (row === undefined) throw new Error('Погашенное приглашение исчезло из управляющей базы');
 
     db.prepare('UPDATE parents SET password_hash = ?, credentials_changed_at = ? WHERE id = ?').run(
       passwordHash,
@@ -1558,8 +1566,11 @@ export function redeemDeviceInvite(
       return { ok: false, reason: deviceInviteFailure(selectDeviceInvite(db, token), now) ?? 'used' };
     }
 
+    // Как и у родительского приглашения: отказ после удачного погашения
+    // зафиксировал бы `claimed_at` вместе с токеном, которого никто не
+    // получил, — ссылка сгорела бы, а устройство осталось бы незаведённым.
     const row = selectDeviceInvite(db, token);
-    if (row === undefined) return { ok: false, reason: 'unknown-token' };
+    if (row === undefined) throw new Error('Погашенное приглашение устройства исчезло');
     return {
       ok: true,
       childId: row.child_id,
@@ -2457,7 +2468,15 @@ export function startImpersonation(
   const child = readChild(db, childId);
   // «Не тот ребёнок» и «нет такого» — один ответ: обслуживать `provisioning` и
   // выведенного нечем, а разница между ними оператору ничего не даёт.
-  if (child === undefined || !isChildServiceable(child)) return { ok: false, reason: 'no-child' };
+  //
+  // Отключённый родитель сюда же. Заход выдаёт предъявителя семьи в обход её
+  // собственного входа, и без этой строки `npm run parent -- disable` —
+  // единственный рычаг «перестать обслуживать семью» — переставал бы
+  // действовать ровно на том пути, который семью и показывает: обычный вход в
+  // неё уже отказан, а оператор входит как ни в чём не бывало.
+  if (child === undefined || !isChildServiceable(child) || isChildParentDisabled(db, childId)) {
+    return { ok: false, reason: 'no-child' };
+  }
 
   const token = createBearerToken();
   const stamp = now.toISOString();
@@ -2509,6 +2528,10 @@ export function resolveImpersonation(
   // продолжала бы показывать базу, которую больше не обслуживают.
   const child = readChild(db, row.child_id);
   if (child === undefined || !isChildServiceable(child)) return undefined;
+  // Отключение родителя посреди захода закрывает его так же, как вывод
+  // ребёнка: пятнадцать минут — долгий срок, а открытая вкладка иначе
+  // продолжала бы показывать семью, которую только что перестали обслуживать.
+  if (isChildParentDisabled(db, row.child_id)) return undefined;
 
   return {
     adminId: row.admin_id,

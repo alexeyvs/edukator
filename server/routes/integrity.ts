@@ -3,6 +3,7 @@ import type { IntegrityPublicStatus } from '../integrity.js';
 import { issuedTaskJson } from './task-json.js';
 import { MAX_ANSWER_LENGTH } from '../codex/prompt.js';
 import { ROUTE_ACCESS, failAuth, type TenantContextResolver } from './tenant-context.js';
+import { IntegrityError } from '../integrity-error.js';
 
 export interface IntegrityRoutesOptions {
   context: TenantContextResolver;
@@ -34,9 +35,15 @@ function unavailable(available: () => boolean, reply: FastifyReply): FastifyRepl
 }
 
 export function registerIntegrityRoutes(app: FastifyInstance, options: IntegrityRoutesOptions): void {
+  // `mutating`, хотя метод безопасный: `integrity.status` не читает, а
+  // подталкивает проверку — ставит `reviewing`, занимает слот codex и на
+  // зачтённой проверке закрывает сам забег (`finish`). Детская cookie
+  // `SameSite=Lax` уезжает и на переходе с чужой страницы, так что без
+  // подтверждённого источника этот адрес — способ чужими руками завершить
+  // занятие ребёнка и сжечь бюджет модели.
   app.get('/api/integrity/:runId', (request, reply) => {
     try {
-      const context = options.context(request, { allow: ROUTE_ACCESS.child });
+      const context = options.context(request, { allow: ROUTE_ACCESS.child, mutating: true });
       const stopped = unavailable(context.tenant.available, reply);
       if (stopped !== undefined) return stopped;
       const runId = pathId((request.params as { runId?: string }).runId);
@@ -77,11 +84,14 @@ export function registerIntegrityRoutes(app: FastifyInstance, options: Integrity
         context.tenant.integrity.retry(runId, itemId, answer, duration, hintUsed ?? false),
       ));
     } catch (error) {
-      try {
-        return failAuth(reply, error);
-      } catch {
-        return reply.code(409).send({ error: (error as Error).message });
+      // 409 — только отказ **по состоянию** проверки. Прежний общий `catch`
+      // уносил в него и внутреннюю поломку («задание исчезло», подменённый
+      // файл базы, отказ драйвера): её текст уезжал наружу обычным ответом, а
+      // сама она не попадала ни в обработчик ошибок, ни в журнал аварий.
+      if (error instanceof IntegrityError) {
+        return reply.code(409).send({ error: error.message, code: error.code });
       }
+      return failAuth(reply, error);
     }
   });
 }

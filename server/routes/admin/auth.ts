@@ -17,7 +17,7 @@
 import type { Database } from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { FailureLog } from '../../log.js';
-import { noteLoginLockout } from '../login-lockout.js';
+import { noteLoginCounter, noteLoginGate } from '../login-lockout.js';
 import {
   checkLoginGate,
   clearLoginFailures,
@@ -157,13 +157,16 @@ export function registerAdminAuthRoutes(
     };
     const email = normalizeEmail(body.email);
     const gate = checkLoginGate(control, target, now());
-    if (!gate.allowed) return refuseByGate(reply, gate);
+    if (!gate.allowed) {
+      noteLoginCounter(options.failures, target, gate);
+      return refuseByGate(reply, gate);
+    }
 
     const at = now();
     const result = email === undefined ? undefined : loginAdmin(control, email, body.password, at);
     if (result === undefined || !result.ok) {
       const counted = recordLoginFailure(control, target, at);
-      noteLoginLockout(options.failures, target, counted);
+      noteLoginGate(options.failures, target, counted);
       // Отказ виден в журнале действий только тогда, когда есть чей: строка
       // `admin_audit` называет оператора, и перебор несуществующих адресов
       // иначе давал бы кому угодно возможность писать в этот журнал.

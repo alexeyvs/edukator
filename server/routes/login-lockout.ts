@@ -24,14 +24,71 @@ const KIND_NAMES: Record<LoginTarget['kind'], string> = {
 };
 
 /**
- * Пишет `login-lockout`, если эта неудача и заперла вход. `unavailable` сюда не
- * попадает: сломанный счётчик — не перебор, и о нём говорит своя авария.
+ * Сломан ли счётчик прямо сейчас. Процессная защёлка, а не запись на каждый
+ * отказ: `checkLoginGate` и `recordLoginFailure` работают fail-closed, то есть
+ * при беде с `login_attempts` **каждая** попытка входа в любую из четырёх
+ * дверей вернёт `unavailable`. Строка на попытку выдавила бы из видимого
+ * хвоста журнала (`LOG_TAIL_BYTES`) всё остальное — то же рассуждение, что у
+ * `login-lockout` и у `/api/health`.
  */
-export function noteLoginLockout(
+let counterBroken = false;
+
+/**
+ * Записывает сломанный счётчик и возвращает `true`, если этим всё сказано.
+ *
+ * Отдельно от `login-lockout` не только по событию, но и по месту вызова:
+ * запрет живёт `LOGIN_LOCKOUT_MS`, и все попытки внутри паузы отказывает
+ * `checkLoginGate` **до** счётчика. Пиши он `login-lockout` — подбирающий
+ * получил бы строку на каждую попытку, то есть способ выдавить из хвоста
+ * журнала всё остальное. Поломка счётчика такого рычага не даёт: она либо
+ * есть, либо нет, и защёлка делает её одной записью.
+ */
+function noteCounterState(failures: FailureLog, target: LoginTarget, gate: LoginGate): boolean {
+  if (gate.reason !== 'unavailable') {
+    // Счётчик ответил — значит, работает: следующая беда с ним снова попадёт в
+    // журнал, иначе первая же поломка навсегда обесценила бы эту запись.
+    counterBroken = false;
+    return false;
+  }
+  if (counterBroken) return true;
+  counterBroken = true;
+  failures({
+    event: 'control-error',
+    message: 'счётчик неудачных входов недоступен: вход закрыт на всех дверях',
+    detail: `дверь: ${KIND_NAMES[target.kind]}`,
+  });
+  return true;
+}
+
+/**
+ * То же о счётчике, но на отказе **до** сверки секрета. `login-lockout` здесь
+ * не пишется никогда: сюда приходит каждая попытка внутри действующей паузы, а
+ * запись полагается ровно той, что предел и перешагнула.
+ */
+export function noteLoginCounter(
+  failures: FailureLog,
+  target: LoginTarget,
+  gate: LoginGate,
+): void {
+  noteCounterState(failures, target, gate);
+}
+
+/**
+ * Пишет `login-lockout`, если эта неудача и заперла вход, и `control-error`,
+ * если счётчик сломался.
+ *
+ * Сломанный счётчик — не перебор, и в `login-lockout` ему не место: он запирает
+ * **все четыре** двери разом и держится до починки, а `/api/health` его не
+ * видит вовсе — `validateControlSchema` строк `login_attempts` не читает. Без
+ * этой записи «вход недоступен у всех и навсегда» не оставляло бы в журнале
+ * ничего.
+ */
+export function noteLoginGate(
   failures: FailureLog,
   target: LoginTarget,
   counted: LoginGate,
 ): void {
+  if (noteCounterState(failures, target, counted)) return;
   if (counted.reason !== 'locked') return;
   // Названы те же ключи, по которым счётчик и считал: панель живых запретов на
   // главном экране показывает именно их, и запись, называющая присланную

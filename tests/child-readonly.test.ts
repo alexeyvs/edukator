@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import BetterSqlite3 from 'better-sqlite3';
@@ -114,6 +114,30 @@ describe('опенер детских баз для отчётов операт�
 
     expect(result.state).toBe('stale');
     expect(result.schemaVersion).toBe(SCHEMA_VERSION + 1);
+  });
+
+  it('не заводит спутников рядом с базой не той версии', () => {
+    // Детские базы живут под WAL, и соединение к ним — уже прикосновение:
+    // рядом появляется `-shm`, убрать который `readonly`-соединению нечем. То
+    // есть «не читаем и не трогаем» держалось бы на слове, а размер базы на
+    // главном экране оператора (он считает спутники) прыгал бы навсегда от
+    // одного захода в статистику.
+    const path = childDatabasePath(dir, SECOND);
+    const db = new BetterSqlite3(path);
+    try {
+      db.pragma('journal_mode = WAL');
+      db.exec('CREATE TABLE profile (id INTEGER PRIMARY KEY, name TEXT NOT NULL)');
+      db.pragma(`user_version = ${SCHEMA_VERSION - 1}`);
+    } finally {
+      db.close();
+    }
+
+    const result = readChildDatabase(dir, SECOND, () => 'нельзя');
+
+    expect(result.state).toBe('stale');
+    expect(result.schemaVersion).toBe(SCHEMA_VERSION - 1);
+    expect(existsSync(`${path}-shm`)).toBe(false);
+    expect(existsSync(`${path}-wal`)).toBe(false);
   });
 
   it('не мигрирует: `user_version` и содержимое базы после обхода те же', () => {

@@ -30,7 +30,7 @@ import {
   type LoginTarget,
 } from '../control-db.js';
 import type { FailureLog } from '../log.js';
-import { noteLoginLockout } from './login-lockout.js';
+import { noteLoginCounter, noteLoginGate } from './login-lockout.js';
 import {
   ADMIN_COOKIE,
   AUTH_MESSAGE,
@@ -253,6 +253,7 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
     const email = normalizeEmail(body.email);
     const gate = checkLoginGate(control, target, now());
     if (!gate.allowed) {
+      noteLoginCounter(options.failures, target, gate);
       const retryAfter = Math.max(1, Math.ceil(gate.retryAfterMs / 1000));
       // Сломанный счётчик — это 503: снаружи вход закрыт одинаково, но по коду
       // видно, что сервер неисправен, а не что кто-то перебирает пароли.
@@ -273,7 +274,7 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
       // тогда, когда их считать и нужно, — счётчик обязан быть fail-closed на
       // обоих концах.
       const counted = recordLoginFailure(control, target, now());
-      noteLoginLockout(options.failures, target, counted);
+      noteLoginGate(options.failures, target, counted);
       if (counted.reason === 'unavailable') {
         const retryAfter = Math.max(1, Math.ceil(counted.retryAfterMs / 1000));
         return reply.header('retry-after', retryAfter).code(503).send({
@@ -392,6 +393,7 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
       };
       const gate = checkLoginGate(control, target, now());
       if (!gate.allowed) {
+        noteLoginCounter(options.failures, target, gate);
         const retryAfter = Math.max(1, Math.ceil(gate.retryAfterMs / 1000));
         return reply.header('retry-after', retryAfter).code(gate.reason === 'unavailable' ? 503 : 429).send({
           error: gate.reason === 'unavailable'
@@ -401,7 +403,7 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
       }
       if (!verifyParentPassword(control, browser.parent.parentId, persona.password)) {
         const counted = recordLoginFailure(control, target, now());
-        noteLoginLockout(options.failures, target, counted);
+        noteLoginGate(options.failures, target, counted);
         if (counted.reason === 'unavailable') {
           const retryAfter = Math.max(1, Math.ceil(counted.retryAfterMs / 1000));
           return reply.header('retry-after', retryAfter).code(503).send({ error: 'Вход временно недоступен' });

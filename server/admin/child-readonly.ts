@@ -22,10 +22,40 @@
  * оператора без всей статистики из-за одного испорченного файла, то есть ровно
  * тогда, когда она нужнее всего.
  */
-import { existsSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { childDatabasePath } from '../control-db.js';
 import { SCHEMA_VERSION } from '../db.js';
+
+/**
+ * Версия схемы прямо из заголовка файла, без соединения.
+ *
+ * `PRAGMA user_version` дало бы то же число, но ценой открытия базы, а
+ * открытие — уже прикосновение: соединение к базе под WAL заводит рядом
+ * `-shm`, и убрать его `readonly`-соединению нечем. Обещание «базу со схемой не
+ * той версии обход **не** читает и **не** трогает» тогда держалось бы на слове:
+ * файлы рядом с ней появлялись бы всё равно, а размер базы на главном экране
+ * оператора (он считает спутники) прыгал бы от одного захода в статистику.
+ * `user_version` лежит в заголовке по смещению 60 четырьмя байтами
+ * big-endian — то же место у любой версии формата SQLite.
+ *
+ * `undefined` — «это вообще не база»: короткий файл или чужая подпись. Такой
+ * файл не «схема не та», а отказ, и называть его должен драйвер — у него для
+ * этого есть внятный текст, а у четырёх байт заголовка его нет.
+ */
+const SQLITE_MAGIC = 'SQLite format 3\0';
+
+function fileSchemaVersion(path: string): number | undefined {
+  const handle = openSync(path, 'r');
+  try {
+    const header = Buffer.alloc(64);
+    if (readSync(handle, header, 0, 64, 0) < 64) return undefined;
+    if (header.subarray(0, 16).toString('latin1') !== SQLITE_MAGIC) return undefined;
+    return header.readUInt32BE(60);
+  } finally {
+    closeSync(handle);
+  }
+}
 
 /** Что известно о базе до того, как её начали читать. */
 export interface ChildDatabaseMeta {
@@ -92,12 +122,20 @@ export function readChildDatabase<T>(
     throw new Error(`Базы ребёнка ${childId} нет`);
   }
 
+  // Версия узнаётся до соединения: базу не той версии обход обязан оставить
+  // ровно такой, какой нашёл, — вплоть до отсутствия спутников рядом с ней.
+  const schemaVersion = fileSchemaVersion(path);
+  // База новее приложения попадает сюда же: откатили версию — читать её
+  // нынешними запросами так же нельзя, и молчаливый нуль был бы враньём.
+  if (schemaVersion !== undefined && schemaVersion !== SCHEMA_VERSION) {
+    return { state: 'stale', childId, path, schemaVersion };
+  }
+
   const db = new Database(path, { fileMustExist: true, readonly: true });
   try {
+    // Не база — соединение скажет об этом само, и первым же запросом отчёта.
     const [row] = db.pragma('user_version') as [{ user_version: number }];
     const meta: ChildDatabaseMeta = { childId, path, schemaVersion: row.user_version };
-    // База новее приложения попадает сюда же: откатили версию — читать её
-    // нынешними запросами так же нельзя, и молчаливый нуль был бы враньём.
     if (meta.schemaVersion !== SCHEMA_VERSION) return { state: 'stale', ...meta };
     return { state: 'read', value: read(db, meta), ...meta };
   } finally {
