@@ -30,6 +30,10 @@ import {
   registerAdminOverviewRoutes,
   registerUnavailableAdminOverview,
 } from './routes/admin/overview.js';
+import {
+  registerAdminLogsRoutes,
+  registerUnavailableAdminLogs,
+} from './routes/admin/logs.js';
 import { registerFamilyRoutes, registerUnavailableFamily } from './routes/family.js';
 import { codexConcurrency, disputeConcurrency, type CodexConcurrency } from './codex/concurrency.js';
 import { createQuotedRunner } from './codex/quota.js';
@@ -416,6 +420,7 @@ export function buildServer(
         dataDir,
         ...(options.now === undefined ? {} : { now: options.now }),
       });
+      registerAdminLogsRoutes(app, { context: adminContext, dataDir });
       registerFamilyRoutes(app, {
         control,
         dataDir,
@@ -488,6 +493,7 @@ export function buildServer(
       registerUnavailableAuth(app, reason);
       registerUnavailableAdminAuth(app, reason);
       registerUnavailableAdminOverview(app, reason);
+      registerUnavailableAdminLogs(app, reason);
       registerUnavailableFamily(app, reason);
       registerUnavailableSession(app, reason);
       registerUnavailableRun(app, reason);
