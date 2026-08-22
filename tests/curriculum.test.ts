@@ -6,6 +6,7 @@ import type { Database } from 'better-sqlite3';
 import { openDatabase } from '../server/db.js';
 import {
   CURRICULUM_DIR,
+  assignServerTopicIds,
   loadCurriculum,
   parseCurriculumFile,
   syncTopicState,
@@ -27,7 +28,7 @@ function topic(overrides: Record<string, unknown> = {}): Record<string, unknown>
 }
 
 function file(topics: Record<string, unknown>[], subject = 'math'): Record<string, unknown> {
-  return { subject, topics };
+  return { subject, title: `Курс ${subject}`, grade: '7 класс', revision: 1, topics };
 }
 
 describe('карта тем', () => {
@@ -92,6 +93,19 @@ describe('карта тем', () => {
         'math.ratio',
         'math.percent',
       ]);
+    });
+
+    it('назначает новые стабильные ID сервером и переписывает связи', () => {
+      const proposed = parseCurriculumFile(
+        file([topic(), topic({ id: 'math.percent', prereqs: ['math.fractions-basic'] })]),
+        'ответ модели',
+      );
+      const tokens = ['server-one', 'server-two'];
+      const graph = assignServerTopicIds(proposed, () => tokens.shift() as string);
+
+      expect([...graph.byId.keys()]).toEqual(['math.server-one', 'math.server-two']);
+      expect(graph.byId.get('math.server-two')?.prereqs).toEqual(['math.server-one']);
+      expect(graph.byId.has('math.fractions-basic')).toBe(false);
     });
 
     it('читает каталог с несколькими предметами', () => {
@@ -179,13 +193,19 @@ describe('карта тем', () => {
       ).toThrow(/russian\.spelling/);
     });
 
-    it('отвергает файл, чей предмет не совпадает с его именем', () => {
-      // Иначе математика молча исчезает из планирования: файл прочитан,
-      // а темы в нём чужие, и старт лишь пишет предупреждение о пропаже карты.
-      writeSubject('math', file([topic({ id: 'russian.spelling', subject: 'russian' })], 'russian'));
+    it('определяет курс по содержимому, а не по произвольному имени файла', () => {
+      writeSubject('не-идентификатор', file([
+        topic({ id: 'science-7.cells', subject: 'science-7' }),
+      ], 'science-7'));
 
-      expect(() => loadCurriculum(tempDir)).toThrow(/math\.json/);
-      expect(() => loadCurriculum(tempDir)).toThrow(/russian/);
+      const graph = loadCurriculum(tempDir);
+      expect(graph.subjects).toEqual(['science-7']);
+      expect(graph.courses.get('science-7')).toMatchObject({
+        courseId: 'science-7',
+        title: 'Курс science-7',
+        grade: '7 класс',
+        revisionId: 1,
+      });
     });
 
     it('отвергает id темы с чужим пространством имён', () => {
@@ -269,9 +289,9 @@ describe('карта тем', () => {
       expect(() => loadCurriculum(join(tempDir, 'нет-каталога'))).toThrow(/нет-каталога/);
     });
 
-    it('отвергает частичную карту: обязательны все три предмета', () => {
+    it('принимает каталог с одним произвольным курсом без legacy allow-list', () => {
       writeSubject('math', file([topic()]));
-      expect(() => loadCurriculum(tempDir)).toThrow(/russian\.json.*не найдена/);
+      expect(loadCurriculum(tempDir).subjects).toEqual(['math']);
     });
   });
 

@@ -37,7 +37,7 @@ function readSubject(body: unknown): Subject {
   const value = typeof body === 'object' && body !== null && !Array.isArray(body)
     ? (body as Record<string, unknown>)['subject']
     : undefined;
-  if (typeof value !== 'string' || !SUBJECTS.includes(value as Subject)) {
+  if (typeof value !== 'string' || !(SUBJECTS as readonly string[]).includes(value)) {
     throw new BadRequest(`Поле subject должно быть одним из: ${SUBJECTS.join(', ')}`);
   }
   return value as Subject;

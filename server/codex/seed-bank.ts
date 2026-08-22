@@ -103,7 +103,7 @@ export function parseSeedBank(
   }
 
   const subject = raw['subject'];
-  if (typeof subject !== 'string' || !SUBJECTS.includes(subject as Subject)) {
+  if (typeof subject !== 'string' || !(SUBJECTS as readonly string[]).includes(subject)) {
     throw new Error(
       `Посевной банк ${source}: поле subject должно быть одним из ${SUBJECTS.join(', ')}, получено «${String(subject)}»`,
     );

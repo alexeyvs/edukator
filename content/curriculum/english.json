@@ -1,5 +1,8 @@
 {
   "subject": "english",
+  "title": "Английский язык",
+  "grade": "7 класс",
+  "revision": 1,
   "topics": [
     {
       "id": "english.classroom-language",

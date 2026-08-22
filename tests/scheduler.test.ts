@@ -329,7 +329,7 @@ describe('планировщик', () => {
     const graph = graphOf(topics);
     const states = stateMap(
       ...topics.map((item) =>
-        state(item.id, { mastery: { math: 0, russian: 0.5, english: 0.8 }[item.subject] }),
+        state(item.id, { mastery: { math: 0, russian: 0.5, english: 0.8 }[item.subject] ?? 0 }),
       ),
     );
 

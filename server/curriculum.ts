@@ -1,8 +1,9 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import type { Database } from 'better-sqlite3';
-import { SUBJECTS, type Subject } from './db.js';
+import { SUBJECT_TITLES, requireCourseId, type CourseId } from './db.js';
 import { describeSchemaErrors, schemaValidator } from './json-schema.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -25,7 +26,7 @@ export type AnswerFormat = (typeof ANSWER_FORMATS)[number];
 
 export interface Topic {
   id: string;
-  subject: Subject;
+  subject: CourseId;
   title: string;
   /** 0-3, вероятность встретиться на вступительном. */
   examWeight: number;
@@ -37,6 +38,13 @@ export interface Topic {
   promptSeed: string;
 }
 
+export interface CourseMetadata {
+  courseId: CourseId;
+  title: string;
+  grade: string;
+  revisionId: number | null;
+}
+
 export interface TopicGraph {
   /** Темы по `id`, в порядке объявления в файлах. */
   byId: Map<string, Topic>;
@@ -44,15 +52,16 @@ export interface TopicGraph {
   order: Topic[];
   /** Обратные рёбра: тема → темы, для которых она предпосылка. */
   dependents: Map<string, string[]>;
-  bySubject: Map<Subject, Topic[]>;
-  /** Предметы, карты которых удалось загрузить, в порядке `SUBJECTS`. */
-  subjects: Subject[];
+  bySubject: Map<CourseId, Topic[]>;
+  courses: Map<CourseId, CourseMetadata>;
+  /** Совместимое имя: курсы в порядке объявления. */
+  subjects: CourseId[];
 }
 
 /** Тема как она лежит в JSON: snake_case, ровно поля из схемы. */
 interface TopicJson {
   id: string;
-  subject: Subject;
+  subject: CourseId;
   title: string;
   exam_weight: number;
   difficulty: number;
@@ -62,7 +71,10 @@ interface TopicJson {
 }
 
 interface CurriculumJson {
-  subject: Subject;
+  subject: CourseId;
+  title?: string;
+  grade?: string;
+  revision?: number;
   topics: TopicJson[];
 }
 
@@ -98,7 +110,10 @@ export function toTopicJson(topic: Topic): TopicJson {
  * и циклы в `prereqs`. Цикл ловится обходом в глубину — он не проявляется ни в
  * схеме, ни в тестах на отдельную тему, а планировщик на нём зациклится.
  */
-export function buildTopicGraph(topics: Topic[]): TopicGraph {
+export function buildTopicGraph(
+  topics: Topic[],
+  courseMetadata: Iterable<CourseMetadata> = [],
+): TopicGraph {
   const byId = new Map<string, Topic>();
   for (const topic of topics) {
     if (byId.has(topic.id)) {
@@ -154,9 +169,27 @@ export function buildTopicGraph(topics: Topic[]): TopicGraph {
 
   for (const topic of topics) visit(topic.id);
 
-  const bySubject = new Map<Subject, Topic[]>();
+  const bySubject = new Map<CourseId, Topic[]>();
   for (const topic of topics) {
     bySubject.set(topic.subject, [...(bySubject.get(topic.subject) ?? []), topic]);
+  }
+
+  const courses = new Map<CourseId, CourseMetadata>();
+  for (const metadata of courseMetadata) {
+    if (courses.has(metadata.courseId)) {
+      throw new Error(`Карта тем: курс «${metadata.courseId}» объявлен дважды`);
+    }
+    courses.set(metadata.courseId, { ...metadata });
+  }
+  for (const courseId of bySubject.keys()) {
+    if (!courses.has(courseId)) {
+      courses.set(courseId, {
+        courseId,
+        title: SUBJECT_TITLES[courseId] ?? courseId,
+        grade: '',
+        revisionId: null,
+      });
+    }
   }
 
   return {
@@ -164,15 +197,42 @@ export function buildTopicGraph(topics: Topic[]): TopicGraph {
     order,
     dependents,
     bySubject,
-    subjects: SUBJECTS.filter((subject) => bySubject.has(subject)),
+    courses,
+    subjects: [...bySubject.keys()],
   };
+}
+
+/**
+ * Заменяет предложенные моделью локальные идентификаторы на ID, выданные
+ * сервером. Старые значения используются только для разрешения prereqs внутри
+ * одного ответа и никогда не становятся постоянной идентичностью темы.
+ */
+export function assignServerTopicIds(
+  graph: TopicGraph,
+  createToken: () => string = randomUUID,
+): TopicGraph {
+  const assigned = new Map<string, string>();
+  for (const topic of graph.byId.values()) {
+    const token = createToken();
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(token)) {
+      throw new Error(`Сервер выдал некорректный токен темы «${token}»`);
+    }
+    assigned.set(topic.id, `${topic.subject}.${token}`);
+  }
+
+  const topics = [...graph.byId.values()].map((topic): Topic => ({
+    ...topic,
+    id: assigned.get(topic.id) as string,
+    prereqs: topic.prereqs.map((id) => assigned.get(id) as string),
+  }));
+  return buildTopicGraph(topics, graph.courses.values());
 }
 
 /**
  * Проверяет содержимое одной карты тем по JSON Schema и строит граф.
  * `source` — имя файла или иной источник: попадает в текст ошибки, иначе
- * непонятно, какую из трёх карт чинить. `expected` — предмет, который карта
- * обязана объявлять (для файла это его имя).
+ * непонятно, какую карту чинить. `expected` — course ID, который карта обязана
+ * объявлять (используется для ответа модели; имя legacy-файла не проверяется).
  *
  * Схема требует и совпадения предмета с именем файла, и префикса `<subject>.`
  * в `id`, но выразить это в JSON Schema нельзя, поэтому проверки здесь.
@@ -180,7 +240,7 @@ export function buildTopicGraph(topics: Topic[]): TopicGraph {
 export function parseCurriculumFile(
   raw: unknown,
   source: string,
-  expected?: Subject,
+  expected?: CourseId,
 ): TopicGraph {
   const validate = schemaValidator<CurriculumJson>(CURRICULUM_SCHEMA_PATH);
   if (!validate(raw)) {
@@ -188,6 +248,7 @@ export function parseCurriculumFile(
       `Карта тем ${source} не соответствует схеме: ${describeSchemaErrors(validate.errors)}`,
     );
   }
+  requireCourseId(raw.subject, `Карта тем ${source}: subject`);
 
   // Иначе `math.json` с предметом «russian» проходит молча, и математика просто
   // исчезает из планирования: в графе её нет, а старт лишь пишет предупреждение.
@@ -212,11 +273,15 @@ export function parseCurriculumFile(
     }
   }
 
-  return buildTopicGraph(raw.topics.map(toTopic));
+  return buildTopicGraph(raw.topics.map(toTopic), [{
+    courseId: raw.subject,
+    title: raw.title ?? SUBJECT_TITLES[raw.subject] ?? raw.subject,
+    grade: raw.grade ?? '7 класс',
+    revisionId: raw.revision ?? 1,
+  }]);
 }
 
-function readCurriculumFile(dir: string, subject: Subject): Topic[] {
-  const path = join(dir, `${subject}.json`);
+function readCurriculumFile(path: string): TopicGraph {
   let text: string;
   try {
     text = readFileSync(path, 'utf8');
@@ -234,21 +299,42 @@ function readCurriculumFile(dir: string, subject: Subject): Topic[] {
     throw new Error(`Карта тем ${path} не разбирается как JSON: ${(error as Error).message}`);
   }
 
-  return [...parseCurriculumFile(parsed, path, subject).byId.values()];
+  return parseCurriculumFile(parsed, path);
 }
 
 /**
- * Загружает карты всех предметов из каталога и сшивает их в один граф.
- * После завершения сборки обязательны все три предмета: частичная карта молча
- * исключила бы часть экзамена из плана и прогноза.
+ * Обнаруживает все JSON-карты в каталоге и сшивает их в один граф. Legacy-курсы
+ * сохраняют привычный порядок, произвольные новые ID идут после них по алфавиту.
  */
 export function loadCurriculum(dir: string = CURRICULUM_DIR): TopicGraph {
   const topics: Topic[] = [];
-  for (const subject of SUBJECTS) {
-    topics.push(...readCurriculumFile(dir, subject));
+  const courses: CourseMetadata[] = [];
+  let entries: string[];
+  try {
+    entries = readdirSync(dir).filter((name) => name.endsWith('.json'));
+  } catch (error) {
+    throw new Error(`Каталог карт ${dir} не читается: ${(error as Error).message}`);
+  }
+  if (entries.length === 0) {
+    throw new Error(`Каталог карт ${dir} не содержит JSON-карт`);
+  }
+  const graphs = entries.map((entry) => readCurriculumFile(join(dir, entry)));
+  const legacyOrder = new Map(
+    Object.keys(SUBJECT_TITLES).map((courseId, index) => [courseId, index]),
+  );
+  graphs.sort((left, right) => {
+    const leftId = left.subjects[0] as string;
+    const rightId = right.subjects[0] as string;
+    const leftRank = legacyOrder.get(leftId) ?? Number.MAX_SAFE_INTEGER;
+    const rightRank = legacyOrder.get(rightId) ?? Number.MAX_SAFE_INTEGER;
+    return leftRank - rightRank || leftId.localeCompare(rightId);
+  });
+  for (const graph of graphs) {
+    topics.push(...graph.byId.values());
+    courses.push(...graph.courses.values());
   }
 
-  return buildTopicGraph(topics);
+  return buildTopicGraph(topics, courses);
 }
 
 export interface SyncResult {

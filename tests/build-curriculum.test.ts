@@ -62,7 +62,13 @@ function curriculum(subject: Subject, count: number): string {
     answer_format: 'number',
     prompt_seed: `Задания по теме номер ${index + 1}: спрашивай про счёт, пример формулировки «Вычисли 2 + 2».`,
   }));
-  return JSON.stringify({ subject, topics });
+  return JSON.stringify({
+    subject,
+    title: `Курс ${subject}`,
+    grade: '7 класс',
+    revision: 1,
+    topics,
+  });
 }
 
 const VALID_MATH = curriculum('math', 20);
@@ -179,8 +185,10 @@ describe('parseCurriculumAnswer', () => {
     const graph = parseCurriculumAnswer(VALID_MATH, 'math');
 
     expect(graph.byId.size).toBe(20);
-    expect(graph.byId.get('math.topic-1')?.title).toBe('Тема номер 1');
-    expect(graph.order[0]?.id).toBe('math.topic-1');
+    expect(graph.order[0]?.title).toBe('Тема номер 1');
+    expect(graph.order[0]?.id).toMatch(/^math\.[0-9a-f-]{36}$/u);
+    expect(graph.byId.has('math.topic-1')).toBe(false);
+    expect(graph.order[1]?.prereqs).toEqual([graph.order[0]?.id]);
     expect(graph.subjects).toEqual(['math']);
   });
 

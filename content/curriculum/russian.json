@@ -1,5 +1,8 @@
 {
   "subject": "russian",
+  "title": "Русский язык",
+  "grade": "7 класс",
+  "revision": 1,
   "topics": [
     {
       "id": "russian.fonetika-i-orfografiya",

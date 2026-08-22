@@ -1,15 +1,31 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://edukator.local/schemas/curriculum.json",
-  "title": "Карта тем предмета",
-  "description": "Содержимое одного файла content/curriculum/<subject>.json. Эта же схема передаётся codex через --output-schema, поэтому корень обязан быть объектом, а не массивом.",
+  "title": "Карта тем курса",
+  "description": "Содержимое одной legacy-карты курса. Имя файла не является идентификатором курса.",
   "type": "object",
   "additionalProperties": false,
   "required": ["subject", "topics"],
   "properties": {
     "subject": {
-      "description": "Предмет карты. Обязан совпадать с subject каждой темы и с именем файла.",
-      "enum": ["math", "russian", "english"]
+      "description": "Непрозрачный идентификатор курса; overall зарезервирован для общего прогноза.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "not": { "const": "overall" }
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "grade": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 50
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
     },
     "topics": {
       "type": "array",
@@ -35,10 +51,12 @@
         "id": {
           "description": "Стабильный идентификатор вида <subject>.<тема>; на него ссылаются topic_state, задания и попытки.",
           "type": "string",
-          "pattern": "^[a-z]+(\\.[a-z0-9-]+)+$"
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*\\.[a-z0-9-]+$"
         },
         "subject": {
-          "enum": ["math", "russian", "english"]
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "not": { "const": "overall" }
         },
         "title": {
           "description": "Название обычными словами: попадает в дашборд родителей.",
@@ -63,7 +81,7 @@
           "uniqueItems": true,
           "items": {
             "type": "string",
-            "pattern": "^[a-z]+(\\.[a-z0-9-]+)+$"
+            "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*\\.[a-z0-9-]+$"
           }
         },
         "answer_format": {

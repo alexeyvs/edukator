@@ -369,7 +369,7 @@ describe('база данных', () => {
     // рабочую базу, поэтому число прибито буквально и меняется только вместе с
     // новой ступенью и её тестом обновления.
     it('держит номер версии схемы', () => {
-      expect(SCHEMA_VERSION).toBe(18);
+      expect(SCHEMA_VERSION).toBe(19);
     });
 
     it('создаёт все тринадцать таблиц на пустой базе', () => {
@@ -1170,7 +1170,7 @@ describe('база данных', () => {
       const migrated = openDatabase(path);
       try {
         expect((migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version)
-          .toBe(18);
+          .toBe(19);
         expect(migrated.prepare('SELECT * FROM computer_access_override').all()).toEqual([]);
         expect(migrated.prepare('SELECT topic_id FROM topic_state').get())
           .toEqual({ topic_id: 'math.saved' });
@@ -1189,7 +1189,7 @@ describe('база данных', () => {
       const migrated = openDatabase(path);
       try {
         expect((migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version)
-          .toBe(18);
+          .toBe(19);
         expect(tableNames(migrated)).toEqual(expect.arrayContaining([
           'integrity_reviews', 'integrity_items',
         ]));
@@ -1198,7 +1198,7 @@ describe('база данных', () => {
       }
     });
 
-    it('мигрирует v17→v18, сохраняет активные наборы и фиксирует прежний штраф', () => {
+    it('мигрирует v17→v19, сохраняя всю цепочку и фиксируя прежний штраф', () => {
       const path = join(tempDir, 'v17.db');
       const legacy = openDatabase(path);
       seedTopic(legacy, 'math.saved');
@@ -1212,10 +1212,49 @@ describe('база данных', () => {
       const historical = insertTask.get({ status: 'used', question: 'Историческая выдача' })?.id;
       const boss = insertTask.get({ status: 'boss_reserved', question: 'Подготовленный босс' })?.id;
       const lesson = insertTask.get({ status: 'lesson_reserved', question: 'Подготовленный урок' })?.id;
+      const runId = Number(legacy.prepare(
+        `INSERT INTO runs (subject, kind, topic_id, started_at, total, correct)
+         VALUES ('math', 'run', 'math.saved', '2026-08-01T10:00:00.000Z', 1, 1)`,
+      ).run().lastInsertRowid);
       legacy.prepare(
-        `INSERT INTO attempts (task_id, topic_id, answer, is_correct, hint_used)
-         VALUES (?, 'math.saved', '4', 1, 1)`,
-      ).run(historical);
+        `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct, hint_used)
+         VALUES (?, 'math.saved', ?, '4', 1, 1)`,
+      ).run(historical, runId);
+      const attemptId = Number(legacy.prepare<[number], { id: number }>(
+        "SELECT id FROM attempts WHERE task_id = ?",
+      ).get(historical as number)!.id);
+      const disputeId = Number(legacy.prepare(
+        "INSERT INTO disputes (attempt_id, status) VALUES (?, 'open')",
+      ).run(attemptId).lastInsertRowid);
+      legacy.prepare(
+        "INSERT INTO forecast_snapshots (subject, score, band) VALUES ('math', 4, 0.2)",
+      ).run();
+      const batchId = Number(legacy.prepare(
+        "INSERT INTO boss_batches (topic_id, status) VALUES ('math.saved', 'ready')",
+      ).run().lastInsertRowid);
+      legacy.prepare('INSERT INTO boss_tasks (batch_id, task_id, position) VALUES (?, ?, 1)')
+        .run(batchId, boss);
+      const materialId = Number(legacy.prepare(
+        `INSERT INTO learning_materials
+           (subject, topic_id, status, recommendation_reason, mastery_before)
+         VALUES ('math', 'math.saved', 'preparing', 'Пробел', 0.2)`,
+      ).run().lastInsertRowid);
+      legacy.prepare('INSERT INTO learning_tasks (material_id, task_id, position) VALUES (?, ?, 1)')
+        .run(materialId, lesson);
+      const lessonRunId = Number(legacy.prepare(
+        `INSERT INTO runs (subject, kind, topic_id, started_at, lives_remaining)
+         VALUES ('math', 'lesson', 'math.saved', '2026-08-01T11:00:00.000Z', NULL)`,
+      ).run().lastInsertRowid);
+      legacy.prepare('INSERT INTO learning_runs (material_id, run_id, attempt_number) VALUES (?, ?, 1)')
+        .run(materialId, lessonRunId);
+      legacy.prepare(
+        "INSERT INTO integrity_reviews (run_id, status) VALUES (?, 'passed')",
+      ).run(runId);
+      legacy.prepare(
+        `INSERT INTO integrity_items
+           (run_id, task_id, attempt_id, status, decision, confidence, reviewed_by)
+         VALUES (?, ?, ?, 'approved', 'meaningful', 0.9, 'heuristic')`,
+      ).run(runId, historical, attemptId);
       legacy.exec(`
         ALTER TABLE task_bank DROP COLUMN word_tiles;
         ALTER TABLE task_bank DROP COLUMN deep_hint;
@@ -1227,7 +1266,7 @@ describe('база данных', () => {
       const migrated = openDatabase(path);
       try {
         expect((migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version)
-          .toBe(18);
+          .toBe(19);
         expect(migrated.prepare('SELECT id, status FROM task_bank ORDER BY id').all()).toEqual([
           { id: issued, status: 'used' },
           { id: historical, status: 'used' },
@@ -1240,6 +1279,25 @@ describe('база данных', () => {
         expect(migrated.prepare(
           'SELECT word_tiles, deep_hint FROM task_bank WHERE id = ?',
         ).get(issued)).toEqual({ word_tiles: null, deep_hint: null });
+        expect(migrated.prepare('SELECT id FROM runs WHERE id IN (?, ?) ORDER BY id').all(
+          runId, lessonRunId,
+        )).toHaveLength(2);
+        expect(migrated.prepare('SELECT id FROM disputes WHERE id = ?').get(disputeId))
+          .toEqual({ id: disputeId });
+        expect(migrated.prepare('SELECT id FROM boss_batches WHERE id = ?').get(batchId))
+          .toEqual({ id: batchId });
+        expect(migrated.prepare('SELECT id FROM learning_materials WHERE id = ?').get(materialId))
+          .toEqual({ id: materialId });
+        expect(migrated.prepare('SELECT run_id FROM integrity_reviews WHERE run_id = ?').get(runId))
+          .toEqual({ run_id: runId });
+        expect(migrated.prepare('SELECT subject FROM forecast_snapshots').get())
+          .toEqual({ subject: 'math' });
+        expect(migrated.pragma('foreign_key_check')).toEqual([]);
+        for (const table of ['runs', 'task_bank', 'boss_batches', 'learning_materials']) {
+          expect(migrated.prepare(`PRAGMA table_info(${table})`).all()).toEqual(
+            expect.arrayContaining([expect.objectContaining({ name: 'course_revision_id' })]),
+          );
+        }
         expect([pending, valid]).not.toContain(undefined);
       } finally {
         migrated.close();
@@ -1856,18 +1914,23 @@ describe('база данных', () => {
       ).toThrow(/CHECK constraint failed/);
     });
 
-    it('отвергает неизвестный предмет в забеге и снимке прогноза', () => {
+    it('принимает произвольный course ID и резервирует overall для общего прогноза', () => {
       const topicId = seedTopic(db);
 
       expect(() =>
         db
           .prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
-          .run('химия', topicId, '2026-08-07T10:00:00Z'),
-      ).toThrow(/CHECK constraint failed/);
+          .run('chemistry-8', topicId, '2026-08-07T10:00:00Z'),
+      ).not.toThrow();
       expect(() =>
         db
           .prepare('INSERT INTO forecast_snapshots (subject, score, band) VALUES (?, ?, ?)')
-          .run('химия', 4.0, 0.3),
+          .run('chemistry-8', 4.0, 0.3),
+      ).not.toThrow();
+      expect(() =>
+        db
+          .prepare('INSERT INTO runs (subject, topic_id, started_at) VALUES (?, ?, ?)')
+          .run('overall', topicId, '2026-08-07T10:00:00Z'),
       ).toThrow(/CHECK constraint failed/);
     });
 

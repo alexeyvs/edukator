@@ -1,5 +1,8 @@
 {
   "subject": "math",
+  "title": "Математика",
+  "grade": "7 класс",
+  "revision": 1,
   "topics": [
     {
       "id": "math.natural-number-operations",

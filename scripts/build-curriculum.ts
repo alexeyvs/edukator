@@ -21,6 +21,7 @@ import { writeFileAtomic } from '../server/atomic-write.js';
 import {
   CURRICULUM_DIR,
   CURRICULUM_SCHEMA_PATH,
+  assignServerTopicIds,
   parseCurriculumFile,
   toTopicJson,
   type TopicGraph,
@@ -157,13 +158,21 @@ export function parseCurriculumAnswer(raw: string, subject: Subject): TopicGraph
   const parsed = parseCodexAnswer(raw);
   const graph = parseCurriculumFile(parsed, `ответ codex (${subject})`, subject);
   assertExpectedShape(graph);
-  return graph;
+  return assignServerTopicIds(graph);
 }
 
 /** Сериализует карту в тот же вид, что лежит в репозитории. */
 export function formatCurriculum(subject: Subject, graph: TopicGraph): string {
   const topics = [...graph.byId.values()].map(toTopicJson);
-  return `${JSON.stringify({ subject, topics }, null, 2)}\n`;
+  const metadata = graph.courses.get(subject);
+  if (metadata === undefined) throw new Error(`Карта не содержит курс «${subject}»`);
+  return `${JSON.stringify({
+    subject,
+    title: metadata.title,
+    grade: metadata.grade,
+    revision: metadata.revisionId ?? 1,
+    topics,
+  }, null, 2)}\n`;
 }
 
 export interface BuildCurriculumOptions {
@@ -323,7 +332,7 @@ export function parseArgs(argv: string[]): CliArgs {
   }
 
   const subject = values.get('subject');
-  if (subject === undefined || !SUBJECTS.includes(subject as Subject)) {
+  if (subject === undefined || !(SUBJECTS as readonly string[]).includes(subject)) {
     throw new Error(`--subject обязателен и должен быть одним из: ${SUBJECTS.join(', ')}`);
   }
 

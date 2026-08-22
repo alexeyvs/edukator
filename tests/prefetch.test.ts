@@ -500,10 +500,11 @@ describe('prefetch', () => {
       await expect(run({ cycles: 0 })).rejects.toThrow(/положительным целым/u);
     });
 
-    it('падает на непрочитанной карте тем', async () => {
+    it('продолжает с оставшимися курсами, если legacy-карта удалена', async () => {
       rmSync(join(curriculumDir, 'russian.json'));
 
-      await expect(run()).rejects.toThrow(/не найдена/u);
+      const result = await run({ topics: 2 });
+      expect(result.cycles[0]?.topics).toEqual(['math.a', 'english.a']);
     });
   });
 

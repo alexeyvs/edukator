@@ -99,7 +99,7 @@ function readStart(body: unknown): { subject: Subject; topicId?: string } {
   const value = typeof body === 'object' && body !== null && !Array.isArray(body)
     ? (body as Record<string, unknown>)['subject']
     : undefined;
-  if (typeof value !== 'string' || !SUBJECTS.includes(value as Subject)) {
+  if (typeof value !== 'string' || !(SUBJECTS as readonly string[]).includes(value)) {
     throw new BadRequest(`Поле subject должно быть одним из: ${SUBJECTS.join(', ')}`);
   }
   const topicId = (body as Record<string, unknown>)['topic_id'];
@@ -121,7 +121,9 @@ function readPathId(value: string): number {
 /** Тело плана: активные забеги, рекомендации, прогнозы и состояние тем. */
 function planResponse(db: Database, graph: TopicGraph, at: Date): Record<string, unknown> {
   const calibrations = readSubjectCalibrations(db, graph);
-  const triaged = new Set(SUBJECTS.filter((subject) => calibrations.get(subject)?.triagePassed));
+  const triaged = new Set<Subject>(
+    SUBJECTS.filter((subject) => calibrations.get(subject)?.triagePassed),
+  );
   const gate = readDailyGate(db, at);
   const active = activeRunCards(db, graph, triaged);
   const planned = planFromDatabase(

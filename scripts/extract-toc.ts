@@ -363,7 +363,7 @@ export function parseArgs(argv: string[]): CliArgs {
   }
 
   const subject = values.get('subject');
-  if (subject === undefined || !SUBJECTS.includes(subject as Subject)) {
+  if (subject === undefined || !(SUBJECTS as readonly string[]).includes(subject)) {
     throw new Error(`--subject обязателен и должен быть одним из: ${SUBJECTS.join(', ')}`);
   }
   const pdfPath = values.get('pdf');

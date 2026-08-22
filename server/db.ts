@@ -5,7 +5,7 @@ import { LEARNING_TASK_COUNT } from './learning-constants.js';
  * Версия схемы. Хранится в `PRAGMA user_version`; миграция сравнивает её со
  * своей и пропускает работу, если база уже актуальна.
  */
-export const SCHEMA_VERSION = 18;
+export const SCHEMA_VERSION = 19;
 
 /** Таблицы приложения. Тесты сверяют состав базы именно с этим списком. */
 export const TABLES = [
@@ -26,9 +26,30 @@ export const TABLES = [
   'integrity_items',
 ] as const;
 
-/** Предметы подготовки. Ограничение уровня схемы, чтобы опечатка не дошла до отчётов. */
+/** Legacy-курсы, импортируемые при первом запуске каталога. Это не allow-list. */
 export const SUBJECTS = ['math', 'russian', 'english'] as const;
-export type Subject = (typeof SUBJECTS)[number];
+/** Непрозрачный идентификатор курса. `overall` зарезервирован общим прогнозом. */
+export type CourseId = string;
+/** @deprecated Совместимое имя до перевода всех API с поля `subject`. */
+export type Subject = CourseId;
+
+export const RESERVED_COURSE_IDS = new Set<CourseId>(['overall']);
+const COURSE_ID_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/u;
+
+export function isCourseId(value: unknown): value is CourseId {
+  return (
+    typeof value === 'string' &&
+    COURSE_ID_PATTERN.test(value) &&
+    !RESERVED_COURSE_IDS.has(value)
+  );
+}
+
+export function requireCourseId(value: unknown, label = 'course ID'): CourseId {
+  if (!isCourseId(value)) {
+    throw new Error(`${label}: ожидается корректный идентификатор курса, отличный от «overall»`);
+  }
+  return value;
+}
 
 /**
  * Человеческие названия предметов для промптов. Живут рядом с `SUBJECTS`, а не
@@ -74,8 +95,7 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
  * одной колонке сравнивались бы как попало.
  */
 const NOW_ISO = `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
-
-const subjectCheck = SUBJECTS.map((subject) => `'${subject}'`).join(', ');
+const legacySubjectCheck = SUBJECTS.map((subject) => `'${subject}'`).join(', ');
 
 const CORE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS profile (
@@ -117,6 +137,7 @@ const CORE_SCHEMA = `
     -- Отпечаток формулировки (questionFingerprint): по нему банк отсекает
     -- повторы внутри темы.
     fingerprint TEXT   NOT NULL DEFAULT '',
+    course_revision_id INTEGER,
     issued_run_id INTEGER REFERENCES runs (id) ON DELETE SET NULL,
     created_at TEXT    NOT NULL DEFAULT (${NOW_ISO})
   );
@@ -131,7 +152,8 @@ const CORE_SCHEMA = `
 
   CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY,
-    subject     TEXT    NOT NULL CHECK (subject IN (${subjectCheck})),
+    subject     TEXT    NOT NULL CHECK (length(subject) > 0 AND subject <> 'overall'),
+    course_revision_id INTEGER,
     kind        TEXT    NOT NULL DEFAULT 'run' CHECK (kind IN ('run', 'triage', 'boss', 'lesson')),
     -- Тема, ради которой забег начат. Внутри забега задания могут относиться к
     -- другим темам предмета; это поле читают планировочные эвристики
@@ -209,7 +231,7 @@ const CORE_SCHEMA = `
 
   CREATE TABLE IF NOT EXISTS forecast_snapshots (
     id         INTEGER PRIMARY KEY,
-    subject    TEXT    NOT NULL CHECK (subject IN (${subjectCheck}, 'overall')),
+    subject    TEXT    NOT NULL CHECK (length(subject) > 0),
     score      REAL    NOT NULL CHECK (score BETWEEN 2 AND 5),
     band       REAL    NOT NULL DEFAULT 0 CHECK (band BETWEEN 0 AND 1),
     created_at TEXT    NOT NULL DEFAULT (${NOW_ISO})
@@ -222,6 +244,7 @@ const CORE_SCHEMA = `
     id           INTEGER PRIMARY KEY,
     topic_id     TEXT    NOT NULL REFERENCES topic_state (topic_id) ON DELETE CASCADE,
     run_id       INTEGER REFERENCES runs (id) ON DELETE SET NULL,
+    course_revision_id INTEGER,
     status       TEXT    NOT NULL DEFAULT 'preparing'
                          CHECK (status IN ('preparing', 'ready', 'active', 'won', 'lost', 'failed')),
     created_at   TEXT    NOT NULL DEFAULT (${NOW_ISO}),
@@ -246,8 +269,9 @@ const CORE_SCHEMA = `
 const LEARNING_SCHEMA = `
   CREATE TABLE IF NOT EXISTS learning_materials (
     id                    INTEGER PRIMARY KEY,
-    subject               TEXT    NOT NULL CHECK (subject IN (${subjectCheck})),
+    subject               TEXT    NOT NULL CHECK (length(subject) > 0 AND subject <> 'overall'),
     topic_id              TEXT    NOT NULL REFERENCES topic_state (topic_id) ON DELETE CASCADE,
+    course_revision_id    INTEGER,
     status                TEXT    NOT NULL DEFAULT 'preparing'
                                 CHECK (status IN ('preparing', 'ready', 'active', 'passed', 'failed', 'rejected', 'retired')),
     content               TEXT,
@@ -380,6 +404,28 @@ const LEARNING_SCHEMA = `
   END;
 `;
 
+const REVISION_SCOPE_INDEXES_SCHEMA = `
+  DROP INDEX IF EXISTS task_bank_fingerprint;
+  CREATE UNIQUE INDEX task_bank_fingerprint
+    ON task_bank (topic_id, COALESCE(course_revision_id, -1), fingerprint)
+    WHERE fingerprint <> '';
+
+  DROP INDEX IF EXISTS boss_batches_live_topic;
+  CREATE UNIQUE INDEX boss_batches_live_topic
+    ON boss_batches (topic_id, COALESCE(course_revision_id, -1))
+    WHERE status IN ('preparing', 'ready', 'active');
+
+  DROP INDEX IF EXISTS learning_materials_live_topic;
+  CREATE UNIQUE INDEX learning_materials_live_topic
+    ON learning_materials (topic_id, COALESCE(course_revision_id, -1))
+    WHERE status IN ('preparing', 'ready', 'active');
+
+  DROP INDEX IF EXISTS learning_materials_live_subject;
+  CREATE UNIQUE INDEX learning_materials_live_subject
+    ON learning_materials (subject, COALESCE(course_revision_id, -1))
+    WHERE status IN ('preparing', 'ready', 'active');
+`;
+
 /** Ручная команда доступа хранится одной строкой и живёт не дольше суток. */
 const COMPUTER_ACCESS_SCHEMA = `
   CREATE TABLE IF NOT EXISTS computer_access_override (
@@ -469,6 +515,7 @@ export function migrate(db: Database.Database): void {
       }
       db.exec(CORE_SCHEMA);
       db.exec(LEARNING_SCHEMA);
+      db.exec(REVISION_SCOPE_INDEXES_SCHEMA);
       db.exec(COMPUTER_ACCESS_SCHEMA);
       db.exec(INTEGRITY_SCHEMA);
       db.pragma(`user_version = ${SCHEMA_VERSION}`);
@@ -524,7 +571,7 @@ export function migrate(db: Database.Database): void {
         ALTER TABLE forecast_snapshots RENAME TO forecast_snapshots_v2;
         CREATE TABLE forecast_snapshots (
           id         INTEGER PRIMARY KEY,
-          subject    TEXT    NOT NULL CHECK (subject IN (${subjectCheck}, 'overall')),
+          subject    TEXT    NOT NULL CHECK (subject IN (${legacySubjectCheck}, 'overall')),
           score      REAL    NOT NULL CHECK (score BETWEEN 2 AND 5),
           band       REAL    NOT NULL DEFAULT 0 CHECK (band BETWEEN 0 AND 1),
           created_at TEXT    NOT NULL DEFAULT (${NOW_ISO})
@@ -962,6 +1009,127 @@ export function migrate(db: Database.Database): void {
       `);
     }
 
+    if (version <= 18) {
+      // v19 снимает allow-list курсов и одновременно добавляет область редакции.
+      // Связанный граф таблиц переносится целиком: переименование только runs
+      // оставило бы внешние ключи дочерних таблиц привязанными к runs_v18.
+      // Старые версии создавали integrity-таблицы только в общем финале
+      // миграции; v19 переносит их раньше этого финала, поэтому материализуем
+      // актуальную v18-форму перед переименованием.
+      db.exec(LEARNING_SCHEMA);
+      db.exec(INTEGRITY_SCHEMA);
+      db.exec(`
+        PRAGMA defer_foreign_keys = ON;
+
+        DROP TRIGGER IF EXISTS runs_correct_not_above_total_insert;
+        DROP TRIGGER IF EXISTS runs_correct_not_above_total_update;
+        DROP TRIGGER IF EXISTS attempts_topic_consistency_insert;
+        DROP TRIGGER IF EXISTS attempts_topic_consistency_update;
+        DROP TRIGGER IF EXISTS learning_material_ready_at_insert;
+        DROP TRIGGER IF EXISTS learning_material_ready_at_update;
+        DROP TRIGGER IF EXISTS learning_material_ready_at_immutable;
+        DROP TRIGGER IF EXISTS learning_tasks_consistency_insert;
+        DROP TRIGGER IF EXISTS learning_tasks_consistency_update;
+        DROP TRIGGER IF EXISTS learning_run_consistency_insert;
+        DROP TRIGGER IF EXISTS learning_run_consistency_update;
+        DROP TRIGGER IF EXISTS learning_material_runs_consistency_update;
+        DROP TRIGGER IF EXISTS learning_material_ready_complete;
+        DROP TRIGGER IF EXISTS learning_tasks_complete_delete;
+        DROP INDEX IF EXISTS task_bank_queue;
+        DROP INDEX IF EXISTS task_bank_fingerprint;
+        DROP INDEX IF EXISTS attempts_by_topic;
+        DROP INDEX IF EXISTS forecast_by_subject;
+        DROP INDEX IF EXISTS boss_batches_live_topic;
+        DROP INDEX IF EXISTS learning_materials_live_topic;
+        DROP INDEX IF EXISTS learning_materials_live_subject;
+        DROP INDEX IF EXISTS integrity_items_by_run;
+
+        ALTER TABLE integrity_items RENAME TO integrity_items_v18;
+        ALTER TABLE integrity_reviews RENAME TO integrity_reviews_v18;
+        ALTER TABLE learning_tasks RENAME TO learning_tasks_v18;
+        ALTER TABLE learning_runs RENAME TO learning_runs_v18;
+        ALTER TABLE boss_tasks RENAME TO boss_tasks_v18;
+        ALTER TABLE disputes RENAME TO disputes_v18;
+        ALTER TABLE attempts RENAME TO attempts_v18;
+        ALTER TABLE learning_materials RENAME TO learning_materials_v18;
+        ALTER TABLE boss_batches RENAME TO boss_batches_v18;
+        ALTER TABLE task_bank RENAME TO task_bank_v18;
+        ALTER TABLE runs RENAME TO runs_v18;
+        ALTER TABLE forecast_snapshots RENAME TO forecast_snapshots_v18;
+      `);
+
+      db.exec(CORE_SCHEMA);
+      db.exec(LEARNING_SCHEMA);
+      db.exec(INTEGRITY_SCHEMA);
+      db.exec(`
+        INSERT INTO runs
+          (id, subject, course_revision_id, kind, topic_id, started_at, finished_at,
+           summary, total, correct, lives_remaining, retry_task_id)
+          SELECT id, subject, NULL, kind, topic_id, started_at, finished_at,
+                 summary, total, correct, lives_remaining, retry_task_id FROM runs_v18;
+        INSERT INTO task_bank
+          (id, topic_id, question, instruction, material, material_format, choices,
+           word_tiles, answer, accept, hint, deep_hint, explain, joke, difficulty,
+           status, fingerprint, course_revision_id, issued_run_id, created_at)
+          SELECT id, topic_id, question, instruction, material, material_format, choices,
+                 word_tiles, answer, accept, hint, deep_hint, explain, joke, difficulty,
+                 status, fingerprint, NULL, issued_run_id, created_at FROM task_bank_v18;
+        INSERT INTO attempts
+          (id, task_id, topic_id, run_id, answer, is_correct, hint_used,
+           hint_penalty_applied, duration_ms, is_current, life_charged,
+           affects_progress, created_at)
+          SELECT id, task_id, topic_id, run_id, answer, is_correct, hint_used,
+                 hint_penalty_applied, duration_ms, is_current, life_charged,
+                 affects_progress, created_at FROM attempts_v18;
+        INSERT INTO disputes (id, attempt_id, status, resolution, created_at, resolved_at)
+          SELECT id, attempt_id, status, resolution, created_at, resolved_at FROM disputes_v18;
+        INSERT INTO forecast_snapshots (id, subject, score, band, created_at)
+          SELECT id, subject, score, band, created_at FROM forecast_snapshots_v18;
+        INSERT INTO boss_batches
+          (id, topic_id, run_id, course_revision_id, status, created_at, activated_at, finished_at)
+          SELECT id, topic_id, run_id, NULL, status, created_at, activated_at, finished_at
+            FROM boss_batches_v18;
+        INSERT INTO boss_tasks (batch_id, task_id, position)
+          SELECT batch_id, task_id, position FROM boss_tasks_v18;
+        INSERT INTO learning_materials
+          (id, subject, topic_id, course_revision_id, status, content,
+           recommendation_reason, estimated_minutes, mastery_before, created_at,
+           updated_at, ready_at, opened_at, finished_at)
+          SELECT id, subject, topic_id, NULL, status, content,
+                 recommendation_reason, estimated_minutes, mastery_before, created_at,
+                 updated_at, ready_at, opened_at, finished_at FROM learning_materials_v18;
+        INSERT INTO learning_runs (material_id, run_id, attempt_number)
+          SELECT material_id, run_id, attempt_number FROM learning_runs_v18;
+        INSERT INTO learning_tasks (material_id, task_id, position)
+          SELECT material_id, task_id, position FROM learning_tasks_v18;
+        INSERT INTO integrity_reviews (run_id, status, last_error, created_at, updated_at)
+          SELECT run_id, status, last_error, created_at, updated_at FROM integrity_reviews_v18;
+        INSERT INTO integrity_items
+          (id, run_id, task_id, attempt_id, status, decision, confidence, reason,
+           reviewed_by, created_at, updated_at)
+          SELECT id, run_id, task_id, attempt_id, status, decision, confidence, reason,
+                 reviewed_by, created_at, updated_at FROM integrity_items_v18;
+
+        DROP TABLE integrity_items_v18;
+        DROP TABLE integrity_reviews_v18;
+        DROP TABLE learning_tasks_v18;
+        DROP TABLE learning_runs_v18;
+        DROP TABLE boss_tasks_v18;
+        DROP TABLE disputes_v18;
+        DROP TABLE attempts_v18;
+        DROP TABLE learning_materials_v18;
+        DROP TABLE boss_batches_v18;
+        DROP TABLE task_bank_v18;
+        DROP TABLE runs_v18;
+        DROP TABLE forecast_snapshots_v18;
+      `);
+
+      const [foreignKeyProblem] = db.pragma('foreign_key_check') as unknown[];
+      if (foreignKeyProblem !== undefined) {
+        throw new Error('Миграция динамических курсов нарушила целостность внешних ключей');
+      }
+    }
+
     // CREATE TRIGGER IF NOT EXISTS не обновляет текст уже установленного
     // триггера, поэтому v14 должна получить и новые инварианты, и русские ошибки.
     db.exec(`
@@ -977,6 +1145,7 @@ export function migrate(db: Database.Database): void {
       DROP TRIGGER IF EXISTS learning_tasks_complete_delete;
     `);
     db.exec(LEARNING_SCHEMA);
+    db.exec(REVISION_SCOPE_INDEXES_SCHEMA);
     db.exec(COMPUTER_ACCESS_SCHEMA);
     db.exec(INTEGRITY_SCHEMA);
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
@@ -986,14 +1155,14 @@ export function migrate(db: Database.Database): void {
 const REQUIRED_COLUMNS: Readonly<Record<(typeof TABLES)[number], readonly string[]>> = {
   profile: ['id', 'name', 'interests', 'exam_date', 'partner_name'],
   topic_state: ['topic_id', 'mastery', 'confidence', 'attempts', 'last_seen', 'next_review', 'closed_at'],
-  task_bank: ['id', 'topic_id', 'question', 'instruction', 'material', 'material_format', 'choices', 'word_tiles', 'answer', 'accept', 'hint', 'deep_hint', 'explain', 'joke', 'difficulty', 'status', 'fingerprint', 'issued_run_id', 'created_at'],
-  runs: ['id', 'subject', 'kind', 'topic_id', 'started_at', 'finished_at', 'summary', 'total', 'correct', 'lives_remaining', 'retry_task_id'],
+  task_bank: ['id', 'topic_id', 'question', 'instruction', 'material', 'material_format', 'choices', 'word_tiles', 'answer', 'accept', 'hint', 'deep_hint', 'explain', 'joke', 'difficulty', 'status', 'fingerprint', 'course_revision_id', 'issued_run_id', 'created_at'],
+  runs: ['id', 'subject', 'course_revision_id', 'kind', 'topic_id', 'started_at', 'finished_at', 'summary', 'total', 'correct', 'lives_remaining', 'retry_task_id'],
   attempts: ['id', 'task_id', 'topic_id', 'run_id', 'answer', 'is_correct', 'hint_used', 'hint_penalty_applied', 'duration_ms', 'is_current', 'life_charged', 'affects_progress', 'created_at'],
   disputes: ['id', 'attempt_id', 'status', 'resolution', 'created_at', 'resolved_at'],
   forecast_snapshots: ['id', 'subject', 'score', 'band', 'created_at'],
-  boss_batches: ['id', 'topic_id', 'run_id', 'status', 'created_at', 'activated_at', 'finished_at'],
+  boss_batches: ['id', 'topic_id', 'run_id', 'course_revision_id', 'status', 'created_at', 'activated_at', 'finished_at'],
   boss_tasks: ['batch_id', 'task_id', 'position'],
-  learning_materials: ['id', 'subject', 'topic_id', 'status', 'content', 'recommendation_reason', 'estimated_minutes', 'mastery_before', 'created_at', 'updated_at', 'ready_at', 'opened_at', 'finished_at'],
+  learning_materials: ['id', 'subject', 'topic_id', 'course_revision_id', 'status', 'content', 'recommendation_reason', 'estimated_minutes', 'mastery_before', 'created_at', 'updated_at', 'ready_at', 'opened_at', 'finished_at'],
   learning_runs: ['material_id', 'run_id', 'attempt_number'],
   learning_tasks: ['material_id', 'task_id', 'position'],
   computer_access_override: ['id', 'mode', 'changed_at', 'expires_at'],
@@ -1027,7 +1196,8 @@ const REQUIRED_AUXILIARY_OBJECTS = [
 ] as const;
 
 const REQUIRED_SCHEMA_FRAGMENTS = {
-  runs: ["'run', 'triage', 'boss', 'lesson'"],
+  runs: ["'run', 'triage', 'boss', 'lesson'", "subject <> 'overall'"],
+  forecast_snapshots: ['length(subject) > 0'],
   task_bank: ["'pending', 'valid', 'rejected', 'used', 'boss_reserved', 'lesson_reserved'"],
   boss_batches: ["'preparing', 'ready', 'active', 'won', 'lost', 'failed'"],
   boss_tasks: ['position BETWEEN 1 AND 5', 'UNIQUE (task_id)'],

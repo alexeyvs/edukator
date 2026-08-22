@@ -95,20 +95,21 @@ describe('codexOutputSchema', () => {
     }
   });
 
-  it('сохраняет структуру, перечисления и обязательные поля', () => {
+  it('сохраняет структуру, строковый course ID и обязательные поля', () => {
     const source = JSON.parse(readFileSync(CURRICULUM_SCHEMA_PATH, 'utf8')) as unknown;
     const stripped = codexOutputSchema(source) as {
       type: string;
       additionalProperties: boolean;
       required: string[];
-      properties: { subject: { enum: string[] }; topics: { items: { $ref: string } } };
+      properties: { subject: { type: string; enum?: string[] }; topics: { items: { $ref: string } } };
       $defs: { topic: { required: string[] } };
     };
 
     expect(stripped.type).toBe('object');
     expect(stripped.additionalProperties).toBe(false);
     expect(stripped.required).toEqual(['subject', 'topics']);
-    expect(stripped.properties.subject.enum).toEqual(['math', 'russian', 'english']);
+    expect(stripped.properties.subject.type).toBe('string');
+    expect(stripped.properties.subject.enum).toBeUndefined();
     expect(stripped.properties.topics.items.$ref).toBe('#/$defs/topic');
     expect(stripped.$defs.topic.required).toContain('prompt_seed');
   });
