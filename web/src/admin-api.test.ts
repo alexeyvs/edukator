@@ -132,4 +132,33 @@ describe('адаптер админского API', () => {
       message: 'Сводка недоступна: нет управляющей базы',
     });
   });
+
+  it('собирает JSON, multipart и status-запросы каталога курсов', async () => {
+    const fetch = vi.fn().mockResolvedValue(response({}));
+    vi.stubGlobal('fetch', fetch);
+    const file = new File(['%PDF-1.7'], 'учебник.pdf', { type: 'application/pdf' });
+
+    await browserAdminApi.createCourse({ id: 'history-6', title: 'История', grade: '6 класс' });
+    await browserAdminApi.updateCourse('history/6', {
+      revisionId: 2, editVersion: 3, title: 'История мира', grade: '6 класс',
+    });
+    await browserAdminApi.uploadCourseSource('history/6', file);
+    await browserAdminApi.courseSourceStatus('history/6', 9);
+    await browserAdminApi.retryCourseSource('history/6', 9, { fromPage: 2, toPage: 4 });
+    await browserAdminApi.deleteCourseSource('history/6', 9);
+
+    expect(fetch.mock.calls[0]).toEqual(['/api/admin/courses', expect.objectContaining({
+      method: 'POST', body: '{"id":"history-6","title":"История","grade":"6 класс"}',
+    })]);
+    expect(fetch.mock.calls[1]).toEqual(['/api/admin/courses/history%2F6', expect.objectContaining({ method: 'PATCH' })]);
+    expect(fetch.mock.calls[2]?.[0]).toBe('/api/admin/courses/history%2F6/sources');
+    expect((fetch.mock.calls[2]?.[1] as RequestInit).body).toBeInstanceOf(FormData);
+    expect(fetch.mock.calls.slice(3)).toEqual([
+      ['/api/admin/courses/history%2F6/sources/9/status'],
+      ['/api/admin/courses/history%2F6/sources/9/retry', expect.objectContaining({
+        method: 'POST', body: '{"fromPage":2,"toPage":4}',
+      })],
+      ['/api/admin/courses/history%2F6/sources/9', { method: 'DELETE' }],
+    ]);
+  });
 });

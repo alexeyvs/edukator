@@ -275,19 +275,19 @@ Checkbox-пункты ниже описывают только автомати�
 
 ### Task 12: Добавить каталог курсов в админский UI
 
-- [ ] расширить `web/src/admin-api.ts` типами и вызовами courses/drafts/sources,
+- [x] расширить `web/src/admin-api.ts` типами и вызовами courses/drafts/sources,
   не вводя закрытых union по предметам
-- [ ] добавить навигацию и экраны списка, создания курса, метаданных и редакций
+- [x] добавить навигацию и экраны списка, создания курса, метаданных и редакций
   в `web/src/admin/AdminApp.tsx`
-- [ ] реализовать ручной редактор тем/зависимостей и preview страниц-оснований с
+- [x] реализовать ручной редактор тем/зависимостей и preview страниц-оснований с
   явным различием draft/published/archived
-- [ ] реализовать upload PDF, прогресс OCR/drafting, диагностику страниц,
+- [x] реализовать upload PDF, прогресс OCR/drafting, диагностику страниц,
   retry и блокировку публикации до готовности
-- [ ] добавить подтверждение publish/archive и корректно обрабатывать 401, 409,
+- [x] добавить подтверждение publish/archive и корректно обрабатывать 401, 409,
   сетевой отказ и повторный запрос
-- [ ] написать Testing Library тесты всех состояний, конфликтов и недоступности;
+- [x] написать Testing Library тесты всех состояний, конфликтов и недоступности;
   обновить CSS без предметно-зависимых селекторов
-- [ ] запустить `npx vitest run web/src/admin/AdminApp.test.tsx web/src/admin/AdminCoursesScreen.test.tsx web/src/admin/AdminCourseEditor.test.tsx web/src/admin-api.test.ts` и `npm run typecheck` и `npm run build:web`
+- [x] запустить `npx vitest run web/src/admin/AdminApp.test.tsx web/src/admin/AdminCoursesScreen.test.tsx web/src/admin/AdminCourseEditor.test.tsx web/src/admin-api.test.ts` и `npm run typecheck` и `npm run build:web`
 
 ### Task 13: Добавить назначения родителю и динамические карточки ученику
 

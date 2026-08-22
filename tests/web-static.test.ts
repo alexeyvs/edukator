@@ -47,6 +47,8 @@ describe('статика интерфейса', () => {
       '/',
       '/parents',
       '/admin',
+      '/admin/courses',
+      '/admin/course/:courseId',
       '/admin/child/:childId',
       '/join/:token',
       '/invite/:token',
@@ -56,6 +58,7 @@ describe('статика интерфейса', () => {
       // такому адресу ребёнок открывает приложение.
       const url = page
         .replace(':token', 'токен-приглашения')
+        .replace(':courseId', 'history-6')
         .replace(':childId', 'a1b2c3d4');
       const response = await app.inject({ method: 'GET', url });
 

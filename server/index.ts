@@ -129,6 +129,8 @@ export const APP_PAGES = [
   '/',
   '/parents',
   '/admin',
+  '/admin/courses',
+  '/admin/course/:courseId',
   '/admin/child/:childId',
   '/join/:token',
   '/invite/:token',

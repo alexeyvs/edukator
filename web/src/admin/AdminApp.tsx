@@ -4,44 +4,54 @@ import { AdminHomeScreen, type AdminSignOutReason } from './AdminHomeScreen';
 import { AdminLoginScreen } from './AdminLoginScreen';
 import { AdminLogsScreen } from './AdminLogsScreen';
 import { AdminStatsScreen } from './AdminStatsScreen';
+import { AdminCoursesScreen } from './AdminCoursesScreen';
+import { AdminCourseEditor } from './AdminCourseEditor';
 import type { AdminApi } from '../admin-api';
 
 const CHILD_PREFIX = '/admin/child/';
+const COURSE_PREFIX = '/admin/course/';
 
-/** Какой экран админки открыт. Адресом выбирается только карточка ребёнка. */
+/** Какой экран админки открыт. Карточки ребёнка и курса имеют прямые адреса. */
 export type AdminPage =
   | { kind: 'home' }
   | { kind: 'logs' }
   | { kind: 'stats' }
+  | { kind: 'courses' }
+  | { kind: 'course'; courseId: string }
   | { kind: 'child'; childId: string };
 
 /**
  * Экран по адресу страницы.
  *
- * Адрес есть ровно у карточки ребёнка, и это не непоследовательность: сводка и
- * лента открываются от начала работы, а ссылку на карточку хочется уметь
- * отправить себе же — она и есть то, что называют в жалобе. Отсюда же
- * `/admin/child/:childId` в `APP_PAGES`: без него ссылка уходила бы в 404
- * статики.
+ * Адрес есть у сущностей, к которым оператор возвращается напрямую: карточки
+ * ребёнка, списка курсов и редактора курса. Сводка, статистика и лента аварий
+ * остаются короткими режимами работы от корня. Эти адреса также перечислены в
+ * `APP_PAGES`, иначе обновление страницы уходило бы в 404 статики.
  *
  * Битая процентная последовательность — не карточка, а главный экран:
  * `decodeURIComponent` бросает на ней `URIError`, а зовётся разбор из
  * инициализатора состояния, где вылет означает белый экран без единого слова.
  */
 export function readAdminPage(pathname: string): AdminPage {
-  if (!pathname.startsWith(CHILD_PREFIX)) return { kind: 'home' };
-  let childId: string;
+  if (pathname === '/admin/courses') return { kind: 'courses' };
+  const prefix = pathname.startsWith(CHILD_PREFIX) ? CHILD_PREFIX
+    : pathname.startsWith(COURSE_PREFIX) ? COURSE_PREFIX : undefined;
+  if (prefix === undefined) return { kind: 'home' };
+  let id: string;
   try {
-    childId = decodeURIComponent(pathname.slice(CHILD_PREFIX.length));
+    id = decodeURIComponent(pathname.slice(prefix.length));
   } catch {
     return { kind: 'home' };
   }
-  return childId === '' || childId.includes('/') ? { kind: 'home' } : { kind: 'child', childId };
+  if (id === '' || id.includes('/')) return { kind: 'home' };
+  return prefix === CHILD_PREFIX ? { kind: 'child', childId: id } : { kind: 'course', courseId: id };
 }
 
-/** Адрес открытого экрана: в истории браузера остаётся только карточка. */
+/** Адрес открытого экрана: в истории браузера остаются карточки и каталог. */
 function pathOf(page: AdminPage): string {
-  return page.kind === 'child' ? `${CHILD_PREFIX}${encodeURIComponent(page.childId)}` : '/admin';
+  if (page.kind === 'child') return `${CHILD_PREFIX}${encodeURIComponent(page.childId)}`;
+  if (page.kind === 'course') return `${COURSE_PREFIX}${encodeURIComponent(page.courseId)}`;
+  return page.kind === 'courses' ? '/admin/courses' : '/admin';
 }
 
 /**
@@ -140,6 +150,27 @@ export function AdminApp({ api }: { api?: AdminApi } = {}) {
       />
     );
   }
+  if (page.kind === 'courses') {
+    return (
+      <AdminCoursesScreen
+        {...(api === undefined ? {} : { api })}
+        onBack={() => go({ kind: 'home' })}
+        onCourse={(courseId) => go({ kind: 'course', courseId })}
+        onSignedOut={signedOut}
+      />
+    );
+  }
+  if (page.kind === 'course') {
+    return (
+      <AdminCourseEditor
+        key={page.courseId}
+        {...(api === undefined ? {} : { api })}
+        courseId={page.courseId}
+        onBack={() => go({ kind: 'courses' })}
+        onSignedOut={signedOut}
+      />
+    );
+  }
   if (page.kind === 'child') {
     return (
       <AdminChildScreen
@@ -161,6 +192,7 @@ export function AdminApp({ api }: { api?: AdminApi } = {}) {
       onChild={(childId) => go({ kind: 'child', childId })}
       onLogs={() => go({ kind: 'logs' })}
       onStats={() => go({ kind: 'stats' })}
+      onCourses={() => go({ kind: 'courses' })}
       onSignedOut={signedOut}
     />
   );

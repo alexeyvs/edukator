@@ -396,6 +396,7 @@ export interface AdminHomeScreenProps {
   onLogs?: () => void;
   /** Перейти к статистике: слой 2 обходит все детские базы и потому не здесь. */
   onStats?: () => void;
+  onCourses?: () => void;
   /** Открыть карточку ребёнка: слой 3 живёт своим адресом. */
   onChild?: (childId: string) => void;
   /** Сессии оператора больше нет: решение показать вход принимает корень. */
@@ -421,6 +422,7 @@ export function AdminHomeScreen({
   onChild,
   onLogs,
   onStats,
+  onCourses,
   onSignedOut,
   onEntered = (): void => { window.location.assign('/'); },
 }: AdminHomeScreenProps) {
@@ -504,6 +506,9 @@ export function AdminHomeScreen({
         </div>
         {onStats !== undefined && (
           <button type="button" onClick={onStats}>Статистика</button>
+        )}
+        {onCourses !== undefined && (
+          <button type="button" onClick={onCourses}>Курсы</button>
         )}
         {onLogs !== undefined && (
           <button type="button" onClick={onLogs}>Аварии</button>

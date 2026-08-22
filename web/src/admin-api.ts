@@ -364,6 +364,96 @@ export interface AdminParentInvite {
   expiresAt: string;
 }
 
+export type AdminCourseStatus = 'draft' | 'published' | 'archived';
+export type AdminRevisionStatus = 'draft' | 'published';
+export type AdminAnswerFormat = 'number' | 'text' | 'choice';
+
+export interface AdminCourse {
+  id: string;
+  title: string;
+  grade: string;
+  status: AdminCourseStatus;
+  activeRevisionId: number | null;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+}
+
+export interface AdminCourseRevision {
+  id: number;
+  courseId: string;
+  revisionNumber: number;
+  status: AdminRevisionStatus;
+  basedOnRevisionId: number | null;
+  editVersion: number;
+  publishedBy: string | null;
+  createdAt: string;
+  publishedAt: string | null;
+}
+
+export interface AdminCourseTopic {
+  id: string;
+  title: string;
+  examWeight: number;
+  difficulty: number;
+  prereqs: string[];
+  answerFormat: AdminAnswerFormat;
+  promptSeed: string;
+  active: boolean;
+  position: number;
+}
+
+export interface AdminDraftTopicInput extends Omit<AdminCourseTopic, 'id' | 'position'> {
+  id?: string;
+  clientId?: string;
+}
+
+export interface AdminCourseCard {
+  course: AdminCourse;
+  revisions: Array<AdminCourseRevision & { topics: AdminCourseTopic[] }>;
+}
+
+export interface AdminCourseDraft {
+  revision: AdminCourseRevision;
+  topics: AdminCourseTopic[];
+}
+
+export interface AdminCourseSource {
+  id: number;
+  courseId: string;
+  revisionId: number;
+  uploadName: string;
+  sha256: string;
+  pageCount: number | null;
+  status: 'uploaded' | 'processing' | 'ready' | 'failed';
+  error: string | null;
+  createdAt: string;
+}
+
+export interface AdminSourceProcessingStatus {
+  sourceId: number;
+  sourceStatus: string;
+  job: {
+    id: number;
+    status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+    attempts: number;
+    currentPage: number | null;
+    error: string | null;
+  } | null;
+  pages: Array<{ pageNumber: number; status: string; error: string | null }>;
+}
+
+export interface AdminCourseBuildStatus {
+  revisionId: number;
+  job: {
+    id: number;
+    status: string;
+    attempts: number;
+    error: string | null;
+    updatedAt: string;
+  } | null;
+}
+
 export interface AdminApi {
   login(email: string, password: string): Promise<{ kind: 'admin'; email: string }>;
   logout(): Promise<void>;
@@ -383,6 +473,36 @@ export interface AdminApi {
   issueParentInvite(parentId: string): Promise<{ invite: AdminParentInvite }>;
   /** Пароль, поставленный самим оператором. Отдельное действие в журнале. */
   setParentPassword(parentId: string, password: string): Promise<{ parent: AdminParentView }>;
+  courses(): Promise<{ courses: AdminCourse[] }>;
+  createCourse(input: { id?: string; title: string; grade: string }): Promise<{
+    course: AdminCourse; draft: AdminCourseRevision;
+  }>;
+  course(courseId: string): Promise<AdminCourseCard>;
+  updateCourse(courseId: string, input: {
+    revisionId: number; editVersion: number; title: string; grade: string;
+  }): Promise<{ course: AdminCourse; revision: AdminCourseRevision }>;
+  courseDraft(courseId: string): Promise<AdminCourseDraft>;
+  createCourseDraft(courseId: string, activeRevisionId: number): Promise<AdminCourseDraft>;
+  replaceCourseTopics(courseId: string, input: {
+    revisionId: number; editVersion: number; topics: AdminDraftTopicInput[];
+  }): Promise<AdminCourseDraft>;
+  publishCourse(courseId: string, input: {
+    revisionId: number; editVersion: number; idempotencyKey: string;
+  }): Promise<{ revision: AdminCourseRevision; idempotent: boolean }>;
+  archiveCourse(courseId: string): Promise<{ course: AdminCourse; idempotent: boolean }>;
+  courseSources(courseId: string): Promise<{ sources: AdminCourseSource[] }>;
+  uploadCourseSource(courseId: string, file: File): Promise<{
+    source: AdminCourseSource; duplicate: boolean;
+  }>;
+  deleteCourseSource(courseId: string, sourceId: number): Promise<{ source: AdminCourseSource }>;
+  courseSourceStatus(courseId: string, sourceId: number): Promise<AdminSourceProcessingStatus>;
+  retryCourseSource(courseId: string, sourceId: number, range?: {
+    fromPage?: number; toPage?: number;
+  }): Promise<{ jobId: number; status: AdminSourceProcessingStatus }>;
+  courseBuild(courseId: string): Promise<AdminCourseBuildStatus>;
+  buildCourseDraft(courseId: string, input: {
+    revisionId: number; editVersion: number;
+  }): Promise<{ revisionId: number; status: string }>;
 }
 
 /**
@@ -430,6 +550,18 @@ export function adminStatsUrl(refresh = false): string {
  */
 export function adminChildUrl(childId: string): string {
   return `/api/admin/children/${encodeURIComponent(childId)}`;
+}
+
+function adminCourseUrl(courseId: string, suffix = ''): string {
+  return `/api/admin/courses/${encodeURIComponent(courseId)}${suffix}`;
+}
+
+function adminJson<T>(
+  url: string,
+  init: RequestInit | undefined,
+  fallback: string,
+): Promise<T> {
+  return requestJson<T>(url, init, fallback, adminError, ADMIN_POLICY);
 }
 
 export const browserAdminApi: AdminApi = {
@@ -515,5 +647,61 @@ export const browserAdminApi: AdminApi = {
     'Не получилось загрузить журнал',
     adminError,
     ADMIN_POLICY,
+  ),
+  courses: () => adminJson('/api/admin/courses', undefined, 'Не получилось загрузить курсы'),
+  createCourse: (input) => adminJson(
+    '/api/admin/courses', jsonRequest('POST', input), 'Не получилось создать курс',
+  ),
+  course: (courseId) => adminJson(adminCourseUrl(courseId), undefined, 'Не получилось загрузить курс'),
+  updateCourse: (courseId, input) => adminJson(
+    adminCourseUrl(courseId),
+    { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) },
+    'Не получилось сохранить метаданные',
+  ),
+  courseDraft: (courseId) => adminJson(
+    adminCourseUrl(courseId, '/draft'), undefined, 'Не получилось загрузить черновик',
+  ),
+  createCourseDraft: (courseId, activeRevisionId) => adminJson(
+    adminCourseUrl(courseId, '/draft'), jsonRequest('POST', { activeRevisionId }),
+    'Не получилось создать черновик',
+  ),
+  replaceCourseTopics: (courseId, input) => adminJson(
+    adminCourseUrl(courseId, '/draft/topics'), jsonRequest('PUT', input),
+    'Не получилось сохранить темы',
+  ),
+  publishCourse: (courseId, input) => adminJson(
+    adminCourseUrl(courseId, '/publish'), jsonRequest('POST', input), 'Не получилось опубликовать курс',
+  ),
+  archiveCourse: (courseId) => adminJson(
+    adminCourseUrl(courseId, '/archive'), jsonRequest('POST', {}), 'Не получилось архивировать курс',
+  ),
+  courseSources: (courseId) => adminJson(
+    adminCourseUrl(courseId, '/sources'), undefined, 'Не получилось загрузить источники',
+  ),
+  uploadCourseSource: (courseId, file) => {
+    const body = new FormData();
+    body.append('file', file);
+    return adminJson(
+      adminCourseUrl(courseId, '/sources'), { method: 'POST', body }, 'Не получилось загрузить PDF',
+    );
+  },
+  deleteCourseSource: (courseId, sourceId) => adminJson(
+    adminCourseUrl(courseId, `/sources/${String(sourceId)}`), { method: 'DELETE' },
+    'Не получилось удалить источник',
+  ),
+  courseSourceStatus: (courseId, sourceId) => adminJson(
+    adminCourseUrl(courseId, `/sources/${String(sourceId)}/status`), undefined,
+    'Не получилось загрузить состояние OCR',
+  ),
+  retryCourseSource: (courseId, sourceId, range = {}) => adminJson(
+    adminCourseUrl(courseId, `/sources/${String(sourceId)}/retry`), jsonRequest('POST', range),
+    'Не получилось повторить OCR',
+  ),
+  courseBuild: (courseId) => adminJson(
+    adminCourseUrl(courseId, '/draft/build'), undefined, 'Не получилось загрузить состояние сборки',
+  ),
+  buildCourseDraft: (courseId, input) => adminJson(
+    adminCourseUrl(courseId, '/draft/build'), jsonRequest('POST', input),
+    'Не получилось запустить сборку курса',
   ),
 };

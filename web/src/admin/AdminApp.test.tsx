@@ -2,7 +2,7 @@
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AdminApp } from './AdminApp';
+import { AdminApp, readAdminPage } from './AdminApp';
 import type { AdminApi, AdminChildDetail, AdminOverview, AdminStats } from '../admin-api';
 import { testAdminApi } from './test-admin-api';
 import '../test-setup';
@@ -143,6 +143,24 @@ function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
 }
 
 describe('переходы между экранами админки', () => {
+  it('разбирает прямые адреса каталога и курса', () => {
+    expect(readAdminPage('/admin/courses')).toEqual({ kind: 'courses' });
+    expect(readAdminPage('/admin/course/history-6')).toEqual({ kind: 'course', courseId: 'history-6' });
+    expect(readAdminPage('/admin/course/%')).toEqual({ kind: 'home' });
+  });
+
+  it('открывает каталог курсов отдельным адресом и возвращается к сводке', async () => {
+    render(<AdminApp api={adminApi({ courses: vi.fn().mockResolvedValue({ courses: [] }) })} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Курсы' }));
+    expect(await screen.findByText('Курсов пока нет')).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/admin/courses');
+
+    fireEvent.click(screen.getByRole('button', { name: 'К сводке' }));
+    expect(await screen.findByText('Семьи')).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/admin');
+  });
+
   it('открывает карточку ребёнка со сводки и кладёт её в адрес', async () => {
     render(<AdminApp api={adminApi()} />);
 
