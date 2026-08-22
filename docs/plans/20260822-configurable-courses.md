@@ -132,21 +132,21 @@ Checkbox-пункты ниже описывают только автомати�
 
 ### Task 3: Добавить назначения и CurriculumProvider
 
-- [ ] добавить в `control.db` таблицы `child_courses` и
+- [x] добавить в `control.db` таблицы `child_courses` и
   `child_topic_exclusions` с FK, уникальностью и сохранением истории при снятии
   назначения
-- [ ] реализовать `server/course-assignments.ts` для назначения/снятия курса и
+- [x] реализовать `server/course-assignments.ts` для назначения/снятия курса и
   замены набора исключений одной транзакцией
-- [ ] при legacy-bootstrap назначить три исходных курса всем существующим детям,
+- [x] при legacy-bootstrap назначить три исходных курса всем существующим детям,
   не восстанавливая снятые позднее назначения при повторном запуске
-- [ ] реализовать `server/curriculum-provider.ts`, возвращающий immutable
+- [x] реализовать `server/curriculum-provider.ts`, возвращающий immutable
   `CurriculumSnapshot` из опубликованных редакций, назначений и исключений
-- [ ] добавить cache generation/invalidation для публикации, назначения и
+- [x] добавить cache generation/invalidation для публикации, назначения и
   архивирования; новое опубликованное topic автоматически включать, если оно не
   исключено явно
-- [ ] написать тесты правдоподобных наборов из нескольких классов, отсутствия
+- [x] написать тесты правдоподобных наборов из нескольких классов, отсутствия
   назначений, исключений, архивных тем, новой редакции и кеш-инвалидации
-- [ ] запустить `npx vitest run tests/course-assignments.test.ts tests/curriculum-provider.test.ts tests/control-db.test.ts` и `npm run typecheck`
+- [x] запустить `npx vitest run tests/course-assignments.test.ts tests/curriculum-provider.test.ts tests/control-db.test.ts` и `npm run typecheck`
 
 ### Task 4: Привязать арендатора и активный забег к снимку программы
 

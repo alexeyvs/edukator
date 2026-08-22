@@ -10,7 +10,7 @@ import { MAX_SECRET_LENGTH, hashSecret, verifySecret } from './secrets.js';
  * и живёт отдельно от `SCHEMA_VERSION` детской базы: это разные файлы с разной
  * историей, и общий номер заставлял бы мигрировать одну ради изменений другой.
  */
-export const CONTROL_SCHEMA_VERSION = 2;
+export const CONTROL_SCHEMA_VERSION = 3;
 
 /** Таблицы управляющей базы. Тесты сверяют состав файла именно с этим списком. */
 export const CONTROL_TABLES = [
@@ -40,6 +40,8 @@ export const CONTROL_TABLES = [
   'source_chunks_fts_docsize',
   'source_chunks_fts_config',
   'catalog_jobs',
+  'child_courses',
+  'child_topic_exclusions',
 ] as const;
 
 export type ControlTable = (typeof CONTROL_TABLES)[number];
@@ -318,6 +320,35 @@ const COURSE_CATALOG_SCHEMA = `
   CREATE INDEX IF NOT EXISTS catalog_jobs_queue ON catalog_jobs (status, created_at, id);
 `;
 
+/** Назначения курсов. Строка пары сохраняется и после снятия назначения. */
+const COURSE_ASSIGNMENTS_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS child_courses (
+    id           INTEGER PRIMARY KEY,
+    child_id     TEXT NOT NULL REFERENCES children (id) ON DELETE CASCADE,
+    course_id    TEXT NOT NULL REFERENCES courses (id) ON DELETE CASCADE,
+    assigned_at  TEXT NOT NULL DEFAULT (${NOW_ISO}),
+    unassigned_at TEXT,
+    CHECK (unassigned_at IS NULL OR unassigned_at >= assigned_at)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS child_courses_one_active
+    ON child_courses (child_id, course_id) WHERE unassigned_at IS NULL;
+  CREATE INDEX IF NOT EXISTS child_courses_course
+    ON child_courses (course_id, child_id) WHERE unassigned_at IS NULL;
+
+  CREATE TABLE IF NOT EXISTS child_topic_exclusions (
+    child_id   TEXT NOT NULL,
+    course_id  TEXT NOT NULL,
+    topic_id   TEXT NOT NULL,
+    excluded_at TEXT NOT NULL DEFAULT (${NOW_ISO}),
+    PRIMARY KEY (child_id, course_id, topic_id),
+    FOREIGN KEY (child_id) REFERENCES children (id) ON DELETE CASCADE,
+    FOREIGN KEY (course_id, topic_id)
+      REFERENCES topics (course_id, id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS child_topic_exclusions_topic
+    ON child_topic_exclusions (topic_id, child_id);
+`;
+
 const CONTROL_SCHEMA = `
   CREATE TABLE IF NOT EXISTS parents (
     id                     TEXT PRIMARY KEY,
@@ -407,6 +438,8 @@ const CONTROL_SCHEMA = `
   ${ADMIN_SCHEMA}
 
   ${COURSE_CATALOG_SCHEMA}
+
+  ${COURSE_ASSIGNMENTS_SCHEMA}
 `;
 
 /**
@@ -448,10 +481,7 @@ function catalogSentinelCount(db: Database.Database): number {
  */
 export function migrateControl(db: Database.Database): void {
   const initialVersion = readControlUserVersion(db);
-  if (
-    initialVersion === CONTROL_SCHEMA_VERSION &&
-    catalogSentinelCount(db) === CATALOG_SENTINEL_OBJECTS.length
-  ) return;
+  if (initialVersion === CONTROL_SCHEMA_VERSION) return;
 
   // Версия перечитывается под записью, и транзакция именно `immediate`: между
   // быстрой проверкой выше и первым запросом транзакции базу мог мигрировать
@@ -461,15 +491,7 @@ export function migrateControl(db: Database.Database): void {
   // parents» на совершенно исправной базе.
   db.transaction(() => {
     const version = readControlUserVersion(db);
-    if (version === CONTROL_SCHEMA_VERSION) {
-      const catalogObjects = catalogSentinelCount(db);
-      // Version 2 existed briefly before the catalog was added to the same
-      // planned migration. Upgrade only that recognizable zero-catalog shape;
-      // a partially missing catalog is corruption and validateControlSchema
-      // must report it instead of silently rebuilding around user data.
-      if (catalogObjects === 0) db.exec(COURSE_CATALOG_SCHEMA);
-      return;
-    }
+    if (version === CONTROL_SCHEMA_VERSION) return;
 
     if (version === 0) {
       const existing = db
@@ -490,7 +512,7 @@ export function migrateControl(db: Database.Database): void {
       return;
     }
 
-    if (version !== 1) {
+    if (version !== 1 && version !== 2) {
       // Молчаливое «ничего не делаем» превратило бы пропущенный переход в
       // порчу данных, поэтому неизвестная версия — отказ, а не умолчание.
       throw new Error(
@@ -498,19 +520,28 @@ export function migrateControl(db: Database.Database): void {
       );
     }
 
-    db.exec(ADMIN_SCHEMA);
-    db.exec(COURSE_CATALOG_SCHEMA);
+    if (version === 1) {
+      db.exec(ADMIN_SCHEMA);
+      db.exec(COURSE_CATALOG_SCHEMA);
 
-    // `kind` получил третье значение, а `CHECK` в SQLite на месте не меняется.
-    // Строки переносятся: обнулить счётчики перебора миграцией значит открыть
-    // окно подбора в предсказуемое время — в момент обновления приложения.
-    db.exec(`
-      ALTER TABLE login_attempts RENAME TO login_attempts_v1;
-      ${LOGIN_ATTEMPTS_SCHEMA}
-      INSERT INTO login_attempts (scope, kind, key, failures, first_failed_at, last_failed_at)
-        SELECT scope, kind, key, failures, first_failed_at, last_failed_at FROM login_attempts_v1;
-      DROP TABLE login_attempts_v1;
-    `);
+      // `kind` получил третье значение, а `CHECK` в SQLite на месте не меняется.
+      // Строки переносятся: обнулить счётчики перебора миграцией значит открыть
+      // окно подбора в предсказуемое время — в момент обновления приложения.
+      db.exec(`
+        ALTER TABLE login_attempts RENAME TO login_attempts_v1;
+        ${LOGIN_ATTEMPTS_SCHEMA}
+        INSERT INTO login_attempts (scope, kind, key, failures, first_failed_at, last_failed_at)
+          SELECT scope, kind, key, failures, first_failed_at, last_failed_at FROM login_attempts_v1;
+        DROP TABLE login_attempts_v1;
+      `);
+    } else {
+      const catalogObjects = catalogSentinelCount(db);
+      // Ранняя версия 2 могла быть выпущена до каталога. Полностью пустую форму
+      // достраиваем, частично повреждённую оставляем валидатору.
+      if (catalogObjects === 0) db.exec(COURSE_CATALOG_SCHEMA);
+    }
+
+    db.exec(COURSE_ASSIGNMENTS_SCHEMA);
 
     db.pragma(`user_version = ${CONTROL_SCHEMA_VERSION}`);
   }).immediate();
@@ -657,6 +688,8 @@ const REQUIRED_CONTROL_COLUMNS: Record<ControlTable, readonly string[]> = {
     'created_at',
     'updated_at',
   ],
+  child_courses: ['id', 'child_id', 'course_id', 'assigned_at', 'unassigned_at'],
+  child_topic_exclusions: ['child_id', 'course_id', 'topic_id', 'excluded_at'],
 };
 
 /** Индексы, на которых держатся выборки по родителю и ребёнку. */
@@ -678,6 +711,9 @@ const REQUIRED_CONTROL_INDEXES = [
   'source_chunks_fts_delete',
   'source_chunks_fts_update',
   'catalog_jobs_queue',
+  'child_courses_one_active',
+  'child_courses_course',
+  'child_topic_exclusions_topic',
 ] as const;
 
 /**
@@ -709,6 +745,8 @@ const REQUIRED_CONTROL_FRAGMENTS: Partial<Record<ControlTable, readonly string[]
   source_pages: ["'pending', 'processing', 'ready', 'suspicious', 'failed'"],
   source_chunks_fts: ["content=''"],
   catalog_jobs: ["'queued', 'running', 'succeeded', 'failed', 'cancelled'"],
+  child_courses: ['CHECK (unassigned_at IS NULL OR unassigned_at >= assigned_at)'],
+  child_topic_exclusions: ['PRIMARY KEY (child_id, course_id, topic_id)'],
 };
 
 /** Не даёт базе с актуальным номером версии скрыть удалённую или чужую схему. */

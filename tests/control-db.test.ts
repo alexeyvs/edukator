@@ -205,7 +205,7 @@ describe('openControlDatabase', () => {
   });
 
   it('держит константы спеки: номер версии и состав таблиц', () => {
-    expect(CONTROL_SCHEMA_VERSION).toBe(2);
+    expect(CONTROL_SCHEMA_VERSION).toBe(3);
     expect([...CONTROL_TABLES]).toEqual([
       'parents',
       'parent_invites',
@@ -233,6 +233,8 @@ describe('openControlDatabase', () => {
       'source_chunks_fts_docsize',
       'source_chunks_fts_config',
       'catalog_jobs',
+      'child_courses',
+      'child_topic_exclusions',
     ]);
   });
 });
@@ -433,6 +435,8 @@ describe('ошибочные пути', () => {
  */
 function dropCatalogSchema(legacy: Database): void {
   legacy.exec(`
+    DROP TABLE child_topic_exclusions;
+    DROP TABLE child_courses;
     DROP TABLE source_chunks_fts;
     DROP TABLE catalog_jobs;
     DROP TABLE revision_topic_sources;
@@ -471,7 +475,7 @@ function createVersionOneDatabase(target: string): Database {
   return legacy;
 }
 
-describe('обновление управляющей базы до версии 2', () => {
+describe('обновление управляющей базы до версии 3', () => {
   it('заводит админские таблицы и сохраняет счётчики перебора', () => {
     const legacy = createVersionOneDatabase(path);
     legacy
@@ -491,7 +495,7 @@ describe('обновление управляющей базы до версии
     const db = open();
 
     const [version] = db.pragma('user_version') as [{ user_version: number }];
-    expect(version.user_version).toBe(2);
+    expect(version.user_version).toBe(3);
     expect(tableNames(db)).toEqual([...CONTROL_TABLES].sort());
 
     // Обнулить счётчики миграцией значит открыть окно перебора в предсказуемое
@@ -543,11 +547,25 @@ describe('обновление управляющей базы до версии
     open().close();
     const legacy = new BetterSqlite3(path);
     dropCatalogSchema(legacy);
+    legacy.pragma('user_version = 2');
     expect(legacy.pragma('user_version', { simple: true })).toBe(2);
     legacy.close();
 
     const migrated = open();
     expect(tableNames(migrated)).toEqual([...CONTROL_TABLES].sort());
+    expect(migrated.pragma('foreign_key_check')).toEqual([]);
+  });
+
+  it('мигрирует назначения из версии 2 и сохраняет существующие данные', () => {
+    open().close();
+    const legacy = new BetterSqlite3(path);
+    legacy.exec('DROP TABLE child_topic_exclusions; DROP TABLE child_courses;');
+    legacy.pragma('user_version = 2');
+    legacy.close();
+
+    const migrated = open();
+    expect(tableNames(migrated)).toEqual([...CONTROL_TABLES].sort());
+    expect(migrated.pragma('user_version', { simple: true })).toBe(3);
     expect(migrated.pragma('foreign_key_check')).toEqual([]);
   });
 
@@ -626,12 +644,12 @@ describe('обновление управляющей базы до версии
     expect(admins).toEqual([{ email: 'operator@example.com' }]);
   });
 
-  it('отвергает управляющую базу версии 3', () => {
+  it('отвергает управляющую базу версии 4', () => {
     const legacy = createVersionOneDatabase(path);
-    legacy.pragma('user_version = 3');
+    legacy.pragma('user_version = 4');
     legacy.close();
 
-    expect(() => open()).toThrow(/более новой версией схемы \(3 > 2\)/);
+    expect(() => open()).toThrow(/более новой версией схемы \(4 > 3\)/);
   });
 
   it('отвергает базу версии 2 без админской таблицы и без её индекса', () => {

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Database } from 'better-sqlite3';
 import { buildTopicGraph, loadCurriculum, type AnswerFormat, type Topic, type TopicGraph } from './curriculum.js';
+import { invalidateCatalogCurricula, invalidateChildCurriculum } from './curriculum-generation.js';
 import { CURRICULUM_DIR } from './curriculum.js';
 import { requireCourseId, type CourseId } from './db.js';
 
@@ -422,7 +423,9 @@ export function publishRevision(
           (SELECT topic_id FROM revision_topics WHERE revision_id = ? AND active = 1)`,
     ).run(courseId, revisionId);
   }).immediate();
-  return toRevision(selectRevision(db, revisionId) as RevisionRow);
+  const result = toRevision(selectRevision(db, revisionId) as RevisionRow);
+  invalidateCatalogCurricula(db);
+  return result;
 }
 
 export function archiveCourse(db: Database, courseId: CourseId, now: Date = new Date()): CatalogCourse {
@@ -430,7 +433,9 @@ export function archiveCourse(db: Database, courseId: CourseId, now: Date = new 
   db.prepare(
     `UPDATE courses SET status = 'archived', archived_at = ?, updated_at = ? WHERE id = ?`,
   ).run(now.toISOString(), now.toISOString(), courseId);
-  return toCourse(requireCourse(db, courseId));
+  const result = toCourse(requireCourse(db, courseId));
+  invalidateCatalogCurricula(db);
+  return result;
 }
 
 export function updateCourseMetadata(
@@ -461,6 +466,7 @@ export function bootstrapLegacyCourses(
   const graph = loadCurriculum(curriculumDir);
   const created: CourseId[] = [];
   const skipped: CourseId[] = [];
+  const assignedChildren = new Set<string>();
   db.transaction(() => {
     for (const courseId of graph.subjects) {
       if (selectCourse(db, courseId) !== undefined) {
@@ -493,6 +499,20 @@ export function bootstrapLegacyCourses(
       publishRevision(db, courseId, draft.id, replaced.revision.editVersion);
       created.push(courseId);
     }
+    const children = db.prepare<[], { id: string }>('SELECT id FROM children').all();
+    const assign = db.prepare(
+      `INSERT INTO child_courses (child_id, course_id)
+       SELECT ?, ?
+        WHERE NOT EXISTS (
+          SELECT 1 FROM child_courses WHERE child_id = ? AND course_id = ?
+        )`,
+    );
+    for (const child of children) {
+      for (const courseId of graph.subjects) {
+        if (assign.run(child.id, courseId, child.id, courseId).changes > 0) assignedChildren.add(child.id);
+      }
+    }
   }).immediate();
+  for (const childId of assignedChildren) invalidateChildCurriculum(db, childId);
   return { created, skipped };
 }
