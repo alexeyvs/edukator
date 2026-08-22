@@ -10,9 +10,9 @@ import {
   type ParentsRunDetail,
 } from './parents-api';
 import { isParentPin } from './pin-format';
-import { SUBJECT_NAMES, SUBJECTS } from './subject-meta';
 import { SafeFormula, SafeRichText } from './TaskPrompt';
 import { BrandLink } from './BrandMark';
+import { courseById, courseColor, type CourseMeta } from './course-meta';
 
 const KIND_NAMES = {
   run: 'Обычный забег',
@@ -490,12 +490,14 @@ function RunDetail({
 
 function ActivityItem({
   item,
+  courses,
   api,
   pin,
   pinRequired,
   onDashboardChanged,
 }: {
   item: ParentsDashboard['activity'][number];
+  courses: readonly CourseMeta[];
   api: ParentsApi;
   pin: string;
   pinRequired: boolean;
@@ -529,7 +531,7 @@ function ActivityItem({
     <li className={`activity-${item.kind}${open ? ' open' : ''}`}>
       <button aria-controls={panelId} aria-expanded={open} className="parents-activity-toggle" type="button" onClick={toggle}>
         <span className="parents-activity-summary">
-          <span><strong>{KIND_NAMES[item.kind]}</strong><small>{SUBJECT_NAMES[item.subject]}</small></span>
+          <span><strong>{KIND_NAMES[item.kind]}</strong><small>{courseById(courses, item.subject).title}</small></span>
           <span>{item.correct} из {item.total} · {item.activeMinutes} мин
             {item.kind === 'boss' && ` · ${item.bossOutcome === 'won' ? 'победа' : 'попытка'}`}</span>
         </span>
@@ -556,12 +558,14 @@ function ActivityItem({
 
 function IntegrityReviewItem({
   item,
+  courses,
   api,
   pin,
   pinRequired,
   onDashboardChanged,
 }: {
   item: NonNullable<ParentsDashboard['integrityReviews']>[number];
+  courses: readonly CourseMeta[];
   api: ParentsApi;
   pin: string;
   pinRequired: boolean;
@@ -593,7 +597,7 @@ function IntegrityReviewItem({
       onClick={() => { const next = !open; setOpen(next); if (next && detail === null) void load(); }}
     >
       <span className="parents-activity-summary">
-        <span><strong>{KIND_NAMES[item.kind]}</strong><small>{SUBJECT_NAMES[item.subject]}</small></span>
+        <span><strong>{KIND_NAMES[item.kind]}</strong><small>{courseById(courses, item.subject).title}</small></span>
         <span>{item.flagged} вопросов · {item.retryRequired > 0 ? `${String(item.retryRequired)} нужно повторить` : 'идёт проверка'}</span>
       </span>
       <time dateTime={item.startedAt}>{activityDateFormatter.format(new Date(item.startedAt))}</time>
@@ -619,9 +623,9 @@ function Flags({ dashboard }: { dashboard: ParentsDashboard }) {
   const observations = [
     ...(dashboard.flags.threeFullDaysWithoutRun ? ['Три полных дня без обычных забегов.'] : []),
     ...dashboard.flags.forecastNotGrowing.map((subject) =>
-      `Прогноз по предмету «${SUBJECT_NAMES[subject]}» не растёт пять дней.`),
+      `Прогноз по курсу «${courseById(dashboard.courses, subject).title}» не растёт пять дней.`),
     ...dashboard.flags.reduceLoad.map((subject) =>
-      `${SUBJECT_NAMES[subject]}: нижняя граница прогноза уже не ниже 4,0 — нагрузку можно обсудить.`),
+      `${courseById(dashboard.courses, subject).title}: нижняя граница прогноза уже не ниже 4,0 — нагрузку можно обсудить.`),
   ];
   return (
     <section className="parents-panel parents-flags" aria-labelledby="parents-flags-title">
@@ -779,6 +783,7 @@ export function ParentsScreen({
         <ol className="parents-activity">{(dashboard.integrityReviews ?? []).map((item) => (
           <IntegrityReviewItem
             api={api}
+            courses={dashboard.courses}
             item={item}
             pin={pin}
             pinRequired={pinRequired}
@@ -790,12 +795,18 @@ export function ParentsScreen({
 
       <section className="parents-panel" aria-labelledby="parents-forecast-title">
         <div className="section-heading"><p>Прогноз, не оценка</p><h2 id="parents-forecast-title">По предметам</h2></div>
-        <div className="parents-forecasts">
-          {SUBJECTS.map((subject) => {
-            const forecast = dashboard.forecasts.find((item) => item.subject === subject);
+        {dashboard.courses.length === 0
+          ? <p className="parents-empty">Учебные курсы пока не назначены. Выберите их в составе семьи.</p>
+          : <div className="parents-forecasts">
+          {dashboard.courses.map((course) => {
+            const forecast = dashboard.forecasts.find((item) => item.subject === course.courseId);
             return (
-              <article key={subject} aria-label={`Прогноз: ${SUBJECT_NAMES[subject]}`}>
-                <span>{SUBJECT_NAMES[subject]}</span>
+              <article
+                key={course.courseId}
+                aria-label={`Прогноз: ${course.title}`}
+                style={{ borderColor: courseColor(course.courseId) }}
+              >
+                <span>{course.title}{course.grade === '' ? '' : ` · ${course.grade}`}</span>
                 {forecast === undefined ? <p>Прогноз пока недоступен</p> : <>
                   <strong>{forecast.score.toFixed(1)} <small>± {forecast.band.toFixed(1)}</small></strong>
                   <p>Диапазон {forecast.low.toFixed(1)}–{forecast.high.toFixed(1)}</p>
@@ -805,7 +816,7 @@ export function ParentsScreen({
               </article>
             );
           })}
-        </div>
+          </div>}
       </section>
 
       <section className="parents-panel parents-time" aria-labelledby="parents-time-title">
@@ -831,7 +842,7 @@ export function ParentsScreen({
           {dashboard.gaps.length === 0
             ? <p className="parents-empty">Проблемные темы пока не определились.</p>
             : <ol className="parents-gaps">{dashboard.gaps.slice(0, 5).map((gap) => (
-              <li key={`${gap.subject}:${gap.title}`}><span>{gap.title}</span><small>{SUBJECT_NAMES[gap.subject]}</small></li>
+              <li key={`${gap.subject}:${gap.title}`}><span>{gap.title}</span><small>{courseById(dashboard.courses, gap.subject).title}</small></li>
             ))}</ol>}
         </section>
 
@@ -842,6 +853,7 @@ export function ParentsScreen({
             : <ol className="parents-activity">{dashboard.activity.map((item) => (
               <ActivityItem
                 api={api}
+                courses={dashboard.courses}
                 item={item}
                 pin={pin}
                 pinRequired={pinRequired}

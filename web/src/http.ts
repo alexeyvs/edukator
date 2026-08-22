@@ -188,7 +188,7 @@ export async function requestJson<T>(
   }
 }
 
-export function jsonRequest(method: 'POST' | 'PUT', body?: unknown): RequestInit {
+export function jsonRequest(method: 'POST' | 'PUT' | 'DELETE', body?: unknown): RequestInit {
   return {
     method,
     ...(body === undefined ? {} : {

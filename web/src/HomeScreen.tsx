@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
 import { FinishScreen } from './FinishScreen';
 import {
   browserHomeApi,
@@ -11,8 +11,8 @@ import {
 } from './home-api';
 import type { FinishRunResponse } from './run-api';
 import { isPreliminaryForecast } from './forecast-presentation';
-import { SUBJECT_MARKS, SUBJECT_NAMES, SUBJECTS } from './subject-meta';
 import { BrandLink } from './BrandMark';
+import { courseById, courseColor, courseInitials, type CourseMeta } from './course-meta';
 
 export interface HomeScreenProps {
   api?: HomeApi;
@@ -48,9 +48,9 @@ function runStartedText(startedAt: string, currentDay: string): string {
   return `начат ${moscowRunDateFormatter.format(started)}`;
 }
 
-function runMeta(item: PlannedRun, currentDay: string): string {
-  if (item.active === undefined) return SUBJECT_NAMES[item.subject];
-  return `${SUBJECT_NAMES[item.subject]} · ${item.active.progress.total} из ` +
+function runMeta(item: PlannedRun, currentDay: string, course: CourseMeta): string {
+  if (item.active === undefined) return course.title;
+  return `${course.title} · ${item.active.progress.total} из ` +
     `${item.active.progress.target} · ${runStartedText(item.active.startedAt, currentDay)}`;
 }
 
@@ -268,8 +268,9 @@ export function HomeScreen({
 
   if (finish !== null) return <FinishScreen result={finish.result} kind={finish.kind} />;
 
+  const courses = plan?.courses ?? [];
   const anySubjectCalibrated = plan?.triage.some((item) => !item.needed) ?? false;
-  const nextTriage = plan?.triage.find((item) => item.needed)?.subject ?? 'math';
+  const nextTriage = plan?.triage.find((item) => item.needed)?.subject;
   const closedTopicIds = new Set(
     plan?.topics.filter((topic) => topic.readiness.status === 'closed').map((topic) => topic.id) ?? [],
   );
@@ -295,8 +296,12 @@ export function HomeScreen({
       <section className="home-intro">
         <div>
           <p className="home-kicker">План на сегодня</p>
-          <h1>{anySubjectCalibrated ? 'Выбирай первый забег' : 'Сначала сверим карту знаний'}</h1>
-          <p>{anySubjectCalibrated
+          <h1>{courses.length === 0
+            ? 'Курсы пока не назначены'
+            : anySubjectCalibrated ? 'Выбирай первый забег' : 'Сначала сверим карту знаний'}</h1>
+          <p>{courses.length === 0
+            ? 'Попроси родителя выбрать курсы в семейном кабинете.'
+            : anySubjectCalibrated
             ? 'Короткие забеги держат темп и показывают, что уже стало увереннее.'
             : 'Триаж расставит темы по приоритету — после него появится план дня.'}</p>
         </div>
@@ -310,11 +315,17 @@ export function HomeScreen({
 
       {plan === null && problem === null ? (
         <section className="home-loading" aria-label="Загрузка плана">Собираю план дня…</section>
-      ) : plan === null ? null : !anySubjectCalibrated ? (
+      ) : plan === null ? null : courses.length === 0 ? (
+        <section className="home-empty-courses" aria-labelledby="empty-courses-title">
+          <span aria-hidden="true">○</span>
+          <div><h2 id="empty-courses-title">Здесь появится учебный план</h2>
+            <p>Когда родитель назначит хотя бы один курс, можно будет пройти триаж и начать занятия.</p></div>
+        </section>
+      ) : !anySubjectCalibrated && nextTriage !== undefined ? (
         <section className="triage-offer" aria-labelledby="triage-title">
           <span aria-hidden="true">01</span>
           <div>
-            <p>Первый шаг · {SUBJECT_NAMES[nextTriage]}</p>
+            <p>Первый шаг · {courseById(courses, nextTriage).title}</p>
             <h2 id="triage-title">Быстрый триаж</h2>
             <small>12 коротких вопросов без подсказок</small>
           </div>
@@ -341,13 +352,16 @@ export function HomeScreen({
                     plan.gate.learning.materialId === material.id;
                   return (
                     <article
-                      className={`learning-card learning-card-${material.subject}${required ? ' learning-card-required' : ''}`}
+                      className={`learning-card${required ? ' learning-card-required' : ''}`}
                       key={material.id}
+                      style={{ '--subject-accent': courseColor(material.subject) } as CSSProperties}
                     >
-                      <span className="learning-card-mark" aria-hidden="true">{SUBJECT_MARKS[material.subject]}</span>
+                      <span className="learning-card-mark" aria-hidden="true">
+                        {courseInitials(courseById(courses, material.subject).title)}
+                      </span>
                       <div className="learning-card-copy">
                         {required && <span className="learning-required-badge">Обязательный разбор</span>}
-                        <small>{SUBJECT_NAMES[material.subject]} · {material.estimatedMinutes} минут</small>
+                        <small>{courseById(courses, material.subject).title} · {material.estimatedMinutes} минут</small>
                         <h3>{material.topic.title}</h3>
                         <p>{material.recommendationReason}</p>
                       </div>
@@ -371,12 +385,12 @@ export function HomeScreen({
               <h2 id="forecast-title">Прогноз по предметам</h2>
             </div>
             <div className="forecast-cards">
-              {SUBJECTS.map((subject) => {
-                const forecast = plan.forecasts.find((item) => item.subject === subject);
+              {courses.map((course) => {
+                const forecast = plan.forecasts.find((item) => item.subject === course.courseId);
                 const preliminary = forecast !== undefined && isPreliminaryForecast(forecast);
                 return (
-                  <article key={subject}>
-                    <span>{SUBJECT_NAMES[subject]}</span>
+                  <article key={course.courseId} style={{ borderColor: courseColor(course.courseId) }}>
+                    <span>{course.title}{course.grade === '' ? '' : ` · ${course.grade}`}</span>
                     <strong className={preliminary ? 'forecast-pending' : undefined}>{forecast === undefined
                       ? '—'
                       : preliminary ? 'Собираем данные' : forecast.score.toFixed(1)}</strong>
@@ -397,14 +411,14 @@ export function HomeScreen({
                 <p>{plan.gate.completed} из {plan.gate.required} завершено</p>
                 <h2 id="day-plan-title">Забеги на сегодня</h2>
               </div>
-              {plan.triage.some((item) => item.needed) && (
+              {nextTriage !== undefined && (
                 <button
                   className="secondary compact-triage"
                   type="button"
                   disabled={starting !== null}
                   onClick={() => void start(nextTriage, 'triage')}
                 >
-                  {starting === nextTriage ? 'Начинаю…' : `Пройти триаж · ${SUBJECT_NAMES[nextTriage]}`}
+                  {starting === nextTriage ? 'Начинаю…' : `Пройти триаж · ${courseById(courses, nextTriage).title}`}
                 </button>
               )}
             </div>
@@ -419,7 +433,7 @@ export function HomeScreen({
                       ? `${item.subject}:${item.topic.id}`
                       : `run:${active.runId}`}>
                       <span className="plan-number">{String(index + 1).padStart(2, '0')}</span>
-                      <div><small>{runMeta(item, plan.gate.day)}</small><h3>{item.topic.title}</h3></div>
+                      <div><small>{runMeta(item, plan.gate.day, courseById(courses, item.subject))}</small><h3>{item.topic.title}</h3></div>
                       <button
                         className="primary"
                         type="button"
@@ -454,11 +468,11 @@ export function HomeScreen({
             <h2 id="topic-map-title">Карта тем</h2>
           </div>
           <div className="topic-map-subjects">
-            {SUBJECTS.map((subject) => (
-              <section key={subject} aria-labelledby={`topic-map-${subject}`}>
-                <h3 id={`topic-map-${subject}`}>{SUBJECT_NAMES[subject]}</h3>
+            {courses.map((course) => (
+              <section key={course.courseId} aria-labelledby={`topic-map-${course.courseId}`}>
+                <h3 id={`topic-map-${course.courseId}`}>{course.title} <small aria-hidden="true">{course.grade}</small></h3>
                 <ul>
-                  {plan.topics.filter((topic) => topic.subject === subject).map((topic) => {
+                  {plan.topics.filter((topic) => topic.subject === course.courseId).map((topic) => {
                     const canStart = topic.readiness.status === 'active' ||
                       (topic.readiness.status === 'ready' && topic.readiness.eligible);
                     return (

@@ -1,10 +1,22 @@
 import type { FinishRunResponse, RunProgress } from './run-api';
 import { jsonRequest, requestJson } from './http';
 
-export type Subject = 'math' | 'russian' | 'english';
+export type CourseId = string;
+/** Совместимое имя поля API: subject теперь содержит произвольный CourseId. */
+export type Subject = CourseId;
+
+export interface CourseSummary {
+  courseId: CourseId;
+  title: string;
+  grade: string;
+  revision: number | null;
+}
 
 export interface PlannedRun {
   subject: Subject;
+  courseId?: CourseId;
+  courseTitle?: string;
+  grade?: string;
   topic: { id: string; title: string };
   priority: number;
   triagePassed: boolean;
@@ -17,6 +29,9 @@ export interface PlannedRun {
 
 export interface SubjectForecast {
   subject: Subject;
+  courseId?: CourseId;
+  courseTitle?: string;
+  grade?: string;
   score: number;
   band: number;
   low: number;
@@ -58,6 +73,9 @@ export interface HomeTopic {
   id: string;
   title: string;
   subject: Subject;
+  courseId?: CourseId;
+  courseTitle?: string;
+  grade?: string;
   bossProgress: number;
   readiness: BossReadiness;
 }
@@ -65,6 +83,9 @@ export interface HomeTopic {
 export interface LearningMaterialCard {
   id: number;
   subject: Subject;
+  courseId?: CourseId;
+  courseTitle?: string;
+  grade?: string;
   topic: { id: string; title: string };
   recommendationReason: string;
   estimatedMinutes: number;
@@ -72,6 +93,8 @@ export interface LearningMaterialCard {
 }
 
 export interface DayPlanResponse {
+  courses: CourseSummary[];
+  empty?: boolean;
   plan: PlannedRun[];
   learning: LearningMaterialCard[];
   forecasts: SubjectForecast[];

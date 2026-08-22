@@ -1,4 +1,4 @@
-import type { DailyGateState, Subject } from './home-api';
+import type { CourseSummary, DailyGateState, Subject } from './home-api';
 import { requestJson } from './http';
 import type { IntegrityStatusResponse } from './run-api';
 
@@ -25,6 +25,7 @@ export interface ParentsForecast {
 }
 
 export interface ParentsDashboard {
+  courses: CourseSummary[];
   generatedAt: string;
   computerAccess: DailyGateState & { configured: boolean };
   window: { since: string; until: string };

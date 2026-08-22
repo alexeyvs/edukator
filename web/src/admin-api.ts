@@ -143,7 +143,7 @@ export interface AdminLogQuery {
 }
 
 /** Предмет: те же два слова, что и у сервера. */
-export type AdminSubject = 'math' | 'russian';
+export type AdminSubject = string;
 
 export interface AdminActiveTime {
   total: number;

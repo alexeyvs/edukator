@@ -278,10 +278,13 @@ describe('браузерные API-адаптеры', () => {
     await browserAuthApi.claimDevice('tok');
     await browserAuthApi.switchPersona('parent', 'длинный-пароль');
     await browserFamilyApi.read();
+    await browserFamilyApi.readCourses();
     await browserFamilyApi.addChild('Марта');
     await browserFamilyApi.issueDevice('c-1', 'agent', 'Ноутбук');
     await browserFamilyApi.revokeDevice(4);
     await browserFamilyApi.setPin('123456');
+    await browserFamilyApi.assignCourse('c-1', 'география 5', ['geo.map']);
+    await browserFamilyApi.unassignCourse('c-1', 'география 5');
 
     expect(fetch.mock.calls).toEqual([
       ['/api/auth/me'],
@@ -301,12 +304,19 @@ describe('браузерные API-адаптеры', () => {
         method: 'POST', body: '{"kind":"parent","password":"длинный-пароль"}',
       })],
       ['/api/family'],
+      ['/api/family/courses'],
       ['/api/family/children', expect.objectContaining({ method: 'POST', body: '{"name":"Марта"}' })],
       ['/api/family/children/c-1/devices', expect.objectContaining({
         method: 'POST', body: '{"kind":"agent","label":"Ноутбук"}',
       })],
       ['/api/family/devices/4/revoke', { method: 'POST' }],
       ['/api/family/pin', expect.objectContaining({ method: 'POST', body: '{"pin":"123456"}' })],
+      ['/api/family/children/c-1/courses/%D0%B3%D0%B5%D0%BE%D0%B3%D1%80%D0%B0%D1%84%D0%B8%D1%8F%205', expect.objectContaining({
+        method: 'PUT', body: '{"excludedTopicIds":["geo.map"]}',
+      })],
+      ['/api/family/children/c-1/courses/%D0%B3%D0%B5%D0%BE%D0%B3%D1%80%D0%B0%D1%84%D0%B8%D1%8F%205', expect.objectContaining({
+        method: 'DELETE',
+      })],
     ]);
   });
 

@@ -24,6 +24,23 @@ export interface FamilyChild {
   retiredAt?: string;
   createdAt: string;
   devices: FamilyDevice[];
+  courses: FamilyCourseAssignment[];
+}
+
+export interface FamilyCourseAssignment {
+  courseId: string;
+  excludedTopicIds: string[];
+  assignedAt?: string;
+  unassignedAt?: string;
+  updatedAt?: string;
+}
+
+export interface FamilyCourse {
+  courseId: string;
+  title: string;
+  grade: string;
+  revisionId: number;
+  topics: Array<{ id: string; title: string; prereqs: string[] }>;
 }
 
 export interface Family {
@@ -44,15 +61,24 @@ export interface IssuedInvite {
 
 export interface FamilyApi {
   read(): Promise<Family>;
+  readCourses(): Promise<FamilyCourse[]>;
   addChild(name: string): Promise<FamilyChild>;
   retryProvision(childId: string): Promise<FamilyChild>;
   issueDevice(childId: string, kind: DeviceKind, label: string): Promise<IssuedInvite>;
   revokeDevice(deviceId: number): Promise<{ revoked: boolean; device: FamilyDevice }>;
   setPin(pin: string): Promise<{ pinConfigured: boolean }>;
+  assignCourse(childId: string, courseId: string, excludedTopicIds?: string[]): Promise<FamilyCourseAssignment>;
+  unassignCourse(childId: string, courseId: string): Promise<FamilyCourseAssignment | null>;
 }
 
 export const browserFamilyApi: FamilyApi = {
   read: () => requestJson<Family>('/api/family', undefined, 'Не получилось загрузить семью'),
+  readCourses: async () => {
+    const result = await requestJson<{ courses: FamilyCourse[] }>(
+      '/api/family/courses', undefined, 'Не получилось загрузить каталог курсов',
+    );
+    return result.courses;
+  },
   addChild: async (name) => {
     const created = await requestJson<{ child: FamilyChild }>(
       '/api/family/children',
@@ -84,4 +110,20 @@ export const browserFamilyApi: FamilyApi = {
     jsonRequest('POST', { pin }),
     'Не получилось сохранить PIN',
   ),
+  assignCourse: async (childId, courseId, excludedTopicIds) => {
+    const result = await requestJson<{ assignment: FamilyCourseAssignment }>(
+      `/api/family/children/${encodeURIComponent(childId)}/courses/${encodeURIComponent(courseId)}`,
+      jsonRequest('PUT', excludedTopicIds === undefined ? {} : { excludedTopicIds }),
+      'Не получилось сохранить курс',
+    );
+    return result.assignment;
+  },
+  unassignCourse: async (childId, courseId) => {
+    const result = await requestJson<{ assignment: FamilyCourseAssignment | null }>(
+      `/api/family/children/${encodeURIComponent(childId)}/courses/${encodeURIComponent(courseId)}`,
+      jsonRequest('DELETE'),
+      'Не получилось снять курс',
+    );
+    return result.assignment;
+  },
 };

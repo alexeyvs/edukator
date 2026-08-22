@@ -17,6 +17,11 @@ afterEach(() => {
 });
 
 const DASHBOARD: ParentsDashboard = {
+  courses: [
+    { courseId: 'math', title: 'Математика', grade: '7 класс', revision: 1 },
+    { courseId: 'russian', title: 'Русский язык', grade: '7 класс', revision: 2 },
+    { courseId: 'english', title: 'Английский язык', grade: '7 класс', revision: 3 },
+  ],
   generatedAt: '2026-08-08T12:00:00.000Z',
   computerAccess: {
     day: '2026-08-08', required: 3, completed: 1, remaining: 2,
@@ -639,5 +644,34 @@ describe('родительский дашборд', () => {
     rerender(<ParentsScreen childId="c-2" api={second} />);
     expect(screen.getByRole('status')).toHaveTextContent('Собираю сводку за неделю…');
     expect(await screen.findByRole('region', { name: 'План и факт' })).toHaveTextContent('Факт7 мин');
+  });
+
+  it('показывает произвольный курс в прогнозе, пробелах и истории', async () => {
+    const course = { courseId: 'history-6', title: 'История Древнего мира', grade: '6 класс', revision: 9 };
+    const dashboard: ParentsDashboard = {
+      ...DASHBOARD,
+      courses: [course],
+      forecasts: [{ subject: course.courseId, score: 4, band: .4, low: 3.6, high: 4.4, preliminary: false }],
+      gaps: [{ subject: course.courseId, title: 'Древний Египет' }],
+      activity: [{ ...DASHBOARD.activity[0]!, subject: course.courseId }],
+      flags: { threeFullDaysWithoutRun: false, forecastNotGrowing: [], reduceLoad: [] },
+    };
+    render(<ParentsScreen childId="c-1" api={parentsApi(dashboard)} />);
+
+    expect(await screen.findByRole('article', { name: 'Прогноз: История Древнего мира' }))
+      .toHaveTextContent('6 класс');
+    expect(screen.getAllByText('История Древнего мира').length).toBeGreaterThan(1);
+    expect(screen.queryByText('Математика')).not.toBeInTheDocument();
+  });
+
+  it('объясняет пустую сводку без назначенных курсов', async () => {
+    render(<ParentsScreen childId="c-1" api={parentsApi({
+      ...DASHBOARD, courses: [], forecasts: [], gaps: [], activity: [],
+      flags: { threeFullDaysWithoutRun: false, forecastNotGrowing: [], reduceLoad: [] },
+    })} />);
+
+    expect(await screen.findByText('Учебные курсы пока не назначены. Выберите их в составе семьи.'))
+      .toBeInTheDocument();
+    expect(screen.queryByRole('article', { name: /Прогноз:/u })).not.toBeInTheDocument();
   });
 });

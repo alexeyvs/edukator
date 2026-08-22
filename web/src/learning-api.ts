@@ -19,6 +19,9 @@ export interface LearningMaterialContent {
 export interface LearningMaterialView {
   id: number;
   subject: Subject;
+  courseId?: string;
+  courseTitle?: string;
+  grade?: string;
   topic: { id: string; title: string };
   recommendationReason: string;
   estimatedMinutes: number;

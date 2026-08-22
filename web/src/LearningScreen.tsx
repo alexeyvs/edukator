@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
 import {
   browserLearningApi,
   type LearningApi,
@@ -6,7 +6,7 @@ import {
   type LearningMaterialView,
 } from './learning-api';
 import { SafeFormula } from './TaskPrompt';
-import { SUBJECT_MARKS, SUBJECT_NAMES } from './subject-meta';
+import { courseColor, courseInitials } from './course-meta';
 import { BrandLink } from './BrandMark';
 
 export interface LearningScreenProps {
@@ -82,16 +82,21 @@ export function LearningScreen({
   }
 
   return (
-    <main className={`lesson-shell lesson-${material.subject}`}>
+    <main
+      className="lesson-shell"
+      style={{ '--subject-accent': courseColor(material.subject) } as CSSProperties}
+    >
       <header className="lesson-header">
         <BrandLink label="На главный экран" />
-        <div><span>{SUBJECT_NAMES[material.subject]}</span><strong>{material.topic.title}</strong></div>
+        <div><span>{material.courseTitle ?? material.subject}</span><strong>{material.topic.title}</strong></div>
         <small>{material.estimatedMinutes} минут</small>
       </header>
 
       <article className="lesson-paper">
         <header className="lesson-lead">
-          <div className="lesson-subject-mark" aria-hidden="true">{SUBJECT_MARKS[material.subject]}</div>
+          <div className="lesson-subject-mark" aria-hidden="true">
+            {courseInitials(material.courseTitle ?? material.subject)}
+          </div>
           <div>
             <p className="home-kicker">Разобрать слабое место</p>
             <h1>{material.topic.title}</h1>

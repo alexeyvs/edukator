@@ -291,19 +291,19 @@ Checkbox-пункты ниже описывают только автомати�
 
 ### Task 13: Добавить назначения родителю и динамические карточки ученику
 
-- [ ] расширить `web/src/family-api.ts` каталогом, назначениями и исключениями;
+- [x] расширить `web/src/family-api.ts` каталогом, назначениями и исключениями;
   добавить в `FamilyScreen` настройку курса для каждого ребёнка
-- [ ] сделать «все темы» состоянием по умолчанию, раскрывать опциональный список
+- [x] сделать «все темы» состоянием по умолчанию, раскрывать опциональный список
   исключений и предупреждать, что снятие курса не удаляет прогресс
-- [ ] удалить `web/src/subject-meta.ts` и закрытые Subject union; отображать
+- [x] удалить `web/src/subject-meta.ts` и закрытые Subject union; отображать
   title/grade из API, инициалы и детерминированный цвет по course ID
-- [ ] обновить `HomeScreen`, `ParentsScreen`, триаж и прогноз для динамического
+- [x] обновить `HomeScreen`, `ParentsScreen`, триаж и прогноз для динамического
   количества курсов и пустого состояния без назначений
-- [ ] проверить адаптивную раскладку при одном, трёх и большом числе карточек без
+- [x] проверить адаптивную раскладку при одном, трёх и большом числе карточек без
   предположения «ровно три»
-- [ ] написать Testing Library тесты родительских назначений, новых тем,
+- [x] написать Testing Library тесты родительских назначений, новых тем,
   исключений, пустого состояния и произвольных кириллических названий
-- [ ] запустить `npx vitest run web/src/FamilyScreen.test.tsx web/src/HomeScreen.test.tsx web/src/ParentsScreen.test.tsx web/src/api.test.ts` и `npm run typecheck` и `npm run build:web`
+- [x] запустить `npx vitest run web/src/FamilyScreen.test.tsx web/src/HomeScreen.test.tsx web/src/ParentsScreen.test.tsx web/src/api.test.ts` и `npm run typecheck` и `npm run build:web`
 
 ### Task 14: Подготовить Linux VPS и усилить deploy preflight
 

@@ -367,14 +367,6 @@ input:focus-visible {
   box-shadow: 0 12px 32px color-mix(in srgb, var(--subject-accent) 13%, transparent);
 }
 
-.learning-card-russian {
-  --subject-accent: #28729b;
-}
-
-.learning-card-english {
-  --subject-accent: #8b5cad;
-}
-
 .learning-card-mark {
   display: grid;
   width: 4rem;
@@ -429,7 +421,7 @@ input:focus-visible {
 
 .topic-map-subjects {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
   gap: 1rem;
   margin-top: 1.25rem;
 }
@@ -566,7 +558,7 @@ input:focus-visible {
 
 .forecast-cards {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
   gap: 1rem;
   margin-top: 1.25rem;
 }
@@ -2015,7 +2007,7 @@ input:focus-visible {
 
 .parents-forecasts {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
   gap: 1rem;
   margin-top: 1.25rem;
 }
@@ -2455,13 +2447,6 @@ input:focus-visible {
   padding: 2rem 0 5rem;
 }
 
-.lesson-russian {
-  --subject-accent: #28729b;
-}
-
-.lesson-english {
-  --subject-accent: #8b5cad;
-}
 
 .lesson-header {
   display: flex;
@@ -3205,6 +3190,107 @@ input:focus-visible {
   background: white;
   color: var(--evergreen);
   font-weight: 750;
+}
+
+.family-courses {
+  display: grid;
+  gap: .75rem;
+  padding: 1rem;
+  border-radius: .9rem;
+  background: #f4f8f5;
+}
+
+.family-courses > div:first-child,
+.family-course-toggle span {
+  display: grid;
+  gap: .1rem;
+}
+
+.family-course-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: .65rem;
+}
+
+.family-course {
+  padding: .8rem;
+  border: 1px solid #d8e4dc;
+  border-radius: .8rem;
+  background: white;
+}
+
+.family-course-toggle,
+.family-course details li label {
+  display: flex;
+  align-items: flex-start;
+  gap: .65rem;
+  cursor: pointer;
+}
+
+.family-course input {
+  width: 1rem;
+  min-height: 1rem;
+  margin-top: .2rem;
+}
+
+.family-course details {
+  margin-top: .7rem;
+  padding-top: .7rem;
+  border-top: 1px solid #e3e9e5;
+}
+
+.family-course summary {
+  color: var(--evergreen);
+  cursor: pointer;
+  font-size: .82rem;
+  font-weight: 750;
+}
+
+.family-course details p {
+  margin-top: .55rem;
+  font-size: .78rem;
+}
+
+.family-course details ul {
+  display: grid;
+  gap: .4rem;
+  margin: .65rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.family-course details li {
+  font-size: .82rem;
+}
+
+.family-panel p.family-course-warning {
+  color: #72520c;
+  font-size: .8rem;
+}
+
+.home-empty-courses {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 1rem;
+  padding: 1.5rem;
+  border: 1px dashed #aabdb3;
+  border-radius: 1.25rem;
+  background: rgb(255 255 255 / 58%);
+}
+
+.home-empty-courses > span {
+  color: var(--leaf);
+  font-size: 2rem;
+}
+
+.home-empty-courses h2,
+.home-empty-courses p {
+  margin: 0;
+}
+
+.home-empty-courses p {
+  margin-top: .35rem;
+  color: #52625c;
 }
 
 /* Предупреждение о цене действия: янтарь, а не красный. Смена пароля — не

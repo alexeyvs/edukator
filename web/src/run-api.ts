@@ -26,7 +26,7 @@ export interface RunTask {
   id: number;
   topic_id: string;
   topic_title: string;
-  subject: 'math' | 'russian' | 'english';
+  subject: string;
   question: string;
   instruction?: string;
   material?: string;
@@ -86,7 +86,7 @@ export interface RunTopicChange {
 
 export interface ForecastSnapshot {
   id: number;
-  subject: 'math' | 'russian' | 'english' | 'overall';
+  subject: string;
   score: number;
   band: number;
   createdAt: string;

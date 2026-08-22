@@ -10,6 +10,11 @@ import './test-setup';
 afterEach(cleanup);
 
 const PLAN: DayPlanResponse = {
+  courses: [
+    { courseId: 'math', title: 'Математика', grade: '7 класс', revision: 1 },
+    { courseId: 'russian', title: 'Русский язык', grade: '7 класс', revision: 2 },
+    { courseId: 'english', title: 'Английский язык', grade: '7 класс', revision: 3 },
+  ],
   gate: {
     day: '2026-08-08', required: 3, completed: 1, remaining: 2,
     learning: { materialId: null, required: false, passed: false },
@@ -579,5 +584,37 @@ describe('главный экран', () => {
     expect(dayPlan).not.toBeNull();
     expect(within(dayPlan!).queryByText('Чтение')).not.toBeInTheDocument();
     expect(within(dayPlan!).getAllByRole('button', { name: 'Начать' })).toHaveLength(2);
+  });
+
+  it('строит карточки из произвольного кириллического курса и данных API', async () => {
+    const course = { courseId: 'geo-5', title: 'География России', grade: '5 класс', revision: 17 };
+    render(<HomeScreen api={apiWith({
+      ...PLAN,
+      courses: [course],
+      plan: [{
+        subject: 'geo-5', topic: { id: 'geo.map', title: 'Карта России' },
+        priority: 1, triagePassed: true,
+      }],
+      forecasts: [{ subject: 'geo-5', score: 4.2, band: .3, low: 3.9, high: 4.5 }],
+      triage: [{ subject: 'geo-5', passed: true, needed: false }],
+      topics: [{
+        id: 'geo.map', title: 'Карта России', subject: 'geo-5', bossProgress: 25,
+        readiness: { status: 'working', eligible: false },
+      }],
+    })} />);
+
+    expect(await screen.findByText('География России · 5 класс')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'География России' })).toBeInTheDocument();
+    expect(screen.queryByText('Математика')).not.toBeInTheDocument();
+  });
+
+  it('показывает понятное пустое состояние без назначенных курсов', async () => {
+    render(<HomeScreen api={apiWith({
+      ...PLAN, courses: [], plan: [], forecasts: [], triage: [], topics: [], learning: [], empty: true,
+    })} />);
+
+    expect(await screen.findByRole('heading', { name: 'Курсы пока не назначены' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Здесь появится учебный план' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /триаж/iu })).not.toBeInTheDocument();
   });
 });

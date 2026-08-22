@@ -5,6 +5,7 @@ import {
   type Family,
   type FamilyApi,
   type FamilyChild,
+  type FamilyCourse,
   type FamilyDevice,
   type IssuedInvite,
 } from './family-api';
@@ -67,13 +68,110 @@ function DeviceInvite({ issued }: { issued: IssuedInvite }) {
   );
 }
 
+function ChildCourses({
+  child,
+  courses,
+  api,
+  onChanged,
+}: {
+  child: FamilyChild;
+  courses: FamilyCourse[];
+  api: FamilyApi;
+  onChanged: () => Promise<string | undefined>;
+}) {
+  const [pending, setPending] = useState<string | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const assignments = new Map(child.courses.map((assignment) => [assignment.courseId, assignment]));
+
+  async function changeAssignment(course: FamilyCourse, assigned: boolean): Promise<void> {
+    if (pending !== null) return;
+    setPending(course.courseId);
+    setProblem(null);
+    try {
+      if (assigned) await api.assignCourse(child.id, course.courseId);
+      else await api.unassignCourse(child.id, course.courseId);
+      const stale = await onChanged();
+      if (stale !== undefined) setProblem(`Изменение сохранено, но список не обновился: ${stale}`);
+    } catch (error) {
+      setProblem(error instanceof Error ? error.message : 'Не получилось изменить назначение');
+    } finally {
+      setPending(null);
+    }
+  }
+
+  async function changeTopic(course: FamilyCourse, topicId: string, included: boolean): Promise<void> {
+    const assignment = assignments.get(course.courseId);
+    if (assignment === undefined || pending !== null) return;
+    const excluded = new Set(assignment.excludedTopicIds);
+    if (included) excluded.delete(topicId);
+    else excluded.add(topicId);
+    setPending(course.courseId);
+    setProblem(null);
+    try {
+      await api.assignCourse(child.id, course.courseId, [...excluded]);
+      const stale = await onChanged();
+      if (stale !== undefined) setProblem(`Исключения сохранены, но список не обновился: ${stale}`);
+    } catch (error) {
+      setProblem(error instanceof Error ? error.message : 'Не получилось сохранить темы');
+    } finally {
+      setPending(null);
+    }
+  }
+
+  return (
+    <section className="family-courses" aria-label={`Курсы: ${child.name}`}>
+      <div>
+        <strong>Учебные курсы</strong>
+        <small>После назначения доступны все темы, включая новые темы следующих редакций.</small>
+      </div>
+      {courses.length === 0
+        ? <p className="family-empty">Опубликованных курсов пока нет.</p>
+        : <div className="family-course-list">{courses.map((course) => {
+          const assignment = assignments.get(course.courseId);
+          const assigned = assignment !== undefined;
+          const excluded = new Set(assignment?.excludedTopicIds ?? []);
+          return <article key={course.courseId} className="family-course">
+            <label className="family-course-toggle">
+              <input
+                type="checkbox"
+                checked={assigned}
+                disabled={pending !== null || child.status !== 'ready'}
+                onChange={(event) => { void changeAssignment(course, event.target.checked); }}
+              />
+              <span><strong>{course.title}</strong><small>{course.grade}</small></span>
+            </label>
+            {assigned && <details>
+              <summary>Настроить темы ({String(course.topics.length - excluded.size)} из {String(course.topics.length)})</summary>
+              <p>По умолчанию включены все темы. Снимите только те, которые сейчас не нужны.</p>
+              <ul>{course.topics.map((topic) => <li key={topic.id}>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={!excluded.has(topic.id)}
+                    disabled={pending !== null}
+                    onChange={(event) => { void changeTopic(course, topic.id, event.target.checked); }}
+                  />
+                  <span>{topic.title}</span>
+                </label>
+              </li>)}</ul>
+            </details>}
+          </article>;
+        })}</div>}
+      <p className="family-course-warning">Снятие курса скрывает его из плана, но не удаляет прогресс ребёнка.</p>
+      {problem !== null && <p className="auth-message error" role="alert">{problem}</p>}
+    </section>
+  );
+}
+
 function ChildCard({
   child,
+  courses,
   api,
   onChanged,
   onOpenDashboard,
 }: {
   child: FamilyChild;
+  courses: FamilyCourse[];
   api: FamilyApi;
   /** Перечитывание списка семьи: возвращает причину отказа, а не бросает её. */
   onChanged: () => Promise<string | undefined>;
@@ -199,6 +297,8 @@ function ChildCard({
         </button>
       )}
 
+      <ChildCourses child={child} courses={courses} api={api} onChanged={onChanged} />
+
       {child.devices.length === 0
         ? <p className="family-empty">Устройств пока нет. Выпустите ссылку — ученик войдёт по ней.</p>
         : <ul className="family-devices">
@@ -276,6 +376,7 @@ export function FamilyScreen({
   onLogout,
 }: FamilyScreenProps) {
   const [family, setFamily] = useState<Family | null>(null);
+  const [courses, setCourses] = useState<FamilyCourse[]>([]);
   const [problem, setProblem] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [adding, setAdding] = useState(false);
@@ -308,16 +409,22 @@ export function FamilyScreen({
 
   async function reload(): Promise<void> {
     const generation = ++readGeneration.current;
-    const loaded = await api.read();
-    if (readGeneration.current === generation) setFamily(loaded);
+    const [loaded, loadedCourses] = await Promise.all([api.read(), api.readCourses()]);
+    if (readGeneration.current === generation) {
+      setFamily(loaded);
+      setCourses(loadedCourses);
+    }
   }
 
   useEffect(() => {
     let active = true;
     const generation = ++readGeneration.current;
-    api.read()
-      .then((loaded) => {
-        if (active && readGeneration.current === generation) setFamily(loaded);
+    Promise.all([api.read(), api.readCourses()])
+      .then(([loaded, loadedCourses]) => {
+        if (active && readGeneration.current === generation) {
+          setFamily(loaded);
+          setCourses(loadedCourses);
+        }
       })
       .catch((error: unknown) => {
         if (active) setProblem(error instanceof Error ? error.message : 'Не получилось загрузить семью');
@@ -478,6 +585,7 @@ export function FamilyScreen({
             <ChildCard
               api={api}
               child={child}
+              courses={courses}
               key={child.id}
               onChanged={refresh}
               onOpenDashboard={(childId) => {

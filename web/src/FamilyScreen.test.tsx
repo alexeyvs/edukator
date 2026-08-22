@@ -16,6 +16,7 @@ const CHILD: FamilyChild = {
   name: 'Тимофей',
   status: 'ready',
   createdAt: '2026-08-01T09:00:00.000Z',
+  courses: [{ courseId: 'math', excludedTopicIds: [] }],
   devices: [
     {
       id: 4,
@@ -47,6 +48,15 @@ const FAMILY: Family = {
 function familyApi(overrides: Partial<FamilyApi> = {}, value: Family = FAMILY): FamilyApi {
   return {
     read: vi.fn().mockResolvedValue(value),
+    readCourses: vi.fn().mockResolvedValue([
+      {
+        courseId: 'math', title: 'Математика', grade: '7 класс', revisionId: 1,
+        topics: [
+          { id: 'math.fractions', title: 'Обыкновенные дроби', prereqs: [] },
+          { id: 'math.percent', title: 'Проценты', prereqs: ['math.fractions'] },
+        ],
+      },
+    ]),
     addChild: vi.fn().mockResolvedValue({ ...CHILD, id: 'c-2', name: 'Марта', devices: [] }),
     retryProvision: vi.fn().mockResolvedValue({ ...CHILD, status: 'ready' }),
     issueDevice: vi.fn().mockResolvedValue({
@@ -55,6 +65,8 @@ function familyApi(overrides: Partial<FamilyApi> = {}, value: Family = FAMILY): 
     }),
     revokeDevice: vi.fn().mockResolvedValue({ revoked: true, device: CHILD.devices[0] }),
     setPin: vi.fn().mockResolvedValue({ pinConfigured: true }),
+    assignCourse: vi.fn().mockResolvedValue({ courseId: 'math', excludedTopicIds: [] }),
+    unassignCourse: vi.fn().mockResolvedValue(null),
     ...overrides,
   };
 }
@@ -156,6 +168,44 @@ describe('смена пароля родителем', () => {
 });
 
 describe('состав семьи', () => {
+  it('назначает произвольный курс со всеми темами и предупреждает о сохранении прогресса', async () => {
+    const child = { ...CHILD, courses: [] };
+    const api = familyApi({
+      readCourses: vi.fn().mockResolvedValue([{
+        courseId: 'geo-5', title: 'География России', grade: '5 класс', revisionId: 11,
+        topics: [
+          { id: 'geo.map', title: 'Карта России', prereqs: [] },
+          { id: 'geo.rivers', title: 'Реки России', prereqs: [] },
+        ],
+      }]),
+    }, { ...FAMILY, children: [child] });
+    render(<FamilyScreen {...props(api)} />);
+
+    const courses = await screen.findByRole('region', { name: 'Курсы: Тимофей' });
+    expect(courses).toHaveTextContent('Снятие курса скрывает его из плана, но не удаляет прогресс');
+    fireEvent.click(within(courses).getByRole('checkbox', { name: /География России/u }));
+
+    await waitFor(() => expect(api.assignCourse).toHaveBeenCalledWith('c-1', 'geo-5'));
+  });
+
+  it('хранит исключения отрицательным списком, а новую тему показывает включённой', async () => {
+    const child = {
+      ...CHILD,
+      courses: [{ courseId: 'math', excludedTopicIds: ['math.fractions'] }],
+    };
+    const api = familyApi({}, { ...FAMILY, children: [child] });
+    render(<FamilyScreen {...props(api)} />);
+
+    const courses = await screen.findByRole('region', { name: 'Курсы: Тимофей' });
+    fireEvent.click(within(courses).getByText(/Настроить темы/u));
+    expect(within(courses).getByRole('checkbox', { name: 'Обыкновенные дроби' })).not.toBeChecked();
+    expect(within(courses).getByRole('checkbox', { name: 'Проценты' })).toBeChecked();
+
+    fireEvent.click(within(courses).getByRole('checkbox', { name: 'Проценты' }));
+    await waitFor(() => expect(api.assignCourse)
+      .toHaveBeenCalledWith('c-1', 'math', ['math.fractions', 'math.percent']));
+  });
+
   it('показывает детей, состояние устройств и настроенный PIN', async () => {
     render(<FamilyScreen {...props(familyApi())} />);
 
