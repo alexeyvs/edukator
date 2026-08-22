@@ -28,7 +28,7 @@ import {
   type ChildSummary,
 } from '../control-db.js';
 import type { TopicGraph } from '../curriculum.js';
-import { SUBJECTS, type Subject } from '../db.js';
+import type { Subject } from '../db.js';
 import { moscowDate, moscowDayBounds } from '../moscow-time.js';
 import { readStreak } from '../streak.js';
 import { readSubjectCalibrations } from '../subject-calibration.js';
@@ -78,6 +78,10 @@ export interface AdminActiveTime {
 /** Освоение предмета: среднее по темам, которых ребёнок касался. */
 export interface AdminSubjectMastery {
   subject: Subject;
+  courseId: Subject;
+  title: string;
+  grade: string;
+  revisionId: number | null;
   average: number;
   topics: number;
 }
@@ -220,7 +224,9 @@ export interface AdminStats {
 
 export interface AdminStatsOptions {
   dataDir: string;
-  graph: TopicGraph;
+  graph?: TopicGraph;
+  /** Снимок конкретного ребёнка; отказ попадает в failed[], не обрывая обход. */
+  graphForChild?: (childId: string) => TopicGraph;
   now?: Date;
 }
 
@@ -384,11 +390,20 @@ function readChildStats(
     finishedRuns,
     answers: answers.answers,
     correct: answers.correct,
-    mastery: SUBJECTS.flatMap((subject) => {
+    mastery: graph.subjects.flatMap((subject) => {
       const bucket = masterySums.get(subject);
+      const course = graph.courses.get(subject);
       return bucket === undefined || bucket.topics === 0
         ? []
-        : [{ subject, average: bucket.sum / bucket.topics, topics: bucket.topics }];
+        : [{
+            subject,
+            courseId: subject,
+            title: course?.title ?? subject,
+            grade: course?.grade ?? '',
+            revisionId: course?.revisionId ?? null,
+            average: bucket.sum / bucket.topics,
+            topics: bucket.topics,
+          }];
     }),
     calibrated: [...calibrations]
       .filter(([, calibration]) => calibration.calibrated)
@@ -456,7 +471,9 @@ export function collectAdminStats(control: Database, options: AdminStatsOptions)
   const sweep = sweepChildDatabases(options.dataDir, readable, (db, meta) => {
     const child = byId.get(meta.childId);
     if (child === undefined) throw new Error(`Ребёнок ${meta.childId} исчез из управляющей базы`);
-    return readChildStats(db, meta, child, options.graph, now);
+    const graph = options.graphForChild?.(meta.childId) ?? options.graph;
+    if (graph === undefined) throw new Error(`Программа ребёнка ${meta.childId} недоступна`);
+    return readChildStats(db, meta, child, graph, now);
   });
   const reports = sweep.reports.map((report) => report.value);
 
@@ -485,6 +502,7 @@ export function collectAdminStats(control: Database, options: AdminStatsOptions)
   }
 
   const masteryTotals = new Map<Subject, { sum: number; topics: number; children: number }>();
+  const courseMetadata = new Map<Subject, Pick<AdminSubjectMastery, 'title' | 'grade' | 'revisionId'>>();
   const calibratedChildren = new Map<Subject, number>();
   const emptyBanks = new Map<string, number>();
   const topicTotals = new Map<string, AdminTopicAnswers>();
@@ -548,6 +566,7 @@ export function collectAdminStats(control: Database, options: AdminStatsOptions)
       bucket.topics += subject.topics;
       bucket.children += 1;
       masteryTotals.set(subject.subject, bucket);
+      courseMetadata.set(subject.subject, subject);
     }
     for (const subject of report.calibrated) {
       calibratedChildren.set(subject, (calibratedChildren.get(subject) ?? 0) + 1);
@@ -569,20 +588,21 @@ export function collectAdminStats(control: Database, options: AdminStatsOptions)
   }
 
   const accuracy = accuracyOf(learning.answers, learning.correct);
-  learning.mastery = SUBJECTS.flatMap((subject) => {
-    const bucket = masteryTotals.get(subject);
-    return bucket === undefined || bucket.topics === 0
-      ? []
-      : [{
-          subject,
-          average: bucket.sum / bucket.topics,
-          topics: bucket.topics,
-          children: bucket.children,
-        }];
+  learning.mastery = [...masteryTotals].flatMap(([subject, bucket]) => {
+    const metadata = courseMetadata.get(subject);
+    return bucket.topics === 0 ? [] : [{
+      subject,
+      courseId: subject,
+      title: metadata?.title ?? subject,
+      grade: metadata?.grade ?? '',
+      revisionId: metadata?.revisionId ?? null,
+      average: bucket.sum / bucket.topics,
+      topics: bucket.topics,
+      children: bucket.children,
+    }];
   });
-  learning.calibrated = SUBJECTS.flatMap((subject) => {
-    const count = calibratedChildren.get(subject);
-    return count === undefined ? [] : [{ subject, children: count }];
+  learning.calibrated = [...calibratedChildren].flatMap(([subject, count]) => {
+    return [{ subject, children: count }];
   });
   if (accuracy !== undefined) learning.accuracy = accuracy;
   // Знаменатель — только решённые споры. С `total` доля выигранных падала бы от
@@ -643,7 +663,8 @@ export function collectAdminStats(control: Database, options: AdminStatsOptions)
 export interface AdminStatsCacheOptions {
   control: Database;
   dataDir: string;
-  graph: TopicGraph;
+  graph?: TopicGraph;
+  graphForChild?: (childId: string) => TopicGraph;
   ttlMs?: number;
   now?: () => Date;
 }
@@ -682,7 +703,10 @@ export class AdminStatsCache {
     }
     const stats = collectAdminStats(this.#options.control, {
       dataDir: this.#options.dataDir,
-      graph: this.#options.graph,
+      ...(this.#options.graph === undefined ? {} : { graph: this.#options.graph }),
+      ...(this.#options.graphForChild === undefined
+        ? {}
+        : { graphForChild: this.#options.graphForChild }),
       now,
     });
     this.#cached = stats;

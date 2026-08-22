@@ -383,7 +383,7 @@ export function buildServer(
           ? undefined
           : new WarmupDispatcher({
               control,
-              graph: loaded,
+              graphFor: (childId) => curriculumProvider.get(childId).graph,
               log,
               failures,
               budget,
@@ -509,7 +509,7 @@ export function buildServer(
         cache: new AdminStatsCache({
           control,
           dataDir,
-          graph: loaded,
+          graphForChild: (childId) => curriculumProvider.get(childId).graph,
           ...(options.now === undefined ? {} : { now: options.now }),
         }),
       });
@@ -517,7 +517,7 @@ export function buildServer(
         context: adminContext,
         control,
         dataDir,
-        graph: loaded,
+        graphForChild: (childId) => curriculumProvider.get(childId).graph,
         ...(options.now === undefined ? {} : { now: options.now }),
       });
       registerAdminLogsRoutes(app, { context: adminContext, dataDir });

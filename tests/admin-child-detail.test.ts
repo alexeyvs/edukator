@@ -345,6 +345,31 @@ describe('слой 3 статистики оператора', () => {
     expect(generated).toBeLessThanOrEqual(Date.now());
   });
 
+  it('берёт произвольный курс и display metadata из снимка ребёнка', () => {
+    const id = child('Робототехник');
+    const graph = buildTopicGraph([{
+      ...topic('robotics.motion'),
+      subject: 'robotics',
+    }], [{ courseId: 'robotics', title: 'Робототехника', grade: '8 класс', revisionId: 7 }]);
+    seed(id, (db) => {
+      syncTopicState(db, graph);
+      db.prepare('UPDATE topic_state SET attempts = 1 WHERE topic_id = ?').run('robotics.motion');
+    });
+
+    const card = readChildDetail(control, {
+      dataDir: dir,
+      graphForChild: () => graph,
+      childId: id,
+      now: NOW,
+    });
+
+    if (card?.state !== 'read') throw new Error('карточка не прочитана');
+    expect(card.topics).toContainEqual(expect.objectContaining({
+      topicId: 'robotics.motion', subject: 'robotics', courseTitle: 'Робототехника',
+      grade: '8 класс', revisionId: 7,
+    }));
+  });
+
   it('не находит ребёнка, которого нет в управляющей базе', () => {
     expect(detail('0123456789abcdef')).toBeUndefined();
     // Чужой формат идентификатора отвечает тем же самым: путь по нему не

@@ -279,6 +279,27 @@ describe('воркер тёплой очереди', () => {
   });
 
   describe('выборка тем', () => {
+    it('греет произвольный course ID из переданного снимка', async () => {
+      const graph = graphOf([topic('robotics.motion', { subject: 'robotics' })]);
+      syncTopicState(db, graph);
+      const generated = producer(1);
+
+      const report = await runWarmupCycle({
+        db,
+        graph,
+        topics: 1,
+        target: 1,
+        threshold: 1,
+        produce: generated.produce,
+        prepareBoss: false,
+        prepareLearning: false,
+        log,
+      });
+
+      expect(report.topics).toEqual(['robotics.motion']);
+      expect(generated.requests[0]?.topic.subject).toBe('robotics');
+    });
+
     it('греет только темы плана, а не всю карту', async () => {
       const graph = graphOf(WIDE);
       const { requests, produce } = producer(QUEUE_TARGET);

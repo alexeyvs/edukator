@@ -31,6 +31,7 @@ import {
 } from '../server/control-db.js';
 import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
 import { acquireDataLock, dataLockPath, SERVER_LOCK_OWNER } from '../server/data-lock.js';
+import { buildTopicGraph } from '../server/curriculum.js';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const tsxCli = join(projectRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
@@ -117,6 +118,29 @@ describe('prefetch', () => {
   }
 
   describe('наполнение банка', () => {
+    it('греет произвольный курс из переданного персонального снимка', async () => {
+      const graph = buildTopicGraph([{
+        id: 'robotics.motion', subject: 'robotics', title: 'Движение', examWeight: 3,
+        difficulty: 2, prereqs: [], answerFormat: 'number', promptSeed: 'Про движение.',
+      }]);
+      const result = await prefetch({
+        dbPath,
+        graph,
+        seedDir,
+        topics: 1,
+        target: 1,
+        produce: (request) => Promise.resolve([task(request.topic.id)]),
+      });
+
+      expect(result.cycles[0]?.topics).toEqual(['robotics.motion']);
+      const db = openDatabase(dbPath);
+      try {
+        expect(countAvailable(db, 'robotics.motion')).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+
     it('заводит темы и греет ближайшие до запаса', async () => {
       const result = await run({ topics: 2 });
 

@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import type { AnswerFormat, Topic, TopicGraph } from '../curriculum.js';
-import { SUBJECTS, type Subject } from '../db.js';
+import { requireCourseId, type Subject } from '../db.js';
 import { storeTasks, takeTask, type BankTask, type TakeTaskOptions } from './bank.js';
 import { parseTaskBatch, type GeneratedTask, type MaterialFormat } from './task-schema.js';
 import type { DeepHint } from './task-schema.js';
@@ -67,7 +67,7 @@ export interface LoadSeedBankResult {
 }
 
 export function seedBankPath(subject: Subject, dir: string = SEED_BANK_DIR): string {
-  return join(dir, `${subject}.json`);
+  return join(dir, `${requireCourseId(subject, 'course ID посевного банка')}.json`);
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -102,11 +102,9 @@ export function parseSeedBank(
     throw new Error(`Посевной банк ${source}: ожидался объект`);
   }
 
-  const subject = raw['subject'];
-  if (typeof subject !== 'string' || !(SUBJECTS as readonly string[]).includes(subject)) {
-    throw new Error(
-      `Посевной банк ${source}: поле subject должно быть одним из ${SUBJECTS.join(', ')}, получено «${String(subject)}»`,
-    );
+  const subject = requireCourseId(raw['subject'], `Посевной банк ${source}: поле subject`);
+  if (!graph.subjects.includes(subject)) {
+    throw new Error(`Посевной банк ${source}: курса «${subject}» нет в карте`);
   }
   if (expected !== undefined && subject !== expected) {
     throw new Error(
@@ -168,7 +166,7 @@ export function parseSeedBank(
     topics.push({ topicId, tasks: parsed });
   });
 
-  return { subject: subject as Subject, topics, problems };
+  return { subject, topics, problems };
 }
 
 /**

@@ -87,7 +87,10 @@ export type CycleRunner = (options: WorkerOptions) => Promise<CycleReport>;
 export interface WarmupDispatcherOptions {
   /** Управляющая база: по ней берётся список детей, их свежесть и квота. */
   control: Database.Database;
-  graph: TopicGraph;
+  /** Актуальная программа ребёнка; вызывается заново перед каждой фазой. */
+  graphFor?: (childId: string) => TopicGraph;
+  /** Совместимый fallback для тестов и legacy-вызовов. */
+  graph?: TopicGraph;
   /**
    * Открывает базу ребёнка. `undefined` — пропустить его в этом обходе: его
    * база может быть испорчена или упереться в потолок открытых, и это состояние
@@ -579,10 +582,12 @@ export class WarmupDispatcher {
     const settings = this.#options.worker ?? {};
     const run = this.#options.runFor?.(childId) ?? settings.run;
     try {
+      const graph = this.#options.graphFor?.(childId) ?? this.#options.graph;
+      if (graph === undefined) throw new Error(`программа ребёнка ${childId} недоступна`);
       const cycle = await this.#cycle({
         ...settings,
         db,
-        graph: this.#options.graph,
+        graph,
         target: phase.target,
         threshold: phase.threshold,
         maxBatches: phase.maxBatches,

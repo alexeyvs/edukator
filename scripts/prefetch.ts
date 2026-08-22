@@ -35,7 +35,7 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { openDatabase, SUBJECTS, type Subject } from '../server/db.js';
+import { openDatabase, type Subject } from '../server/db.js';
 import { writeFileAtomic } from '../server/atomic-write.js';
 import {
   childDatabasePath,
@@ -55,7 +55,9 @@ import {
   PREFETCH_LOCK_OWNER,
   releaseDataLockOnSignals,
 } from '../server/data-lock.js';
-import { CURRICULUM_DIR, loadCurriculum, syncTopicState } from '../server/curriculum.js';
+import { CURRICULUM_DIR, loadCurriculum, syncTopicState, type TopicGraph } from '../server/curriculum.js';
+import { bootstrapLegacyCourses } from '../server/course-catalog.js';
+import { CurriculumProvider } from '../server/curriculum-provider.js';
 import type { CodexRunner } from '../server/codex/client.js';
 import { createQuotedRunner } from '../server/codex/quota.js';
 import {
@@ -111,6 +113,8 @@ export interface PrefetchOptions {
    */
   dbPath?: string;
   curriculumDir?: string;
+  /** Персональный снимок; обход детей передаёт его из CurriculumProvider. */
+  graph?: TopicGraph;
   /** Подменяемый производитель заданий: тесты не запускают процессов. */
   produce?: TaskProducer;
   /** Подменяемый вызов codex. */
@@ -203,7 +207,7 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
     options.threshold ?? (options.target === undefined ? undefined : Math.min(REFILL_BELOW, options.target));
 
   const log = options.log ?? defaultLog;
-  const graph = loadCurriculum(options.curriculumDir ?? CURRICULUM_DIR);
+  const graph = options.graph ?? loadCurriculum(options.curriculumDir ?? CURRICULUM_DIR);
   if (options.dbPath === undefined || options.dbPath.trim() === '') {
     throw new Error('Прогрев не знает, какую базу греть: путь ребёнка не задан');
   }
@@ -231,7 +235,7 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
       // про любой из них известно одно: посев в базу не попал. Частичный итог
       // `SeedBankError` при этом сохраняется: здоровые предметы доехали, и
       // выгрузке важно, у каких из них файла не было вовсе.
-      const affected = error instanceof SeedBankError ? error.subjects : SUBJECTS;
+      const affected = error instanceof SeedBankError ? error.subjects : graph.subjects;
       if (error instanceof SeedBankError) seeded = error.result;
       for (const subject of affected) brokenSeed.add(subject);
     }
@@ -297,7 +301,7 @@ export async function prefetch(options: PrefetchOptions = {}): Promise<PrefetchR
     if (options.exportSeed === true) {
       const outDir = options.outDir ?? SEED_BANK_DIR;
       mkdirSync(outDir, { recursive: true });
-      for (const subject of SUBJECTS) {
+      for (const subject of graph.subjects) {
         const path = seedBankPath(subject, outDir);
         // Предмет с непрочитанным посевом не выгружается вовсе, даже когда
         // задания в банке есть: в нём лежит не снимок, а огрызок — то, что
@@ -435,6 +439,8 @@ export async function prefetchChildren(
     // мимо счётчика.
     const control = openControlDatabase(controlPath, { fileMustExist: true });
     try {
+      bootstrapLegacyCourses(control, shared.curriculumDir ?? CURRICULUM_DIR);
+      const curriculum = new CurriculumProvider(control);
       let children: string[];
       if (childId === undefined) {
         children = listServiceableChildren(control).map((child) => child.id);
@@ -474,8 +480,10 @@ export async function prefetchChildren(
         // повод посадить остальных за пустой банк. В код возврата отказ всё
         // равно попадает — через `prefetchChildrenFailed`.
         try {
+          const graph = curriculum.get(id).graph;
           const result = await prefetch({
             ...shared,
+            graph,
             dbPath: childDatabasePath(dir, id),
             // Квота надевается ровно там же, где у сервера, — на сам вызов
             // модели, а не на бюджет: за одним слотом семафора прячется от двух

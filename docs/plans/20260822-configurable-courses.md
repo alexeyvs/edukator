@@ -180,17 +180,17 @@ Checkbox-пункты ниже описывают только автомати�
 
 ### Task 6: Перевести фоновые процессы, seed bank и админскую статистику
 
-- [ ] получать снимок ребёнка на каждом шаге `WarmupDispatcher`, codex worker и
+- [x] получать снимок ребёнка на каждом шаге `WarmupDispatcher`, codex worker и
   `learning-prep`, не удерживая общий graph после публикации
-- [ ] переделать `server/codex/seed-bank.ts` и `scripts/prefetch.ts` на
+- [x] переделать `server/codex/seed-bank.ts` и `scripts/prefetch.ts` на
   динамические курсы; legacy JSON seeds использовать только там, где они есть
-- [ ] обновить `server/admin/stats.ts`, `server/admin/child-detail.ts` и readonly
+- [x] обновить `server/admin/stats.ts`, `server/admin/child-detail.ts` и readonly
   обход так, чтобы агрегаты группировались по course ID и получали display metadata
-- [ ] сохранить изоляцию отказов: битая программа/источник одного курса или
+- [x] сохранить изоляцию отказов: битая программа/источник одного курса или
   ребёнка не останавливает обработку остальных и попадает в failure report
-- [ ] написать тесты диспетчера, prefetch, seed bank, статистики и readonly-card
+- [x] написать тесты диспетчера, prefetch, seed bank, статистики и readonly-card
   с произвольным курсом и разными назначениями детей
-- [ ] запустить `npx vitest run tests/codex-dispatcher.test.ts tests/codex-worker.test.ts tests/codex-seed-bank.test.ts tests/prefetch.test.ts tests/admin-stats.test.ts tests/admin-child-detail.test.ts` и `npm run typecheck`
+- [x] запустить `npx vitest run tests/codex-dispatcher.test.ts tests/codex-worker.test.ts tests/codex-seed-bank.test.ts tests/prefetch.test.ts tests/admin-stats.test.ts tests/admin-child-detail.test.ts` и `npm run typecheck`
 
 ### Task 7: Реализовать админское API каталога и ручного редактора тем
 

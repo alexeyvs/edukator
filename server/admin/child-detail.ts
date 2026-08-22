@@ -31,6 +31,9 @@ export interface AdminTopicCard {
   /** Название из карты тем. Его нет у темы, выпавшей из карты после правки. */
   title?: string;
   subject?: Subject;
+  courseTitle?: string;
+  grade?: string;
+  revisionId?: number | null;
   mastery: number;
   attempts: number;
   /** Тема закрыта победой над боссом: заданий по ней больше не просят. */
@@ -120,7 +123,8 @@ export type AdminChildDetail =
 
 export interface AdminChildDetailOptions {
   dataDir: string;
-  graph: TopicGraph;
+  graph?: TopicGraph;
+  graphForChild?: (childId: string) => TopicGraph;
   childId: string;
   now?: Date;
 }
@@ -191,9 +195,16 @@ function readTopics(db: Database, graph: TopicGraph): AdminTopicCard[] {
     .all();
   return rows.map((row) => {
     const topic = graph.byId.get(row.topic_id);
+    const course = topic === undefined ? undefined : graph.courses.get(topic.subject);
     return {
       topicId: row.topic_id,
-      ...(topic === undefined ? {} : { title: topic.title, subject: topic.subject }),
+      ...(topic === undefined ? {} : {
+        title: topic.title,
+        subject: topic.subject,
+        courseTitle: course?.title ?? topic.subject,
+        grade: course?.grade ?? '',
+        revisionId: course?.revisionId ?? null,
+      }),
       mastery: row.mastery,
       attempts: row.attempts,
       ...(row.closed_at === null ? {} : { closedAt: row.closed_at }),
@@ -304,9 +315,11 @@ export function readChildDetail(
 
   let result;
   try {
+    const graph = options.graphForChild?.(child.id) ?? options.graph;
+    if (graph === undefined) throw new Error(`Программа ребёнка ${child.id} недоступна`);
     result = readChildDatabase(options.dataDir, child.id, (db, meta): AdminChildInside => ({
       schemaVersion: meta.schemaVersion,
-      topics: readTopics(db, options.graph),
+      topics: readTopics(db, graph),
       materials: readMaterials(db),
       disputes: readDisputes(db),
       bosses: readBosses(db),

@@ -111,6 +111,18 @@ describe('посевной банк', () => {
       expect(bank.topics[0]?.tasks.map((item) => item.answer)).toEqual(['4', '4']);
     });
 
+    it('принимает посев произвольного курса из текущей карты', () => {
+      const graph = buildTopicGraph([topic('robotics.motion', { subject: 'robotics' })]);
+      const bank = parseSeedBank(
+        seedJson([{ topic_id: 'robotics.motion', tasks: batch(1) }], 'robotics'),
+        graph,
+        'robotics.json',
+      );
+
+      expect(bank.subject).toBe('robotics');
+      expect(seedBankPath('robotics', seedDir)).toBe(join(seedDir, 'robotics.json'));
+    });
+
     it('прогоняет задания через те же проверки, что и ответ модели', () => {
       const broken = seedJson([
         { topic_id: 'math.a', tasks: [task({ answer: '5', accept: ['4'] })] },

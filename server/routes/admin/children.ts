@@ -21,7 +21,8 @@ export interface AdminChildrenRoutesOptions {
   context: AdminContextResolver;
   control: Database;
   dataDir: string;
-  graph: TopicGraph;
+  graph?: TopicGraph;
+  graphForChild?: (childId: string) => TopicGraph;
   now?: () => Date;
 }
 
@@ -36,7 +37,8 @@ export function registerAdminChildrenRoutes(
       const childId = childIdParam(request.params);
       const detail = readChildDetail(options.control, {
         dataDir: options.dataDir,
-        graph: options.graph,
+        ...(options.graph === undefined ? {} : { graph: options.graph }),
+        ...(options.graphForChild === undefined ? {} : { graphForChild: options.graphForChild }),
         childId,
         now: now(),
       });

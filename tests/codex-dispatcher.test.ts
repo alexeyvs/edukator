@@ -360,6 +360,30 @@ describe('диспетчер прогрева', () => {
   });
 
   describe('брошенные, недоступные и исчерпавшие квоту', () => {
+    it('получает свежий снимок программы перед каждой фазой ребёнка', async () => {
+      const kid = addKid('Обновляемый');
+      const first = buildTopicGraph([TOPICS[0] as Topic]);
+      const second = buildTopicGraph([{ ...TOPICS[0] as Topic, subject: 'robotics', id: 'robotics.a' }]);
+      const seen: string[][] = [];
+      let reads = 0;
+      const worker = new WarmupDispatcher({
+        control,
+        graphFor: () => (++reads === 1 ? first : second),
+        log,
+        failures,
+        now: () => NOW,
+        open: () => kid.db,
+        cycle: (options) => {
+          seen.push([...options.graph.subjects]);
+          return Promise.resolve({ topics: [], refilled: [], codexUnavailable: false });
+        },
+      });
+
+      await worker.sweep();
+
+      expect(seen).toEqual([['math'], ['robotics']]);
+    });
+
     it('не греет брошенного ребёнка и берёт его обратно после ответа', async () => {
       const kid = addKid('Вернувшийся', ACTIVE_WINDOW_MS + 1000);
       const served: string[] = [];
@@ -408,6 +432,38 @@ describe('диспетчер прогрева', () => {
         .toBe('unavailable');
       expect(served.every((name) => name === 'Здоровый')).toBe(true);
       expect(served.length).toBeGreaterThan(0);
+    });
+
+    it('изолирует битую программу одного ребёнка и пишет failure report', async () => {
+      const broken = addKid('Битая программа');
+      const healthy = addKid('Здоровая программа');
+      const served: string[] = [];
+      const worker = new WarmupDispatcher({
+        control,
+        graphFor: (childId) => {
+          if (childId === broken.id) throw new Error('цикл в программе');
+          return graph;
+        },
+        log,
+        failures,
+        now: () => NOW,
+        open: (childId) => kids.find((kid) => kid.id === childId)?.db,
+        worker: {
+          produce: (request) => {
+            served.push(request.profile.name);
+            return Promise.resolve(batchOf(QUEUE_TARGET));
+          },
+        },
+      });
+
+      const report = await worker.sweep();
+
+      expect(report.children.find((child) => child.childId === broken.id)?.skipped).toBe('error');
+      expect(report.children.find((child) => child.childId === healthy.id)?.skipped).toBeUndefined();
+      expect(served).toContain('Здоровая программа');
+      expect(failed).toContainEqual(expect.objectContaining({
+        event: 'sweep-failed', childId: broken.id, detail: 'цикл в программе',
+      }));
     });
 
     // Исчерпанная квота приезжает той же недоступностью, что и отсутствующий

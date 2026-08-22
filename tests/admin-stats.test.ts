@@ -356,8 +356,14 @@ describe('слой 2 статистики оператора', () => {
     expect(report.learning.correct).toBe(2);
     expect(report.learning.accuracy).toBeCloseTo(2 / 3, 10);
     expect(report.learning.mastery).toEqual([
-      { subject: 'math', average: 0.6, topics: 1, children: 1 },
-      { subject: 'russian', average: 0.4, topics: 1, children: 1 },
+      {
+        subject: 'math', courseId: 'math', title: 'математика', grade: '', revisionId: null,
+        average: 0.6, topics: 1, children: 1,
+      },
+      {
+        subject: 'russian', courseId: 'russian', title: 'русский язык', grade: '', revisionId: null,
+        average: 0.4, topics: 1, children: 1,
+      },
     ]);
     expect(report.learning.boss).toEqual({ won: 1, lost: 0, failed: 0, live: 1 });
     expect(report.learning.integrity).toEqual({ reviews: 1, needsRetry: 1, retryItems: 1 });
@@ -372,6 +378,35 @@ describe('слой 2 статистики оператора', () => {
       open: 1,
       upheldShare: 1,
     });
+  });
+
+  it('группирует произвольный курс и отдаёт его display metadata из снимка ребёнка', () => {
+    const родитель = parent('dynamic@example.com');
+    const id = child(родитель, 'Динамический');
+    const dynamic = buildTopicGraph([
+      topic('robotics.motion', 'math'),
+    ].map((item) => ({ ...item, subject: 'robotics' })), [{
+      courseId: 'robotics', title: 'Робототехника', grade: '8 класс', revisionId: 42,
+    }]);
+    seed(id, (db) => {
+      syncTopicState(db, dynamic);
+      db.prepare('UPDATE topic_state SET mastery = 0.75, attempts = 2 WHERE topic_id = ?')
+        .run('robotics.motion');
+    });
+
+    const report = collectAdminStats(control, {
+      dataDir: dir,
+      graphForChild: (childId) => {
+        expect(childId).toBe(id);
+        return dynamic;
+      },
+      now: NOW,
+    });
+
+    expect(report.learning.mastery).toEqual([{
+      subject: 'robotics', courseId: 'robotics', title: 'Робототехника', grade: '8 класс',
+      revisionId: 42, average: 0.75, topics: 1, children: 1,
+    }]);
   });
 
   it('оставляет точность и долю споров пустыми, пока считать нечего', () => {
