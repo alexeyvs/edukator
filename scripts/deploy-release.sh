@@ -21,6 +21,8 @@ curl_bin="${EDUKATOR_DEPLOY_CURL_BIN:-curl}"
 chown_bin="${EDUKATOR_DEPLOY_CHOWN_BIN:-chown}"
 runuser_bin="${EDUKATOR_DEPLOY_RUNUSER_BIN:-runuser}"
 npm_bin="${EDUKATOR_DEPLOY_NPM_BIN:-/opt/node/bin/npm}"
+node_bin="${EDUKATOR_DEPLOY_NODE_BIN:-${npm_bin%/npm}/node}"
+maintenance_name='.maintenance'
 
 die() {
   printf 'deploy: %s\n' "$*" >&2
@@ -42,7 +44,7 @@ if [[ "$require_root" == 1 && "$(id -u)" != 0 ]]; then
   die 'remote-helper должен работать от root'
 fi
 
-for executable in "$systemctl_bin" "$curl_bin" "$chown_bin" "$runuser_bin" "$npm_bin"; do
+for executable in "$systemctl_bin" "$curl_bin" "$chown_bin" "$runuser_bin" "$npm_bin" "$node_bin"; do
   [[ -x "$executable" ]] || command -v "$executable" >/dev/null 2>&1 || die "не найдена команда $executable"
 done
 
@@ -180,6 +182,35 @@ wait_for_health() {
   return 1
 }
 
+restore_snapshot() {
+  local data_dir="$1" manifest artifact expected actual
+  [[ -f "$backup_dir/control.db" ]] || die 'в снимке нет control.db'
+  manifest="$backup_dir/catalog/manifest.json"
+  if [[ -f "$manifest" ]]; then
+    command -v sha256sum >/dev/null 2>&1 || die 'для проверки снимка нужен sha256sum'
+    while IFS=$'\t' read -r artifact expected; do
+      [[ -n "$artifact" && "$artifact" != /* && "$artifact" != *'..'* ]] \
+        || die 'manifest снимка содержит недопустимый путь'
+      [[ -f "$backup_dir/$artifact" ]] || die 'в снимке отсутствует catalog artifact'
+      actual="$(sha256sum "$backup_dir/$artifact" | awk '{print $1}')"
+      [[ "$actual" == "$expected" ]] || die 'catalog artifact снимка не прошёл проверку'
+    done < <("$node_bin" -e '
+      const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+      for (const x of p.artifacts ?? []) console.log(`${x.path}\t${x.sha256}`);
+    ' "$manifest")
+  fi
+
+  rm -f -- "$data_dir/control.db" "$data_dir/control.db-wal" "$data_dir/control.db-shm"
+  rm -rf -- "$data_dir/children" "$data_dir/catalog"
+  cp "$backup_dir/control.db" "$data_dir/control.db"
+  [[ ! -d "$backup_dir/children" ]] || cp -a "$backup_dir/children" "$data_dir/children"
+  [[ ! -d "$backup_dir/catalog" ]] || cp -a "$backup_dir/catalog" "$data_dir/catalog"
+  mkdir -p "$data_dir/children"
+  rm -f -- "$data_dir/$maintenance_name"
+  "$chown_bin" -R "$owner" "$data_dir/control.db" "$data_dir/children" \
+    "$data_dir/catalog" 2>/dev/null || true
+}
+
 show_failure() {
   "$systemctl_bin" --no-pager --full status "$service" >&2 || true
   if command -v journalctl >/dev/null 2>&1; then
@@ -198,6 +229,7 @@ rollback() {
     die "автооткат не смог вернуть $previous_dir"
   fi
   previous_saved=0
+  restore_snapshot "$EDUKATOR_DATA_DIR"
   "$systemctl_bin" start "$service"
   service_stopped=0
   if ! wait_for_health; then
@@ -209,6 +241,8 @@ rollback() {
 
 "$systemctl_bin" stop "$service"
 service_stopped=1
+touch "$EDUKATOR_DATA_DIR/$maintenance_name"
+"$chown_bin" "$owner" "$EDUKATOR_DATA_DIR/$maintenance_name"
 if ! mv "$app_dir" "$previous_dir"; then
   if "$systemctl_bin" start "$service"; then
     service_stopped=0
@@ -226,6 +260,18 @@ if ! mv "$stage_dir" "$app_dir"; then
 fi
 new_installed=1
 
+if ! "$systemctl_bin" start "$service"; then
+  show_failure
+  rollback
+fi
+service_stopped=0
+if ! wait_for_health; then
+  show_failure
+  rollback
+fi
+"$systemctl_bin" stop "$service"
+service_stopped=1
+rm -f -- "$EDUKATOR_DATA_DIR/$maintenance_name"
 if ! "$systemctl_bin" start "$service"; then
   show_failure
   rollback

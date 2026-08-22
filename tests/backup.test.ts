@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';
@@ -24,6 +24,7 @@ import { backupDataDir, parseArgs } from '../scripts/backup.js';
 import {
   CourseArtifactStore,
   resolveCatalogPath,
+  sha256File,
   verifyArtifactManifest,
   type ArtifactManifest,
 } from '../server/course-artifacts.js';
@@ -341,14 +342,30 @@ describe('снятие копии каталога данных', () => {
       'SELECT artifact_path FROM course_sources WHERE id = ?',
     ).get(uploaded.source.id)?.artifact_path;
     if (storedPath === undefined) throw new Error('источник не записан');
+    const imagePath = `catalog/artifacts/geography-5/${draft.id}/pages/${uploaded.source.id}-1.jpg`;
+    const absoluteImage = resolveCatalogPath(dir, imagePath);
+    mkdirSync(resolve(absoluteImage, '..'), { recursive: true });
+    writeFileSync(absoluteImage, 'recognized-page');
+    control.prepare(
+      `INSERT INTO source_pages (source_id, page_number, status, text, image_path)
+       VALUES (?, 1, 'ready', 'Распознанная страница', ?)`,
+    ).run(uploaded.source.id, imagePath);
 
     const result = backupDataDir(dir, out);
-    expect(result.artifacts).toEqual([{
-      path: storedPath,
-      sha256: uploaded.source.sha256,
-      size: statSync(resolveCatalogPath(dir, storedPath)).size,
-    }]);
+    expect(result.artifacts).toEqual([
+      {
+        path: storedPath,
+        sha256: uploaded.source.sha256,
+        size: statSync(resolveCatalogPath(dir, storedPath)).size,
+      },
+      {
+        path: imagePath,
+        sha256: sha256File(absoluteImage),
+        size: statSync(absoluteImage).size,
+      },
+    ].sort((left, right) => left.path.localeCompare(right.path)));
     expect(existsSync(resolveCatalogPath(out, storedPath))).toBe(true);
+    expect(existsSync(resolveCatalogPath(out, imagePath))).toBe(true);
     const manifest = JSON.parse(readFileSync(result.artifactManifest, 'utf8')) as ArtifactManifest;
     expect(() => verifyArtifactManifest(out, manifest)).not.toThrow();
 

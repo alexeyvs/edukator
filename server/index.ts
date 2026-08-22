@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import type Database from 'better-sqlite3';
@@ -89,6 +89,7 @@ import { CatalogWorker, type CatalogWorkerOptions } from './catalog-worker.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
 export const WEB_DIST_DIR = resolve(projectRoot, 'web', 'dist');
+export const MAINTENANCE_MARKER = '.maintenance';
 
 /**
  * Версия приложения из package.json — отдаётся в /api/health. Нечитаемый или
@@ -277,6 +278,18 @@ export function buildServer(
 
   try {
     const app = Fastify({ logger: false });
+
+    const maintenancePath = resolve(dataDir, MAINTENANCE_MARKER);
+    app.addHook('onRequest', (request, reply, done) => {
+      if (
+        existsSync(maintenancePath)
+        && !['GET', 'HEAD', 'OPTIONS'].includes(request.method)
+      ) {
+        void reply.code(503).send({ error: 'Сервис временно работает в режиме обслуживания' });
+        return;
+      }
+      done();
+    });
 
     // Снятие замка регистрируется **первым**: `onClose` в Fastify выполняются в
     // обратном порядке регистрации, так что первый зарегистрированный отработает
@@ -613,6 +626,7 @@ export function buildServer(
       // чем сервер вообще способен ответить ученику, незачем, а тесты маршрутов
       // ходят через `inject` и фоновой генерации не поднимают вовсе.
       app.addHook('onListen', async () => {
+        if (existsSync(maintenancePath)) return;
         dispatcher?.start();
         catalogWorker?.start();
       });
@@ -754,6 +768,7 @@ export function buildServer(
         .send({
           status,
           version: readVersion(),
+          maintenance: existsSync(maintenancePath),
           control,
           curriculum,
           catalog,

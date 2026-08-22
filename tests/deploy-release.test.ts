@@ -15,6 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 const helper = resolve('scripts/deploy-release.sh');
+const ocrSetup = resolve('scripts/install-ocr-dependencies.sh');
 const releaseId = '20260821T120000Z-abcdef123456';
 const proxy = 'http://deploy-user:deploy-secret@proxy.test:3128';
 
@@ -41,6 +42,11 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
     mkdirSync(join(appRoot, 'app'), { recursive: true });
     mkdirSync(join(root, 'home'), { recursive: true });
     mkdirSync(fakeBin, { recursive: true });
+    mkdirSync(join(root, 'data', 'children'), { recursive: true });
+    mkdirSync(join(root, 'data', 'catalog', 'artifacts'), { recursive: true });
+    writeFileSync(join(root, 'data', 'control.db'), 'control-before\n');
+    writeFileSync(join(root, 'data', 'children', 'child.db'), 'child-before\n');
+    writeFileSync(join(root, 'data', 'catalog', 'artifacts', 'book.pdf'), 'pdf-before\n');
     writeFileSync(join(appRoot, 'app', 'version'), 'old\n');
     writeFileSync(
       envFile,
@@ -58,7 +64,13 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
 
     executable(
       'systemctl',
-      '#!/usr/bin/env bash\nprintf \'systemctl %s\\n\' "$*" >> "$EDUKATOR_DEPLOY_TEST_LOG"\n',
+      [
+        '#!/usr/bin/env bash',
+        'marker=normal',
+        '[[ -e "$EDUKATOR_DATA_DIR/.maintenance" ]] && marker=maintenance',
+        'printf \'systemctl %s %s\\n\' "$*" "$marker" >> "$EDUKATOR_DEPLOY_TEST_LOG"',
+        '',
+      ].join('\n'),
     );
     executable('chown', '#!/usr/bin/env bash\nexit 0\n');
     executable(
@@ -79,7 +91,11 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
         'printf \'npm %s %s\\n\' "$PWD" "$*" >> "$EDUKATOR_DEPLOY_TEST_LOG"',
         'if [[ "$1 $2 $3" == "run backup --" ]]; then',
         '  mkdir -p "$5"',
-        '  printf \'backup\\n\' > "$5/control.db"',
+        '  cp "$EDUKATOR_DATA_DIR/control.db" "$5/control.db"',
+        '  cp -a "$EDUKATOR_DATA_DIR/children" "$5/children"',
+        '  cp -a "$EDUKATOR_DATA_DIR/catalog" "$5/catalog"',
+        '  hash="$(sha256sum "$5/catalog/artifacts/book.pdf" | awk \'{print $1}\')"',
+        '  printf \'{"version":1,"artifacts":[{"path":"catalog/artifacts/book.pdf","sha256":"%s","size":11}]}\\n\' "$hash" > "$5/catalog/manifest.json"',
         'fi',
         '',
       ].join('\n'),
@@ -90,6 +106,9 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
         '#!/usr/bin/env bash',
         'if [[ "${EDUKATOR_DEPLOY_TEST_HEALTH:-ok}" == "new-fails" ]] &&',
         '   [[ "$(cat "$EDUKATOR_DEPLOY_APP_ROOT/app/version" 2>/dev/null)" == "new" ]]; then',
+        '  printf \'control-migrated\\n\' > "$EDUKATOR_DATA_DIR/control.db"',
+        '  printf \'child-migrated\\n\' > "$EDUKATOR_DATA_DIR/children/child.db"',
+        '  printf \'pdf-migrated\\n\' > "$EDUKATOR_DATA_DIR/catalog/artifacts/book.pdf"',
         '  exit 22',
         'fi',
         'exit 0',
@@ -122,6 +141,9 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
     expect(readFileSync(commandLog, 'utf8')).toContain('ci --include=dev --no-audit --no-fund');
     expect(readFileSync(commandLog, 'utf8')).toContain('run backup -- --out');
     expect(existsSync(join(root, 'home', 'deploy-backups', releaseId, 'control.db'))).toBe(true);
+    expect(readFileSync(commandLog, 'utf8')).toContain('start edukator-test maintenance');
+    expect(readFileSync(commandLog, 'utf8')).toContain('start edukator-test normal');
+    expect(existsSync(join(root, 'data', '.maintenance'))).toBe(false);
     expect(`${result.stdout}${result.stderr}`).not.toContain('deploy-secret');
   });
 
@@ -135,6 +157,11 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
     );
     expect(result.stderr).toContain('предыдущая версия восстановлена');
     expect(existsSync(join(root, 'home', 'deploy-backups', releaseId, 'control.db'))).toBe(true);
+    expect(readFileSync(join(root, 'data', 'control.db'), 'utf8')).toBe('control-before\n');
+    expect(readFileSync(join(root, 'data', 'children', 'child.db'), 'utf8')).toBe('child-before\n');
+    expect(readFileSync(join(root, 'data', 'catalog', 'artifacts', 'book.pdf'), 'utf8'))
+      .toBe('pdf-before\n');
+    expect(existsSync(join(root, 'data', '.maintenance'))).toBe(false);
     expect(`${result.stdout}${result.stderr}`).not.toContain('deploy-secret');
   });
 
@@ -233,8 +260,111 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
       EDUKATOR_DEPLOY_CHOWN_BIN: join(fakeBin, 'chown'),
       EDUKATOR_DEPLOY_RUNUSER_BIN: join(fakeBin, 'runuser'),
       EDUKATOR_DEPLOY_NPM_BIN: join(fakeBin, 'npm'),
+      EDUKATOR_DEPLOY_NODE_BIN: process.execPath,
       EDUKATOR_DEPLOY_TEST_LOG: commandLog,
       EDUKATOR_DEPLOY_TEST_HEALTH: health,
     };
+  }
+});
+
+describe('OCR preflight и подготовка Ubuntu', () => {
+  let root: string;
+  let fakeBin: string;
+  let osRelease: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'edukator-ocr-setup-'));
+    fakeBin = join(root, 'bin');
+    osRelease = join(root, 'os-release');
+    mkdirSync(fakeBin);
+    writeFileSync(osRelease, 'ID=ubuntu\nVERSION_ID=22.04\n');
+    for (const name of ['ocrmypdf', 'tesseract', 'pdftotext', 'pdftoppm', 'qpdf']) {
+      const version = name === 'ocrmypdf' ? '13.4.0'
+        : name === 'tesseract' ? '5.3.0'
+        : name === 'qpdf' ? '10.6.3' : '22.02.0';
+      executable(name, [
+        '#!/usr/bin/env bash',
+        'if [[ "$1" == "--list-langs" ]]; then printf \'List of available languages (2):\\nrus\\neng\\n\'; exit; fi',
+        `printf '%s ${version}\\n' ${JSON.stringify(name)}`,
+        '',
+      ].join('\n'));
+    }
+  });
+
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it('read-only проверяет версии и rus+eng', () => {
+    const result = check();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('зависимости готовы');
+  });
+
+  it('идемпотентно устанавливает точный набор Ubuntu-пакетов', () => {
+    const log = join(root, 'apt.log');
+    executable('apt-get', [
+      '#!/usr/bin/env bash',
+      'printf \'%s\\n\' "$*" >> "$EDUKATOR_OCR_APT_LOG"',
+      '',
+    ].join('\n'));
+    const env = {
+      EDUKATOR_OCR_REQUIRE_ROOT: '0',
+      EDUKATOR_OCR_APT_LOG: log,
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const result = spawnSync('bash', [ocrSetup], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+          EDUKATOR_OCR_OS_RELEASE: osRelease,
+          ...env,
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+    }
+    const calls = readFileSync(log, 'utf8');
+    expect(calls.match(/^update$/gmu)).toHaveLength(2);
+    expect(calls.match(/install -y --no-install-recommends ocrmypdf tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng poppler-utils qpdf/gmu))
+      .toHaveLength(2);
+  });
+
+  it.each(['ocrmypdf', 'tesseract', 'pdftotext', 'pdftoppm', 'qpdf'])(
+    'называет отсутствующий пакет %s',
+    (missing) => {
+      const result = check({ EDUKATOR_OCR_FORCE_MISSING: missing });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(missing);
+      expect(result.stderr).not.toContain(proxy);
+    },
+  );
+
+  it.each(['rus', 'eng'])('отказывает без языка %s', (missing) => {
+    executable('tesseract', [
+      '#!/usr/bin/env bash',
+      `if [[ "$1" == "--list-langs" ]]; then printf '${missing === 'rus' ? 'eng' : 'rus'}\\n'; exit; fi`,
+      "printf 'tesseract 5.3.0\\n'",
+      '',
+    ].join('\n'));
+    const result = check();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(missing);
+  });
+
+  function executable(name: string, body: string): void {
+    const path = join(fakeBin, name);
+    writeFileSync(path, body);
+    chmodSync(path, 0o755);
+  }
+
+  function check(extra: NodeJS.ProcessEnv = {}) {
+    return spawnSync('bash', [ocrSetup, '--check'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+        EDUKATOR_OCR_OS_RELEASE: osRelease,
+        ...extra,
+      },
+    });
   }
 });

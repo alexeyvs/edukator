@@ -38,6 +38,7 @@ interface HealthBody {
   curriculum: string;
   catalog: { state: string; queued: number; running: number; failed: number };
   children: { open: number; detached: string[] };
+  maintenance: boolean;
 }
 
 describe('GET /api/health', () => {
@@ -89,6 +90,7 @@ describe('GET /api/health', () => {
     expect(body.version).toMatch(/^\d+\.\d+\.\d+$/);
     expect(body.control).toBe('ok');
     expect(body.curriculum).toBe('ok');
+    expect(body.maintenance).toBe(false);
     expect(body.catalog).toMatchObject({ state: 'idle', queued: 0, running: 0, failed: 0 });
     // Ни одного обращения к детям не было — и ни одна база не открыта.
     expect(body.children).toEqual({ open: 0, detached: [] });
@@ -207,6 +209,46 @@ describe('GET /api/health', () => {
       expect(body.children.open).toBe(1);
       expect(body.status).toBe('ok');
       expect(existsSync(untouched.dbPath)).toBe(true);
+    });
+
+    it('в maintenance-окне оставляет диагностику доступной, но запрещает записи', async () => {
+      const marker = join(tempDir, 'дети', '.maintenance');
+      writeFileSync(marker, 'deploy\n');
+      try {
+        const health = await server.app.inject({ method: 'GET', url: '/api/health' });
+        expect(health.statusCode).toBe(200);
+        expect((health.json() as HealthBody).maintenance).toBe(true);
+        expect((await server.app.inject({ method: 'GET', url: '/api/gate/status' })).statusCode)
+          .toBe(200);
+
+        const mutation = await server.app.inject({
+          method: 'POST', url: '/api/run/start', payload: { subject: 'math' },
+        });
+        expect(mutation.statusCode).toBe(503);
+        expect(mutation.json()).toEqual({
+          error: 'Сервис временно работает в режиме обслуживания',
+        });
+      } finally {
+        rmSync(marker, { force: true });
+      }
+    });
+
+    it('отказ OCR красит только catalog worker и не останавливает занятия', async () => {
+      const revision = server.control.prepare<[], { id: number; course_id: string }>(
+        "SELECT id, course_id FROM course_revisions WHERE status = 'published' LIMIT 1",
+      ).get();
+      if (revision === undefined) throw new Error('нет опубликованной редакции');
+      server.control.prepare(
+        `INSERT INTO catalog_jobs
+           (job_key, type, status, course_id, revision_id, error)
+         VALUES ('ocr:dependency-failure', 'ocr', 'failed', ?, ?, 'qpdf не установлен')`,
+      ).run(revision.course_id, revision.id);
+
+      const health = await server.app.inject({ method: 'GET', url: '/api/health' });
+      expect(health.statusCode).toBe(200);
+      expect((health.json() as HealthBody).catalog).toMatchObject({ state: 'degraded', failed: 1 });
+      expect((await server.app.inject({ method: 'GET', url: '/api/gate/status' })).statusCode)
+        .toBe(200);
     });
 
     it('краснеет за подменённую базу ребёнка и называет его', async () => {

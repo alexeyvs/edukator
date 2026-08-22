@@ -37,6 +37,8 @@ import {
   CATALOG_DIR,
   CATALOG_MANIFEST_FILE,
   copyArtifactForBackup,
+  resolveCatalogPath,
+  sha256File,
   verifyArtifactManifest,
   type ArtifactManifest,
   type ArtifactManifestEntry,
@@ -131,11 +133,22 @@ export function backupDataDir(dir: string, outDir: string): DataDirBackup {
     const hasSources = control.prepare<[], { count: number }>(
       "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'course_sources'",
     ).get()?.count === 1;
-    artifactRows = hasSources
+    const sources = hasSources
       ? control.prepare<[], { artifact_path: string; sha256: string }>(
         'SELECT artifact_path, sha256 FROM course_sources ORDER BY artifact_path',
       ).all()
       : [];
+    const pageImages = hasSources
+      ? control.prepare<[], { artifact_path: string }>(
+        `SELECT DISTINCT image_path AS artifact_path FROM source_pages
+         WHERE image_path IS NOT NULL ORDER BY image_path`,
+      ).all().map((row) => ({
+        artifact_path: row.artifact_path,
+        sha256: sha256File(resolveCatalogPath(dir, row.artifact_path)),
+      }))
+      : [];
+    artifactRows = [...sources, ...pageImages]
+      .sort((left, right) => left.artifact_path.localeCompare(right.artifact_path));
   } finally {
     control.close();
   }

@@ -56,6 +56,11 @@ command -v systemctl >/dev/null
 systemctl cat "$service" >/dev/null
 REMOTE_PREFLIGHT
 
+if ! ssh "${ssh_options[@]}" "$target" /bin/bash -s -- --check \
+  < scripts/install-ocr-dependencies.sh; then
+  die "OCR-зависимости не готовы. Выполните: ssh $target /bin/bash -s < scripts/install-ocr-dependencies.sh"
+fi
+
 printf '%s\n' 'Проверяю приложение перед деплоем...'
 npm test
 npm run coverage
