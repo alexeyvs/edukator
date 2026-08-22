@@ -324,6 +324,9 @@ describe('админские маршруты каталога курсов', ()
         { method: 'PUT', url: '/api/admin/courses/x/draft/topics' },
         { method: 'POST', url: '/api/admin/courses/x/publish' },
         { method: 'POST', url: '/api/admin/courses/x/archive' },
+        { method: 'GET', url: '/api/admin/courses/x/sources' },
+        { method: 'POST', url: '/api/admin/courses/x/sources' },
+        { method: 'DELETE', url: '/api/admin/courses/x/sources/1' },
       ] as const;
       for (const item of requests) {
         expect((await unavailable.inject(item)).statusCode, `${item.method} ${item.url}`).toBe(503);

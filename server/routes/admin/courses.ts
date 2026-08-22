@@ -1,5 +1,6 @@
 import type { Database } from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply } from 'fastify';
+import fastifyMultipart from '@fastify/multipart';
 import {
   ANSWER_FORMATS,
   type AnswerFormat,
@@ -23,6 +24,14 @@ import {
   type DraftTopicInput,
 } from '../../course-catalog.js';
 import { recordAdminAudit } from '../../control-db.js';
+import {
+  ArtifactNotFoundError,
+  ArtifactStorageError,
+  ArtifactTooLargeError,
+  ArtifactValidationError,
+  CourseArtifactStore,
+} from '../../course-artifacts.js';
+import { dataDir as defaultDataDir } from '../../data-dir.js';
 import { ROUTE_ACCESS, failAuth, type AdminContextResolver } from '../tenant-context.js';
 
 export const COURSE_ID_MAX_LENGTH = 80;
@@ -41,6 +50,8 @@ export interface AdminCoursesRoutesOptions {
   now?: () => Date;
   createCourseId?: () => string;
   createTopicToken?: () => string;
+  dataDir?: string;
+  artifacts?: CourseArtifactStore;
 }
 
 class RequestValidationError extends Error {}
@@ -149,6 +160,13 @@ function courseCard(control: Database, courseId: CourseId): object {
 }
 
 function sendError(reply: FastifyReply, error: unknown): FastifyReply {
+  if (error instanceof ArtifactTooLargeError) return reply.code(413).send({ error: error.message });
+  if (error instanceof ArtifactValidationError) return reply.code(400).send({ error: error.message });
+  if (error instanceof ArtifactNotFoundError) return reply.code(404).send({ error: error.message });
+  if (error instanceof ArtifactStorageError) return reply.code(503).send({ error: error.message });
+  if (error instanceof Error && /file too large|parts limit|files limit|request body is too large/iu.test(error.message)) {
+    return reply.code(413).send({ error: 'PDF превышает допустимый размер multipart-запроса' });
+  }
   if (error instanceof RequestValidationError) return reply.code(400).send({ error: error.message });
   if (error instanceof CatalogNotFoundError) return reply.code(404).send({ error: error.message });
   if (error instanceof CatalogConflictError || error instanceof PublishedRevisionError) {
@@ -182,6 +200,14 @@ export function registerAdminCoursesRoutes(
   options: AdminCoursesRoutesOptions,
 ): void {
   const now = options.now ?? (() => new Date());
+  const artifacts = options.artifacts ?? new CourseArtifactStore(
+    options.control,
+    options.dataDir ?? defaultDataDir(),
+    { now },
+  );
+  app.register(fastifyMultipart, {
+    limits: { files: 1, fields: 0, parts: 1, fileSize: artifacts.maxBytes },
+  });
 
   app.get('/api/admin/courses', (request, reply) => {
     const auth = authorize(options, request, reply);
@@ -379,6 +405,65 @@ export function registerAdminCoursesRoutes(
       return sendError(reply, error);
     }
   });
+
+  app.get('/api/admin/courses/:courseId/sources', (request, reply) => {
+    const auth = authorize(options, request, reply);
+    if (isReply(auth)) return auth;
+    try {
+      return reply.send({ sources: artifacts.list(courseIdParam(request.params)) });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post('/api/admin/courses/:courseId/sources', async (request, reply) => {
+    const auth = authorize(options, request, reply, true);
+    if (isReply(auth)) return auth;
+    try {
+      const courseId = courseIdParam(request.params);
+      if (!request.isMultipart()) throw new RequestValidationError('Ожидался multipart/form-data с одним PDF');
+      const file = await request.file({
+        limits: { files: 1, fields: 0, parts: 1, fileSize: artifacts.maxBytes },
+      });
+      if (file === undefined) throw new RequestValidationError('PDF-файл не передан');
+      if (file.mimetype !== 'application/pdf') {
+        file.file.resume();
+        throw new ArtifactValidationError('Ожидался файл с типом application/pdf');
+      }
+      const at = now();
+      const result = await artifacts.uploadToCurrentDraft(courseId, file.filename, file.file);
+      recordAdminAudit(options.control, {
+        adminId: auth.admin.adminId,
+        action: 'course-update',
+        detail: `курс ${courseId}, источник ${result.source.id}, редакция ${result.source.revisionId}`,
+      }, at);
+      return reply.code(result.duplicate ? 200 : 201).send(result);
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.delete('/api/admin/courses/:courseId/sources/:sourceId', async (request, reply) => {
+    const auth = authorize(options, request, reply, true);
+    if (isReply(auth)) return auth;
+    try {
+      const courseId = courseIdParam(request.params);
+      const rawSourceId = (request.params as { sourceId?: unknown }).sourceId;
+      const sourceId = typeof rawSourceId === 'string' ? Number(rawSourceId) : Number.NaN;
+      if (!Number.isSafeInteger(sourceId) || sourceId < 1) {
+        throw new RequestValidationError('Некорректный идентификатор источника');
+      }
+      const removed = await artifacts.remove(courseId, sourceId);
+      recordAdminAudit(options.control, {
+        adminId: auth.admin.adminId,
+        action: 'course-update',
+        detail: `курс ${courseId}, удалён источник ${removed.id}, редакция ${removed.revisionId}`,
+      }, now());
+      return reply.send({ source: removed });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
 }
 
 export function registerUnavailableAdminCourses(app: FastifyInstance, reason: string): void {
@@ -393,4 +478,7 @@ export function registerUnavailableAdminCourses(app: FastifyInstance, reason: st
   app.put('/api/admin/courses/:courseId/draft/topics', send);
   app.post('/api/admin/courses/:courseId/publish', send);
   app.post('/api/admin/courses/:courseId/archive', send);
+  app.get('/api/admin/courses/:courseId/sources', send);
+  app.post('/api/admin/courses/:courseId/sources', send);
+  app.delete('/api/admin/courses/:courseId/sources/:sourceId', send);
 }

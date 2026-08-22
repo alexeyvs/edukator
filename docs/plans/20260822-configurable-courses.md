@@ -224,19 +224,19 @@ Checkbox-пункты ниже описывают только автомати�
 
 ### Task 9: Добавить безопасное хранилище PDF и upload API
 
-- [ ] подключить потоковый multipart-парсер с явными пределами и реализовать
+- [x] подключить потоковый multipart-парсер с явными пределами и реализовать
   `server/course-artifacts.ts` под отдельным каталогом внутри `EDUKATOR_DATA_DIR`
-- [ ] проверять `%PDF-`, qpdf-структуру, размер/страницы, SHA-256 и канонический
+- [x] проверять `%PDF-`, qpdf-структуру, размер/страницы, SHA-256 и канонический
   путь; писать через temp + fsync + rename, не используя имя загрузки как путь
-- [ ] добавить admin endpoints загрузки/списка/удаления источника только у draft
+- [x] добавить admin endpoints загрузки/списка/удаления источника только у draft
   и дедупликацию одинакового содержимого
-- [ ] сделать published artifacts immutable и безопасно очищать только временные
+- [x] сделать published artifacts immutable и безопасно очищать только временные
   или неиспользуемые failed artifacts
-- [ ] расширить `scripts/backup.ts` консистентным копированием catalog artifacts и
+- [x] расширить `scripts/backup.ts` консистентным копированием catalog artifacts и
   manifest-проверкой, не затрагивая исходники
-- [ ] написать тесты multipart limits, поддельной сигнатуры, path traversal,
+- [x] написать тесты multipart limits, поддельной сигнатуры, path traversal,
   дубля, атомарности при сбое, immutable publication и backup/restore layout
-- [ ] запустить `npx vitest run tests/course-artifacts.test.ts tests/admin-course-sources-routes.test.ts tests/backup.test.ts` и `npm run typecheck`
+- [x] запустить `npx vitest run tests/course-artifacts.test.ts tests/admin-course-sources-routes.test.ts tests/backup.test.ts` и `npm run typecheck`
 
 ### Task 10: Реализовать перезапускаемый OCR-конвейер
 

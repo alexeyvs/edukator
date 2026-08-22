@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Database } from 'better-sqlite3';
@@ -20,6 +21,13 @@ import { openDatabase, SCHEMA_VERSION, validateSchema, writeProfile } from '../s
 // снятия — в `server/backup.ts`. Оба проверяются здесь: разводить их по двум
 // файлам с одинаковым именем нечем.
 import { backupDataDir, parseArgs } from '../scripts/backup.js';
+import {
+  CourseArtifactStore,
+  resolveCatalogPath,
+  verifyArtifactManifest,
+  type ArtifactManifest,
+} from '../server/course-artifacts.js';
+import { createCourse } from '../server/course-catalog.js';
 
 const projectRoot = resolve(import.meta.dirname, '..');
 const tsxCli = join(projectRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
@@ -317,6 +325,36 @@ describe('снятие копии каталога данных', () => {
     } finally {
       copiedControl.close();
     }
+  });
+
+  it('копирует catalog artifacts по снимку control.db и проверяет manifest для restore', async () => {
+    const draft = createCourse(control, {
+      id: 'geography-5', title: 'География', grade: '5 класс',
+    }).draft;
+    const artifacts = new CourseArtifactStore(control, dir, {
+      inspector: { inspect: async () => ({ pageCount: 1 }) },
+    });
+    const uploaded = await artifacts.upload(
+      'geography-5', draft.id, 'atlas.pdf', Readable.from(Buffer.from('%PDF-1.7\natlas\n%%EOF\n')),
+    );
+    const storedPath = control.prepare<[number], { artifact_path: string }>(
+      'SELECT artifact_path FROM course_sources WHERE id = ?',
+    ).get(uploaded.source.id)?.artifact_path;
+    if (storedPath === undefined) throw new Error('источник не записан');
+
+    const result = backupDataDir(dir, out);
+    expect(result.artifacts).toEqual([{
+      path: storedPath,
+      sha256: uploaded.source.sha256,
+      size: statSync(resolveCatalogPath(dir, storedPath)).size,
+    }]);
+    expect(existsSync(resolveCatalogPath(out, storedPath))).toBe(true);
+    const manifest = JSON.parse(readFileSync(result.artifactManifest, 'utf8')) as ArtifactManifest;
+    expect(() => verifyArtifactManifest(out, manifest)).not.toThrow();
+
+    writeFileSync(resolveCatalogPath(out, storedPath), 'tampered');
+    expect(() => verifyArtifactManifest(out, manifest)).toThrow(/не прошёл проверку/u);
+    expect(readFileSync(resolveCatalogPath(dir, storedPath), 'utf8')).toContain('atlas');
   });
 
   it('снимает и выведенного ребёнка: retired_at не удаляет прогресс', () => {

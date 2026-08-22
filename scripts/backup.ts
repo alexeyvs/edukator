@@ -12,7 +12,7 @@
  *   npm run backup -- --out ../backups/2026-08-19
  *   npm run backup -- --out ../backups/2026-08-19 --data-dir /srv/edukator/data
  */
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
@@ -32,6 +32,15 @@ import {
 } from '../server/data-dir.js';
 import { SCHEMA_VERSION, validateSchema } from '../server/db.js';
 import { failureLogFor } from '../server/log.js';
+import { writeFileAtomic } from '../server/atomic-write.js';
+import {
+  CATALOG_DIR,
+  CATALOG_MANIFEST_FILE,
+  copyArtifactForBackup,
+  verifyArtifactManifest,
+  type ArtifactManifest,
+  type ArtifactManifestEntry,
+} from '../server/course-artifacts.js';
 
 /**
  * Проверка копии составом схемы — только на копии своей версии.
@@ -85,6 +94,8 @@ export interface DataDirBackup {
    * было нечего, здесь — было что и не вышло.
    */
   failed: ChildBackupFailure[];
+  artifacts: ArtifactManifestEntry[];
+  artifactManifest: string;
 }
 
 /**
@@ -114,11 +125,28 @@ export function backupDataDir(dir: string, outDir: string): DataDirBackup {
   // вовсе, хотя разворачивать её будет то приложение, которое её и писало.
   const control = new Database(controlCopy, { fileMustExist: true, readonly: true });
   let children: ChildSummary[];
+  let artifactRows: { artifact_path: string; sha256: string }[];
   try {
     children = listAllChildren(control);
+    const hasSources = control.prepare<[], { count: number }>(
+      "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'course_sources'",
+    ).get()?.count === 1;
+    artifactRows = hasSources
+      ? control.prepare<[], { artifact_path: string; sha256: string }>(
+        'SELECT artifact_path, sha256 FROM course_sources ORDER BY artifact_path',
+      ).all()
+      : [];
   } finally {
     control.close();
   }
+
+  const artifacts = artifactRows.map((row) =>
+    copyArtifactForBackup(dir, out, row.artifact_path, row.sha256));
+  const artifactManifest = resolve(out, CATALOG_MANIFEST_FILE);
+  mkdirSync(resolve(out, CATALOG_DIR), { recursive: true });
+  const manifest: ArtifactManifest = { version: 1, artifacts };
+  writeFileAtomic(artifactManifest, `${JSON.stringify(manifest, null, 2)}\n`);
+  verifyArtifactManifest(out, manifest);
 
   const copied: ChildBackup[] = [];
   const missing: string[] = [];
@@ -153,7 +181,7 @@ export function backupDataDir(dir: string, outDir: string): DataDirBackup {
       failed.push({ childId: child.id, reason: (error as Error).message });
     }
   }
-  return { control: controlCopy, children: copied, missing, failed };
+  return { control: controlCopy, children: copied, missing, failed, artifacts, artifactManifest };
 }
 
 export interface BackupArgs {
@@ -192,6 +220,7 @@ function main(): void {
   const result = backupDataDir(dir, args.outDir);
 
   process.stdout.write(`backup: ${result.control}\n`);
+  process.stdout.write(`backup: ${result.artifactManifest}\n`);
   for (const child of result.children) {
     process.stdout.write(`backup: ${child.childId} → ${child.path}\n`);
   }

@@ -537,6 +537,7 @@ export function buildServer(
       registerAdminCoursesRoutes(app, {
         context: adminContext,
         control,
+        dataDir,
         ...(options.now === undefined ? {} : { now: options.now }),
       });
       registerAdminParentsRoutes(app, {
