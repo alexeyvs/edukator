@@ -11,6 +11,8 @@ export default defineConfig({
         'server/**/*.ts', 'scripts/**/*.ts',
         'web/src/{home,profile,run,boss,parents,auth,family,admin}-api.ts',
         'web/src/{BossScreen,ParentsScreen,App,LoginScreen,FamilyScreen,InviteScreen,JoinScreen}.tsx',
+        'web/src/{HomeScreen,LearningScreen}.tsx',
+        'web/src/course-meta.ts',
         'web/src/{http,app-route}.ts',
         'web/src/admin/**/*.tsx',
       ],
@@ -76,6 +78,15 @@ export default defineConfig({
           functions: 80,
           lines: 80,
         },
+        // Динамический каталог и персональный снимок программы — новые границы
+        // данных. Усреднение с давно покрытой SQLite-схемой скрывало бы отказ
+        // инвалидации или потерю стабильного topic ID.
+        'server/{course-assignments,course-catalog,course-retrieval,curriculum-generation,curriculum-provider}.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
         // Каталог данных, замок каталога, адрес клиента, снимок базы и
         // разделённое спорное состояние появились вместе с арендаторами и
         // тоже не попадали ни под один порог.
@@ -122,6 +133,18 @@ export default defineConfig({
           lines: 80,
         },
         'web/src/{BossScreen,ParentsScreen}.tsx': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        'web/src/{HomeScreen,LearningScreen}.tsx': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
+        'web/src/course-meta.ts': {
           statements: 80,
           branches: 80,
           functions: 80,

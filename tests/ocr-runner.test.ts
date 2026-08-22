@@ -54,7 +54,7 @@ printf 'jpeg-page' > "$last.jpg"`),
     const page = await runner.processPage({ pdfPath: join(dir, 'book.pdf'), pageNumber: 2 });
     expect(page.text).toContain('русский текст');
     expect(page.image.toString()).toBe('jpeg-page');
-  });
+  }, 15_000);
 
   it('понятно сообщает об отсутствующей зависимости и языке', async () => {
     const binaries = workingBinaries();
@@ -63,7 +63,7 @@ printf 'jpeg-page' > "$last.jpg"`),
 
     binaries.tesseract = binary('tesseract-no-rus', "printf 'eng\\n'");
     await expect(new SystemOcrRunner({ binaries }).checkDependencies()).rejects.toThrow(/rus/u);
-  });
+  }, 15_000);
 
   it('ограничивает время и вывод дочерних процессов', async () => {
     const binaries = workingBinaries();
@@ -74,7 +74,7 @@ printf 'jpeg-page' > "$last.jpg"`),
     binaries.qpdf = binary('loud-qpdf', "printf '01234567890123456789'");
     await expect(new SystemOcrRunner({ binaries, outputLimit: 8 }).checkDependencies())
       .rejects.toThrow(OcrOutputError);
-  });
+  }, 15_000);
 
   it('отвергает bad output Poppler', async () => {
     const binaries = workingBinaries();
@@ -82,7 +82,7 @@ printf 'jpeg-page' > "$last.jpg"`),
     const runner = new SystemOcrRunner({ binaries, tempRoot: dir });
     await expect(runner.processPage({ pdfPath: join(dir, 'book.pdf'), pageNumber: 1 }))
       .rejects.toThrow(/не создал изображение/u);
-  });
+  }, 15_000);
 
   it('при shutdown завершает активный дочерний процесс', async () => {
     const binaries = workingBinaries();

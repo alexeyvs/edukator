@@ -17,6 +17,9 @@ import {
   writeProfile,
 } from '../server/db.js';
 import { readDailyGate } from '../server/daily-gate.js';
+import { createChild, createParent, openControlDatabase } from '../server/control-db.js';
+import { bootstrapLegacyCourses } from '../server/course-catalog.js';
+import { CURRICULUM_DIR } from '../server/curriculum.js';
 
 /** Формат, в котором отметки времени пишет код: сравнение по колонке — строковое. */
 const ISO_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -1299,6 +1302,35 @@ describe('база данных', () => {
           );
         }
         expect([pending, valid]).not.toContain(undefined);
+
+        const preserved = {
+          tasks: migrated.prepare<[], { count: number }>('SELECT COUNT(*) AS count FROM task_bank').get()?.count,
+          attempts: migrated.prepare<[], { count: number }>('SELECT COUNT(*) AS count FROM attempts').get()?.count,
+          forecasts: migrated.prepare<[], { count: number }>('SELECT COUNT(*) AS count FROM forecast_snapshots').get()?.count,
+        };
+        const control = openControlDatabase(join(tempDir, 'existing-family-control.db'));
+        try {
+          const parentId = createParent(control, 'existing-family@example.org');
+          const childId = createChild(control, parentId, 'Существующий ребёнок');
+          bootstrapLegacyCourses(control, CURRICULUM_DIR);
+          bootstrapLegacyCourses(control, CURRICULUM_DIR);
+          expect(control.prepare<[string], { course_id: string }>(
+            `SELECT course_id FROM child_courses
+              WHERE child_id = ? AND unassigned_at IS NULL ORDER BY course_id`,
+          ).all(childId)).toEqual([
+            { course_id: 'english' }, { course_id: 'math' }, { course_id: 'russian' },
+          ]);
+          expect(control.prepare<[], { count: number }>(
+            'SELECT COUNT(*) AS count FROM course_revisions',
+          ).get()).toEqual({ count: 3 });
+          expect({
+            tasks: migrated.prepare<[], { count: number }>('SELECT COUNT(*) AS count FROM task_bank').get()?.count,
+            attempts: migrated.prepare<[], { count: number }>('SELECT COUNT(*) AS count FROM attempts').get()?.count,
+            forecasts: migrated.prepare<[], { count: number }>('SELECT COUNT(*) AS count FROM forecast_snapshots').get()?.count,
+          }).toEqual(preserved);
+        } finally {
+          control.close();
+        }
       } finally {
         migrated.close();
       }

@@ -25,6 +25,7 @@ const DASHBOARD = {
     automaticUnlocked: false, override: null, unlocked: false, configured: true,
   },
   window: { since: '2026-08-01T12:00:00.000Z', until: '2026-08-08T12:00:00.000Z' },
+  courses: [],
   forecasts: [],
   time: { plannedMinutes: 630, actualMinutes: 35, daily: [] },
   gaps: [],
@@ -419,9 +420,10 @@ describe('App', () => {
     const family = {
       email: 'parent@example.org',
       pinConfigured: true,
+      courses: [],
       children: [
-        { id: 'c-1', name: 'Тимофей', status: 'ready', createdAt: '2026-08-01T09:00:00.000Z', devices: [] },
-        { id: 'c-2', name: 'Марта', status: 'ready', createdAt: '2026-08-01T09:00:00.000Z', devices: [] },
+        { id: 'c-1', name: 'Тимофей', status: 'ready', createdAt: '2026-08-01T09:00:00.000Z', devices: [], courses: [] },
+        { id: 'c-2', name: 'Марта', status: 'ready', createdAt: '2026-08-01T09:00:00.000Z', devices: [], courses: [] },
       ],
     };
     vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve({
@@ -800,6 +802,7 @@ describe('App', () => {
           automaticUnlocked: false, override: null, unlocked: false, configured: false,
         },
         window: { since: '2026-08-01T12:00:00.000Z', until: '2026-08-08T12:00:00.000Z' },
+        courses: [],
         forecasts: [],
         time: { plannedMinutes: 630, actualMinutes: 0, daily: [] },
         gaps: [], activity: [],

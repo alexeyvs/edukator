@@ -327,19 +327,19 @@ Checkbox-пункты ниже описывают только автомати�
 
 ### Task 15: Провести сквозную миграцию и автоматическую приёмку
 
-- [ ] добавить e2e harness для произвольного курса и управляемого OCR/Codex,
+- [x] добавить e2e harness для произвольного курса и управляемого OCR/Codex,
   создаваемого во время теста без нового файла в `content/curriculum`
-- [ ] реализовать Playwright-сценарий «География, 5 класс»: upload scan → OCR →
+- [x] реализовать Playwright-сценарий «География, 5 класс»: upload scan → OCR →
   draft → publish → parent assignment/exclusion → triage → обычный run
-- [ ] расширить сценарий новой редакцией: новая тема включается, исключение и
+- [x] расширить сценарий новой редакцией: новая тема включается, исключение и
   прогресс сохраняются, начатый на старой редакции run завершается
-- [ ] прогнать миграционную фикстуру существующей семьи и доказать, что три
+- [x] прогнать миграционную фикстуру существующей семьи и доказать, что три
   legacy-курса назначены, попытки/прогнозы/банк не изменились, bootstrap повторяем
-- [ ] добавить новые server/UI модули в пофайловые пороги `vitest.config.ts` и
+- [x] добавить новые server/UI модули в пофайловые пороги `vitest.config.ts` и
   доказать покрытие не ниже принятого проектом 80%
-- [ ] проверить edge cases: corrupted PDF, OCR restart, publish conflict,
+- [x] проверить edge cases: corrupted PDF, OCR restart, publish conflict,
   archive assigned course, no assignments и отказ одного tenant/source
-- [ ] запустить `npm test`, `npm run coverage`, `npm run typecheck`, `npm run lint`,
+- [x] запустить `npm test`, `npm run coverage`, `npm run typecheck`, `npm run lint`,
   `npm run build:web` и `npm run test:e2e`; исправить все ошибки и пороги
 
 ### Task 16: Обновить документацию и эксплуатационные инструкции

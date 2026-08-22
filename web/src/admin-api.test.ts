@@ -139,21 +139,40 @@ describe('адаптер админского API', () => {
     const file = new File(['%PDF-1.7'], 'учебник.pdf', { type: 'application/pdf' });
 
     await browserAdminApi.createCourse({ id: 'history-6', title: 'История', grade: '6 класс' });
+    await browserAdminApi.courses();
+    await browserAdminApi.course('history/6');
     await browserAdminApi.updateCourse('history/6', {
       revisionId: 2, editVersion: 3, title: 'История мира', grade: '6 класс',
     });
+    await browserAdminApi.courseDraft('history/6');
+    await browserAdminApi.createCourseDraft('history/6', 2);
+    await browserAdminApi.replaceCourseTopics('history/6', { revisionId: 3, editVersion: 1, topics: [] });
+    await browserAdminApi.publishCourse('history/6', { revisionId: 3, editVersion: 2, idempotencyKey: 'publish-3' });
+    await browserAdminApi.archiveCourse('history/6');
+    await browserAdminApi.courseSources('history/6');
     await browserAdminApi.uploadCourseSource('history/6', file);
     await browserAdminApi.courseSourceStatus('history/6', 9);
     await browserAdminApi.retryCourseSource('history/6', 9, { fromPage: 2, toPage: 4 });
     await browserAdminApi.deleteCourseSource('history/6', 9);
+    await browserAdminApi.courseBuild('history/6');
+    await browserAdminApi.buildCourseDraft('history/6', { revisionId: 3, editVersion: 2 });
 
     expect(fetch.mock.calls[0]).toEqual(['/api/admin/courses', expect.objectContaining({
       method: 'POST', body: '{"id":"history-6","title":"История","grade":"6 класс"}',
     })]);
-    expect(fetch.mock.calls[1]).toEqual(['/api/admin/courses/history%2F6', expect.objectContaining({ method: 'PATCH' })]);
-    expect(fetch.mock.calls[2]?.[0]).toBe('/api/admin/courses/history%2F6/sources');
-    expect((fetch.mock.calls[2]?.[1] as RequestInit).body).toBeInstanceOf(FormData);
-    expect(fetch.mock.calls.slice(3)).toEqual([
+    expect(fetch.mock.calls.map((call) => call[0])).toEqual([
+      '/api/admin/courses', '/api/admin/courses', '/api/admin/courses/history%2F6',
+      '/api/admin/courses/history%2F6', '/api/admin/courses/history%2F6/draft',
+      '/api/admin/courses/history%2F6/draft', '/api/admin/courses/history%2F6/draft/topics',
+      '/api/admin/courses/history%2F6/publish', '/api/admin/courses/history%2F6/archive',
+      '/api/admin/courses/history%2F6/sources', '/api/admin/courses/history%2F6/sources',
+      '/api/admin/courses/history%2F6/sources/9/status',
+      '/api/admin/courses/history%2F6/sources/9/retry',
+      '/api/admin/courses/history%2F6/sources/9',
+      '/api/admin/courses/history%2F6/draft/build', '/api/admin/courses/history%2F6/draft/build',
+    ]);
+    expect((fetch.mock.calls[10]?.[1] as RequestInit).body).toBeInstanceOf(FormData);
+    expect(fetch.mock.calls.slice(11, 14)).toEqual([
       ['/api/admin/courses/history%2F6/sources/9/status'],
       ['/api/admin/courses/history%2F6/sources/9/retry', expect.objectContaining({
         method: 'POST', body: '{"fromPage":2,"toPage":4}',

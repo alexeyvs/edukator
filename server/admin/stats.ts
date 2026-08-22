@@ -600,7 +600,7 @@ export function collectAdminStats(control: Database, options: AdminStatsOptions)
       topics: bucket.topics,
       children: bucket.children,
     }];
-  });
+  }).sort((left, right) => left.courseId.localeCompare(right.courseId));
   learning.calibrated = [...calibratedChildren].flatMap(([subject, count]) => {
     return [{ subject, children: count }];
   });

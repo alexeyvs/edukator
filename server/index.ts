@@ -58,6 +58,7 @@ import {
 import {
   registerAdminCoursesRoutes,
   registerUnavailableAdminCourses,
+  type AdminCoursesRoutesOptions,
 } from './routes/admin/courses.js';
 import { registerFamilyRoutes, registerUnavailableFamily } from './routes/family.js';
 import { codexConcurrency, disputeConcurrency, type CodexConcurrency } from './codex/concurrency.js';
@@ -154,6 +155,9 @@ export type ServerOptions =
   worker?: false | DispatcherWorkerOptions;
   /** OCR catalog worker; false disables it for focused tests and maintenance tools. */
   catalogWorker?: false | CatalogWorkerOptions;
+  /** Test/integration seams for catalog upload validation and Codex drafting. */
+  courseArtifacts?: AdminCoursesRoutesOptions['artifacts'];
+  catalogDraftBuilder?: AdminCoursesRoutesOptions['draftBuilder'];
   /** Подменяемый бюджет фонового воркера. */
   codexBudget?: CodexConcurrency;
   /** Подменяемая проверка осмысленности; по умолчанию — отдельный вызов codex. */
@@ -565,6 +569,8 @@ export function buildServer(
         control,
         dataDir,
         ...(catalogWorker === undefined ? {} : { catalogWorker }),
+        ...(options.courseArtifacts === undefined ? {} : { artifacts: options.courseArtifacts }),
+        ...(options.catalogDraftBuilder === undefined ? {} : { draftBuilder: options.catalogDraftBuilder }),
         ...(options.now === undefined ? {} : { now: options.now }),
       });
       registerAdminParentsRoutes(app, {

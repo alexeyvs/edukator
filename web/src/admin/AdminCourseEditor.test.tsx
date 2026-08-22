@@ -57,6 +57,13 @@ describe('редактор курса', () => {
     fireEvent.change(titles[2] as HTMLElement, { target: { value: 'Средние века' } });
     const seeds = screen.getAllByLabelText('Основа промпта');
     fireEvent.change(seeds[1] as HTMLElement, { target: { value: 'Европа и Азия' } });
+    fireEvent.change(screen.getAllByLabelText('Вес')[0] as HTMLElement, { target: { value: '3' } });
+    fireEvent.change(screen.getAllByLabelText('Сложность')[0] as HTMLElement, { target: { value: '2' } });
+    fireEvent.change(screen.getAllByLabelText('Ответ')[0] as HTMLElement, { target: { value: 'number' } });
+    fireEvent.change(screen.getAllByLabelText('Зависимости (ID через запятую)')[1] as HTMLElement, {
+      target: { value: 'history-6.ancient, ' },
+    });
+    fireEvent.click(screen.getAllByLabelText('Тема активна')[1] as HTMLElement);
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить карту тем' }));
 
     await waitFor(() => expect(replaceCourseTopics).toHaveBeenCalled());
@@ -97,6 +104,31 @@ describe('редактор курса', () => {
     expect(await screen.findByText('OCR поставлен на повтор')).toBeInTheDocument();
   });
 
+  it('показывает недоступную диагностику и дубликат PDF', async () => {
+    const source = {
+      id: 7, courseId: 'history-6', revisionId: 11, uploadName: 'повтор.pdf', sha256: 'b'.repeat(64),
+      pageCount: null, status: 'failed' as const, error: 'OCR недоступен', createdAt: '2026-08-22T10:00:00.000Z',
+    };
+    const uploadCourseSource = vi.fn().mockResolvedValue({ source, duplicate: true });
+    const api = baseApi({
+      uploadCourseSource,
+      courseBuild: vi.fn().mockRejectedValue(new Error('сборка недоступна')),
+      courseSources: vi.fn().mockResolvedValue({ sources: [source] }),
+      courseSourceStatus: vi.fn().mockRejectedValue(new Error('статус недоступен')),
+    });
+    render(<AdminCourseEditor api={api} courseId="history-6" onBack={vi.fn()} onSignedOut={vi.fn()} />);
+
+    expect(await screen.findByText('OCR недоступен')).toBeInTheDocument();
+    expect(screen.getByText(/страницы считаются/i)).toBeInTheDocument();
+    expect(screen.getByText('Диагностика страниц ещё не загружена')).toBeInTheDocument();
+    expect(await screen.findByText('состояние недоступно')).toBeInTheDocument();
+
+    const file = new File(['%PDF-1.7'], 'повтор.pdf', { type: 'application/pdf' });
+    fireEvent.change(document.querySelector('input[type=file]') as HTMLInputElement, { target: { files: [file] } });
+    await waitFor(() => expect(uploadCourseSource).toHaveBeenCalledWith('history-6', file));
+    expect(await screen.findByText('Такой PDF уже загружен')).toBeInTheDocument();
+  });
+
   it('объясняет optimistic conflict и позволяет обновить данные', async () => {
     const course = vi.fn().mockResolvedValue(card);
     const api = baseApi({
@@ -110,5 +142,62 @@ describe('редактор курса', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Конфликт: Черновик уже изменён');
     fireEvent.click(screen.getByRole('button', { name: 'Обновить данные' }));
     await waitFor(() => expect(course).toHaveBeenCalledTimes(2));
+  });
+
+  it('проводит PDF через upload, build, delete и архивирует курс', async () => {
+    const source = {
+      id: 5, courseId: 'history-6', revisionId: 11, uploadName: 'учебник.pdf', sha256: 'a'.repeat(64),
+      pageCount: 1, status: 'ready' as const, error: null, createdAt: '2026-08-22T10:00:00.000Z',
+    };
+    const updateCourse = vi.fn().mockResolvedValue({ course: card.course, revision: { ...revision, editVersion: 4 } });
+    const uploadCourseSource = vi.fn().mockResolvedValue({ source, duplicate: false });
+    const buildCourseDraft = vi.fn().mockResolvedValue({ revisionId: 11, status: 'running' });
+    const deleteCourseSource = vi.fn().mockResolvedValue({ source });
+    const archiveCourse = vi.fn().mockResolvedValue({ course: { ...card.course, status: 'archived' }, idempotent: false });
+    const api = baseApi({
+      updateCourse, uploadCourseSource, buildCourseDraft, deleteCourseSource, archiveCourse,
+      courseSources: vi.fn().mockResolvedValue({ sources: [source] }),
+      courseSourceStatus: vi.fn().mockResolvedValue({
+        sourceId: 5, sourceStatus: 'ready', job: { id: 4, status: 'succeeded', attempts: 1, currentPage: null, error: null },
+        pages: [{ pageNumber: 1, status: 'ready', error: null }],
+      }),
+    });
+    render(<AdminCourseEditor api={api} courseId="history-6" onBack={vi.fn()} onSignedOut={vi.fn()} />);
+
+    await screen.findByText('учебник.pdf');
+    fireEvent.change(screen.getAllByLabelText('Название')[0] as HTMLElement, { target: { value: 'История мира' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить' }));
+    await waitFor(() => expect(updateCourse).toHaveBeenCalled());
+
+    const file = new File(['%PDF-1.7'], 'новый.pdf', { type: 'application/pdf' });
+    fireEvent.change(document.querySelector('input[type=file]') as HTMLInputElement, { target: { files: [file] } });
+    await waitFor(() => expect(uploadCourseSource).toHaveBeenCalledWith('history-6', file));
+    fireEvent.click(screen.getByRole('button', { name: 'Собрать по источникам' }));
+    await waitFor(() => expect(buildCourseDraft).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: 'Удалить' }));
+    await waitFor(() => expect(deleteCourseSource).toHaveBeenCalledWith('history-6', 5));
+    fireEvent.click(screen.getByRole('button', { name: 'В архив' }));
+    await waitFor(() => expect(archiveCourse).toHaveBeenCalledWith('history-6'));
+  });
+
+  it('создаёт новый черновик опубликованной редакции и обрабатывает 401', async () => {
+    const publishedOnly = {
+      ...card,
+      revisions: card.revisions.filter((item) => item.status === 'published'),
+    };
+    const createCourseDraft = vi.fn().mockResolvedValue({ revision, topics: [topic] });
+    const onSignedOut = vi.fn();
+    const api = baseApi({
+      course: vi.fn().mockResolvedValue(publishedOnly),
+      createCourseDraft,
+      archiveCourse: vi.fn().mockRejectedValue(new HttpError({ status: 401, message: 'Нужно войти' })),
+    });
+    render(<AdminCourseEditor api={api} courseId="history-6" onBack={vi.fn()} onSignedOut={onSignedOut} />);
+
+    await screen.findByRole('heading', { name: 'Опубликованная редакция неизменяема' });
+    fireEvent.click(screen.getByRole('button', { name: 'Создать черновик' }));
+    await waitFor(() => expect(createCourseDraft).toHaveBeenCalledWith('history-6', 10));
+    fireEvent.click(screen.getByRole('button', { name: 'В архив' }));
+    await waitFor(() => expect(onSignedOut).toHaveBeenCalledWith('expired'));
   });
 });

@@ -62,6 +62,7 @@ describe('админские маршруты каталога курсов', ()
       now: () => NOW,
       createCourseId: () => 'generated-course',
       createTopicToken: () => `topic-${++topicNumber}`,
+      draftBuilder: async () => ({}),
     });
     await app.ready();
   });
@@ -255,6 +256,108 @@ describe('админские маршруты каталога курсов', ()
     expect(listAdminAudit(control, { limit: 20 }).entries).toEqual([]);
   });
 
+  it('покрывает чтение draft/build и безопасные отказы status/retry', async () => {
+    const created = await createBiology();
+    expect((await request('GET', '/api/admin/courses/biology-7/draft')).json()).toMatchObject({
+      revision: { id: created.draft.id }, topics: [],
+    });
+    expect((await request('GET', '/api/admin/courses/biology-7/draft/build')).json()).toEqual({
+      revisionId: created.draft.id, job: null,
+    });
+    expect((await request('POST', '/api/admin/courses/biology-7/draft/build', {
+      revisionId: created.draft.id, editVersion: created.draft.editVersion,
+    })).statusCode).toBe(202);
+
+    const sourceId = Number(control.prepare(
+      `INSERT INTO course_sources
+         (course_id, revision_id, upload_name, sha256, artifact_path, page_count, status)
+       VALUES ('biology-7', ?, 'scan.pdf', ?, 'catalog/artifacts/biology-7/scan.pdf', 2, 'failed')`,
+    ).run(created.draft.id, 'a'.repeat(64)).lastInsertRowid);
+    expect((await request('GET', `/api/admin/courses/biology-7/sources/${String(sourceId)}/status`)).statusCode)
+      .toBe(503);
+    expect((await request('POST', `/api/admin/courses/biology-7/sources/${String(sourceId)}/retry`, {
+      fromPage: 1, toPage: 2,
+    })).statusCode).toBe(503);
+
+    expect((await request('GET', '/api/admin/courses/missing')).statusCode).toBe(404);
+    expect((await request('GET', '/api/admin/courses/missing/draft')).statusCode).toBe(404);
+    expect((await request('GET', '/api/admin/courses/missing/draft/build')).statusCode).toBe(404);
+    expect((await request('POST', '/api/admin/courses/biology-7/draft/build', {
+      revisionId: 999, editVersion: 1,
+    })).statusCode).toBe(404);
+  });
+
+  it('отвергает неверные формы полей редактора и публикации', async () => {
+    const created = await createBiology();
+    const invalidPayloads = [
+      { revisionId: created.draft.id, editVersion: created.draft.editVersion, topics: 'not-array' },
+      { revisionId: created.draft.id, editVersion: created.draft.editVersion, topics: [null] },
+      { revisionId: created.draft.id, editVersion: created.draft.editVersion, topics: [{
+        clientId: 'x', title: 'Тема', examWeight: 4, difficulty: 1, prereqs: [],
+        answerFormat: 'text', promptSeed: 'Основа',
+      }] },
+      { revisionId: created.draft.id, editVersion: created.draft.editVersion, topics: [{
+        clientId: 'x', title: 'Тема', examWeight: 1, difficulty: 0, prereqs: [],
+        answerFormat: 'binary', promptSeed: 'Основа',
+      }] },
+      { revisionId: created.draft.id, editVersion: created.draft.editVersion, topics: [{
+        clientId: 'x', title: 'Тема', examWeight: 1, difficulty: 1, prereqs: 'bad',
+        answerFormat: 'text', promptSeed: 'Основа',
+      }] },
+      { revisionId: created.draft.id, editVersion: created.draft.editVersion, topics: [{
+        title: 'Тема', examWeight: 1, difficulty: 1, prereqs: [],
+        answerFormat: 'text', promptSeed: 'Основа',
+      }] },
+      { revisionId: created.draft.id, editVersion: created.draft.editVersion, topics: [{
+        clientId: 'x', title: 'Тема', examWeight: 1, difficulty: 1, prereqs: [''],
+        answerFormat: 'text', promptSeed: 'Основа',
+      }] },
+      { revisionId: created.draft.id, editVersion: created.draft.editVersion, topics: [{
+        clientId: 'x', title: 'Тема', examWeight: 1, difficulty: 1, prereqs: [42],
+        answerFormat: 'text', promptSeed: 'Основа',
+      }] },
+      { revisionId: created.draft.id, editVersion: created.draft.editVersion, topics: [{
+        clientId: 'x', title: 'Тема', examWeight: 1, difficulty: 1, prereqs: [],
+        answerFormat: 'text', promptSeed: 'Основа', active: 'yes',
+      }] },
+      { revisionId: created.draft.id, editVersion: created.draft.editVersion, topics: Array.from(
+        { length: 501 }, () => ({}),
+      ) },
+    ];
+    for (const payload of invalidPayloads) {
+      expect((await request('PUT', '/api/admin/courses/biology-7/draft/topics', payload)).statusCode)
+        .toBe(400);
+    }
+    const stableTopic = await request('PUT', '/api/admin/courses/biology-7/draft/topics', {
+      revisionId: created.draft.id,
+      editVersion: created.draft.editVersion,
+      topics: [{
+        id: 'biology-7.fixed', title: 'Готовая тема', examWeight: 0, difficulty: 3,
+        prereqs: [], answerFormat: 'number', promptSeed: 'Проверка', active: false,
+      }],
+    });
+    expect(stableTopic.statusCode).toBe(200);
+    expect(stableTopic.json()).toMatchObject({ topics: [{ id: 'biology-7.fixed', active: false }] });
+    expect((await request('POST', '/api/admin/courses', {
+      title: 'Курс с авто-ID', grade: '7 класс',
+    })).json()).toMatchObject({ course: { id: 'course-generated-course' } });
+    expect((await request('PATCH', '/api/admin/courses/biology-7', {
+      revisionId: created.draft.id, editVersion: created.draft.editVersion,
+      title: '', grade: '7',
+    })).statusCode).toBe(400);
+    expect((await request('POST', '/api/admin/courses/biology-7/publish', {
+      revisionId: created.draft.id, editVersion: created.draft.editVersion,
+      idempotencyKey: '',
+    })).statusCode).toBe(400);
+    expect((await request('GET', `/api/admin/courses/${'x'.repeat(81)}`)).statusCode).toBe(400);
+    expect((await request('GET', '/api/admin/courses/overall')).statusCode).toBe(400);
+    expect((await request('GET', '/api/admin/courses/biology-7/sources/not-a-number/status')).statusCode)
+      .toBe(400);
+    expect((await request('GET', '/api/admin/courses/biology-7/sources/0/status')).statusCode)
+      .toBe(400);
+    expect((await request('POST', '/api/admin/courses/biology-7/archive')).statusCode).toBe(200);
+  });
+
   it('пускает только admin cookie и отвергает parent, child и impersonation', async () => {
     const parentId = createParent(control, 'family@example.com', NOW);
     const parentInvite = issueParentInvite(control, parentId, NOW);
@@ -323,10 +426,14 @@ describe('админские маршруты каталога курсов', ()
         { method: 'POST', url: '/api/admin/courses/x/draft' },
         { method: 'PUT', url: '/api/admin/courses/x/draft/topics' },
         { method: 'POST', url: '/api/admin/courses/x/publish' },
+        { method: 'GET', url: '/api/admin/courses/x/draft/build' },
+        { method: 'POST', url: '/api/admin/courses/x/draft/build' },
         { method: 'POST', url: '/api/admin/courses/x/archive' },
         { method: 'GET', url: '/api/admin/courses/x/sources' },
         { method: 'POST', url: '/api/admin/courses/x/sources' },
         { method: 'DELETE', url: '/api/admin/courses/x/sources/1' },
+        { method: 'GET', url: '/api/admin/courses/x/sources/1/status' },
+        { method: 'POST', url: '/api/admin/courses/x/sources/1/retry' },
       ] as const;
       for (const item of requests) {
         expect((await unavailable.inject(item)).statusCode, `${item.method} ${item.url}`).toBe(503);

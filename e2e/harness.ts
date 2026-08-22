@@ -39,6 +39,9 @@ import { loadCurriculum, syncTopicState, type TopicGraph } from '../server/curri
 import { startRun } from '../server/run.js';
 import { submitAnswer } from '../server/session.js';
 import { bootstrapLegacyCourses } from '../server/course-catalog.js';
+import { CourseArtifactStore } from '../server/course-artifacts.js';
+import { buildCourseDraft } from '../server/course-drafting.js';
+import type { OcrRunner } from '../server/ocr-runner.js';
 
 const NOW = new Date('2026-08-08T12:00:00.000Z');
 const TOPICS_PER_SUBJECT = 12;
@@ -101,7 +104,10 @@ export interface CookieJar {
 export interface E2eHarness {
   app: FastifyInstance;
   db: Database;
+  control: Database;
   url: string;
+  /** Runtime-created scan used by configurable-course acceptance scenarios. */
+  scanPath: string;
   /** Ребёнок сценария: его `id` стоит в адресах родительской сводки. */
   childId: string;
   /** Оператор сценария: его `id` стоит в каждой записи журнала действий. */
@@ -124,6 +130,7 @@ export interface E2eHarness {
    * одному забегу.
    */
   seedChild(childId: string, seed?: SeedChildOptions): void;
+  seedCourseTasks(courseId: string): void;
   assertCodexNotCalled(): void;
   /**
    * Журнал действий оператора, новые сверху. Экрана у него нет вовсе, а
@@ -162,15 +169,24 @@ interface HarnessOptions extends SeedChildOptions {
   context?: CookieJar;
   /** Кем сценарий входит в этот браузер. По умолчанию — машина ученика. */
   signIn?: E2eSide;
+  /** Enables deterministic PDF inspection, OCR and curriculum drafting seams. */
+  configurableCourses?: boolean;
 }
 
 function writeCurriculum(directory: string): void {
+  const titles: Record<Subject, string> = {
+    math: 'Математика',
+    russian: 'Русский язык',
+    english: 'Английский язык',
+  };
   for (const subject of SUBJECTS) {
     const answerFormat = subject === 'math' ? 'number' : subject === 'russian' ? 'text' : 'choice';
     writeFileSync(
       join(directory, `${subject}.json`),
       JSON.stringify({
         subject,
+        title: titles[subject],
+        grade: '7 класс',
         topics: Array.from({ length: TOPICS_PER_SUBJECT }, (_, index) => ({
           id: `${subject}.${index + 1}`,
           subject,
@@ -368,10 +384,12 @@ export async function startE2eHarness(
   const seedDir = join(tempDir, 'seed-bank');
   const binDir = join(tempDir, 'bin');
   const codexMarker = join(tempDir, 'codex-called');
+  const scanPath = join(tempDir, 'geography-scan.pdf');
   mkdirSync(curriculumDir);
   mkdirSync(seedDir);
   mkdirSync(binDir);
   writeCurriculum(curriculumDir);
+  writeFileSync(scanPath, '%PDF-1.4\n% runtime-created e2e scan\n');
 
   const codexShim = join(binDir, 'codex');
   writeFileSync(codexShim, `#!/bin/sh\ntouch '${codexMarker}'\nexit 97\n`);
@@ -433,6 +451,19 @@ export async function startE2eHarness(
   };
   const dbPath = childDatabasePath(dataDir, childId);
 
+  const catalogRunner: OcrRunner = {
+    checkDependencies: async () => undefined,
+    processPage: async ({ pageNumber }) => ({
+      text: `Страница ${String(pageNumber)}. Материки, океаны и географическая карта Земли.`,
+      image: Buffer.from('controlled-jpeg'),
+    }),
+    stop: async () => undefined,
+  };
+  const courseArtifacts = new CourseArtifactStore(control, dataDir, {
+    inspector: { inspect: async () => ({ pageCount: 1 }) },
+    now: () => NOW,
+  });
+
   /**
    * Cookie стороны. `Secure` снять нельзя ни в каком тесте: cookie с префиксом
    * `__Host-` без него браузер не примет вовсе, а 127.0.0.1 он и по голому http
@@ -475,6 +506,32 @@ export async function startE2eHarness(
       reason: 'Ответ в браузерном сценарии осмысленный.',
     })),
     now: () => NOW,
+    ...(options.configurableCourses === true ? {
+      catalogWorker: { runner: catalogRunner, autoPollMs: 5 },
+      courseArtifacts,
+      catalogDraftBuilder: (input) => buildCourseDraft({
+        ...input,
+        attempts: 1,
+        run: async ({ prompt }) => {
+          if (prompt.startsWith('Составь краткий фактологический конспект')) {
+            return JSON.stringify({ summary: 'Материки, океаны и чтение географической карты.' });
+          }
+          const sourceId = Number(control.prepare<[], { id: number }>(
+            'SELECT id FROM course_sources ORDER BY id DESC LIMIT 1',
+          ).get()?.id);
+          return JSON.stringify({ topics: Array.from({ length: 14 }, (_, index) => ({
+            client_id: index === 0 ? 'map' : index === 1 ? 'continents' : `region-${String(index + 1)}`,
+            title: index === 0 ? 'Географическая карта' : index === 1 ? 'Материки и океаны' : `Географический регион ${String(index + 1)}`,
+            exam_weight: 3,
+            difficulty: index % 3 + 1,
+            prereqs: index === 0 ? [] : [index === 1 ? 'map' : index === 2 ? 'continents' : `region-${String(index)}`],
+            answer_format: 'number',
+            prompt_seed: `Изучить географический раздел ${String(index + 1)}.`,
+            source_refs: [{ source_id: sourceId, page_from: 1, page_to: 1 }],
+          })) });
+        },
+      }),
+    } : {}),
   });
   const db = openDatabase(dbPath);
 
@@ -492,7 +549,9 @@ export async function startE2eHarness(
     return {
       app,
       db,
+      control,
       url,
+      scanPath,
       childId,
       adminId: admin.adminId,
       children(): Array<{ id: string; name: string }> {
@@ -529,6 +588,20 @@ export async function startE2eHarness(
         // Этот legacy-сценарий имитирует ребёнка, появившегося после startup:
         // повторный bootstrap назначает ему исходные курсы, не возвращая ранее снятые.
         bootstrapLegacyCourses(control, curriculumDir);
+      },
+      seedCourseTasks(courseId: string): void {
+        const topicIds = control.prepare<[string], { topic_id: string }>(
+          `SELECT rt.topic_id FROM courses c
+             JOIN revision_topics rt ON rt.revision_id = c.active_revision_id
+            WHERE c.id = ? AND rt.active = 1 ORDER BY rt.position`,
+        ).all(courseId).map((row) => row.topic_id);
+        for (const [topicIndex, topicId] of topicIds.entries()) {
+          db.prepare('INSERT OR IGNORE INTO topic_state (topic_id) VALUES (?)').run(topicId);
+          storeTasks(db, topicId, Array.from(
+            { length: TASKS_PER_TOPIC },
+            (_, index) => task(courseId, topicIndex + 1, index + 1),
+          ));
+        }
       },
       assertCodexNotCalled,
       async waitForLearningMaterial(topicId: string): Promise<number> {
