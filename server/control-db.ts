@@ -25,6 +25,21 @@ export const CONTROL_TABLES = [
   'admin_sessions',
   'admin_impersonations',
   'admin_audit',
+  'courses',
+  'course_revisions',
+  'topics',
+  'revision_topics',
+  'topic_prereqs',
+  'revision_topic_sources',
+  'course_sources',
+  'source_pages',
+  'source_chunks',
+  'source_chunks_fts',
+  'source_chunks_fts_data',
+  'source_chunks_fts_idx',
+  'source_chunks_fts_docsize',
+  'source_chunks_fts_config',
+  'catalog_jobs',
 ] as const;
 
 export type ControlTable = (typeof CONTROL_TABLES)[number];
@@ -146,6 +161,163 @@ const ADMIN_SCHEMA = `
   CREATE INDEX IF NOT EXISTS admin_audit_at ON admin_audit (at, id);
 `;
 
+/** Нормализованный каталог курсов. Входит в переход 1 -> 2 вместе с админкой. */
+const COURSE_CATALOG_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS courses (
+    id                 TEXT PRIMARY KEY CHECK (id <> '' AND id <> 'overall'),
+    title              TEXT NOT NULL CHECK (title <> ''),
+    grade              TEXT NOT NULL CHECK (grade <> ''),
+    status             TEXT NOT NULL DEFAULT 'draft'
+                            CHECK (status IN ('draft', 'published', 'archived')),
+    active_revision_id INTEGER,
+    created_at         TEXT NOT NULL DEFAULT (${NOW_ISO}),
+    updated_at         TEXT NOT NULL DEFAULT (${NOW_ISO}),
+    archived_at        TEXT,
+    CHECK ((status = 'archived') = (archived_at IS NOT NULL)),
+    CHECK (status <> 'published' OR active_revision_id IS NOT NULL),
+    FOREIGN KEY (active_revision_id, id) REFERENCES course_revisions (id, course_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS course_revisions (
+    id                   INTEGER PRIMARY KEY,
+    course_id            TEXT NOT NULL REFERENCES courses (id) ON DELETE CASCADE,
+    revision_number      INTEGER NOT NULL CHECK (revision_number > 0),
+    status               TEXT NOT NULL CHECK (status IN ('draft', 'published')),
+    based_on_revision_id INTEGER REFERENCES course_revisions (id),
+    edit_version         INTEGER NOT NULL DEFAULT 1 CHECK (edit_version > 0),
+    published_by         TEXT REFERENCES admins (id),
+    created_at           TEXT NOT NULL DEFAULT (${NOW_ISO}),
+    published_at         TEXT,
+    UNIQUE (course_id, revision_number),
+    UNIQUE (id, course_id),
+    CHECK ((status = 'published') = (published_at IS NOT NULL))
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS course_revisions_one_draft
+    ON course_revisions (course_id) WHERE status = 'draft';
+  CREATE INDEX IF NOT EXISTS course_revisions_course
+    ON course_revisions (course_id, revision_number);
+
+  CREATE TABLE IF NOT EXISTS topics (
+    id          TEXT PRIMARY KEY CHECK (id <> ''),
+    course_id   TEXT NOT NULL REFERENCES courses (id) ON DELETE CASCADE,
+    created_at  TEXT NOT NULL DEFAULT (${NOW_ISO}),
+    archived_at TEXT,
+    UNIQUE (course_id, id)
+  );
+  CREATE INDEX IF NOT EXISTS topics_course ON topics (course_id);
+
+  CREATE TABLE IF NOT EXISTS revision_topics (
+    revision_id  INTEGER NOT NULL REFERENCES course_revisions (id) ON DELETE CASCADE,
+    topic_id     TEXT NOT NULL REFERENCES topics (id),
+    title        TEXT NOT NULL CHECK (title <> ''),
+    exam_weight  INTEGER NOT NULL CHECK (exam_weight BETWEEN 0 AND 3),
+    difficulty   INTEGER NOT NULL CHECK (difficulty BETWEEN 1 AND 3),
+    answer_format TEXT NOT NULL CHECK (answer_format IN ('number', 'text', 'choice')),
+    prompt_seed  TEXT NOT NULL CHECK (prompt_seed <> ''),
+    position     INTEGER NOT NULL CHECK (position >= 0),
+    active       INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    PRIMARY KEY (revision_id, topic_id),
+    UNIQUE (revision_id, position)
+  );
+  CREATE INDEX IF NOT EXISTS revision_topics_topic ON revision_topics (topic_id, revision_id);
+
+  CREATE TABLE IF NOT EXISTS topic_prereqs (
+    revision_id    INTEGER NOT NULL,
+    topic_id       TEXT NOT NULL,
+    prereq_topic_id TEXT NOT NULL,
+    position       INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+    PRIMARY KEY (revision_id, topic_id, prereq_topic_id),
+    UNIQUE (revision_id, topic_id, position),
+    FOREIGN KEY (revision_id, topic_id)
+      REFERENCES revision_topics (revision_id, topic_id) ON DELETE CASCADE,
+    FOREIGN KEY (revision_id, prereq_topic_id)
+      REFERENCES revision_topics (revision_id, topic_id) ON DELETE CASCADE,
+    CHECK (topic_id <> prereq_topic_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS course_sources (
+    id            INTEGER PRIMARY KEY,
+    course_id     TEXT NOT NULL REFERENCES courses (id) ON DELETE CASCADE,
+    revision_id   INTEGER NOT NULL REFERENCES course_revisions (id) ON DELETE CASCADE,
+    upload_name   TEXT NOT NULL CHECK (upload_name <> ''),
+    sha256        TEXT NOT NULL CHECK (length(sha256) = 64),
+    artifact_path TEXT NOT NULL UNIQUE CHECK (artifact_path <> ''),
+    page_count    INTEGER CHECK (page_count IS NULL OR page_count > 0),
+    status        TEXT NOT NULL DEFAULT 'uploaded'
+                       CHECK (status IN ('uploaded', 'processing', 'ready', 'failed')),
+    error         TEXT,
+    created_at    TEXT NOT NULL DEFAULT (${NOW_ISO}),
+    UNIQUE (revision_id, sha256)
+  );
+  CREATE INDEX IF NOT EXISTS course_sources_revision ON course_sources (revision_id, id);
+
+  CREATE TABLE IF NOT EXISTS source_pages (
+    source_id      INTEGER NOT NULL REFERENCES course_sources (id) ON DELETE CASCADE,
+    page_number    INTEGER NOT NULL CHECK (page_number > 0),
+    status         TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'processing', 'ready', 'suspicious', 'failed')),
+    text           TEXT,
+    image_path     TEXT,
+    error          TEXT,
+    updated_at     TEXT NOT NULL DEFAULT (${NOW_ISO}),
+    PRIMARY KEY (source_id, page_number)
+  );
+
+  CREATE TABLE IF NOT EXISTS source_chunks (
+    id          INTEGER PRIMARY KEY,
+    source_id   INTEGER NOT NULL,
+    page_number INTEGER NOT NULL,
+    chunk_number INTEGER NOT NULL CHECK (chunk_number >= 0),
+    text        TEXT NOT NULL,
+    FOREIGN KEY (source_id, page_number)
+      REFERENCES source_pages (source_id, page_number) ON DELETE CASCADE,
+    UNIQUE (source_id, page_number, chunk_number)
+  );
+  CREATE INDEX IF NOT EXISTS source_chunks_page ON source_chunks (source_id, page_number);
+  CREATE VIRTUAL TABLE IF NOT EXISTS source_chunks_fts USING fts5(text, content='');
+  CREATE TRIGGER IF NOT EXISTS source_chunks_fts_insert AFTER INSERT ON source_chunks BEGIN
+    INSERT INTO source_chunks_fts (rowid, text) VALUES (new.id, new.text);
+  END;
+  CREATE TRIGGER IF NOT EXISTS source_chunks_fts_delete AFTER DELETE ON source_chunks BEGIN
+    INSERT INTO source_chunks_fts (source_chunks_fts, rowid, text)
+      VALUES ('delete', old.id, old.text);
+  END;
+  CREATE TRIGGER IF NOT EXISTS source_chunks_fts_update AFTER UPDATE OF text ON source_chunks BEGIN
+    INSERT INTO source_chunks_fts (source_chunks_fts, rowid, text)
+      VALUES ('delete', old.id, old.text);
+    INSERT INTO source_chunks_fts (rowid, text) VALUES (new.id, new.text);
+  END;
+
+  CREATE TABLE IF NOT EXISTS revision_topic_sources (
+    revision_id INTEGER NOT NULL,
+    topic_id    TEXT NOT NULL,
+    source_id   INTEGER NOT NULL REFERENCES course_sources (id) ON DELETE CASCADE,
+    page_from   INTEGER NOT NULL CHECK (page_from > 0),
+    page_to     INTEGER NOT NULL CHECK (page_to >= page_from),
+    PRIMARY KEY (revision_id, topic_id, source_id, page_from, page_to),
+    FOREIGN KEY (revision_id, topic_id)
+      REFERENCES revision_topics (revision_id, topic_id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS catalog_jobs (
+    id            INTEGER PRIMARY KEY,
+    job_key       TEXT NOT NULL UNIQUE,
+    type          TEXT NOT NULL CHECK (type IN ('ocr', 'build-curriculum')),
+    status        TEXT NOT NULL DEFAULT 'queued'
+                       CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+    course_id     TEXT NOT NULL REFERENCES courses (id) ON DELETE CASCADE,
+    revision_id   INTEGER NOT NULL REFERENCES course_revisions (id) ON DELETE CASCADE,
+    source_id     INTEGER REFERENCES course_sources (id) ON DELETE CASCADE,
+    current_page  INTEGER CHECK (current_page IS NULL OR current_page > 0),
+    attempts      INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    error         TEXT,
+    created_at    TEXT NOT NULL DEFAULT (${NOW_ISO}),
+    updated_at    TEXT NOT NULL DEFAULT (${NOW_ISO})
+  );
+  CREATE INDEX IF NOT EXISTS catalog_jobs_queue ON catalog_jobs (status, created_at, id);
+`;
+
 const CONTROL_SCHEMA = `
   CREATE TABLE IF NOT EXISTS parents (
     id                     TEXT PRIMARY KEY,
@@ -233,6 +405,8 @@ const CONTROL_SCHEMA = `
   ${LOGIN_ATTEMPTS_SCHEMA}
 
   ${ADMIN_SCHEMA}
+
+  ${COURSE_CATALOG_SCHEMA}
 `;
 
 /**
@@ -250,13 +424,34 @@ function readControlUserVersion(db: Database.Database): number {
   return row.user_version;
 }
 
+const CATALOG_SENTINEL_OBJECTS = [
+  'courses',
+  'course_revisions',
+  'topics',
+  'revision_topics',
+  'course_sources',
+  'catalog_jobs',
+] as const;
+
+function catalogSentinelCount(db: Database.Database): number {
+  return db
+    .prepare<[string, string, string, string, string, string], { count: number }>(
+      'SELECT COUNT(*) AS count FROM sqlite_master WHERE name IN (?, ?, ?, ?, ?, ?)',
+    )
+    .get(...CATALOG_SENTINEL_OBJECTS)?.count ?? 0;
+}
+
 /**
  * Приводит управляющую базу к текущей версии схемы. Идемпотентна: на уже
  * мигрированной базе ничего не выполняет. Вся DDL идёт одной транзакцией —
  * оборванная миграция не оставляет половину таблиц.
  */
 export function migrateControl(db: Database.Database): void {
-  if (readControlUserVersion(db) === CONTROL_SCHEMA_VERSION) return;
+  const initialVersion = readControlUserVersion(db);
+  if (
+    initialVersion === CONTROL_SCHEMA_VERSION &&
+    catalogSentinelCount(db) === CATALOG_SENTINEL_OBJECTS.length
+  ) return;
 
   // Версия перечитывается под записью, и транзакция именно `immediate`: между
   // быстрой проверкой выше и первым запросом транзакции базу мог мигрировать
@@ -266,7 +461,15 @@ export function migrateControl(db: Database.Database): void {
   // parents» на совершенно исправной базе.
   db.transaction(() => {
     const version = readControlUserVersion(db);
-    if (version === CONTROL_SCHEMA_VERSION) return;
+    if (version === CONTROL_SCHEMA_VERSION) {
+      const catalogObjects = catalogSentinelCount(db);
+      // Version 2 existed briefly before the catalog was added to the same
+      // planned migration. Upgrade only that recognizable zero-catalog shape;
+      // a partially missing catalog is corruption and validateControlSchema
+      // must report it instead of silently rebuilding around user data.
+      if (catalogObjects === 0) db.exec(COURSE_CATALOG_SCHEMA);
+      return;
+    }
 
     if (version === 0) {
       const existing = db
@@ -296,6 +499,7 @@ export function migrateControl(db: Database.Database): void {
     }
 
     db.exec(ADMIN_SCHEMA);
+    db.exec(COURSE_CATALOG_SCHEMA);
 
     // `kind` получил третье значение, а `CHECK` в SQLite на месте не меняется.
     // Строки переносятся: обнулить счётчики перебора миграцией значит открыть
@@ -377,6 +581,82 @@ const REQUIRED_CONTROL_COLUMNS: Record<ControlTable, readonly string[]> = {
     'created_at',
   ],
   admin_audit: ['id', 'admin_id', 'at', 'action', 'child_id', 'parent_id', 'detail'],
+  courses: [
+    'id',
+    'title',
+    'grade',
+    'status',
+    'active_revision_id',
+    'created_at',
+    'updated_at',
+    'archived_at',
+  ],
+  course_revisions: [
+    'id',
+    'course_id',
+    'revision_number',
+    'status',
+    'based_on_revision_id',
+    'edit_version',
+    'published_by',
+    'created_at',
+    'published_at',
+  ],
+  topics: ['id', 'course_id', 'created_at', 'archived_at'],
+  revision_topics: [
+    'revision_id',
+    'topic_id',
+    'title',
+    'exam_weight',
+    'difficulty',
+    'answer_format',
+    'prompt_seed',
+    'position',
+    'active',
+  ],
+  topic_prereqs: ['revision_id', 'topic_id', 'prereq_topic_id', 'position'],
+  revision_topic_sources: ['revision_id', 'topic_id', 'source_id', 'page_from', 'page_to'],
+  course_sources: [
+    'id',
+    'course_id',
+    'revision_id',
+    'upload_name',
+    'sha256',
+    'artifact_path',
+    'page_count',
+    'status',
+    'error',
+    'created_at',
+  ],
+  source_pages: [
+    'source_id',
+    'page_number',
+    'status',
+    'text',
+    'image_path',
+    'error',
+    'updated_at',
+  ],
+  source_chunks: ['id', 'source_id', 'page_number', 'chunk_number', 'text'],
+  source_chunks_fts: ['text'],
+  source_chunks_fts_data: ['id', 'block'],
+  source_chunks_fts_idx: ['segid', 'term', 'pgno'],
+  source_chunks_fts_docsize: ['id', 'sz'],
+  source_chunks_fts_config: ['k', 'v'],
+  catalog_jobs: [
+    'id',
+    'job_key',
+    'type',
+    'status',
+    'course_id',
+    'revision_id',
+    'source_id',
+    'current_page',
+    'attempts',
+    'error',
+    'created_at',
+    'updated_at',
+  ],
 };
 
 /** Индексы, на которых держатся выборки по родителю и ребёнку. */
@@ -388,6 +668,16 @@ const REQUIRED_CONTROL_INDEXES = [
   'admin_sessions_admin',
   'admin_impersonations_admin',
   'admin_audit_at',
+  'course_revisions_one_draft',
+  'course_revisions_course',
+  'topics_course',
+  'revision_topics_topic',
+  'course_sources_revision',
+  'source_chunks_page',
+  'source_chunks_fts_insert',
+  'source_chunks_fts_delete',
+  'source_chunks_fts_update',
+  'catalog_jobs_queue',
 ] as const;
 
 /**
@@ -411,6 +701,14 @@ const REQUIRED_CONTROL_FRAGMENTS: Partial<Record<ControlTable, readonly string[]
   ],
   admins: ['email = lower(email)'],
   admin_impersonations: [IMPERSONATION_ROLE_CHECK],
+  courses: ["'draft', 'published', 'archived'", "id <> 'overall'"],
+  course_revisions: ["'draft', 'published'", 'UNIQUE (course_id, revision_number)'],
+  revision_topics: ["'number', 'text', 'choice'", 'PRIMARY KEY (revision_id, topic_id)'],
+  topic_prereqs: ['CHECK (topic_id <> prereq_topic_id)'],
+  course_sources: ["'uploaded', 'processing', 'ready', 'failed'", 'UNIQUE (revision_id, sha256)'],
+  source_pages: ["'pending', 'processing', 'ready', 'suspicious', 'failed'"],
+  source_chunks_fts: ["content=''"],
+  catalog_jobs: ["'queued', 'running', 'succeeded', 'failed', 'cancelled'"],
 };
 
 /** Не даёт базе с актуальным номером версии скрыть удалённую или чужую схему. */

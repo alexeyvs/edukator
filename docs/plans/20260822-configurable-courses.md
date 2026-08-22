@@ -116,19 +116,19 @@ Checkbox-пункты ниже описывают только автомати�
 
 ### Task 2: Добавить версионированный каталог курсов в control.db
 
-- [ ] расширить миграцию и валидацию `server/control-db.ts` нормализованными
+- [x] расширить миграцию и валидацию `server/control-db.ts` нормализованными
   таблицами courses/revisions/topics/revision topics/prereqs, источников,
   страниц/chunks, contentless FTS5 и перезапускаемых catalog jobs
-- [ ] реализовать `server/course-catalog.ts`: создание курса/черновика,
+- [x] реализовать `server/course-catalog.ts`: создание курса/черновика,
   клонирование редакции, стабильные topic ID, optimistic revision check,
   валидация графа, атомарная публикация и архивирование
-- [ ] запретить изменение опубликованных редакций на уровне repository API и
+- [x] запретить изменение опубликованных редакций на уровне repository API и
   обеспечить один редактируемый черновик на курс
-- [ ] реализовать идемпотентный bootstrap трёх legacy-карт из `content/curriculum`
+- [x] реализовать идемпотентный bootstrap трёх legacy-карт из `content/curriculum`
   с сохранением `math/russian/english` и существующих `topic_id`
-- [ ] написать тесты миграции `CONTROL_SCHEMA_VERSION = 2`, CRUD, конфликтов
+- [x] написать тесты миграции `CONTROL_SCHEMA_VERSION = 2`, CRUD, конфликтов
   редакций, циклов/ссылок, повторного bootstrap и транзакционного отката публикации
-- [ ] запустить `npx vitest run tests/control-db.test.ts tests/course-catalog.test.ts` и `npm run typecheck`
+- [x] запустить `npx vitest run tests/control-db.test.ts tests/course-catalog.test.ts` и `npm run typecheck`
 
 ### Task 3: Добавить назначения и CurriculumProvider
 

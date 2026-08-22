@@ -218,6 +218,21 @@ describe('openControlDatabase', () => {
       'admin_sessions',
       'admin_impersonations',
       'admin_audit',
+      'courses',
+      'course_revisions',
+      'topics',
+      'revision_topics',
+      'topic_prereqs',
+      'revision_topic_sources',
+      'course_sources',
+      'source_pages',
+      'source_chunks',
+      'source_chunks_fts',
+      'source_chunks_fts_data',
+      'source_chunks_fts_idx',
+      'source_chunks_fts_docsize',
+      'source_chunks_fts_config',
+      'catalog_jobs',
     ]);
   });
 });
@@ -277,6 +292,31 @@ describe('ограничения схемы', () => {
 
     expect(() => insert.run(childId, '2026-08-19', 2)).toThrow(/UNIQUE/i);
     expect(() => insert.run(childId, '2026-08-20', -1)).toThrow(/CHECK/i);
+  });
+
+  it('индексирует фрагменты источников в contentless FTS5', () => {
+    const db = open();
+    db.prepare("INSERT INTO courses (id, title, grade) VALUES ('science-7', 'Наука', '7 класс')").run();
+    const revisionId = Number(db.prepare(
+      "INSERT INTO course_revisions (course_id, revision_number, status) VALUES ('science-7', 1, 'draft')",
+    ).run().lastInsertRowid);
+    const sourceId = Number(db.prepare(
+      `INSERT INTO course_sources
+         (course_id, revision_id, upload_name, sha256, artifact_path)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run('science-7', revisionId, 'book.pdf', 'a'.repeat(64), 'sources/a.pdf').lastInsertRowid);
+    db.prepare('INSERT INTO source_pages (source_id, page_number) VALUES (?, 1)').run(sourceId);
+    const chunkId = Number(db.prepare(
+      'INSERT INTO source_chunks (source_id, page_number, chunk_number, text) VALUES (?, 1, 0, ?)',
+    ).run(sourceId, 'клеточное строение организмов').lastInsertRowid);
+
+    expect(db.prepare(
+      "SELECT rowid FROM source_chunks_fts WHERE source_chunks_fts MATCH 'клеточное'",
+    ).all()).toEqual([{ rowid: chunkId }]);
+    db.prepare('DELETE FROM source_chunks WHERE id = ?').run(chunkId);
+    expect(db.prepare(
+      "SELECT rowid FROM source_chunks_fts WHERE source_chunks_fts MATCH 'клеточное'",
+    ).all()).toEqual([]);
   });
 });
 
@@ -338,7 +378,10 @@ describe('ошибочные пути', () => {
     const source = new BetterSqlite3(wholePath);
     const statements = source
       .prepare<[], { sql: string | null }>(
-        "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'",
+        `SELECT sql FROM sqlite_master
+          WHERE sql IS NOT NULL
+            AND name NOT LIKE 'sqlite_%'
+            AND NOT (type = 'table' AND name GLOB 'source_chunks_fts_*')`,
       )
       .all()
       .map((row) => row.sql ?? '');
@@ -388,9 +431,26 @@ describe('ошибочные пути', () => {
  * собранная из нынешней константы, приняла бы `kind = 'admin'` ещё до миграции
  * и проверять было бы нечего.
  */
+function dropCatalogSchema(legacy: Database): void {
+  legacy.exec(`
+    DROP TABLE source_chunks_fts;
+    DROP TABLE catalog_jobs;
+    DROP TABLE revision_topic_sources;
+    DROP TABLE source_chunks;
+    DROP TABLE source_pages;
+    DROP TABLE course_sources;
+    DROP TABLE topic_prereqs;
+    DROP TABLE revision_topics;
+    DROP TABLE topics;
+    DROP TABLE course_revisions;
+    DROP TABLE courses;
+  `);
+}
+
 function createVersionOneDatabase(target: string): Database {
   openControlDatabase(target).close();
   const legacy = new BetterSqlite3(target);
+  dropCatalogSchema(legacy);
   legacy.exec(`
     DROP TABLE admin_audit;
     DROP TABLE admin_impersonations;
@@ -460,6 +520,35 @@ describe('обновление управляющей базы до версии
     ).toThrow(/CHECK/i);
 
     expect(db.pragma('foreign_key_check')).toEqual([]);
+  });
+
+  it('добавляет нормализованный каталог, FTS и перезапускаемые задания', () => {
+    createVersionOneDatabase(path).close();
+    const db = open();
+
+    for (const table of ['courses', 'course_revisions', 'topics', 'revision_topics',
+      'topic_prereqs', 'course_sources', 'source_pages', 'source_chunks', 'catalog_jobs']) {
+      expect(tableNames(db)).toContain(table);
+    }
+    const ftsSql = db
+      .prepare<[string], { sql: string }>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+      )
+      .get('source_chunks_fts')?.sql;
+    expect(ftsSql).toContain("content=''");
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+  });
+
+  it('достраивает каталог у ранней базы версии 2 без каталожных объектов', () => {
+    open().close();
+    const legacy = new BetterSqlite3(path);
+    dropCatalogSchema(legacy);
+    expect(legacy.pragma('user_version', { simple: true })).toBe(2);
+    legacy.close();
+
+    const migrated = open();
+    expect(tableNames(migrated)).toEqual([...CONTROL_TABLES].sort());
+    expect(migrated.pragma('foreign_key_check')).toEqual([]);
   });
 
   it('ставит на админские таблицы ограничения и ISO-умолчания', () => {
