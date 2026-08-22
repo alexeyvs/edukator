@@ -36,6 +36,7 @@ interface HealthBody {
   version: string;
   control: string;
   curriculum: string;
+  catalog: { state: string; queued: number; running: number; failed: number };
   children: { open: number; detached: string[] };
 }
 
@@ -88,6 +89,7 @@ describe('GET /api/health', () => {
     expect(body.version).toMatch(/^\d+\.\d+\.\d+$/);
     expect(body.control).toBe('ok');
     expect(body.curriculum).toBe('ok');
+    expect(body.catalog).toMatchObject({ state: 'idle', queued: 0, running: 0, failed: 0 });
     // Ни одного обращения к детям не было — и ни одна база не открыта.
     expect(body.children).toEqual({ open: 0, detached: [] });
   });

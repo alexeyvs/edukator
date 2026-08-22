@@ -42,7 +42,7 @@ export function syncDirectory(path: string): void {
   }
 }
 
-export function writeFileAtomic(path: string, content: string): void {
+export function writeFileAtomic(path: string, content: string | NodeJS.ArrayBufferView): void {
   const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
   let handle: number | undefined;
   try {

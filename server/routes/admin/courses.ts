@@ -32,6 +32,7 @@ import {
   CourseArtifactStore,
 } from '../../course-artifacts.js';
 import { dataDir as defaultDataDir } from '../../data-dir.js';
+import type { CatalogWorker } from '../../catalog-worker.js';
 import { ROUTE_ACCESS, failAuth, type AdminContextResolver } from '../tenant-context.js';
 
 export const COURSE_ID_MAX_LENGTH = 80;
@@ -52,6 +53,7 @@ export interface AdminCoursesRoutesOptions {
   createTopicToken?: () => string;
   dataDir?: string;
   artifacts?: CourseArtifactStore;
+  catalogWorker?: CatalogWorker;
 }
 
 class RequestValidationError extends Error {}
@@ -100,6 +102,32 @@ function courseIdParam(params: unknown): CourseId {
     throw new RequestValidationError('Некорректный идентификатор курса');
   }
   return courseId;
+}
+
+function sourceIdParam(params: unknown): number {
+  const rawSourceId = (params as { sourceId?: unknown }).sourceId;
+  const sourceId = typeof rawSourceId === 'string' ? Number(rawSourceId) : Number.NaN;
+  if (!Number.isSafeInteger(sourceId) || sourceId < 1) {
+    throw new RequestValidationError('Некорректный идентификатор источника');
+  }
+  return sourceId;
+}
+
+function requireOwnedSource(
+  control: Database,
+  courseId: CourseId,
+  sourceId: number,
+  draftOnly = false,
+): void {
+  const source = control.prepare<[number], { course_id: string; revision_status: 'draft' | 'published' }>(
+    `SELECT cs.course_id, cr.status AS revision_status
+       FROM course_sources cs JOIN course_revisions cr ON cr.id = cs.revision_id
+      WHERE cs.id = ?`,
+  ).get(sourceId);
+  if (source === undefined || source.course_id !== courseId) throw new ArtifactNotFoundError('Источник не найден');
+  if (draftOnly && source.revision_status !== 'draft') {
+    throw new PublishedRevisionError('OCR опубликованной редакции неизменяем');
+  }
 }
 
 function emptyBody(value: unknown): void {
@@ -432,6 +460,7 @@ export function registerAdminCoursesRoutes(
       }
       const at = now();
       const result = await artifacts.uploadToCurrentDraft(courseId, file.filename, file.file);
+      if (!result.duplicate) options.catalogWorker?.enqueueSource(result.source.id);
       recordAdminAudit(options.control, {
         adminId: auth.admin.adminId,
         action: 'course-update',
@@ -448,11 +477,7 @@ export function registerAdminCoursesRoutes(
     if (isReply(auth)) return auth;
     try {
       const courseId = courseIdParam(request.params);
-      const rawSourceId = (request.params as { sourceId?: unknown }).sourceId;
-      const sourceId = typeof rawSourceId === 'string' ? Number(rawSourceId) : Number.NaN;
-      if (!Number.isSafeInteger(sourceId) || sourceId < 1) {
-        throw new RequestValidationError('Некорректный идентификатор источника');
-      }
+      const sourceId = sourceIdParam(request.params);
       const removed = await artifacts.remove(courseId, sourceId);
       recordAdminAudit(options.control, {
         adminId: auth.admin.adminId,
@@ -461,6 +486,51 @@ export function registerAdminCoursesRoutes(
       }, now());
       return reply.send({ source: removed });
     } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.get('/api/admin/courses/:courseId/sources/:sourceId/status', (request, reply) => {
+    const auth = authorize(options, request, reply);
+    if (isReply(auth)) return auth;
+    try {
+      const courseId = courseIdParam(request.params);
+      const sourceId = sourceIdParam(request.params);
+      requireOwnedSource(options.control, courseId, sourceId);
+      if (options.catalogWorker === undefined) {
+        return reply.code(503).send({ error: 'OCR worker отключён' });
+      }
+      return reply.send(options.catalogWorker.sourceStatus(sourceId));
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post('/api/admin/courses/:courseId/sources/:sourceId/retry', (request, reply) => {
+    const auth = authorize(options, request, reply, true);
+    if (isReply(auth)) return auth;
+    try {
+      const courseId = courseIdParam(request.params);
+      const sourceId = sourceIdParam(request.params);
+      requireOwnedSource(options.control, courseId, sourceId, true);
+      if (options.catalogWorker === undefined) {
+        return reply.code(503).send({ error: 'OCR worker отключён' });
+      }
+      const body = objectBody(request.body, ['fromPage', 'toPage']);
+      const fromPage = body['fromPage'] === undefined ? undefined : integerField(body, 'fromPage');
+      const toPage = body['toPage'] === undefined ? undefined : integerField(body, 'toPage');
+      const jobId = options.catalogWorker.retrySource(sourceId, {
+        ...(fromPage === undefined ? {} : { fromPage }),
+        ...(toPage === undefined ? {} : { toPage }),
+      });
+      recordAdminAudit(options.control, {
+        adminId: auth.admin.adminId,
+        action: 'course-retry',
+        detail: `курс ${courseId}, источник ${sourceId}, OCR job ${jobId}`,
+      }, now());
+      return reply.send({ jobId, status: options.catalogWorker.sourceStatus(sourceId) });
+    } catch (error) {
+      if (error instanceof RangeError) return reply.code(400).send({ error: error.message });
       return sendError(reply, error);
     }
   });
@@ -481,4 +551,6 @@ export function registerUnavailableAdminCourses(app: FastifyInstance, reason: st
   app.get('/api/admin/courses/:courseId/sources', send);
   app.post('/api/admin/courses/:courseId/sources', send);
   app.delete('/api/admin/courses/:courseId/sources/:sourceId', send);
+  app.get('/api/admin/courses/:courseId/sources/:sourceId/status', send);
+  app.post('/api/admin/courses/:courseId/sources/:sourceId/retry', send);
 }

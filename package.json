@@ -25,6 +25,7 @@
     "adopt": "tsx scripts/adopt-single-user.ts",
     "test": "npm run build:web && vitest run",
     "test:e2e": "npm run build:web && playwright test",
+    "test:ocr": "EDUKATOR_OCR_SMOKE=1 vitest run tests/ocr-smoke.test.ts",
     "coverage": "npm run build:web && vitest run --coverage",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
     "lint": "eslint .",

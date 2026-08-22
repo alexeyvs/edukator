@@ -240,21 +240,21 @@ Checkbox-пункты ниже описывают только автомати�
 
 ### Task 10: Реализовать перезапускаемый OCR-конвейер
 
-- [ ] реализовать подменяемый `server/ocr-runner.ts` для OCRmyPDF/Tesseract,
+- [x] реализовать подменяемый `server/ocr-runner.ts` для OCRmyPDF/Tesseract,
   Poppler и qpdf с timeout, output limit, `rus+eng`, deskew/rotate и понятной
   диагностикой отсутствующих зависимостей
-- [ ] реализовать `server/catalog-worker.ts`: persistent jobs, один OCR одновременно,
+- [x] реализовать `server/catalog-worker.ts`: persistent jobs, один OCR одновременно,
   page-level checkpoints, retry диапазона, recovery `running` после рестарта и
   корректный shutdown дочернего процесса
-- [ ] сохранять распознанный текст и оптимизированные изображения страниц
+- [x] сохранять распознанный текст и оптимизированные изображения страниц
   атомарно; отмечать страницы с пустым/подозрительно коротким OCR
-- [ ] подключить worker к lifecycle `buildServer`, административным retry/status
+- [x] подключить worker к lifecycle `buildServer`, административным retry/status
   endpoints и отдельному состоянию catalog/OCR в `/api/health`
-- [ ] добавить unit-тесты через fake binaries для успеха, timeout, bad output,
+- [x] добавить unit-тесты через fake binaries для успеха, timeout, bad output,
   частичного отказа, рестарта, retry и остановки
-- [ ] добавить маленький русский scan fixture и opt-in `npm run test:ocr`, не
+- [x] добавить маленький русский scan fixture и opt-in `npm run test:ocr`, не
   делая внешние бинарники зависимостью обычного `npm test`
-- [ ] запустить `npx vitest run tests/ocr-runner.test.ts tests/catalog-worker.test.ts tests/health.test.ts` и `npm run typecheck`
+- [x] запустить `npx vitest run tests/ocr-runner.test.ts tests/catalog-worker.test.ts tests/health.test.ts` и `npm run typecheck`
 
 ### Task 11: Построить темы и задания по OCR-источникам
 

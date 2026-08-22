@@ -6,12 +6,14 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ADMIN_COOKIE } from '../server/auth.js';
 import { CourseArtifactStore } from '../server/course-artifacts.js';
+import { CatalogWorker } from '../server/catalog-worker.js';
 import { createCourse, publishRevision, replaceDraftTopics } from '../server/course-catalog.js';
 import { listAdminAudit, openControlDatabase } from '../server/control-db.js';
 import { controlDatabasePath, ensureDataDir } from '../server/data-dir.js';
 import { registerAdminCoursesRoutes } from '../server/routes/admin/courses.js';
 import { createAdminContext } from '../server/routes/tenant-context.js';
 import { createAdminAccount, signInAdmin } from './server-harness.js';
+import type { OcrRunner } from '../server/ocr-runner.js';
 
 const NOW = new Date('2026-08-22T10:00:00.000Z');
 const PDF = Buffer.from('%PDF-1.7\nroute fixture\n%%EOF\n');
@@ -37,6 +39,7 @@ describe('admin API источников курса', () => {
   let app: FastifyInstance;
   let cookie: string;
   let draftId: number;
+  let catalogWorker: CatalogWorker;
 
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'edukator-source-routes-'));
@@ -50,12 +53,22 @@ describe('admin API источников курса', () => {
       maxBytes: 128,
       now: () => NOW,
     });
+    const runner: OcrRunner = {
+      checkDependencies: async () => undefined,
+      processPage: async ({ pageNumber }) => ({
+        text: `Распознанный русский текст страницы ${pageNumber}`,
+        image: Buffer.from(`image-${pageNumber}`),
+      }),
+      stop: async () => undefined,
+    };
+    catalogWorker = new CatalogWorker(db, dir, { runner, now: () => NOW });
     app = Fastify();
     registerAdminCoursesRoutes(app, {
       context: createAdminContext({ control: db, now: () => NOW }),
       control: db,
       dataDir: dir,
       artifacts,
+      catalogWorker,
       now: () => NOW,
     });
     await app.ready();
@@ -123,6 +136,33 @@ describe('admin API источников курса', () => {
       .toBe(0);
   });
 
+  it('показывает page-level OCR status и ставит диапазон на retry с аудитом', async () => {
+    const created = await upload('ocr.pdf');
+    const sourceId = (created.json() as { source: { id: number } }).source.id;
+    await catalogWorker.drainNow();
+
+    const status = await app.inject({
+      method: 'GET',
+      url: `/api/admin/courses/history-6/sources/${sourceId}/status`,
+      headers: { cookie, 'sec-fetch-site': 'same-origin' },
+    });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      sourceStatus: 'ready', job: { status: 'succeeded' },
+      pages: [{ pageNumber: 1, status: 'ready' }, { pageNumber: 2, status: 'ready' }],
+    });
+
+    const retry = await app.inject({
+      method: 'POST',
+      url: `/api/admin/courses/history-6/sources/${sourceId}/retry`,
+      headers: { cookie, 'sec-fetch-site': 'same-origin' },
+      payload: { fromPage: 2, toPage: 2 },
+    });
+    expect(retry.statusCode).toBe(200);
+    expect(retry.json()).toMatchObject({ status: { job: { status: 'queued' } } });
+    expect(listAdminAudit(db, { limit: 10 }).entries[0]?.action).toBe('course-retry');
+  });
+
   it('запрещает не-admin и удаление опубликованного источника', async () => {
     expect((await upload('forbidden.pdf', PDF, '')).statusCode).toBe(401);
     const created = await upload('book.pdf');
@@ -141,4 +181,3 @@ describe('admin API источников курса', () => {
     expect(removed.statusCode).toBe(409);
   });
 });
-

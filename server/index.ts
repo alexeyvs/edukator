@@ -84,6 +84,7 @@ import { ImpersonationRefusals } from './admin/impersonation-refusals.js';
 import { createTenantOpener } from './tenant-opener.js';
 import { bootstrapLegacyCourses } from './course-catalog.js';
 import { CurriculumProvider } from './curriculum-provider.js';
+import { CatalogWorker, type CatalogWorkerOptions } from './catalog-worker.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -148,6 +149,8 @@ export type ServerOptions =
   personaPath?: string;
   /** Подмена настроек воркера в тестах; false отключает его для служебного сервера. */
   worker?: false | DispatcherWorkerOptions;
+  /** OCR catalog worker; false disables it for focused tests and maintenance tools. */
+  catalogWorker?: false | CatalogWorkerOptions;
   /** Подменяемый бюджет фонового воркера. */
   codexBudget?: CodexConcurrency;
   /** Подменяемая проверка осмысленности; по умолчанию — отдельный вызов codex. */
@@ -347,12 +350,20 @@ export function buildServer(
     const controlFile = control === undefined ? undefined : fileIdentity(controlPath);
 
     let registry: TenantRegistry | undefined;
+    let catalogWorker: CatalogWorker | undefined;
 
     if (graph !== undefined && control !== undefined && curriculumProvider !== undefined) {
       const loaded = graph;
       // Отдельная привязка, а не сам `control`: сужение типа не доживает до тела
       // вложенной функции, а квота списывается именно оттуда.
       const controlDb = control;
+      if (options.catalogWorker !== false) {
+        catalogWorker = new CatalogWorker(controlDb, dataDir, {
+          ...(options.catalogWorker ?? {}),
+          log,
+          ...(options.now === undefined ? {} : { now: options.now }),
+        });
+      }
       const budget = options.codexBudget ?? codexConcurrency;
       const tenants = new TenantRegistry({
         control,
@@ -538,6 +549,7 @@ export function buildServer(
         context: adminContext,
         control,
         dataDir,
+        ...(catalogWorker === undefined ? {} : { catalogWorker }),
         ...(options.now === undefined ? {} : { now: options.now }),
       });
       registerAdminParentsRoutes(app, {
@@ -600,8 +612,10 @@ export function buildServer(
       // ходят через `inject` и фоновой генерации не поднимают вовсе.
       app.addHook('onListen', async () => {
         dispatcher?.start();
+        catalogWorker?.start();
       });
       app.addHook('onClose', async () => {
+        await catalogWorker?.stop();
         await dispatcher?.stop();
         // Соединения имперсонации первыми: они ничего не пишут и никого не
         // ждут, а держат дескриптор той же базы, которую сейчас закроет реестр.
@@ -722,6 +736,16 @@ export function buildServer(
 
       const status: DatabaseStatus =
         control === 'ok' && curriculum === 'ok' && detached.length === 0 ? 'ok' : 'error';
+      const workerStatus = catalogWorker?.status();
+      const catalog = workerStatus === undefined
+        ? { state: 'disabled', queued: 0, running: 0, failed: 0, currentJobId: null }
+        : {
+            state: workerStatus.state,
+            queued: workerStatus.queued,
+            running: workerStatus.running,
+            failed: workerStatus.failed,
+            currentJobId: workerStatus.currentJobId,
+          };
 
       return reply
         .code(status === 'ok' ? 200 : 503)
@@ -730,6 +754,7 @@ export function buildServer(
           version: readVersion(),
           control,
           curriculum,
+          catalog,
           children: { open: open.length, detached },
         });
     });
