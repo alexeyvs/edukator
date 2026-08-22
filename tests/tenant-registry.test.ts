@@ -26,6 +26,7 @@ import {
   openSessionDatabase,
   type SessionDatabase,
 } from '../server/tenant-registry.js';
+import type { CurriculumSnapshot } from '../server/curriculum-provider.js';
 
 function topic(id: string, patch: Partial<Topic> = {}): Topic {
   return {
@@ -138,6 +139,47 @@ describe('реестр детских баз', () => {
   }
 
   describe('открытие', () => {
+    it('обновляет снимок без переоткрытия базы и сохраняет stale topic_state', async () => {
+      const childId = readyChild();
+      const firstGraph = buildTopicGraph([topic('math.a')]);
+      const secondGraph = buildTopicGraph([topic('math.b')]);
+      const snapshot = (graph: TopicGraph, revisionId: number): CurriculumSnapshot => Object.freeze({
+        childId,
+        generation: Object.freeze({ catalog: revisionId, child: 0 }),
+        courses: Object.freeze([Object.freeze({
+          ...(graph.courses.get('math') ?? {
+            courseId: 'math', title: 'Математика', grade: '7 класс', revisionId,
+          }),
+          revisionId,
+        })]),
+        revisionIds: new Map([['math', revisionId]]),
+        graph,
+      });
+      let current = snapshot(firstGraph, 41);
+      const revisions = new Map([[41, firstGraph], [42, secondGraph]]);
+      const tenants = registry({
+        curriculum: {
+          get: () => current,
+          graphFor: (_courseId, revisionId) => revisions.get(revisionId ?? 42) as TopicGraph,
+        },
+      });
+
+      const first = tenants.open(childId);
+      first.db.prepare(
+        "INSERT INTO runs (subject, course_revision_id, topic_id, started_at) VALUES ('math', 41, 'math.a', '2030-01-01')",
+      ).run();
+      current = snapshot(secondGraph, 42);
+      const refreshed = tenants.open(childId);
+
+      expect(refreshed).toBe(first);
+      expect(refreshed.curriculum).toBe(current);
+      expect(refreshed.db.prepare<[], { topic_id: string }>(
+        'SELECT topic_id FROM topic_state ORDER BY topic_id',
+      ).all().map((row) => row.topic_id)).toEqual(['math.a', 'math.b']);
+      expect(refreshed.graphForRun(1)).toBe(firstGraph);
+      await tenants.closeAll();
+    });
+
     it('открывает базу ребёнка, заводит темы и заливает посев', async () => {
       const childId = readyChild();
       const tenants = registry();

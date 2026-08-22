@@ -37,6 +37,8 @@ export interface DisputeCoordinatorOptions {
   /** База того ребёнка, чьи споры разбираются. */
   db: Database;
   graph: TopicGraph;
+  /** Выбирает зафиксированную карту операции; legacy callers используют graph. */
+  graphForDispute?: (disputeId: number) => TopicGraph;
   /** Разбирающий спор; по умолчанию — вызов codex. */
   review?: DisputeReviewer;
   background?: BackgroundRunner;
@@ -78,6 +80,7 @@ export interface DisputeScheduler {
 export class DisputeCoordinator implements DisputeScheduler {
   readonly #db: Database;
   readonly #graph: TopicGraph;
+  readonly #graphForDispute: (disputeId: number) => TopicGraph;
   readonly #review: DisputeReviewer;
   readonly #background: BackgroundRunner;
   readonly #log: (message: string) => void;
@@ -99,6 +102,7 @@ export class DisputeCoordinator implements DisputeScheduler {
   constructor(options: DisputeCoordinatorOptions) {
     this.#db = options.db;
     this.#graph = options.graph;
+    this.#graphForDispute = options.graphForDispute ?? ((): TopicGraph => this.#graph);
     this.#review = options.review ?? disputeReviewer();
     this.#background = options.background ?? ((task): void => void task());
     this.#log = options.log ?? defaultLog;
@@ -133,7 +137,7 @@ export class DisputeCoordinator implements DisputeScheduler {
   schedule(id: number): void {
     if (this.#stopped || !this.#available() || this.#reviewing.has(id)) return;
     const pending = this.#budget.tryRun(() =>
-      resolveDispute(this.#db, this.#graph, id, async (context) => {
+      resolveDispute(this.#db, this.#graphForDispute(id), id, async (context) => {
         const verdict = await this.#review(context);
         // За минуты внешнего разбора файл базы могли заменить. После await ещё
         // раз сверяем inode: дальше `resolveDispute` сразу и без нового await

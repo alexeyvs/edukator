@@ -156,6 +156,7 @@ describe('слой данных учебных материалов', () => {
 
   it('идемпотентно открывает материал и создаёт единственный lesson-run', () => {
     const { materialId, taskIds } = readyMaterial(db);
+    db.prepare('UPDATE learning_materials SET course_revision_id = 23 WHERE id = ?').run(materialId);
 
     expect(openLearningMaterial(db, materialId, { now: START }))
       .toEqual({ materialId, resumed: false });
@@ -167,8 +168,9 @@ describe('слой данных учебных материалов', () => {
     const second = startLearningRun(db, materialId, { now: new Date(START.getTime() + 1000) });
     expect(first).toMatchObject({ materialId, resumed: false });
     expect(second).toEqual({ materialId, runId: first.runId, resumed: true });
-    expect(db.prepare('SELECT kind, topic_id FROM runs WHERE id = ?').get(first.runId))
-      .toEqual({ kind: 'lesson', topic_id: TOPIC });
+    expect(db.prepare(
+      'SELECT kind, topic_id, course_revision_id FROM runs WHERE id = ?',
+    ).get(first.runId)).toEqual({ kind: 'lesson', topic_id: TOPIC, course_revision_id: 23 });
     expect(db.prepare('SELECT mastery_before FROM learning_materials WHERE id = ?').get(materialId))
       .toEqual({ mastery_before: 0.41 });
     expect(db.prepare('SELECT id, issued_run_id FROM task_bank ORDER BY id').all())

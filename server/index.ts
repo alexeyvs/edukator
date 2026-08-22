@@ -78,6 +78,8 @@ import { AdminStatsCache } from './admin/stats.js';
 import { ImpersonationTenants } from './admin/impersonation-tenants.js';
 import { ImpersonationRefusals } from './admin/impersonation-refusals.js';
 import { createTenantOpener } from './tenant-opener.js';
+import { bootstrapLegacyCourses } from './course-catalog.js';
+import { CurriculumProvider } from './curriculum-provider.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -319,6 +321,21 @@ export function buildServer(
     }
 
     control = tryOpenControl();
+    let curriculumProvider: CurriculumProvider | undefined;
+    if (control !== undefined && graph !== undefined) {
+      try {
+        bootstrapLegacyCourses(control, curriculumDir);
+        curriculumProvider = new CurriculumProvider(control);
+      } catch (error) {
+        curriculum = 'error';
+        log(`каталог курсов не подготовлен: ${(error as Error).message}`);
+        failures({
+          event: 'startup-failed',
+          message: 'каталог курсов не подготовлен',
+          detail: (error as Error).message,
+        });
+      }
+    }
     // Отпечаток снимается один раз, после открытия: `openControlDatabase` заводит
     // файл, если его нет, так что замер «до» здесь ничего не значил бы. Сверять с
     // ним health обязан по той же причине, что и по детским базам: под WAL запись
@@ -327,7 +344,7 @@ export function buildServer(
 
     let registry: TenantRegistry | undefined;
 
-    if (graph !== undefined && control !== undefined) {
+    if (graph !== undefined && control !== undefined && curriculumProvider !== undefined) {
       const loaded = graph;
       // Отдельная привязка, а не сам `control`: сужение типа не доживает до тела
       // вложенной функции, а квота списывается именно оттуда.
@@ -337,6 +354,7 @@ export function buildServer(
         control,
         dataDir,
         graph: loaded,
+        curriculum: curriculumProvider,
         log,
         failures,
         ...(options.maxOpenTenants === undefined ? {} : { maxOpen: options.maxOpenTenants }),

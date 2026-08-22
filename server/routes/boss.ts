@@ -107,7 +107,12 @@ export function registerBossRoutes(app: FastifyInstance, options: BossRoutesOpti
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
       return reply.send(
-        startBoss(context.tenant.db, graph, readTopicId(request.body), { now: now() }),
+        startBoss(context.tenant.db, graph, readTopicId(request.body), {
+          now: now(),
+          courseRevisionId: context.tenant.curriculum.revisionIds.get(
+            graph.byId.get(readTopicId(request.body))?.subject ?? '',
+          ) ?? null,
+        }),
       );
     } catch (error) {
       return fail(reply, error);

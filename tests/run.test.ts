@@ -32,6 +32,27 @@ function graphOf(...topics: Topic[]): TopicGraph {
 }
 
 describe('жизненный цикл забега', () => {
+  it('фиксирует редакцию нового забега и не смешивает её с активной другой редакции', () => {
+    const first = startRun(db, graph, 'math', { now: at(0, 9), courseRevisionId: 11 });
+    const second = startRun(db, graph, 'math', { now: at(0, 10), courseRevisionId: 12 });
+
+    expect(second.runId).not.toBe(first.runId);
+    expect(db.prepare<[], { course_revision_id: number | null }>(
+      'SELECT course_revision_id FROM runs ORDER BY id',
+    ).all()).toEqual([{ course_revision_id: 11 }, { course_revision_id: 12 }]);
+    expect(startRun(db, graph, 'math', { now: at(0, 11), courseRevisionId: 12 }))
+      .toMatchObject({ runId: second.runId, resumed: true });
+  });
+
+  it('сохраняет совместимость legacy-run без revision ID', () => {
+    const first = startRun(db, graph, 'math', { now: at(0, 9) });
+    expect(startRun(db, graph, 'math', { now: at(0, 10) }))
+      .toMatchObject({ runId: first.runId, resumed: true });
+    expect(db.prepare<[number], { course_revision_id: number | null }>(
+      'SELECT course_revision_id FROM runs WHERE id = ?',
+    ).get(first.runId)?.course_revision_id).toBeNull();
+  });
+
   let tempDir: string;
   let db: Database;
   const graph = graphOf(topic('math.a'), topic('math.b'), topic('russian.a', 'russian'));

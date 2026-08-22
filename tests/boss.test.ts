@@ -105,13 +105,18 @@ describe('доменная модель босса', () => {
 
   it('активирует готовый полный батч и после перезагрузки подхватывает тот же бой', () => {
     const batchId = prepare();
-    const first = startBoss(db, graph, TOPIC, { now: NOW });
+    const first = startBoss(db, graph, TOPIC, { now: NOW, courseRevisionId: 17 });
     const second = startBoss(db, graph, TOPIC, { now: new Date(NOW.getTime() + 1000) });
 
     expect(first).toEqual({ batchId, runId: first.runId, resumed: false });
     expect(second).toEqual({ batchId, runId: first.runId, resumed: true });
-    expect(db.prepare('SELECT kind, topic_id, finished_at FROM runs WHERE id = ?').get(first.runId))
-      .toEqual({ kind: 'boss', topic_id: TOPIC, finished_at: null });
+    expect(db.prepare(
+      'SELECT kind, topic_id, course_revision_id, finished_at FROM runs WHERE id = ?',
+    ).get(first.runId)).toEqual({
+      kind: 'boss', topic_id: TOPIC, course_revision_id: 17, finished_at: null,
+    });
+    expect(db.prepare('SELECT course_revision_id FROM boss_batches WHERE id = ?').get(batchId))
+      .toEqual({ course_revision_id: 17 });
   });
 
   it('два запроса старта создают один бой', () => {

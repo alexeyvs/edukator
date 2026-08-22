@@ -150,19 +150,19 @@ Checkbox-пункты ниже описывают только автомати�
 
 ### Task 4: Привязать арендатора и активный забег к снимку программы
 
-- [ ] заменить фиксированный `graph` в `TenantRegistry` на resolver снимков и
+- [x] заменить фиксированный `graph` в `TenantRegistry` на resolver снимков и
   добавить curriculum snapshot в `Tenant`/tenant context
-- [ ] при открытии/обновлении арендатора синхронизировать `topic_state` только с
+- [x] при открытии/обновлении арендатора синхронизировать `topic_state` только с
   разрешимыми темами, не удаляя stale/архивную историю
-- [ ] сохранять `course_revision_id` при старте run/triage/boss/lesson и
+- [x] сохранять `course_revision_id` при старте run/triage/boss/lesson и
   разрешать незаконченный забег по зафиксированной редакции
-- [ ] перевести `DisputeCoordinator`, integrity и impersonation tenant с
+- [x] перевести `DisputeCoordinator`, integrity и impersonation tenant с
   пожизненного графа на снимок конкретной операции
-- [ ] обеспечить, что смена назначения/публикация во время запроса применяется
+- [x] обеспечить, что смена назначения/публикация во время запроса применяется
   со следующей операции и не закрывает используемое SQLite-соединение
-- [ ] обновить тесты реестра, контекста, имперсонации, споров и активного забега,
+- [x] обновить тесты реестра, контекста, имперсонации, споров и активного забега,
   включая legacy-run без revision ID
-- [ ] запустить `npx vitest run tests/tenant-registry.test.ts tests/tenant-context.test.ts tests/impersonation-tenants.test.ts tests/dispute-coordinator.test.ts tests/integrity.test.ts tests/run.test.ts` и `npm run typecheck`
+- [x] запустить `npx vitest run tests/tenant-registry.test.ts tests/tenant-context.test.ts tests/impersonation-tenants.test.ts tests/dispute-coordinator.test.ts tests/integrity.test.ts tests/run.test.ts` и `npm run typecheck`
 
 ### Task 5: Перевести HTTP учебного ядра на персональный граф
 

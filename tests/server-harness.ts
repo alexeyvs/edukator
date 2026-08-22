@@ -29,6 +29,8 @@ import {
   setAdminPassword,
   type DeviceKind,
 } from '../server/control-db.js';
+import { bootstrapLegacyCourses } from '../server/course-catalog.js';
+import { CURRICULUM_DIR } from '../server/curriculum.js';
 import { ADMIN_COOKIE, CHILD_COOKIE, PARENT_COOKIE } from '../server/auth.js';
 import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
 import { buildServer, type ServerOptions } from '../server/index.js';
@@ -234,6 +236,10 @@ export async function startTenantServer(options: TenantServerOptions): Promise<T
 
   const parent = newParent(email ?? 'родитель@example.com');
   const child = newChild(parent.parentId, childName ?? 'Ученик', 'browser');
+  // buildServer выполняет bootstrap до появления тестового ребёнка. Повторный
+  // вызов назначает legacy-курсы только новому ребёнку и не восстанавливает
+  // когда-либо снятые назначения.
+  bootstrapLegacyCourses(control, curriculumDir ?? CURRICULUM_DIR);
   withDefaultHeaders(app, child.headers);
 
   // Прогрев аренды: он же проверяет, что собранный допуск действительно

@@ -215,6 +215,7 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
       return reply.send(startRun(db, graph, start.subject, {
         now: now(),
         ...(start.topicId === undefined ? {} : { topicId: start.topicId }),
+        courseRevisionId: context.tenant.curriculum.revisionIds.get(start.subject) ?? null,
       }));
     } catch (error) {
       return fail(reply, error);

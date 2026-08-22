@@ -47,6 +47,8 @@ export interface StartRunOptions {
   kind?: Exclude<RunKind, 'boss' | 'lesson'>;
   /** Тема конкретной карточки плана; для триажа тему выбирает его собственная политика. */
   topicId?: string;
+  /** Редакция курса, снимок которой использован для новой операции. */
+  courseRevisionId?: number | null;
 }
 
 export interface StartRunResult {
@@ -216,9 +218,10 @@ export function startRun(
     ).run(start);
 
     const active = db
-      .prepare<[Subject, Exclude<RunKind, 'boss' | 'lesson'>, string, string], { id: number }>(
+      .prepare<[Subject, Exclude<RunKind, 'boss' | 'lesson'>, number | null, string, string], { id: number }>(
         `SELECT id FROM runs
           WHERE subject = ? AND kind = ? AND finished_at IS NULL
+            AND course_revision_id IS ?
             AND EXISTS (
               SELECT 1 FROM topic_state
                WHERE topic_state.topic_id = runs.topic_id AND topic_state.closed_at IS NULL
@@ -226,7 +229,7 @@ export function startRun(
             AND started_at >= ? AND started_at < ?
           ORDER BY started_at DESC, id DESC LIMIT 1`,
       )
-      .get(subject, kind, start, next);
+      .get(subject, kind, options.courseRevisionId ?? null, start, next);
     if (active !== undefined) {
       return { runId: active.id, resumed: true, progress: readRunProgress(db, active.id) };
     }
@@ -255,10 +258,12 @@ export function startRun(
 
     const runId = Number(
       db.prepare(
-        `INSERT INTO runs (subject, kind, topic_id, started_at, lives_remaining)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO runs
+          (subject, course_revision_id, kind, topic_id, started_at, lives_remaining)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       ).run(
         subject,
+        options.courseRevisionId ?? null,
         kind,
         chosen.topic.id,
         now.toISOString(),

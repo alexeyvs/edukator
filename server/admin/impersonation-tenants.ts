@@ -54,10 +54,15 @@ const READ_ONLY_DISPUTES: DisputeScheduler = {
  * Проверка осмысленности, которая только читает. `status` у настоящего
  * координатора не безобиден: незакрытую проверку он тут же ставит на разбор.
  */
-function readOnlyIntegrity(db: Database.Database, graph: TopicGraph): IntegrityCoordinator {
+function readOnlyIntegrity(
+  db: Database.Database,
+  graphForRun: (runId: number) => TopicGraph,
+): IntegrityCoordinator {
   return {
     begin: () => refuseWrite('проверка осмысленности'),
-    status: (runId) => readIntegrityStatus(db, graph, runId),
+    status: (runId) => db.prepare<[number], { found: number }>(
+      'SELECT 1 AS found FROM runs WHERE id = ?',
+    ).get(runId) === undefined ? null : readIntegrityStatus(db, graphForRun(runId), runId),
     retry: () => refuseWrite('повтор отмеченного вопроса'),
     approve: () => refuseWrite('подтверждение ответа'),
     stop: async () => {},
@@ -79,7 +84,7 @@ interface ReadOnlyHandle {
 
 export interface ImpersonationTenantsOptions {
   /** Карта тем: по ней читается состояние проверки осмысленности. */
-  graph: TopicGraph;
+  graph?: TopicGraph;
   /**
    * Насколько handle переживает последний запрос оператора. Умолчание — срок
    * самого захода: не тронутое дольше него соединение принадлежит заходу,
@@ -104,7 +109,6 @@ export interface ImpersonationTenantsOptions {
  */
 export class ImpersonationTenants {
   readonly #handles = new Map<string, ReadOnlyHandle>();
-  readonly #graph: TopicGraph;
   readonly #ttlMs: number;
   readonly #openSession: (path: string) => SessionDatabase | undefined;
   readonly #now: () => Date;
@@ -112,7 +116,6 @@ export class ImpersonationTenants {
   readonly #sweepTimer: ReturnType<typeof setInterval>;
 
   constructor(options: ImpersonationTenantsOptions) {
-    this.#graph = options.graph;
     const ttlMs = options.ttlMs ?? IMPERSONATION_TTL_MS;
     // Ноль или отрицательное значение снимали бы handle раньше, чем им успели
     // воспользоваться, — то есть превращали бы кеш в открытие на каждый запрос.
@@ -197,7 +200,7 @@ export class ImpersonationTenants {
       ...tenant,
       db,
       disputes: READ_ONLY_DISPUTES,
-      integrity: readOnlyIntegrity(db, this.#graph),
+      integrity: readOnlyIntegrity(db, tenant.graphForRun),
     };
   }
 

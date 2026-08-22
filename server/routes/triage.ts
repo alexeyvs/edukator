@@ -86,6 +86,7 @@ export function registerTriageRoutes(app: FastifyInstance, options: TriageRoutes
       return reply.send(startRun(context.tenant.db, graph, readSubject(request.body), {
         kind: 'triage',
         now: now(),
+        courseRevisionId: context.tenant.curriculum.revisionIds.get(readSubject(request.body)) ?? null,
       }));
     } catch (error) {
       return fail(reply, error);

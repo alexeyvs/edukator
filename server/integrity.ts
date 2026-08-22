@@ -371,6 +371,8 @@ function applyVerdicts(db: Database, runId: number, verdicts: readonly Integrity
 export interface IntegrityCoordinatorOptions {
   db: Database;
   graph: TopicGraph;
+  /** Выбирает карту по revision ID занятия; legacy callers используют graph. */
+  graphForRun?: (runId: number) => TopicGraph;
   complete: (runId: number, now: Date) => Record<string, unknown>;
   review?: IntegrityReviewer;
   budget?: CodexConcurrency;
@@ -391,6 +393,7 @@ export interface IntegrityCoordinator {
 
 export function createIntegrityCoordinator(options: IntegrityCoordinatorOptions): IntegrityCoordinator {
   const { db, graph } = options;
+  const graphForRun = options.graphForRun ?? ((): TopicGraph => graph);
   const review = options.review ?? integrityReviewer();
   const budget = options.budget ?? codexConcurrency;
   const background = options.background ?? ((task): void => void task());
@@ -432,7 +435,7 @@ export function createIntegrityCoordinator(options: IntegrityCoordinatorOptions)
       }
       return;
     }
-    const contexts = contextForPending(db, graph, runId);
+    const contexts = contextForPending(db, graphForRun(runId), runId);
     if (contexts.length === 0) return;
     const work = budget.tryRun(() => review(contexts));
     if (work === undefined) {
@@ -465,7 +468,7 @@ export function createIntegrityCoordinator(options: IntegrityCoordinatorOptions)
   }
 
   function current(runId: number): IntegrityPublicStatus {
-    const state = readIntegrityStatus(db, graph, runId);
+    const state = readIntegrityStatus(db, graphForRun(runId), runId);
     if (state === null) throw new IntegrityError('review-not-found', `Проверка занятия ${runId} не найдена`);
     return state;
   }
@@ -489,7 +492,7 @@ export function createIntegrityCoordinator(options: IntegrityCoordinatorOptions)
         'Проверка доступна только для незавершённого забега или разбора',
       );
     }
-    const questions = questionsForRun(db, graph, runId);
+    const questions = questionsForRun(db, graphForRun(runId), runId);
     if (questions.length === 0) {
       const result = options.complete(runId, now());
       return { status: 'completed', result };
@@ -518,7 +521,9 @@ export function createIntegrityCoordinator(options: IntegrityCoordinatorOptions)
     durationMs: number,
     hintUsed: boolean,
   ): IntegrityPublicStatus {
-    const ready = replaceIntegrityAttempt(db, graph, runId, itemId, answer, durationMs, hintUsed, now());
+    const ready = replaceIntegrityAttempt(
+      db, graphForRun(runId), runId, itemId, answer, durationMs, hintUsed, now(),
+    );
     if (ready) schedule(runId);
     return current(runId);
   }
@@ -561,7 +566,7 @@ export function createIntegrityCoordinator(options: IntegrityCoordinatorOptions)
   return {
     begin,
     status: (runId) => {
-      const state = readIntegrityStatus(db, graph, runId);
+      const state = readIntegrityStatus(db, graphForRun(runId), runId);
       if (state !== null && state.status === 'checking') schedule(runId);
       return state;
     },

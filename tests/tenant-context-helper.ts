@@ -31,6 +31,11 @@ export interface FakeTenantOptions {
 /** Аренда поверх готового соединения. Путь и отпечаток здесь ничего не значат. */
 export function fakeTenant(db: Database, options: FakeTenantOptions = {}): Tenant {
   const available = options.available ?? ((): boolean => true);
+  const graph = loadCurriculum();
+  const courses = Object.freeze(graph.subjects.map((courseId) => Object.freeze({
+    ...(graph.courses.get(courseId) as NonNullable<ReturnType<typeof graph.courses.get>>),
+    revisionId: 0,
+  })));
   // Координатор заводится по требованию: он читает карту тем с диска, а нужен
   // одному маршруту из восьми.
   let disputes = options.disputes;
@@ -38,12 +43,20 @@ export function fakeTenant(db: Database, options: FakeTenantOptions = {}): Tenan
     childId: FAKE_CHILD_ID,
     path: ':memory:',
     db,
+    curriculum: Object.freeze({
+      childId: FAKE_CHILD_ID,
+      generation: Object.freeze({ catalog: 0, child: 0 }),
+      courses,
+      revisionIds: new Map(),
+      graph,
+    }),
+    graphForRun: () => graph,
     file: '0:0',
     available,
     get disputes(): DisputeCoordinator {
       disputes ??= new DisputeCoordinator({
         db,
-        graph: loadCurriculum(),
+        graph,
         available,
         background: () => undefined,
         log: () => undefined,

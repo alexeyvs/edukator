@@ -50,6 +50,7 @@ interface BatchRow {
   topic_id: string;
   run_id: number | null;
   status: 'preparing' | 'ready' | 'active' | 'won' | 'lost' | 'failed';
+  course_revision_id: number | null;
 }
 
 function topicRow(db: Database, topicId: string): TopicStateRow {
@@ -62,7 +63,7 @@ function topicRow(db: Database, topicId: string): TopicStateRow {
 
 function liveBatch(db: Database, topicId: string): BatchRow | undefined {
   return db.prepare<[string], BatchRow>(
-    `SELECT id, topic_id, run_id, status FROM boss_batches
+    `SELECT id, topic_id, run_id, status, course_revision_id FROM boss_batches
       WHERE topic_id = ? AND status IN ('preparing', 'ready', 'active')
       ORDER BY id DESC LIMIT 1`,
   ).get(topicId);
@@ -114,7 +115,7 @@ function ensureCompleteBatch(db: Database, batch: BatchRow): void {
   }
 }
 
-export interface StartBossOptions { now?: Date }
+export interface StartBossOptions { now?: Date; courseRevisionId?: number | null }
 export interface StartBossResult { batchId: number; runId: number; resumed: boolean }
 
 /** Активирует готовый батч или идемпотентно восстанавливает уже активный. */
@@ -148,14 +149,16 @@ export function startBoss(
     }
     ensureCompleteBatch(db, batch);
 
+    const revisionId = options.courseRevisionId ?? batch.course_revision_id ?? null;
     const runId = Number(db.prepare(
-      `INSERT INTO runs (subject, kind, topic_id, started_at, lives_remaining)
-       VALUES (?, 'boss', ?, ?, NULL)`,
-    ).run(topic.subject, topicId, now.toISOString()).lastInsertRowid);
+      `INSERT INTO runs
+        (subject, course_revision_id, kind, topic_id, started_at, lives_remaining)
+       VALUES (?, ?, 'boss', ?, ?, NULL)`,
+    ).run(topic.subject, revisionId, topicId, now.toISOString()).lastInsertRowid);
     const activated = db.prepare(
-      `UPDATE boss_batches SET status = 'active', run_id = ?, activated_at = ?
+      `UPDATE boss_batches SET status = 'active', run_id = ?, course_revision_id = ?, activated_at = ?
         WHERE id = ? AND status = 'ready'`,
-    ).run(runId, now.toISOString(), batch.id);
+    ).run(runId, revisionId, now.toISOString(), batch.id);
     if (activated.changes !== 1) {
       throw new BossError('boss-inconsistent', `Босс: батч ${batch.id} изменился во время старта`);
     }

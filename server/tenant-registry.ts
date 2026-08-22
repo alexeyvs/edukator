@@ -12,6 +12,7 @@ import { statSync } from 'node:fs';
 import type Database from 'better-sqlite3';
 import { openDatabase } from './db.js';
 import { syncTopicState, type TopicGraph } from './curriculum.js';
+import type { CurriculumSnapshot } from './curriculum-provider.js';
 import { loadSeedBank, SeedBankError } from './codex/seed-bank.js';
 import { childDatabasePath, isChildServiceable, readChild } from './control-db.js';
 import {
@@ -143,6 +144,10 @@ export interface Tenant {
   /** Путь базы; считается из `id`, в управляющей базе его нет. */
   path: string;
   db: Database.Database;
+  /** Immutable программа, зафиксированная для текущей операции. */
+  curriculum: CurriculumSnapshot;
+  /** Карта редакции сохранённого run (включая уже снятый курс). */
+  graphForRun: (runId: number) => TopicGraph;
   /** Отпечаток файла на момент открытия (см. `fileIdentity`). */
   file: string;
   /**
@@ -167,6 +172,8 @@ export interface TenantRegistryOptions {
   dataDir: string;
   /** Карта тем: по ней заводятся строки `topic_state` и заливается посев. */
   graph: TopicGraph;
+  /** Персональные снимки и исторические редакции каталога. */
+  curriculum?: Pick<import('./curriculum-provider.js').CurriculumProvider, 'get' | 'graphFor'>;
   /** Потолок открытых баз; проверяется как положительное целое. */
   maxOpen?: number;
   /** Каталог посевного банка; подменяется в тестах. */
@@ -208,12 +215,16 @@ export class TenantRegistry {
   readonly #control: Database.Database;
   readonly #dataDir: string;
   readonly #graph: TopicGraph;
+  readonly #curriculum: TenantRegistryOptions['curriculum'];
   readonly #maxOpen: number;
   readonly #seedDir: string | undefined;
   readonly #openSession: (path: string) => SessionDatabase | undefined;
   readonly #log: (message: string) => void;
   readonly #failures: FailureLog;
-  readonly #disputeOptions: Omit<DisputeCoordinatorOptions, 'db' | 'graph' | 'available'>;
+  readonly #disputeOptions: Omit<
+    DisputeCoordinatorOptions,
+    'db' | 'graph' | 'graphForDispute' | 'available'
+  >;
   readonly #integrityOptions: Pick<
     IntegrityCoordinatorOptions,
     'review' | 'budget' | 'background' | 'retryMs' | 'now' | 'log'
@@ -234,6 +245,7 @@ export class TenantRegistry {
     this.#control = options.control;
     this.#dataDir = options.dataDir;
     this.#graph = options.graph;
+    this.#curriculum = options.curriculum;
     this.#maxOpen = maxOpen;
     this.#seedDir = options.seedDir;
     this.#openSession = options.openSession ?? ((path) => openSessionDatabase(path));
@@ -292,7 +304,15 @@ export class TenantRegistry {
    */
   open(childId: string): Tenant {
     const cached = this.#tenants.get(childId);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      const snapshot = this.#snapshot(childId);
+      if (snapshot !== cached.curriculum) {
+        this.#syncCurriculum(childId, cached.db, snapshot.graph);
+        cached.curriculum = snapshot;
+        this.#seedBank(childId, cached.db, snapshot.graph);
+      }
+      return cached;
+    }
 
     if (this.#opening.has(childId)) {
       throw new Error(`Повторный вход в открытие базы ребёнка ${childId}`);
@@ -347,8 +367,9 @@ export class TenantRegistry {
       }
       // Темы заводятся до посева: без строк `topic_state` вставка заданий упала
       // бы на внешнем ключе.
-      this.#syncCurriculum(childId, opened.db);
-      this.#seedBank(childId, opened.db);
+      const snapshot = this.#snapshot(childId);
+      this.#syncCurriculum(childId, opened.db, snapshot.graph);
+      this.#seedBank(childId, opened.db, snapshot.graph);
     } catch (error) {
       if (opened !== undefined) this.#closeQuietly(childId, opened.db);
       // Испорченный файл базы — состояние одного арендатора, а не поломка
@@ -386,7 +407,7 @@ export class TenantRegistry {
     // вместо `unavailable`.
     let tenant: Tenant;
     try {
-      tenant = this.#assemble(childId, path, opened, available);
+      tenant = this.#assemble(childId, path, opened, available, this.#snapshot(childId));
     } catch (error) {
       this.#closeQuietly(childId, opened.db);
       this.#log(`база ребёнка ${childId} недоступна: ${(error as Error).message}`);
@@ -450,24 +471,38 @@ export class TenantRegistry {
     path: string,
     opened: SessionDatabase,
     available: () => boolean,
+    curriculum: CurriculumSnapshot,
   ): Tenant {
+    const graphForRun = (runId: number): TopicGraph => this.#graphForRun(opened.db, runId);
     const disputes = new DisputeCoordinator({
       ...this.#disputeOptions,
       db: opened.db,
       graph: this.#graph,
+      graphForDispute: (disputeId) => {
+        const run = opened.db.prepare<[number], { run_id: number | null }>(
+          `SELECT attempts.run_id
+             FROM disputes JOIN attempts ON attempts.id = disputes.attempt_id
+            WHERE disputes.id = ?`,
+        ).get(disputeId);
+        return run?.run_id === null || run === undefined
+          ? (this.#tenants.get(childId)?.curriculum.graph ?? curriculum.graph)
+          : graphForRun(run.run_id);
+      },
       available,
     });
     const integrity = createIntegrityCoordinator({
       ...this.#integrityOptions,
       db: opened.db,
       graph: this.#graph,
+      graphForRun,
       available,
       complete: (runId, at) => {
         const kind = opened.db.prepare<[number], { kind: string }>(
           'SELECT kind FROM runs WHERE id = ?',
         ).get(runId)?.kind;
+        const operationGraph = graphForRun(runId);
         if (kind === 'lesson') {
-          const result = finishLearningMaterial(opened.db, this.#graph, runId, { now: at });
+          const result = finishLearningMaterial(opened.db, operationGraph, runId, { now: at });
           const learningGate = readDailyGate(opened.db, at).learning;
           const completed = {
             ...result,
@@ -477,7 +512,7 @@ export class TenantRegistry {
             .run(JSON.stringify(completed), runId);
           return completed;
         }
-        if (kind === 'run') return { ...finishRun(opened.db, this.#graph, runId, { now: at }) };
+        if (kind === 'run') return { ...finishRun(opened.db, operationGraph, runId, { now: at }) };
         throw new Error(`Проверка осмысленности не завершает занятие вида «${String(kind)}»`);
       },
     });
@@ -485,6 +520,8 @@ export class TenantRegistry {
       childId,
       path,
       db: opened.db,
+      curriculum,
+      graphForRun,
       file: opened.file,
       available,
       disputes,
@@ -515,8 +552,8 @@ export class TenantRegistry {
     for (const childId of [...this.#tenants.keys()]) await this.close(childId);
   }
 
-  #syncCurriculum(childId: string, db: Database.Database): void {
-    const result = syncTopicState(db, this.#graph);
+  #syncCurriculum(childId: string, db: Database.Database, graph: TopicGraph): void {
+    const result = syncTopicState(db, graph);
 
     // Осиротевшие строки не удаляются (тема может вернуться в карту), но и
     // молчать о них нельзя: обычно это переименованный `id`, то есть прогресс,
@@ -531,11 +568,11 @@ export class TenantRegistry {
    * без него приложение работает, просто первая тема холодная — а отказ здесь
    * оставил бы ученика вовсе без занятия.
    */
-  #seedBank(childId: string, db: Database.Database): void {
+  #seedBank(childId: string, db: Database.Database, graph: TopicGraph): void {
     try {
       const result = loadSeedBank(
         db,
-        this.#graph,
+        graph,
         this.#seedDir === undefined ? {} : { dir: this.#seedDir },
       );
       if (result.loaded > 0) {
@@ -551,6 +588,44 @@ export class TenantRegistry {
         `посевной банк ребёнка ${childId} не загружен${partial}: ${(error as Error).message}`,
       );
     }
+  }
+
+  #snapshot(childId: string): CurriculumSnapshot {
+    if (this.#curriculum !== undefined) return this.#curriculum.get(childId);
+    const courses = Object.freeze(this.#graph.subjects.map((courseId) => {
+      const metadata = this.#graph.courses.get(courseId);
+      if (metadata === undefined) throw new Error(`У курса «${courseId}» нет метаданных`);
+      return Object.freeze({ ...metadata, revisionId: metadata.revisionId ?? 0 });
+    }));
+    return Object.freeze({
+      childId,
+      generation: Object.freeze({ catalog: 0, child: 0 }),
+      courses,
+      revisionIds: new Map(
+        courses.flatMap((course) => course.revisionId > 0 ? [[course.courseId, course.revisionId]] : []),
+      ),
+      graph: this.#graph,
+    });
+  }
+
+  #graphForRun(db: Database.Database, runId: number): TopicGraph {
+    const run = db.prepare<[number], { subject: string; course_revision_id: number | null }>(
+      'SELECT subject, course_revision_id FROM runs WHERE id = ?',
+    ).get(runId);
+    if (run === undefined) throw new Error(`Забег ${String(runId)} не найден`);
+    if (this.#curriculum !== undefined) {
+      try {
+        return this.#curriculum.graphFor(run.subject, run.course_revision_id);
+      } catch (error) {
+        // Только legacy-run может откатиться к файловой карте. Явно сохранённая
+        // редакция обязана существовать: иначе продолжение смешало бы контент.
+        if (run.course_revision_id !== null || !this.#graph.bySubject.has(run.subject)) throw error;
+      }
+    }
+    if (!this.#graph.bySubject.has(run.subject)) {
+      throw new Error(`Для legacy-забега ${String(runId)} нет карты курса «${run.subject}»`);
+    }
+    return this.#graph;
   }
 
   #closeQuietly(childId: string, db: Database.Database): void {

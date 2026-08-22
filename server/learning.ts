@@ -42,6 +42,7 @@ interface MaterialLifecycleRow {
 interface MaterialStartRow extends MaterialLifecycleRow {
   subject: Subject;
   topic_id: string;
+  course_revision_id: number | null;
   latest_run_id: number | null;
   latest_attempt_number: number | null;
   latest_run_kind: string | null;
@@ -173,7 +174,8 @@ function materialStartRow(db: Database, materialId: number): MaterialStartRow {
         ORDER BY attempt_number DESC LIMIT 1
      )
      SELECT learning_materials.id, learning_materials.subject,
-            learning_materials.topic_id, learning_materials.status,
+            learning_materials.topic_id, learning_materials.course_revision_id,
+            learning_materials.status,
             latest_run.run_id AS latest_run_id,
             latest_run.attempt_number AS latest_attempt_number,
             runs.kind AS latest_run_kind,
@@ -440,9 +442,10 @@ export function startLearningRun(
     const attemptNumber = (material.latest_attempt_number ?? 0) + 1;
 
     const runId = Number(db.prepare(
-      `INSERT INTO runs (subject, kind, topic_id, started_at, lives_remaining)
-       VALUES (?, 'lesson', ?, ?, NULL)`,
-    ).run(material.subject, material.topic_id, nowIso).lastInsertRowid);
+      `INSERT INTO runs
+        (subject, course_revision_id, kind, topic_id, started_at, lives_remaining)
+       VALUES (?, ?, 'lesson', ?, ?, NULL)`,
+    ).run(material.subject, material.course_revision_id, material.topic_id, nowIso).lastInsertRowid);
     const linked = db.prepare(
       `UPDATE learning_materials
           SET mastery_before = CASE WHEN ? = 1 THEN (

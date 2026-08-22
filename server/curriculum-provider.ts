@@ -78,6 +78,29 @@ export class CurriculumProvider {
 
   constructor(readonly db: Database) {}
 
+  /**
+   * Карта одной редакции для уже начатой операции. Она намеренно не проверяет
+   * текущее назначение ребёнка: снятие курса не должно ломать сохранённый run.
+   * У legacy-run без revision ID берётся активная редакция курса.
+   */
+  graphFor(courseId: CourseId, revisionId: number | null): TopicGraph {
+    const row = revisionId === null
+      ? this.db.prepare<[string], { revision_id: number }>(
+          'SELECT active_revision_id AS revision_id FROM courses WHERE id = ? AND active_revision_id IS NOT NULL',
+        ).get(courseId)
+      : this.db.prepare<[number, string], { revision_id: number }>(
+          'SELECT id AS revision_id FROM course_revisions WHERE id = ? AND course_id = ?',
+        ).get(revisionId, courseId);
+    if (row === undefined) {
+      throw new Error(
+        revisionId === null
+          ? `У курса «${courseId}» нет активной редакции`
+          : `Редакция ${String(revisionId)} не принадлежит курсу «${courseId}»`,
+      );
+    }
+    return readRevisionGraph(this.db, row.revision_id);
+  }
+
   get(childId: string): CurriculumSnapshot {
     const generation = readCurriculumGeneration(this.db, childId);
     const cached = this.#cache.get(childId);
