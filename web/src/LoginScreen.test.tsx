@@ -3,23 +3,10 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LoginScreen } from './LoginScreen';
-import type { AuthApi } from './auth-api';
+import { testAuthApi } from './test-auth-api';
 import './test-setup';
 
 afterEach(cleanup);
-
-function authApi(overrides: Partial<AuthApi> = {}): AuthApi {
-  return {
-    me: vi.fn().mockResolvedValue({ kind: 'anonymous' }),
-    login: vi.fn().mockResolvedValue({ kind: 'parent', email: 'parent@example.org' }),
-    logout: vi.fn().mockResolvedValue(undefined),
-    readInvite: vi.fn().mockResolvedValue({ email: 'parent@example.org' }),
-    redeemInvite: vi.fn().mockResolvedValue({ kind: 'parent', email: 'parent@example.org' }),
-    claimDevice: vi.fn().mockResolvedValue({ kind: 'child', childId: 'c-1' }),
-    switchPersona: vi.fn().mockResolvedValue({ kind: 'anonymous' }),
-    ...overrides,
-  };
-}
 
 function fill(email: string, password: string): void {
   fireEvent.change(screen.getByLabelText('Электронная почта'), { target: { value: email } });
@@ -28,7 +15,7 @@ function fill(email: string, password: string): void {
 
 describe('вход родителя', () => {
   it('отдаёт наверх разобранного предъявителя после верного пароля', async () => {
-    const api = authApi();
+    const api = testAuthApi();
     const onSignedIn = vi.fn();
     render(<LoginScreen api={api} onSignedIn={onSignedIn} />);
 
@@ -42,7 +29,7 @@ describe('вход родителя', () => {
   });
 
   it('показывает отказ сервера и стирает только пароль', async () => {
-    const api = authApi({ login: vi.fn().mockRejectedValue(new Error('Неверный адрес или пароль')) });
+    const api = testAuthApi({ login: vi.fn().mockRejectedValue(new Error('Неверный адрес или пароль')) });
     const onSignedIn = vi.fn();
     render(<LoginScreen api={api} onSignedIn={onSignedIn} />);
 
@@ -55,8 +42,26 @@ describe('вход родителя', () => {
     expect(screen.getByLabelText('Пароль')).toHaveValue('');
   });
 
+  it('пускает адрес с кириллицей: сервер такие принимает', async () => {
+    const api = testAuthApi();
+    render(<LoginScreen api={api} onSignedIn={vi.fn()} />);
+
+    // `type="email"` браузер проверяет ASCII-регуляркой из спеки и такой адрес
+    // до отправки не допускает вовсе — молча, без единого сообщения. Сервер же
+    // его принимает (`normalizeEmail` смотрит на одну собаку), так что форма
+    // отказывала бы во входе учётной записи, которая заведена и работает.
+    fireEvent.change(screen.getByLabelText('Электронная почта'), {
+      target: { value: 'родитель@example.com' },
+    });
+    fireEvent.change(screen.getByLabelText('Пароль'), { target: { value: 'пароль-подлиннее' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Войти' }));
+
+    await waitFor(() => expect(api.login)
+      .toHaveBeenCalledWith('родитель@example.com', 'пароль-подлиннее'));
+  });
+
   it('объясняет, почему вход показан снова', () => {
-    render(<LoginScreen api={authApi()} notice="Сессия закончилась. Войдите заново." onSignedIn={vi.fn()} />);
+    render(<LoginScreen api={testAuthApi()} notice="Сессия закончилась. Войдите заново." onSignedIn={vi.fn()} />);
 
     expect(screen.getByRole('status')).toHaveTextContent('Сессия закончилась. Войдите заново.');
   });

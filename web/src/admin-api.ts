@@ -340,6 +340,30 @@ export interface AdminImpersonationStart {
   expiresAt: string;
 }
 
+/**
+ * Родитель так, как его отдают изменяющие маршруты админки. Ни отпечатка, ни
+ * пароля здесь нет: `hasPassword` говорит, дошёл ли родитель по ссылке до
+ * своей формы, — а это и есть весь вопрос оператора о заведённой семье.
+ */
+export interface AdminParentView {
+  parentId: string;
+  email: string;
+  hasPassword: boolean;
+  hasPin: boolean;
+  createdAt: string;
+  disabledAt?: string;
+}
+
+/**
+ * Выпущенная ссылка на установку пароля. Сервер отдаёт путь, а не целый адрес:
+ * за прокси ему неизвестны ни схема, ни внешнее имя. Целый адрес собирает
+ * клиент — он по этому адресу и пришёл.
+ */
+export interface AdminParentInvite {
+  path: string;
+  expiresAt: string;
+}
+
 export interface AdminApi {
   login(email: string, password: string): Promise<{ kind: 'admin'; email: string }>;
   logout(): Promise<void>;
@@ -353,6 +377,12 @@ export interface AdminApi {
   impersonate(childId: string, role: AdminImpersonationRole): Promise<AdminImpersonationStart>;
   /** Выйти из захода. Оператор остаётся вошедшим: админская cookie не трогается. */
   stopImpersonation(): Promise<void>;
+  /** Завести семью: родитель по адресу и одноразовая ссылка ему на пароль. */
+  createFamily(email: string): Promise<{ parent: AdminParentView; invite: AdminParentInvite }>;
+  /** Ещё одна ссылка на установку пароля уже заведённой семье. */
+  issueParentInvite(parentId: string): Promise<{ invite: AdminParentInvite }>;
+  /** Пароль, поставленный самим оператором. Отдельное действие в журнале. */
+  setParentPassword(parentId: string, password: string): Promise<{ parent: AdminParentView }>;
 }
 
 /**
@@ -423,6 +453,27 @@ export const browserAdminApi: AdminApi = {
     '/api/admin/overview',
     undefined,
     'Не получилось загрузить сводку',
+    adminError,
+    ADMIN_POLICY,
+  ),
+  createFamily: (email) => requestJson<{ parent: AdminParentView; invite: AdminParentInvite }>(
+    '/api/admin/parents',
+    jsonRequest('POST', { email }),
+    'Не получилось завести семью',
+    adminError,
+    ADMIN_POLICY,
+  ),
+  issueParentInvite: (parentId) => requestJson<{ invite: AdminParentInvite }>(
+    `/api/admin/parents/${encodeURIComponent(parentId)}/invite`,
+    jsonRequest('POST'),
+    'Не получилось выпустить ссылку',
+    adminError,
+    ADMIN_POLICY,
+  ),
+  setParentPassword: (parentId, password) => requestJson<{ parent: AdminParentView }>(
+    `/api/admin/parents/${encodeURIComponent(parentId)}/password`,
+    jsonRequest('POST', { password }),
+    'Не получилось поставить пароль',
     adminError,
     ADMIN_POLICY,
   ),

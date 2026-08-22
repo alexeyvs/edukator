@@ -22,6 +22,7 @@ import { registerLearningRoutes, registerUnavailableLearning } from './routes/le
 import { registerGateRoutes, registerUnavailableGate } from './routes/gate.js';
 import { registerIntegrityRoutes, registerUnavailableIntegrity } from './routes/integrity.js';
 import { registerAuthRoutes, registerUnavailableAuth } from './routes/auth.js';
+import type { ImpersonationMark } from './auth.js';
 import {
   registerAdminAuthRoutes,
   registerUnavailableAdminAuth,
@@ -46,6 +47,10 @@ import {
   registerAdminImpersonateRoutes,
   registerUnavailableAdminImpersonate,
 } from './routes/admin/impersonate.js';
+import {
+  registerAdminParentsRoutes,
+  registerUnavailableAdminParents,
+} from './routes/admin/parents.js';
 import {
   registerAdminAuditRoutes,
   registerUnavailableAdminAudit,
@@ -424,17 +429,31 @@ export function buildServer(
       const insecureCookies =
         options.insecureCookies ?? process.env['EDUKATOR_INSECURE_COOKIES'] === '1';
 
+      /**
+       * Отказ первого замка имперсонации. Один на все три места, где он
+       * выписывается: аренду, маршруты семьи и смену пароля родителем. Три
+       * своих замыкания на одну строку означали бы, что забытое в новом месте
+       * не видно ни по чему, кроме пропавшего числа в записи о конце захода.
+       */
+      const noteReadOnly = (impersonation: ImpersonationMark): void => {
+        refusals.record(impersonation.adminId);
+      };
+
       const context = createTenantContext({
         control,
         tenants: opener,
         insecureCookies,
-        onReadOnly: (impersonation) => refusals.record(impersonation.adminId),
+        onReadOnly: noteReadOnly,
         ...(options.now === undefined ? {} : { now: options.now }),
       });
 
       registerAuthRoutes(app, {
         control,
         failures,
+        // Смена пароля родителем — единственный изменяющий маршрут этого модуля,
+        // и первый замок имперсонации выписан в нём руками: отказы считает тот
+        // же счётчик, что и у аренды с семьёй.
+        onReadOnly: noteReadOnly,
         ...(options.now === undefined ? {} : { now: options.now }),
         ...(options.trustedProxies === undefined ? {} : { trustedProxies: options.trustedProxies }),
         insecureCookies,
@@ -493,12 +512,17 @@ export function buildServer(
         insecureCookies,
       });
       registerAdminAuditRoutes(app, { context: adminContext, control });
+      registerAdminParentsRoutes(app, {
+        context: adminContext,
+        control,
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
       registerFamilyRoutes(app, {
         control,
         dataDir,
         // Аренды у этих маршрутов нет, а замок имперсонации нужен: состав
         // семьи лежит в управляющей базе, до которой `query_only` не достаёт.
-        onReadOnly: (impersonation) => refusals.record(impersonation.adminId),
+        onReadOnly: noteReadOnly,
         insecureCookies,
         ...(pinPepper === undefined ? {} : { pinPepper }),
         ...(options.now === undefined ? {} : { now: options.now }),
@@ -578,6 +602,7 @@ export function buildServer(
       registerUnavailableAdminLogs(app, reason);
       registerUnavailableAdminImpersonate(app, reason);
       registerUnavailableAdminAudit(app, reason);
+      registerUnavailableAdminParents(app, reason);
       registerUnavailableFamily(app, reason);
       registerUnavailableSession(app, reason);
       registerUnavailableRun(app, reason);

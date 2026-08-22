@@ -42,6 +42,7 @@ describe('маршруты входа', () => {
   let app: FastifyInstance;
   let current: Date;
   let failures: ReturnType<typeof recordingFailureLog>;
+  let refusals: string[];
 
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'edukator-auth-routes-'));
@@ -49,8 +50,14 @@ describe('маршруты входа', () => {
     control = openControlDatabase(controlDatabasePath(dir));
     current = NOW;
     failures = recordingFailureLog();
+    refusals = [];
     app = Fastify();
-    registerAuthRoutes(app, { control, failures, now: () => current });
+    registerAuthRoutes(app, {
+      control,
+      failures,
+      onReadOnly: (impersonation) => refusals.push(impersonation.adminId),
+      now: () => current,
+    });
     await app.ready();
   });
 
@@ -382,6 +389,126 @@ describe('маршруты входа', () => {
     });
   });
 
+  describe('смена пароля родителем', () => {
+    /** Вошедший родитель: его cookie и есть право менять свой пароль. */
+    async function signedIn(): Promise<string> {
+      await parentWithPassword();
+      return cookieValue(setCookie((await login()).headers));
+    }
+
+    function change(
+      token: string | undefined,
+      body: object,
+    ): Promise<{ statusCode: number; headers: Record<string, unknown>; json: () => unknown }> {
+      return app.inject({
+        method: 'POST',
+        url: '/api/auth/parent/password',
+        headers: token === undefined ? SAME_ORIGIN : { ...SAME_ORIGIN, cookie: `${PARENT_COOKIE}=${token}` },
+        payload: body,
+      });
+    }
+
+    it('меняет пароль, выдаёт cookie взамен и гасит прежнюю сессию', async () => {
+      const token = await signedIn();
+
+      const response = await change(token, { current: PASSWORD, next: 'совсем-другой-пароль' });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ kind: 'parent', email: 'родитель@example.com' });
+      const fresh = cookieValue(setCookie(response.headers));
+      expect(fresh).not.toBe(token);
+      // Прежняя cookie мертва, выданная взамен — жива: без замены смена пароля
+      // стоила бы родителю выхода на том же ответе.
+      expect((await me({ cookie: `${PARENT_COOKIE}=${token}` })).json()).toEqual({ kind: 'anonymous' });
+      expect((await me({ cookie: `${PARENT_COOKIE}=${fresh}` })).json())
+        .toEqual({ kind: 'parent', email: 'родитель@example.com' });
+      // Вход теперь идёт только по новому паролю.
+      expect((await login(EMAIL, PASSWORD)).statusCode).toBe(401);
+      expect((await login(EMAIL, 'совсем-другой-пароль')).statusCode).toBe(200);
+    });
+
+    it('считает неверный текущий пароль перебором и запирает дверь вместе со входом', async () => {
+      const token = await signedIn();
+
+      for (let attempt = 0; attempt < LOGIN_EMAIL_FAILURE_LIMIT; attempt += 1) {
+        const refused = await change(token, { current: 'не тот пароль', next: 'совсем-другой-пароль' });
+        expect(refused.statusCode).toBe(401);
+        expect(refused.headers['set-cookie']).toBeUndefined();
+      }
+
+      // Счётчик у смены пароля и у входа общий: иначе смена стала бы дверью
+      // перебора мимо запрета, а прежний пароль подбирался бы через неё без
+      // предела попыток.
+      const locked = await change(token, { current: PASSWORD, next: 'совсем-другой-пароль' });
+      expect(locked.statusCode).toBe(429);
+      expect(Number(locked.headers['retry-after'])).toBeGreaterThan(0);
+      expect((await login()).statusCode).toBe(429);
+      expect(failures.records.filter((record) => record.event === 'login-lockout')).toHaveLength(1);
+      expect(JSON.stringify(failures.records)).not.toContain(PASSWORD);
+    });
+
+    it('называет короткий новый пароль, не тратя на него попытку', async () => {
+      const token = await signedIn();
+
+      const short = await change(token, { current: PASSWORD, next: 'коротко' });
+
+      expect(short.statusCode).toBe(400);
+      expect(String((short.json() as { error: string }).error)).toContain(String(MIN_PASSWORD_LENGTH));
+      // Формат нового пароля — не неудачная попытка входа: счётчик его не
+      // считает, иначе опечатка запирала бы родителю дверь на четверть часа.
+      for (let attempt = 0; attempt < LOGIN_EMAIL_FAILURE_LIMIT; attempt += 1) {
+        expect((await change(token, { current: PASSWORD, next: 'коротко' })).statusCode).toBe(400);
+      }
+      expect((await change(token, { current: PASSWORD, next: 'совсем-другой-пароль' })).statusCode).toBe(200);
+    });
+
+    it('требует ровно полей current и next', async () => {
+      const token = await signedIn();
+
+      expect((await change(token, { current: PASSWORD })).statusCode).toBe(400);
+      expect((await change(token, { next: 'совсем-другой-пароль' })).statusCode).toBe(400);
+      expect((await change(token, { current: PASSWORD, next: 'совсем-другой-пароль', lишнее: 1 })).statusCode)
+        .toBe(400);
+      expect((await change(token, [PASSWORD, 'совсем-другой-пароль'])).statusCode).toBe(400);
+      expect((await change(token, { current: PASSWORD, next: 12345678901 })).statusCode).toBe(400);
+    });
+
+    it('пускает только вошедшего родителя и только со своей страницы', async () => {
+      const token = await signedIn();
+      const parentId = await parentWithPassword('второй@example.com');
+      const invite = deviceInvite(parentId, 'browser');
+      // Настоящая детская cookie, а не непогашенный токен ссылки: отказ должен
+      // достаться живой детской сессии, иначе тест проверяет разбор мусора.
+      const claimed = await app.inject({
+        method: 'POST',
+        url: `/api/auth/child/claim/${invite.token}`,
+        headers: SAME_ORIGIN,
+      });
+      const childToken = cookieValue(setCookie(claimed.headers));
+
+      expect((await change(undefined, { current: PASSWORD, next: 'совсем-другой-пароль' })).statusCode)
+        .toBe(401);
+      const child = await app.inject({
+        method: 'POST',
+        url: '/api/auth/parent/password',
+        headers: { ...SAME_ORIGIN, cookie: `${CHILD_COOKIE}=${childToken}` },
+        payload: { current: PASSWORD, next: 'совсем-другой-пароль' },
+      });
+      // За детской машиной сидит ученик: «не тот предъявитель» — это 403, а не
+      // «войдите», иначе клиент показал бы форму входа тому, кто уже вошёл.
+      expect(child.statusCode).toBe(403);
+      const foreign = await app.inject({
+        method: 'POST',
+        url: '/api/auth/parent/password',
+        headers: { cookie: `${PARENT_COOKIE}=${token}` },
+        payload: { current: PASSWORD, next: 'совсем-другой-пароль' },
+      });
+      expect(foreign.statusCode).toBe(403);
+      // Ни один отказ пароля не сменил: он по-прежнему прежний.
+      expect((await login()).statusCode).toBe(200);
+    });
+  });
+
   describe('заход оператора в чужую семью', () => {
     /** Заход в готовую семью: наружу уходит открытый токен cookie захода. */
     function enter(childId: string, role: 'browser' | 'parent'): string {
@@ -450,6 +577,30 @@ describe('маршруты входа', () => {
       expect(body.kind).toBe('child');
       expect(body.childId).toBe(stranger.childId);
       expect(body.childId).not.toBe(ownDevice.childId);
+    });
+
+    it('не даёт оператору сменить пароль семьи, в которую он зашёл', async () => {
+      const parentId = await parentWithPassword();
+      const browser = deviceInvite(parentId, 'browser');
+      const token = enter(browser.childId, 'parent');
+
+      const refused = await app.inject({
+        method: 'POST',
+        url: '/api/auth/parent/password',
+        headers: { ...SAME_ORIGIN, cookie: `${IMPERSONATION_COOKIE}=${token}` },
+        payload: { current: PASSWORD, next: 'совсем-другой-пароль' },
+      });
+
+      // Первый замок выписан здесь руками: аренды у этого маршрута нет, и
+      // `PRAGMA query_only` его не прикрывает — пароль лежит в `control.db`.
+      // Без проверки заход на четверть часа превращался бы в захват семьи
+      // навсегда: сменивший пароль оператор входит уже своим паролем.
+      expect(refused.statusCode).toBe(403);
+      expect((refused.json() as { code: string }).code).toBe('read-only');
+      // Отказ посчитан: он и попадает в запись о конце захода.
+      expect(refusals).toHaveLength(1);
+      expect(refusals[0]).toMatch(/^[0-9a-f]{32}$/u);
+      expect((await login()).statusCode).toBe(200);
     });
 
     it('не называет захода, когда его cookie уже не действует', async () => {

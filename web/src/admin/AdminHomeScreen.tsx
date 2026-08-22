@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import {
   browserAdminApi,
   type AdminApi,
@@ -7,8 +7,11 @@ import {
   type AdminFamilyChild,
   type AdminImpersonationRole,
   type AdminOverview,
+  type AdminParentInvite,
 } from '../admin-api';
 import { HttpError } from '../http';
+import { inviteUrl } from '../invite-url';
+import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, isParentPassword } from '../password-format';
 
 const STATUS_NAMES: Record<AdminChildStatus, string> = {
   provisioning: 'База заводится',
@@ -94,12 +97,216 @@ function Numbers({ overview }: { overview: AdminOverview }) {
   );
 }
 
+/**
+ * Похоже ли на электронную почту — та же грубая проверка, что и в серверном
+ * `normalizeEmail`. Строгой её делать нечего: настоящую проверку адреса делает
+ * сервер, а этой хватает, чтобы не слать заведомый 400 и не заводить у
+ * оператора привычку читать отказы как поломку.
+ */
+export function looksLikeEmail(value: string): boolean {
+  const trimmed = value.trim();
+  const parts = trimmed.split('@');
+  return trimmed.length > 0
+    && trimmed.length <= 254
+    && parts.length === 2
+    && parts.every((part) => part.length > 0)
+    && !/\s/u.test(trimmed);
+}
+
+/**
+ * Показанная ссылка на установку пароля. Видна ровно один раз: в базе лежит
+ * отпечаток, и повторно показать её невозможно не по недосмотру, а по
+ * устройству хранения. Поэтому ссылки **копятся**, а не сменяют друг друга —
+ * вторая выпущенная убирала бы с экрана единственный экземпляр первой.
+ */
+function ParentInvite({ invite, email }: { invite: AdminParentInvite; email: string }) {
+  return (
+    <div className="admin-invite" role="status">
+      <p>Ссылка для «{email}»</p>
+      <code>{inviteUrl(invite.path)}</code>
+      <small>
+        Передайте её родителю: по ней он поставит пароль сам. Действует до{' '}
+        {when(invite.expiresAt)}. Второй раз не покажется.
+      </small>
+    </div>
+  );
+}
+
+/** Заведение семьи: адрес родителя и одноразовая ссылка ему на пароль. */
+function NewFamily({ api, onCreated }: { api: AdminApi; onCreated: () => void }) {
+  const [email, setEmail] = useState('');
+  const [pending, setPending] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [issued, setIssued] = useState<Array<{ email: string; invite: AdminParentInvite }>>([]);
+
+  async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (pending) return;
+    if (!looksLikeEmail(email)) {
+      setProblem('Адрес не похож на электронную почту');
+      return;
+    }
+    setPending(true);
+    setProblem(null);
+    try {
+      const created = await api.createFamily(email.trim());
+      setIssued((shown) => [...shown, { email: created.parent.email, invite: created.invite }]);
+      setEmail('');
+    } catch (error: unknown) {
+      // Набранное остаётся: «уже заведён» — повод посмотреть на адрес, а не
+      // набирать его заново.
+      setProblem(error instanceof Error ? error.message : 'Не получилось завести семью');
+      setPending(false);
+      return;
+    }
+    setPending(false);
+    // Список семей перечитывается отдельно от заведения и своим отказом: семья
+    // уже заведена, и неудача перечитывания не имеет права выглядеть неудачей
+    // заведения — иначе очевидное действие «нажать ещё раз» упрётся в 409.
+    onCreated();
+  }
+
+  return (
+    <div className="admin-new-family">
+      <form className="form-row" onSubmit={(event) => { void submit(event); }}>
+        <label>
+          <span>Адрес родителя</span>
+          {/* `type="text"`, а не `type="email"`: браузер проверяет `email`
+              ASCII-регуляркой из спеки и адрес с кириллицей до отправки не
+              допускает вовсе — молча, а сервер такие принимает. */}
+          <input
+            autoCapitalize="none"
+            autoComplete="off"
+            inputMode="email"
+            maxLength={254}
+            spellCheck={false}
+            type="text"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+          />
+        </label>
+        <button disabled={pending} type="submit">{pending ? 'Завожу…' : 'Завести семью'}</button>
+      </form>
+      {problem !== null && <p className="auth-message error" role="alert">{problem}</p>}
+      {issued.map((shown) => (
+        <ParentInvite email={shown.email} invite={shown.invite} key={shown.invite.path} />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Два способа вернуть семье вход, и они не равнозначны. Ссылку оператор только
+ * передаёт — пароля он не знает. Поставленный им пароль — это вход в семью,
+ * который потом ничем не отличить от родительского, и след от него остаётся
+ * только в журнале действий. Поэтому второй способ спрятан за отдельным
+ * нажатием и объяснён словами, а не стоит готовым полем рядом с первым.
+ */
+function ParentPassword({ family, api }: { family: AdminFamily; api: AdminApi }) {
+  const [issued, setIssued] = useState<AdminParentInvite[]>([]);
+  const [issuing, setIssuing] = useState(false);
+  const [setting, setSetting] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [password, setPassword] = useState('');
+  const [feedback, setFeedback] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+
+  async function issue(): Promise<void> {
+    if (issuing) return;
+    setIssuing(true);
+    setFeedback(null);
+    try {
+      const { invite } = await api.issueParentInvite(family.parentId);
+      setIssued((shown) => [...shown, invite]);
+    } catch (error: unknown) {
+      setFeedback({
+        kind: 'error',
+        text: error instanceof Error ? error.message : 'Не получилось выпустить ссылку',
+      });
+    }
+    setIssuing(false);
+  }
+
+  async function save(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (setting) return;
+    if (!isParentPassword(password)) {
+      setFeedback({
+        kind: 'error',
+        text: `Пароль должен быть от ${String(MIN_PASSWORD_LENGTH)} до ${String(MAX_PASSWORD_LENGTH)} знаков`,
+      });
+      return;
+    }
+    setSetting(true);
+    setFeedback(null);
+    try {
+      await api.setParentPassword(family.parentId, password);
+    } catch (error: unknown) {
+      setFeedback({
+        kind: 'error',
+        text: error instanceof Error ? error.message : 'Не получилось поставить пароль',
+      });
+      setSetting(false);
+      return;
+    }
+    setPassword('');
+    setOpen(false);
+    setFeedback({
+      kind: 'success',
+      text: 'Пароль поставлен. Сеансы родителя и устройства его детей отключены.',
+    });
+    setSetting(false);
+  }
+
+  return (
+    <div className="admin-family-password">
+      <div className="admin-family-actions">
+        <button disabled={issuing} type="button" onClick={() => { void issue(); }}>
+          {issuing ? 'Выпускаю…' : 'Ссылка на смену пароля'}
+        </button>
+        <button className="quiet" type="button" onClick={() => setOpen((shown) => !shown)}>
+          Задать пароль
+        </button>
+      </div>
+      {open && (
+        <form className="form-row admin-set-password" onSubmit={(event) => { void save(event); }}>
+          <p className="admin-note" role="note">
+            Пароль, поставленный отсюда, знаете и вы: войти этой семьёй можно будет без
+            записи о заходе. Ссылка такого не даёт — по ней пароль ставит сам родитель.
+          </p>
+          <label>
+            <span>Новый пароль семьи</span>
+            <input
+              autoComplete="off"
+              maxLength={MAX_PASSWORD_LENGTH}
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+            />
+          </label>
+          <button disabled={setting} type="submit">
+            {setting ? 'Сохраняю…' : 'Сохранить пароль семьи'}
+          </button>
+        </form>
+      )}
+      {feedback !== null && <p
+        className={`auth-message ${feedback.kind}`}
+        role={feedback.kind === 'error' ? 'alert' : 'status'}
+      >{feedback.text}</p>}
+      {issued.map((invite) => (
+        <ParentInvite email={family.email} invite={invite} key={invite.path} />
+      ))}
+    </div>
+  );
+}
+
 function Family({
+  api,
   family,
   onChild,
   onEnter,
   entering,
 }: {
+  api: AdminApi;
   family: AdminFamily;
   /** Открыть карточку ребёнка: слой 3 читает только его базу. */
   onChild?: (childId: string) => void;
@@ -113,46 +320,59 @@ function Family({
         <h3>{family.email}</h3>
         <span>{family.disabledAt === undefined ? `с ${when(family.createdAt)}` : `отключён ${when(family.disabledAt)}`}</span>
       </header>
+      {/* Соседом шапки, а не внутри неё: раскрытая форма пароля шире адреса, и
+          в одной с ним строке она сжимала бы его до нескольких букв в столбик.
+          Кнопки встают рядом с адресом сеткой самой карточки (`display:
+          contents`), а всё, что раскрывается, занимает свою строку целиком.
+
+          Отключённой семье сервер отказывает 409 на обоих маршрутах: кнопка,
+          гарантированно кончающаяся отказом, — не действие, а ловушка. */}
+      {family.disabledAt === undefined && <ParentPassword api={api} family={family} />}
       {family.children.length === 0
         ? <p className="admin-empty">Детей нет</p>
         : (
           <ul className="admin-children">
             {family.children.map((child) => (
               <li key={child.childId}>
-                <div>
+                {/* Имя, состояние и номер — одним блоком: номер стоял отдельной
+                    колонкой посреди строки и разрывал подпись ребёнка надвое,
+                    оставляя кнопки без общей оси. */}
+                <div className="admin-child-copy">
                   <strong>{child.name}</strong>
                   <small>{STATUS_NAMES[child.status]} · {childState(child)}</small>
+                  <code>{child.childId}</code>
                 </div>
-                <code>{child.childId}</code>
-                {/* Карточка предлагается любому: у застрявшего заведения она и
-                    нужнее всего — она называет причину, по которой базы нет. */}
-                {onChild !== undefined && (
-                  <button type="button" onClick={() => onChild(child.childId)}>
-                    Карточка
-                  </button>
-                )}
-                {/* Заход предлагается только готовому и не выведенному: у
-                    застрявшего заведения базы ещё нет вовсе, а выведенного
-                    `isChildServiceable` не отдаёт, — и обе кнопки кончились бы
-                    отказом «Ребёнок не найден» на первом же нажатии. */}
-                {child.status === 'ready' && child.retiredAt === undefined && (
-                  <div className="admin-enter">
-                    <button
-                      disabled={entering !== null}
-                      type="button"
-                      onClick={() => onEnter(child.childId, 'browser')}
-                    >
-                      Войти как ребёнок
+                <div className="admin-child-actions">
+                  {/* Карточка предлагается любому: у застрявшего заведения она и
+                      нужнее всего — она называет причину, по которой базы нет. */}
+                  {onChild !== undefined && (
+                    <button className="quiet" type="button" onClick={() => onChild(child.childId)}>
+                      Карточка
                     </button>
-                    <button
-                      disabled={entering !== null}
-                      type="button"
-                      onClick={() => onEnter(child.childId, 'parent')}
-                    >
-                      Войти как родитель
-                    </button>
-                  </div>
-                )}
+                  )}
+                  {/* Заход предлагается только готовому и не выведенному: у
+                      застрявшего заведения базы ещё нет вовсе, а выведенного
+                      `isChildServiceable` не отдаёт, — и обе кнопки кончились бы
+                      отказом «Ребёнок не найден» на первом же нажатии. */}
+                  {child.status === 'ready' && child.retiredAt === undefined && (
+                    <>
+                      <button
+                        disabled={entering !== null}
+                        type="button"
+                        onClick={() => onEnter(child.childId, 'browser')}
+                      >
+                        Войти как ребёнок
+                      </button>
+                      <button
+                        disabled={entering !== null}
+                        type="button"
+                        onClick={() => onEnter(child.childId, 'parent')}
+                      >
+                        Войти как родитель
+                      </button>
+                    </>
+                  )}
+                </div>
               </li>
             ))}
           </ul>
@@ -283,10 +503,10 @@ export function AdminHomeScreen({
           <strong>{email ?? 'Оператор'}</strong>
         </div>
         {onStats !== undefined && (
-          <button className="admin-header-link" type="button" onClick={onStats}>Статистика</button>
+          <button type="button" onClick={onStats}>Статистика</button>
         )}
         {onLogs !== undefined && (
-          <button className="admin-header-link" type="button" onClick={onLogs}>Аварии</button>
+          <button type="button" onClick={onLogs}>Аварии</button>
         )}
         <button disabled={leaving} type="button" onClick={logout}>
           {leaving ? 'Выхожу…' : 'Выйти'}
@@ -329,7 +549,10 @@ export function AdminHomeScreen({
       <Numbers overview={overview} />
       {overview.stuck.length > 0 && (
         <section className="admin-panel">
-          <h2>Заведение не доехало</h2>
+          <div className="section-heading">
+            <p>Дети без базы</p>
+            <h2>Заведение не доехало</h2>
+          </div>
           <ul className="admin-list">
             {overview.stuck.map((child) => (
               <li key={child.childId}>
@@ -342,7 +565,10 @@ export function AdminHomeScreen({
       )}
       {overview.lockouts.length > 0 && (
         <section className="admin-panel">
-          <h2>Вход заперт перебором</h2>
+          <div className="section-heading">
+            <p>Счётчик неудачных попыток</p>
+            <h2>Вход заперт перебором</h2>
+          </div>
           <ul className="admin-list">
             {overview.lockouts.map((lockout) => (
               <li key={`${lockout.scope}-${lockout.kind}-${lockout.key}`}>
@@ -354,7 +580,11 @@ export function AdminHomeScreen({
         </section>
       )}
       <section className="admin-panel">
-        <h2>Семьи</h2>
+        <div className="section-heading">
+          <p>Родители и их дети</p>
+          <h2>Семьи</h2>
+        </div>
+        <NewFamily api={api} onCreated={() => setAttempt((value) => value + 1)} />
         {enterProblem !== null && (
           <p className="auth-message error" role="alert">{enterProblem}</p>
         )}
@@ -362,6 +592,7 @@ export function AdminHomeScreen({
           ? <p className="admin-empty">Ни одной семьи не заведено</p>
           : overview.families.map((family) => (
             <Family
+              api={api}
               key={family.parentId}
               entering={entering}
               family={family}

@@ -3,24 +3,11 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { InviteScreen } from './InviteScreen';
-import type { AuthApi } from './auth-api';
 import { HttpError } from './http';
+import { testAuthApi } from './test-auth-api';
 import './test-setup';
 
 afterEach(cleanup);
-
-function authApi(overrides: Partial<AuthApi> = {}): AuthApi {
-  return {
-    me: vi.fn().mockResolvedValue({ kind: 'anonymous' }),
-    login: vi.fn().mockResolvedValue({ kind: 'anonymous' }),
-    logout: vi.fn().mockResolvedValue(undefined),
-    readInvite: vi.fn().mockResolvedValue({ email: 'parent@example.org' }),
-    redeemInvite: vi.fn().mockResolvedValue({ kind: 'parent', email: 'parent@example.org' }),
-    claimDevice: vi.fn().mockResolvedValue({ kind: 'child', childId: 'c-1' }),
-    switchPersona: vi.fn().mockResolvedValue({ kind: 'anonymous' }),
-    ...overrides,
-  };
-}
 
 function fill(password: string, repeat: string): void {
   fireEvent.change(screen.getByLabelText('Пароль'), { target: { value: password } });
@@ -29,7 +16,7 @@ function fill(password: string, repeat: string): void {
 
 describe('приглашение родителя', () => {
   it('показывает адрес из ссылки и входит после установки пароля', async () => {
-    const api = authApi();
+    const api = testAuthApi();
     const onSignedIn = vi.fn();
     render(<InviteScreen api={api} token="tok" onSignedIn={onSignedIn} />);
 
@@ -45,7 +32,7 @@ describe('приглашение родителя', () => {
   });
 
   it('не шлёт на сервер несовпавшие и короткие пароли', async () => {
-    const api = authApi();
+    const api = testAuthApi();
     render(<InviteScreen api={api} token="tok" onSignedIn={vi.fn()} />);
     await screen.findByText('Учётная запись: parent@example.org');
 
@@ -55,12 +42,18 @@ describe('приглашение родителя', () => {
 
     fill('коротко', 'коротко');
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить пароль и войти' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('Пароль короче 10 знаков');
+    expect(await screen.findByRole('alert')).toHaveTextContent('от 10 до 128 знаков');
+
+    // Верхняя граница тоже своя: сервер отвергает длинный пароль до KDF, и без
+    // проверки здесь форма получала бы 400 на пароль, который выглядит годным.
+    fill('к'.repeat(129), 'к'.repeat(129));
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить пароль и войти' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('от 10 до 128 знаков');
     expect(api.redeemInvite).not.toHaveBeenCalled();
   });
 
   it('честно говорит про протухшую ссылку и не предлагает пароль', async () => {
-    const api = authApi({
+    const api = testAuthApi({
       readInvite: vi.fn().mockRejectedValue(new HttpError({
         status: 404,
         message: 'Ссылка недействительна или уже использована',
@@ -79,7 +72,7 @@ describe('приглашение родителя', () => {
     const readInvite = vi.fn()
       .mockRejectedValueOnce(new Error('Не получилось проверить ссылку'))
       .mockResolvedValueOnce({ email: 'parent@example.org' });
-    const api = authApi({ readInvite });
+    const api = testAuthApi({ readInvite });
     render(<InviteScreen api={api} token="tok" onSignedIn={vi.fn()} />);
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Не получилось проверить ссылку');
@@ -92,7 +85,7 @@ describe('приглашение родителя', () => {
   });
 
   it('оставляет форму, когда пароль до сервера просто не доехал', async () => {
-    const api = authApi({
+    const api = testAuthApi({
       redeemInvite: vi.fn().mockRejectedValue(new Error('Failed to fetch')),
     });
     const onSignedIn = vi.fn();
@@ -109,7 +102,7 @@ describe('приглашение родителя', () => {
   });
 
   it('зовёт за новой ссылкой, когда погашение ответило 404', async () => {
-    const api = authApi({
+    const api = testAuthApi({
       redeemInvite: vi.fn().mockRejectedValue(new HttpError({
         status: 404,
         message: 'Ссылка недействительна или уже использована',
@@ -130,7 +123,7 @@ describe('приглашение родителя', () => {
   });
 
   it('оставляет короткий пароль на форме: 400 про ссылку ничего не значит', async () => {
-    const api = authApi({
+    const api = testAuthApi({
       redeemInvite: vi.fn().mockRejectedValue(new HttpError({
         status: 400,
         message: 'Пароль должен быть от 10 до 256 знаков',

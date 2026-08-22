@@ -6,6 +6,7 @@ import { AdminHomeScreen, childState, megabytes } from './AdminHomeScreen';
 import { AdminApp } from './AdminApp';
 import type { AdminApi, AdminOverview } from '../admin-api';
 import { HttpError } from '../http';
+import { testAdminApi } from './test-admin-api';
 import '../test-setup';
 
 afterEach(cleanup);
@@ -63,7 +64,9 @@ function overview(patch: Partial<AdminOverview> = {}): AdminOverview {
 }
 
 function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
-  return {
+  // Состав методов держит общий помощник: всё, что этому файлу нужно,
+  // названо здесь, остальное отказывает.
+  return testAdminApi({
     login: vi.fn().mockResolvedValue({ kind: 'admin', email: 'operator@example.com' }),
     logout: vi.fn().mockResolvedValue(undefined),
     overview: vi.fn().mockResolvedValue(overview()),
@@ -74,9 +77,137 @@ function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
     stopImpersonation: vi.fn().mockResolvedValue(undefined),
     stats: vi.fn().mockRejectedValue(new Error('статистика в этом тесте не спрашивается')),
     child: vi.fn().mockRejectedValue(new Error('карточка в этом тесте не спрашивается')),
+    createFamily: vi.fn().mockResolvedValue({
+      parent: {
+        parentId: 'p-3',
+        email: 'новый@example.com',
+        hasPassword: false,
+        hasPin: false,
+        createdAt: '2026-08-21T09:00:00.000Z',
+      },
+      invite: { path: '/invite/new-link', expiresAt: '2026-08-28T09:00:00.000Z' },
+    }),
+    issueParentInvite: vi.fn().mockResolvedValue({
+      invite: { path: '/invite/reset', expiresAt: '2026-08-28T09:00:00.000Z' },
+    }),
+    setParentPassword: vi.fn().mockResolvedValue({
+      parent: {
+        parentId: 'p-1',
+        email: 'первый@example.com',
+        hasPassword: true,
+        hasPin: false,
+        createdAt: '2026-08-01T09:00:00.000Z',
+      },
+    }),
     ...overrides,
-  };
+  });
 }
+
+describe('заведение семьи оператором', () => {
+  function fillEmail(value: string): void {
+    fireEvent.change(screen.getByLabelText('Адрес родителя'), { target: { value } });
+  }
+
+  it('заводит семью, показывает целый адрес ссылки и перечитывает сводку', async () => {
+    const api = adminApi();
+    render(<AdminHomeScreen api={api} email="operator@example.com" onSignedOut={vi.fn()} />);
+    await screen.findByText('Семьи');
+
+    fillEmail('новый@example.com');
+    fireEvent.click(screen.getByRole('button', { name: 'Завести семью' }));
+
+    await waitFor(() => expect(api.createFamily).toHaveBeenCalledWith('новый@example.com'));
+    // Ссылка показывается целым адресом: сервер отдаёт путь, а родителю нужен
+    // адрес, по которому он откроет её у себя.
+    expect(await screen.findByText(/\/invite\/new-link/u)).toBeInTheDocument();
+    // Сводка перечитывается: заведённая семья обязана появиться в списке.
+    await waitFor(() => expect(api.overview).toHaveBeenCalledTimes(2));
+  });
+
+  it('не шлёт на сервер адрес, не похожий на адрес', async () => {
+    const api = adminApi();
+    render(<AdminHomeScreen api={api} email="operator@example.com" onSignedOut={vi.fn()} />);
+    await screen.findByText('Семьи');
+
+    fillEmail('не адрес');
+    fireEvent.click(screen.getByRole('button', { name: 'Завести семью' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('электронную почту');
+    expect(api.createFamily).not.toHaveBeenCalled();
+  });
+
+  it('показывает отказ по уже заведённому адресу и оставляет набранное', async () => {
+    const api = adminApi({
+      createFamily: vi.fn().mockRejectedValue(new HttpError({
+        status: 409,
+        message: 'Родитель с адресом новый@example.com уже заведён',
+      })),
+    });
+    render(<AdminHomeScreen api={api} email="operator@example.com" onSignedOut={vi.fn()} />);
+    await screen.findByText('Семьи');
+
+    fillEmail('новый@example.com');
+    fireEvent.click(screen.getByRole('button', { name: 'Завести семью' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('уже заведён');
+    expect(screen.getByLabelText('Адрес родителя')).toHaveValue('новый@example.com');
+  });
+});
+
+describe('сброс пароля семьи оператором', () => {
+  it('выпускает ссылку на смену пароля и показывает её один раз', async () => {
+    const api = adminApi();
+    render(<AdminHomeScreen api={api} email="operator@example.com" onSignedOut={vi.fn()} />);
+    await screen.findByText('Семьи');
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Ссылка на смену пароля' })[0] as HTMLElement);
+
+    await waitFor(() => expect(api.issueParentInvite).toHaveBeenCalledWith('p-1'));
+    expect(await screen.findByText(/\/invite\/reset/u)).toBeInTheDocument();
+  });
+
+  it('ставит пароль сам и предупреждает, чем это отличается от ссылки', async () => {
+    const api = adminApi();
+    render(<AdminHomeScreen api={api} email="operator@example.com" onSignedOut={vi.fn()} />);
+    await screen.findByText('Семьи');
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Задать пароль' })[0] as HTMLElement);
+    // Оператор, поставивший пароль, знает его: войти этой семьёй он сможет уже
+    // без записи о заходе. Форма обязана сказать это до нажатия, а не после.
+    expect(screen.getByRole('note')).toHaveTextContent(/зна/u);
+    fireEvent.change(screen.getByLabelText('Новый пароль семьи'), {
+      target: { value: 'совсем-другой-пароль' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить пароль семьи' }));
+
+    await waitFor(() => expect(api.setParentPassword)
+      .toHaveBeenCalledWith('p-1', 'совсем-другой-пароль'));
+    expect(await screen.findByText(/Пароль поставлен/u)).toBeInTheDocument();
+  });
+
+  it('не шлёт короткий пароль семьи', async () => {
+    const api = adminApi();
+    render(<AdminHomeScreen api={api} email="operator@example.com" onSignedOut={vi.fn()} />);
+    await screen.findByText('Семьи');
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Задать пароль' })[0] as HTMLElement);
+    fireEvent.change(screen.getByLabelText('Новый пароль семьи'), { target: { value: 'коротко' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить пароль семьи' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('от 10 до 128 знаков');
+    expect(api.setParentPassword).not.toHaveBeenCalled();
+  });
+
+  it('не предлагает ни ссылки, ни пароля отключённой семье', async () => {
+    render(<AdminHomeScreen api={adminApi()} email="operator@example.com" onSignedOut={vi.fn()} />);
+    await screen.findByText('Семьи');
+
+    // Отключённому родителю сервер отказывает 409 на обоих маршрутах: кнопка,
+    // которая гарантированно кончается отказом, — это не действие, а ловушка.
+    expect(screen.getAllByRole('button', { name: 'Ссылка на смену пароля' })).toHaveLength(1);
+    expect(screen.getAllByRole('button', { name: 'Задать пароль' })).toHaveLength(1);
+  });
+});
 
 describe('главный экран админки', () => {
   it('показывает цифры слоя 1 и список семей с детьми', async () => {

@@ -49,6 +49,12 @@ export interface AuthApi {
   claimDevice(token: string): Promise<DeviceClaim>;
   switchPersona(kind: 'child'): Promise<AuthState>;
   switchPersona(kind: 'parent', password: string): Promise<AuthState>;
+  /**
+   * Смена собственного пароля вошедшим родителем. Сервер отдаёт cookie взамен
+   * погашенной, поэтому отдельного повторного входа за этим вызовом не нужно —
+   * и не должно быть: пароль у клиента после этого не остаётся.
+   */
+  changePassword(current: string, next: string): Promise<Principal>;
 }
 
 /**
@@ -99,6 +105,15 @@ export const browserAuthApi: AuthApi = {
     jsonRequest('POST'),
     'Ссылка недействительна или уже использована',
     linkError,
+    KEEP_SCREEN,
+  ),
+  changePassword: (current, next) => requestJson<Principal>(
+    '/api/auth/parent/password',
+    jsonRequest('POST', { current, next }),
+    'Не получилось сменить пароль',
+    undefined,
+    // 401 здесь — «текущий пароль не подошёл», а не «сессия кончилась»: общий
+    // переход ко входу стёр бы форму вместе с объяснением отказа.
     KEEP_SCREEN,
   ),
   switchPersona: (kind, password?: string) => requestJson<AuthState>(

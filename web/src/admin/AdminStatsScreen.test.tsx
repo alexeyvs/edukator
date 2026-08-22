@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AdminStatsScreen, hours, share, statsTime } from './AdminStatsScreen';
 import type { AdminApi, AdminStats } from '../admin-api';
 import { HttpError } from '../http';
+import { testAdminApi } from './test-admin-api';
 import '../test-setup';
 
 afterEach(cleanup);
@@ -67,7 +68,9 @@ function stats(patch: Partial<AdminStats> = {}): AdminStats {
 }
 
 function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
-  return {
+  // Состав методов держит общий помощник: всё, что этому файлу нужно,
+  // названо здесь, остальное отказывает.
+  return testAdminApi({
     login: vi.fn().mockResolvedValue({ kind: 'admin', email: 'operator@example.com' }),
     logout: vi.fn().mockResolvedValue(undefined),
     overview: vi.fn().mockRejectedValue(new Error('сводка в этом тесте не спрашивается')),
@@ -77,7 +80,7 @@ function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
     stats: vi.fn().mockResolvedValue(stats()),
     child: vi.fn().mockRejectedValue(new Error('карточка в этом тесте не спрашивается')),
     ...overrides,
-  };
+  });
 }
 
 describe('экран статистики оператора', () => {

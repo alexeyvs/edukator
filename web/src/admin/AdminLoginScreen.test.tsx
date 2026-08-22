@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AdminLoginScreen, MIN_ADMIN_PASSWORD_LENGTH } from './AdminLoginScreen';
 import type { AdminApi } from '../admin-api';
+import { testAdminApi } from './test-admin-api';
 import '../test-setup';
 
 afterEach(cleanup);
@@ -11,7 +12,9 @@ afterEach(cleanup);
 const PASSWORD = 'пароль-оператора-подлиннее';
 
 function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
-  return {
+  // Состав методов держит общий помощник: всё, что этому файлу нужно,
+  // названо здесь, остальное отказывает.
+  return testAdminApi({
     login: vi.fn().mockResolvedValue({ kind: 'admin', email: 'operator@example.com' }),
     logout: vi.fn().mockResolvedValue(undefined),
     overview: vi.fn().mockRejectedValue(new Error('сводка в этом тесте не нужна')),
@@ -23,7 +26,7 @@ function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
     stats: vi.fn().mockRejectedValue(new Error('статистика в этом тесте не нужна')),
     child: vi.fn().mockRejectedValue(new Error('карточка в этом тесте не нужна')),
     ...overrides,
-  };
+  });
 }
 
 function fill(email: string, password: string): void {

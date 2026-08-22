@@ -71,6 +71,40 @@ describe('адаптер админского API', () => {
     ]);
   });
 
+  it('собирает адреса заведения семьи, ссылки на смену пароля и самого пароля', async () => {
+    const fetch = vi.fn().mockResolvedValue(response({
+      parent: {
+        parentId: 'родитель-1',
+        email: 'родитель@example.com',
+        hasPassword: false,
+        hasPin: false,
+        createdAt: '2026-08-21T09:00:00.000Z',
+      },
+      invite: { path: '/invite/ссылка', expiresAt: '2026-08-28T09:00:00.000Z' },
+    }));
+    vi.stubGlobal('fetch', fetch);
+
+    await browserAdminApi.createFamily('родитель@example.com');
+    await browserAdminApi.issueParentInvite('родитель-1');
+    await browserAdminApi.setParentPassword('родитель-1', 'совсем-другой-пароль');
+
+    expect(fetch.mock.calls).toEqual([
+      ['/api/admin/parents', expect.objectContaining({
+        method: 'POST',
+        body: '{"email":"родитель@example.com"}',
+      })],
+      // Номер родителя уезжает сегментом адреса и обязан быть закодирован: он
+      // непрозрачный, и своей кодировки у него нет.
+      ['/api/admin/parents/%D1%80%D0%BE%D0%B4%D0%B8%D1%82%D0%B5%D0%BB%D1%8C-1/invite', expect.objectContaining({
+        method: 'POST',
+      })],
+      ['/api/admin/parents/%D1%80%D0%BE%D0%B4%D0%B8%D1%82%D0%B5%D0%BB%D1%8C-1/password', expect.objectContaining({
+        method: 'POST',
+        body: '{"password":"совсем-другой-пароль"}',
+      })],
+    ]);
+  });
+
   it('отдаёт 401 своим кодом и не трогает общий переход ко входу семьи', async () => {
     const listener = vi.fn();
     const unsubscribe = onSignedOut(listener);

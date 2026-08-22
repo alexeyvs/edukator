@@ -16,6 +16,7 @@ import {
   ADMIN_SESSION_MAX_MS,
   IMPERSONATION_TTL_MS,
   MIN_PASSWORD_LENGTH,
+  changeParentPassword,
   checkLoginGate,
   clearLoginFailures,
   PARENT_SESSION_MAX_MS,
@@ -44,6 +45,7 @@ import {
   parseCookies,
   resolveBearer,
   resolveBrowserPrincipals,
+  type ImpersonationMark,
 } from '../auth.js';
 import { clientAddress, readTrustedProxies } from '../client-address.js';
 import { MAX_SECRET_LENGTH } from '../secrets.js';
@@ -73,6 +75,11 @@ export interface AuthRoutesOptions {
    * передача обязана падать на сборке, а не молча оставлять перебор без следа.
    */
   failures: FailureLog;
+  /**
+   * Отказ первого замка имперсонации. Проброшен насквозь по той же причине, что
+   * и в маршрутах семьи: считает отказы тот, кто пишет запись о конце захода.
+   */
+  onReadOnly?: (impersonation: ImpersonationMark) => void;
   now?: () => Date;
   /**
    * Кому верить в `X-Forwarded-For`. По умолчанию — список из окружения: без
@@ -181,6 +188,20 @@ function readPasswordBody(body: unknown): string | undefined {
   return typeof password === 'string' ? password : undefined;
 }
 
+/**
+ * Что читает смена пароля. Оба поля обязательны и лишних быть не должно — по
+ * той же причине, что и у входа: это тело собирает наш же клиент.
+ */
+function readChangeBody(body: unknown): { current: string; next: string } | undefined {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined;
+  const fields = body as Record<string, unknown>;
+  if (Object.keys(fields).length !== 2) return undefined;
+  const current = fields['current'];
+  const next = fields['next'];
+  if (typeof current !== 'string' || typeof next !== 'string') return undefined;
+  return { current, next };
+}
+
 type PersonaRequest = { kind: 'child' } | { kind: 'parent'; password: string };
 
 function readPersonaBody(body: unknown): PersonaRequest | undefined {
@@ -234,6 +255,48 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
       .send({ error: AUTH_MESSAGE['cross-origin'] });
   }
 
+  /**
+   * Заперта ли дверь прямо сейчас. Общая у всех трёх мест, где сверяется пароль
+   * родителя, — вход, повышение роли и смена пароля: своя копия этого
+   * рассуждения у каждого разъехалась бы молча, а цена расхождения — дверь,
+   * попытки в которую никто не считает.
+   */
+  function lockedOut(target: LoginTarget, reply: FastifyReply): FastifyReply | undefined {
+    const gate = checkLoginGate(control, target, now());
+    if (gate.allowed) return undefined;
+    noteLoginCounter(options.failures, target, gate);
+    const retryAfter = Math.max(1, Math.ceil(gate.retryAfterMs / 1000));
+    // Сломанный счётчик — это 503: снаружи вход закрыт одинаково, но по коду
+    // видно, что сервер неисправен, а не что кто-то перебирает пароли.
+    return reply
+      .header('retry-after', retryAfter)
+      .code(gate.reason === 'unavailable' ? 503 : 429)
+      .send({
+        error: gate.reason === 'unavailable'
+          ? 'Вход временно недоступен'
+          : 'Слишком много неудачных попыток входа, повторите позже',
+      });
+  }
+
+  /**
+   * Записывает неудачную сверку пароля и отказывает.
+   *
+   * Незаписанная неудача — та же недоступность счётчика, что и на входе в
+   * маршрут: молча отдать на неё обычный 401 значило бы не считать попытки
+   * ровно тогда, когда их считать и нужно.
+   */
+  function refuseAttempt(target: LoginTarget, reply: FastifyReply): FastifyReply {
+    const counted = recordLoginFailure(control, target, now());
+    noteLoginGate(options.failures, target, counted);
+    if (counted.reason === 'unavailable') {
+      const retryAfter = Math.max(1, Math.ceil(counted.retryAfterMs / 1000));
+      return reply.header('retry-after', retryAfter).code(503).send({
+        error: 'Вход временно недоступен',
+      });
+    }
+    return reply.code(401).send({ error: LOGIN_REJECTED });
+  }
+
   app.post('/api/auth/parent/login', (request, reply) => {
     const blocked = crossOrigin(request, reply);
     if (blocked !== undefined) return blocked;
@@ -251,43 +314,83 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
     // Адрес, не похожий на адрес, отвергается до `scrypt`: учётной записи с
     // таким ключом быть не может, а его вид виден и так, из любого ответа.
     const email = normalizeEmail(body.email);
-    const gate = checkLoginGate(control, target, now());
-    if (!gate.allowed) {
-      noteLoginCounter(options.failures, target, gate);
-      const retryAfter = Math.max(1, Math.ceil(gate.retryAfterMs / 1000));
-      // Сломанный счётчик — это 503: снаружи вход закрыт одинаково, но по коду
-      // видно, что сервер неисправен, а не что кто-то перебирает пароли.
-      const status = gate.reason === 'unavailable' ? 503 : 429;
-      return reply.header('retry-after', retryAfter).code(status).send({
-        error:
-          gate.reason === 'unavailable'
-            ? 'Вход временно недоступен'
-            : 'Слишком много неудачных попыток входа, повторите позже',
-      });
-    }
+    const locked = lockedOut(target, reply);
+    if (locked !== undefined) return locked;
 
     const result = email === undefined ? undefined : loginParent(control, email, body.password, now());
-    if (result === undefined || !result.ok) {
-      // Незаписанная неудача — та же недоступность счётчика, что и на входе в
-      // маршрут: `recordLoginFailure` возвращает её `reason === 'unavailable'`,
-      // и молча отдать на неё обычный 401 значило бы не считать попытки ровно
-      // тогда, когда их считать и нужно, — счётчик обязан быть fail-closed на
-      // обоих концах.
-      const counted = recordLoginFailure(control, target, now());
-      noteLoginGate(options.failures, target, counted);
-      if (counted.reason === 'unavailable') {
-        const retryAfter = Math.max(1, Math.ceil(counted.retryAfterMs / 1000));
-        return reply.header('retry-after', retryAfter).code(503).send({
-          error: 'Вход временно недоступен',
-        });
-      }
-      return reply.code(401).send({ error: LOGIN_REJECTED });
-    }
+    if (result === undefined || !result.ok) return refuseAttempt(target, reply);
     clearLoginFailures(control, target);
 
     return reply
       .header('set-cookie', serializeCookie('parent', result.session.token, { secure }))
       .send({ kind: 'parent', email });
+  });
+
+  /**
+   * Смена пароля вошедшим родителем. Живёт рядом со входом, а не в маршрутах
+   * семьи: она сверяет пароль и выдаёт cookie — то есть делает ровно то, ради
+   * чего этот модуль и заведён, — и обязана считаться тем же счётчиком
+   * перебора. Отдельная дверь со своим счётчиком была бы способом подбирать
+   * пароль мимо запрета, наложенного на вход.
+   */
+  app.post('/api/auth/parent/password', (request, reply) => {
+    const blocked = crossOrigin(request, reply);
+    if (blocked !== undefined) return blocked;
+
+    const body = readChangeBody(request.body);
+    if (body === undefined) return reply.code(400).send({ error: 'Нужны поля current и next' });
+
+    const at = now();
+    const bearer = resolveBearer(control, request.headers, at);
+    if (bearer === undefined) {
+      return reply
+        .code(AUTH_STATUS.unauthenticated)
+        .send({ error: AUTH_MESSAGE.unauthenticated, code: 'unauthenticated' });
+    }
+    if (bearer.kind !== 'parent') {
+      return reply
+        .code(AUTH_STATUS.forbidden)
+        .send({ error: AUTH_MESSAGE.forbidden, code: 'forbidden' });
+    }
+    // Первый замок имперсонации выписан здесь руками: аренды у этого маршрута
+    // нет, и `PRAGMA query_only` его не прикрывает — пароль лежит в
+    // `control.db`. Без проверки заход на четверть часа превращался бы в
+    // захват семьи навсегда: сменивший пароль оператор входит уже своим.
+    if (bearer.impersonation !== undefined) {
+      options.onReadOnly?.(bearer.impersonation);
+      return reply
+        .code(AUTH_STATUS['read-only'])
+        .send({ error: AUTH_MESSAGE['read-only'], code: 'read-only' });
+    }
+
+    // Негодный новый пароль — свойство присланного, а не неудачная попытка
+    // входа: считай его счётчик, опечатка в новом пароле запирала бы родителю
+    // дверь на четверть часа. Названы обе границы: слишком длинный пароль от
+    // совета «сделайте длиннее» годным не станет.
+    if (body.next.length < MIN_PASSWORD_LENGTH || body.next.length > MAX_SECRET_LENGTH) {
+      return reply.code(400).send({
+        error: `Пароль должен быть от ${MIN_PASSWORD_LENGTH} до ${MAX_SECRET_LENGTH} знаков`,
+      });
+    }
+
+    const target: LoginTarget = {
+      kind: 'password',
+      email: bearer.parent.email,
+      address: address(request),
+    };
+    const locked = lockedOut(target, reply);
+    if (locked !== undefined) return locked;
+
+    const changed = changeParentPassword(control, bearer.parent.parentId, body.current, body.next, at);
+    if (!changed.ok) return refuseAttempt(target, reply);
+    clearLoginFailures(control, target);
+
+    // Cookie выдаётся взамен погашенной: `credentials_changed_at` гасит и ту,
+    // которой пришёл этот запрос, и без замены родитель платил бы за смену
+    // пароля собственным выходом на том же ответе.
+    return reply
+      .header('set-cookie', serializeCookie('parent', changed.session.token, { secure }))
+      .send({ kind: 'parent', email: bearer.parent.email });
   });
 
   app.post('/api/auth/parent/logout', (request, reply) => {
@@ -391,24 +494,10 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
         email: browser.parent.email,
         address: address(request),
       };
-      const gate = checkLoginGate(control, target, now());
-      if (!gate.allowed) {
-        noteLoginCounter(options.failures, target, gate);
-        const retryAfter = Math.max(1, Math.ceil(gate.retryAfterMs / 1000));
-        return reply.header('retry-after', retryAfter).code(gate.reason === 'unavailable' ? 503 : 429).send({
-          error: gate.reason === 'unavailable'
-            ? 'Вход временно недоступен'
-            : 'Слишком много неудачных попыток входа, повторите позже',
-        });
-      }
+      const locked = lockedOut(target, reply);
+      if (locked !== undefined) return locked;
       if (!verifyParentPassword(control, browser.parent.parentId, persona.password)) {
-        const counted = recordLoginFailure(control, target, now());
-        noteLoginGate(options.failures, target, counted);
-        if (counted.reason === 'unavailable') {
-          const retryAfter = Math.max(1, Math.ceil(counted.retryAfterMs / 1000));
-          return reply.header('retry-after', retryAfter).code(503).send({ error: 'Вход временно недоступен' });
-        }
-        return reply.code(401).send({ error: LOGIN_REJECTED });
+        return refuseAttempt(target, reply);
       }
       clearLoginFailures(control, target);
     }
@@ -476,6 +565,7 @@ export function registerUnavailableAuth(app: FastifyInstance, reason: string): v
   const send = (_request: unknown, reply: FastifyReply): FastifyReply =>
     reply.code(503).send({ error: `Вход недоступен: ${reason}` });
   app.post('/api/auth/parent/login', send);
+  app.post('/api/auth/parent/password', send);
   app.post('/api/auth/parent/logout', send);
   app.get('/api/auth/parent/invite/:token', send);
   app.post('/api/auth/parent/invite/:token', send);

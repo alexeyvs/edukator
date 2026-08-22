@@ -1066,23 +1066,19 @@ export interface ParentRecord {
  * Неразобранный адрес — это `undefined`, а не исключение: для поиска «не адрес»
  * и «нет такого» — один и тот же ответ.
  */
-export function findParentByEmail(db: Database.Database, email: string): ParentRecord | undefined {
-  const normalized = normalizeEmail(email);
-  if (normalized === undefined) return undefined;
-  const row = db
-    .prepare<[string], {
-      id: string;
-      email: string;
-      password_hash: string | null;
-      pin_hash: string | null;
-      disabled_at: string | null;
-      created_at: string;
-    }>(
-      `SELECT id, email, password_hash, pin_hash, disabled_at, created_at
-         FROM parents WHERE email = ?`,
-    )
-    .get(normalized);
-  if (row === undefined) return undefined;
+interface ParentRow {
+  id: string;
+  email: string;
+  password_hash: string | null;
+  pin_hash: string | null;
+  disabled_at: string | null;
+  created_at: string;
+}
+
+const SELECT_PARENT = `SELECT id, email, password_hash, pin_hash, disabled_at, created_at FROM parents`;
+
+/** Строка родителя наружу. Хеша ни пароля, ни PIN здесь нет — только их наличие. */
+function parentRecord(row: ParentRow): ParentRecord {
   return {
     id: row.id,
     email: row.email,
@@ -1091,6 +1087,25 @@ export function findParentByEmail(db: Database.Database, email: string): ParentR
     ...(row.disabled_at === null ? {} : { disabledAt: row.disabled_at }),
     createdAt: row.created_at,
   };
+}
+
+export function findParentByEmail(db: Database.Database, email: string): ParentRecord | undefined {
+  const normalized = normalizeEmail(email);
+  if (normalized === undefined) return undefined;
+  const row = db.prepare<[string], ParentRow>(`${SELECT_PARENT} WHERE email = ?`).get(normalized);
+  return row === undefined ? undefined : parentRecord(row);
+}
+
+/**
+ * Родитель по непрозрачному `id`. Отключённого он читает и называет
+ * отключённым — в отличие от `readParentEmail`, который на нём молчит: тому
+ * ответ нужен для допуска («пускать ли»), а этому — для отказа оператору, и
+ * «нет такого родителя» вместо «родитель отключён» отправляло бы искать
+ * опечатку в адресе там, где её нет.
+ */
+export function readParent(db: Database.Database, parentId: string): ParentRecord | undefined {
+  const row = db.prepare<[string], ParentRow>(`${SELECT_PARENT} WHERE id = ?`).get(parentId);
+  return row === undefined ? undefined : parentRecord(row);
 }
 
 /**
@@ -1126,6 +1141,85 @@ export function setParentPassword(
       throw new Error(`Родителя ${parentId} нет в управляющей базе или он отключён`);
     }
     invalidateParentArtifacts(db, parentId, stamp);
+  }).immediate();
+}
+
+/**
+ * Смена пароля самим родителем: текущий пароль в обмен на новый и новую сессию.
+ *
+ * Сессия выдаётся тем же вызовом не для удобства: `credentials_changed_at`
+ * гасит **все** родительские сессии, включая ту, которой пришёл этот запрос, и
+ * без замены родитель платил бы за смену пароля собственным выходом на том же
+ * ответе. Выдаётся она внутри той же транзакции и **после** погашения — иначе
+ * её погасило бы то же самое изменение.
+ *
+ * Записывающий `UPDATE` сверяет прежний хеш, а не только `id`: между сверкой
+ * пароля и записью лежит `scrypt`, то есть десятки миллисекунд, и за них
+ * пароль могла сменить соседняя вкладка или оператор. Без сверки вторая смена
+ * молча затирала бы первую, а её сессия оставалась бы жить — то есть смена
+ * пароля переставала бы означать «прежние двери закрыты».
+ */
+export function changeParentPassword(
+  db: Database.Database,
+  parentId: string,
+  current: string,
+  next: string,
+  now: Date = new Date(),
+): ParentAuthResult {
+  // Негодный новый пароль отвергается до KDF: он не станет годным ни от какого
+  // текущего, а `scrypt` на него — способ занять процессор чужими руками.
+  if (next.length < MIN_PASSWORD_LENGTH || next.length > MAX_SECRET_LENGTH) {
+    return { ok: false, reason: 'weak-password' };
+  }
+
+  const row = db
+    .prepare<[string], ParentCredentialsRow>(
+      'SELECT id, password_hash, disabled_at FROM parents WHERE id = ?',
+    )
+    .get(parentId);
+  if (row === undefined) {
+    spendVerificationTime();
+    return { ok: false, reason: 'unknown-email' };
+  }
+  if (row.disabled_at !== null) {
+    spendVerificationTime();
+    return { ok: false, reason: 'disabled' };
+  }
+  if (row.password_hash === null) {
+    spendVerificationTime();
+    return { ok: false, reason: 'no-password' };
+  }
+  if (current.length === 0 || current.length > MAX_SECRET_LENGTH) {
+    spendVerificationTime();
+    return { ok: false, reason: 'bad-password' };
+  }
+  if (!verifySecret(row.password_hash, current)) return { ok: false, reason: 'bad-password' };
+
+  const previousHash = row.password_hash;
+  const passwordHash = hashSecret(next);
+  const stamp = now.toISOString();
+
+  return db.transaction((): ParentAuthResult => {
+    const updated = db
+      .prepare(
+        `UPDATE parents SET password_hash = ?, credentials_changed_at = ?
+          WHERE id = ? AND disabled_at IS NULL AND password_hash = ?`,
+      )
+      .run(passwordHash, stamp, parentId, previousHash);
+    if (updated.changes === 0) {
+      // Причину называет перечитанная строка, а не снимок до `scrypt`:
+      // отключение и чужая смена пароля дают один и тот же ноль изменений.
+      const fresh = db
+        .prepare<[string], ParentCredentialsRow>(
+          'SELECT id, password_hash, disabled_at FROM parents WHERE id = ?',
+        )
+        .get(parentId);
+      if (fresh === undefined) return { ok: false, reason: 'unknown-email' };
+      if (fresh.disabled_at !== null) return { ok: false, reason: 'disabled' };
+      return { ok: false, reason: 'bad-password' };
+    }
+    invalidateParentArtifacts(db, parentId, stamp);
+    return { ok: true, parentId, session: insertParentSession(db, parentId, now) };
   }).immediate();
 }
 
@@ -2703,6 +2797,13 @@ export const ADMIN_AUDIT_ACTIONS = [
   'logout',
   'impersonation-start',
   'impersonation-end',
+  // Заведение семьи, ссылка на смену пароля и пароль, поставленный самим
+  // оператором. Три имени, а не одно: по ленте обязано быть видно, знает ли
+  // оператор пароль семьи. Ссылку он только передаёт, а поставленный им пароль
+  // — это вход в семью, не отличимый потом от родительского.
+  'parent-create',
+  'parent-invite',
+  'parent-password',
 ] as const;
 
 export type AdminAuditAction = (typeof ADMIN_AUDIT_ACTIONS)[number];

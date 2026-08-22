@@ -6,6 +6,7 @@ import { ImpersonationBanner, minutesLeft } from './ImpersonationBanner';
 import type { AdminApi } from '../admin-api';
 import type { Impersonation } from '../auth-api';
 import { requestJson } from '../http';
+import { testAdminApi } from './test-admin-api';
 import '../test-setup';
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); });
@@ -23,7 +24,9 @@ function impersonation(patch: Partial<Impersonation> = {}): Impersonation {
 }
 
 function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
-  return {
+  // Состав методов держит общий помощник: всё, что этому файлу нужно,
+  // названо здесь, остальное отказывает.
+  return testAdminApi({
     login: vi.fn().mockRejectedValue(new Error('вход в этом тесте не нужен')),
     logout: vi.fn().mockRejectedValue(new Error('выход оператора в этом тесте не нужен')),
     overview: vi.fn().mockRejectedValue(new Error('сводка в этом тесте не нужна')),
@@ -33,7 +36,7 @@ function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
     stats: vi.fn().mockRejectedValue(new Error('статистика в этом тесте не нужна')),
     child: vi.fn().mockRejectedValue(new Error('карточка в этом тесте не нужна')),
     ...overrides,
-  };
+  });
 }
 
 describe('полоса захода оператора', () => {

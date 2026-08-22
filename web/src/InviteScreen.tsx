@@ -2,9 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { browserAuthApi, type AuthApi } from './auth-api';
 import { HttpError } from './http';
 import { BrandLink } from './BrandMark';
-
-/** Тот же предел, что и на сервере: короткий пароль отвергнет и он. */
-export const MIN_PASSWORD_LENGTH = 10;
+import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, isParentPassword } from './password-format';
 
 export interface InviteScreenProps {
   token: string;
@@ -58,8 +56,8 @@ export function InviteScreen({ token, api = browserAuthApi, onSignedIn }: Invite
       setProblem('Пароли не совпадают');
       return;
     }
-    if (password.length < MIN_PASSWORD_LENGTH) {
-      setProblem(`Пароль короче ${String(MIN_PASSWORD_LENGTH)} знаков`);
+    if (!isParentPassword(password)) {
+      setProblem(`Пароль должен быть от ${String(MIN_PASSWORD_LENGTH)} до ${String(MAX_PASSWORD_LENGTH)} знаков`);
       return;
     }
     setPending(true);

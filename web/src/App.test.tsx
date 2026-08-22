@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App, ProfileGate } from './App';
 import type { AuthApi, Principal } from './auth-api';
 import { requestJson, SignedOutError } from './http';
+import { testAuthApi } from './test-auth-api';
 import './test-setup';
 
 afterEach(() => {
@@ -32,16 +33,13 @@ const DASHBOARD = {
 };
 
 function authApi(overrides: Partial<AuthApi> = {}): AuthApi {
-  return {
+  // Состав методов держит общий помощник; здесь названо только то, чем
+  // этот файл от него отличается: за экраном сидит ребёнок.
+  return testAuthApi({
     me: vi.fn().mockResolvedValue(CHILD),
-    login: vi.fn().mockResolvedValue({ kind: 'parent', email: 'parent@example.org' }),
-    logout: vi.fn().mockResolvedValue(undefined),
-    readInvite: vi.fn().mockResolvedValue({ email: 'parent@example.org' }),
-    redeemInvite: vi.fn().mockResolvedValue({ kind: 'parent', email: 'parent@example.org' }),
-    claimDevice: vi.fn().mockResolvedValue({ kind: 'child', childId: 'c-1' }),
     switchPersona: vi.fn().mockResolvedValue(CHILD),
     ...overrides,
-  };
+  });
 }
 
 describe('App', () => {

@@ -65,11 +65,18 @@ export function AdminLoginScreen({
         {notice !== undefined && <p className="auth-notice" role="status">{notice}</p>}
         <label className="auth-field">
           <span>Электронная почта</span>
+          {/* `type="text"`, а не `type="email"`: браузер проверяет `email`
+              ASCII-регуляркой из спеки и адрес с кириллицей до отправки не
+              допускает вовсе — молча. Сервер такие принимает, так что форма
+              отказывала бы во входе учётной записи, которая работает. */}
           <input
             autoComplete="username"
             name="email"
+            autoCapitalize="none"
+            inputMode="email"
             required
-            type="email"
+            spellCheck={false}
+            type="text"
             value={email}
             onChange={(event) => setEmail(event.target.value)}
           />

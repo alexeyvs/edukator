@@ -145,3 +145,87 @@ test('заход ролью родителя не заводит детей и �
     await harness.close();
   }
 });
+
+/**
+ * Второй способ завести семью — из админки, а не с машины, где лежит
+ * `control.db`. Путь целиком: оператор называет адрес, получает одноразовую
+ * ссылку, родитель по ней ставит себе пароль и попадает в свою семью, а потом
+ * меняет пароль сам.
+ *
+ * Адрес — с кириллицей намеренно. Сервер такие принимает (`normalizeEmail`
+ * смотрит на одну собаку), а форма с `type="email"` не отправила бы его вовсе:
+ * браузер проверяет это поле ASCII-регуляркой из спеки и отказывает молча, без
+ * единого сообщения. Отказ был бы во входе в учётную запись, которая заведена и
+ * работает, так что проверять это надо настоящим браузером — на jsdom
+ * ограничения нет.
+ */
+test('оператор заводит семью ссылкой, родитель ставит по ней пароль и меняет его сам', async ({ page }) => {
+  const harness = await startE2eHarness();
+  const email = 'новая-семья@example.com';
+  const first = 'первый-пароль-семьи';
+  const second = 'второй-пароль-семьи';
+  try {
+    await page.goto(`${harness.url}/admin`);
+    await page.getByLabel('Электронная почта').fill(E2E_ADMIN.email);
+    await page.getByLabel('Пароль').fill(E2E_ADMIN.password);
+    await page.getByRole('button', { name: 'Войти' }).click();
+    await expect(page.getByText('Админка оператора')).toBeVisible();
+
+    await page.getByLabel('Адрес родителя').fill(email);
+    await page.getByRole('button', { name: 'Завести семью' }).click();
+
+    // Ссылка показывается ровно один раз: в базе лежит только её отпечаток.
+    const invite = page.locator('.admin-invite').filter({ hasText: email });
+    await expect(invite).toBeVisible();
+    const link = (await invite.locator('code').innerText()).trim();
+    expect(link).toContain('/invite/');
+    // Заведённая семья появилась в списке: сводка перечитана тем же действием.
+    await expect(page.locator('.admin-family').filter({ hasText: email })).toBeVisible();
+
+    // Дальше идёт родитель, а не оператор: его cookie на этой машине больше
+    // нет. Ссылка обязана работать сама по себе — её открывают из письма.
+    await page.context().clearCookies();
+    await page.goto(link);
+    await expect(page.getByText(`Учётная запись: ${email}`)).toBeVisible();
+    await page.getByLabel('Пароль', { exact: true }).fill(first);
+    await page.getByLabel('Пароль ещё раз').fill(first);
+    await page.getByRole('button', { name: 'Сохранить пароль и войти' }).click();
+
+    await expect(page.getByRole('heading', { name: 'Дети' })).toBeVisible();
+    await expect(page.getByText(email)).toBeVisible();
+
+    // Смена пароля собой же: сервер гасит все сессии родителя, включая ту, что
+    // принесла этот запрос, и выдаёт cookie взамен. Без замены родитель платил
+    // бы за смену пароля собственным выходом на том же ответе — поэтому
+    // проверяется не сообщение, а то, что семья открывается после перезагрузки.
+    await page.getByLabel('Текущий пароль').fill(first);
+    await page.getByLabel('Новый пароль', { exact: true }).fill(second);
+    await page.getByLabel('Новый пароль ещё раз').fill(second);
+    await page.getByRole('button', { name: 'Сменить пароль' }).click();
+    await expect(page.getByText('Пароль сменён.')).toBeVisible();
+
+    await page.reload();
+    await expect(page.getByRole('heading', { name: 'Дети' })).toBeVisible();
+
+    // Прежний пароль больше не пускает, новый пускает.
+    await page.context().clearCookies();
+    await page.goto(harness.url);
+    await page.getByLabel('Электронная почта').fill(email);
+    await page.getByLabel('Пароль').fill(first);
+    await page.getByRole('button', { name: 'Войти' }).click();
+    await expect(page.getByRole('alert')).toContainText('Неверный адрес или пароль');
+    await page.getByLabel('Пароль').fill(second);
+    await page.getByRole('button', { name: 'Войти' }).click();
+    await expect(page.getByRole('heading', { name: 'Дети' })).toBeVisible();
+
+    // Заведение семьи оставляет след в журнале действий, а смена пароля самим
+    // родителем — не оставляет: это не действие оператора.
+    expect(harness.adminAudit().map((entry) => entry.action)).toEqual([
+      'parent-create',
+      'login',
+    ]);
+    harness.assertCodexNotCalled();
+  } finally {
+    await harness.close();
+  }
+});

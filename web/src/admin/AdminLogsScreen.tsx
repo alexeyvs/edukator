@@ -200,7 +200,7 @@ export function AdminLogsScreen({ api = browserAdminApi, onBack, onSignedOut }: 
       </header>
 
       <form
-        className="admin-log-filters"
+        className="form-row admin-log-filters"
         onSubmit={(submit) => { submit.preventDefault(); apply(); }}
       >
         <label>

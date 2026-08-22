@@ -28,6 +28,7 @@ import {
   LOGIN_ADDRESS_FAILURE_LIMIT,
   LOGIN_EMAIL_FAILURE_LIMIT,
   LOGIN_LOCKOUT_MS,
+  changeParentPassword,
   checkLoginGate,
   childDatabasePath,
   clearLoginFailures,
@@ -59,6 +60,8 @@ import {
   readChild,
   readCodexQuota,
   readDevice,
+  readParent,
+  readParentEmail,
   readParentInvite,
   readParentPinHash,
   recordAdminAudit,
@@ -839,6 +842,55 @@ describe('родители, приглашения и сессии', () => {
     expect(resolveParentSession(db, changed.session.token, at(4 * HOUR_MS))?.parentId).toBe(parentId);
   });
 
+  it('меняет пароль по текущему, выдаёт сессию взамен и гасит устройства детей', () => {
+    const db = open();
+    const { parentId, session } = parentWithPassword(db);
+    const childId = createChild(db, parentId, 'Ученик', NOW);
+    markChildReady(db, childId);
+    const deviceInvite = issueDeviceInvite(db, childId, 'browser', 'Компьютер', NOW);
+    const claimed = redeemDeviceInvite(db, deviceInvite.token, NOW);
+    expect(claimed.ok).toBe(true);
+
+    const changed = changeParentPassword(db, parentId, PASSWORD, 'совсем-другой-пароль', at(HOUR_MS));
+    expect(changed.ok).toBe(true);
+    if (!changed.ok) return;
+    expect(changed.parentId).toBe(parentId);
+
+    // Прежняя сессия мертва, выданная взамен — жива: без неё родитель менял бы
+    // пароль ценой собственного выхода на том же запросе.
+    expect(resolveParentSession(db, session.token, at(2 * HOUR_MS))).toBeUndefined();
+    expect(resolveParentSession(db, changed.session.token, at(2 * HOUR_MS))?.parentId).toBe(parentId);
+
+    // Устройства детей отзываются той же сменой: смысл смены пароля после
+    // кражи в том и состоит, что уже выданные токены перестают работать.
+    expect(listDevices(db, childId)[0]?.revokedAt).toBe(at(HOUR_MS).toISOString());
+
+    expect(loginParent(db, 'mama@example.com', PASSWORD, at(2 * HOUR_MS)).ok).toBe(false);
+    expect(loginParent(db, 'mama@example.com', 'совсем-другой-пароль', at(2 * HOUR_MS)).ok).toBe(true);
+  });
+
+  it('не меняет пароль по неверному текущему, слабому новому и у отключённого родителя', () => {
+    const db = open();
+    const { parentId, session } = parentWithPassword(db);
+
+    expect(changeParentPassword(db, parentId, 'не тот пароль', 'совсем-другой-пароль', at(HOUR_MS)))
+      .toEqual({ ok: false, reason: 'bad-password' });
+    expect(changeParentPassword(db, parentId, PASSWORD, 'к'.repeat(MIN_PASSWORD_LENGTH - 1), at(HOUR_MS)))
+      .toEqual({ ok: false, reason: 'weak-password' });
+    expect(changeParentPassword(db, parentId, PASSWORD, 'к'.repeat(MAX_SECRET_LENGTH + 1), at(HOUR_MS)))
+      .toEqual({ ok: false, reason: 'weak-password' });
+    // Ни один отказ не тронул ни пароль, ни сессию: иначе неудачная попытка
+    // выкидывала бы родителя из его же учётной записи.
+    expect(resolveParentSession(db, session.token, at(HOUR_MS))?.parentId).toBe(parentId);
+    expect(loginParent(db, 'mama@example.com', PASSWORD, at(HOUR_MS)).ok).toBe(true);
+
+    disableParent(db, parentId, at(HOUR_MS));
+    expect(changeParentPassword(db, parentId, PASSWORD, 'совсем-другой-пароль', at(2 * HOUR_MS)))
+      .toEqual({ ok: false, reason: 'disabled' });
+    expect(changeParentPassword(db, 'нет такого родителя', PASSWORD, 'совсем-другой-пароль', at(2 * HOUR_MS)))
+      .toEqual({ ok: false, reason: 'unknown-email' });
+  });
+
   it('заводит родителя по адресу и не заводит его дважды', () => {
     const db = open();
     createParent(db, ' Mama@Example.com ', NOW);
@@ -851,6 +903,27 @@ describe('родители, приглашения и сессии', () => {
     expect(normalizeEmail('a@b.c')).toBe('a@b.c');
     expect(normalizeEmail(`${'a'.repeat(MAX_EMAIL_LENGTH)}@b.c`)).toBeUndefined();
     expect(normalizeEmail('два@адреса@example.com')).toBeUndefined();
+  });
+
+  it('читает родителя по id, называя отключённого отключённым', () => {
+    const db = open();
+    const { parentId } = parentWithPassword(db);
+
+    expect(readParent(db, parentId)).toEqual({
+      id: parentId,
+      email: 'mama@example.com',
+      hasPassword: true,
+      hasPin: false,
+      createdAt: NOW.toISOString(),
+    });
+    expect(readParent(db, 'нет такого родителя')).toBeUndefined();
+
+    // Отключённый читается, но отмеченным: `readParentEmail` возвращает на нём
+    // `undefined`, и по одному этому ответу «нет такого» и «отключён»
+    // неразличимы — а оператору это два разных отказа.
+    disableParent(db, parentId, at(HOUR_MS));
+    expect(readParent(db, parentId)?.disabledAt).toBe(at(HOUR_MS).toISOString());
+    expect(readParentEmail(db, parentId)).toBeUndefined();
   });
 
   it('держит калибровочные константы спеки: сроки приглашения и сессии', () => {
@@ -2298,6 +2371,9 @@ describe('журнал действий оператора', () => {
       'logout',
       'impersonation-start',
       'impersonation-end',
+      'parent-create',
+      'parent-invite',
+      'parent-password',
     ]);
     expect(isAdminAuditAction('impersonation-end')).toBe(true);
     expect(isAdminAuditAction('impersonation')).toBe(false);

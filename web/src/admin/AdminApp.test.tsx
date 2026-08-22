@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AdminApp } from './AdminApp';
 import type { AdminApi, AdminChildDetail, AdminOverview, AdminStats } from '../admin-api';
+import { testAdminApi } from './test-admin-api';
 import '../test-setup';
 
 afterEach(() => {
@@ -126,7 +127,9 @@ function detail(): AdminChildDetail {
 }
 
 function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
-  return {
+  // Состав методов держит общий помощник: всё, что этому файлу нужно,
+  // названо здесь, остальное отказывает.
+  return testAdminApi({
     login: vi.fn().mockResolvedValue({ kind: 'admin', email: 'operator@example.com' }),
     logout: vi.fn().mockResolvedValue(undefined),
     overview: vi.fn().mockResolvedValue(overview()),
@@ -136,7 +139,7 @@ function adminApi(overrides: Partial<AdminApi> = {}): AdminApi {
     stats: vi.fn().mockResolvedValue(stats()),
     child: vi.fn().mockResolvedValue(detail()),
     ...overrides,
-  };
+  });
 }
 
 describe('переходы между экранами админки', () => {

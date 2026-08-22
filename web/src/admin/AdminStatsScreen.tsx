@@ -312,12 +312,17 @@ export function AdminStatsScreen({
               : (
                 <ul className="admin-list">
                   {stats.children.map((child) => (
-                    <li key={child.childId}>
-                      <code>{child.childId}</code> · забегов {child.finishedRuns} ·
-                      {' '}ответов {child.answers} · банк {child.bank.valid} ·
-                      {' '}время {hours(child.activeMs.total)}
+                    <li className="admin-list-row" key={child.childId}>
+                      {/* Строка и её действие — две половины, а не одна фраза:
+                          кнопка, дописанная в конец текста, слипается с ним и
+                          читается его продолжением. */}
+                      <span>
+                        <code>{child.childId}</code> · забегов {child.finishedRuns} ·
+                        {' '}ответов {child.answers} · банк {child.bank.valid} ·
+                        {' '}время {hours(child.activeMs.total)}
+                      </span>
                       {onChild !== undefined && (
-                        <button type="button" onClick={() => onChild(child.childId)}>
+                        <button className="quiet" type="button" onClick={() => onChild(child.childId)}>
                           Карточка
                         </button>
                       )}

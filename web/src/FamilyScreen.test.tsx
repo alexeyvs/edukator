@@ -4,6 +4,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FamilyScreen } from './FamilyScreen';
 import type { Family, FamilyApi, FamilyChild, FamilyDevice } from './family-api';
+import type { AuthApi } from './auth-api';
+import { testAuthApi } from './test-auth-api';
 import './test-setup';
 
 afterEach(cleanup);
@@ -57,14 +59,101 @@ function familyApi(overrides: Partial<FamilyApi> = {}, value: Family = FAMILY): 
   };
 }
 
-function props(api: FamilyApi) {
+/** Вход целиком: экрану семьи из него нужна одна смена пароля. */
+function props(api: FamilyApi, auth: AuthApi = testAuthApi()) {
   return {
     api,
+    auth,
     email: 'parent@example.org',
     onOpenDashboard: vi.fn(),
     onLogout: vi.fn(),
   };
 }
+
+describe('смена пароля родителем', () => {
+  function fill(current: string, next: string, repeat: string): void {
+    fireEvent.change(screen.getByLabelText('Текущий пароль'), { target: { value: current } });
+    fireEvent.change(screen.getByLabelText('Новый пароль'), { target: { value: next } });
+    fireEvent.change(screen.getByLabelText('Новый пароль ещё раз'), { target: { value: repeat } });
+  }
+
+  it('предупреждает, что смена пароля отключит устройства детей', async () => {
+    render(<FamilyScreen {...props(familyApi())} />);
+    await screen.findByRole('heading', { name: 'Пароль родителя' });
+
+    // Смена пароля отзывает **погашенные** токены детских устройств: и
+    // компьютер ученика, и контроллер доступа перестают работать до новой
+    // ссылки. Не сказав этого, кнопка выключает ребёнку и занятия, и
+    // родительский контроль — молча.
+    expect(screen.getByRole('note')).toHaveTextContent('устройства детей');
+  });
+
+  it('меняет пароль и чистит поля', async () => {
+    const auth = testAuthApi();
+    render(<FamilyScreen {...props(familyApi(), auth)} />);
+    await screen.findByRole('heading', { name: 'Пароль родителя' });
+
+    fill('пароль-подлиннее', 'совсем-другой-пароль', 'совсем-другой-пароль');
+    fireEvent.click(screen.getByRole('button', { name: 'Сменить пароль' }));
+
+    await waitFor(() => expect(auth.changePassword)
+      .toHaveBeenCalledWith('пароль-подлиннее', 'совсем-другой-пароль'));
+    expect(await screen.findByText(/Пароль сменён/u)).toBeInTheDocument();
+    expect(screen.getByLabelText('Текущий пароль')).toHaveValue('');
+    expect(screen.getByLabelText('Новый пароль')).toHaveValue('');
+  });
+
+  it('не шлёт на сервер несовпавший и короткий новый пароль', async () => {
+    const auth = testAuthApi();
+    render(<FamilyScreen {...props(familyApi(), auth)} />);
+    await screen.findByRole('heading', { name: 'Пароль родителя' });
+
+    fill('пароль-подлиннее', 'совсем-другой-пароль', 'другой-пароль-совсем');
+    fireEvent.click(screen.getByRole('button', { name: 'Сменить пароль' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Пароли не совпадают');
+
+    fill('пароль-подлиннее', 'коротко', 'коротко');
+    fireEvent.click(screen.getByRole('button', { name: 'Сменить пароль' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('от 10 до 128 знаков');
+    expect(auth.changePassword).not.toHaveBeenCalled();
+  });
+
+  it('показывает отказ сервера и оставляет введённое на месте', async () => {
+    const auth = testAuthApi({
+      changePassword: vi.fn().mockRejectedValue(new Error('Неверный адрес или пароль')),
+    });
+    render(<FamilyScreen {...props(familyApi(), auth)} />);
+    await screen.findByRole('heading', { name: 'Пароль родителя' });
+
+    fill('не тот пароль', 'совсем-другой-пароль', 'совсем-другой-пароль');
+    fireEvent.click(screen.getByRole('button', { name: 'Сменить пароль' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Неверный адрес или пароль');
+    // Новый пароль набран длинный и остаётся на месте: стереть его — значит
+    // заставить набирать заново из-за опечатки в другом поле.
+    expect(screen.getByLabelText('Новый пароль')).toHaveValue('совсем-другой-пароль');
+  });
+
+  it('не шлёт вторую смену по двойному щелчку', async () => {
+    let release = (): void => {};
+    const auth = testAuthApi({
+      changePassword: vi.fn().mockImplementation(() => new Promise((resolve) => {
+        release = () => resolve({ kind: 'parent', email: 'parent@example.org' });
+      })),
+    });
+    render(<FamilyScreen {...props(familyApi(), auth)} />);
+    await screen.findByRole('heading', { name: 'Пароль родителя' });
+
+    fill('пароль-подлиннее', 'совсем-другой-пароль', 'совсем-другой-пароль');
+    const button = screen.getByRole('button', { name: 'Сменить пароль' });
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    expect(auth.changePassword).toHaveBeenCalledTimes(1);
+    release();
+    await screen.findByText(/Пароль сменён/u);
+  });
+});
 
 describe('состав семьи', () => {
   it('показывает детей, состояние устройств и настроенный PIN', async () => {

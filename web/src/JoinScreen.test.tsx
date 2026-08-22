@@ -4,28 +4,15 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { StrictMode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { JoinScreen } from './JoinScreen';
-import type { AuthApi } from './auth-api';
 import { HttpError } from './http';
+import { testAuthApi } from './test-auth-api';
 import './test-setup';
 
 afterEach(cleanup);
 
-function authApi(overrides: Partial<AuthApi> = {}): AuthApi {
-  return {
-    me: vi.fn().mockResolvedValue({ kind: 'anonymous' }),
-    login: vi.fn().mockResolvedValue({ kind: 'anonymous' }),
-    logout: vi.fn().mockResolvedValue(undefined),
-    readInvite: vi.fn().mockResolvedValue({ email: 'parent@example.org' }),
-    redeemInvite: vi.fn().mockResolvedValue({ kind: 'parent', email: 'parent@example.org' }),
-    claimDevice: vi.fn().mockResolvedValue({ kind: 'child', childId: 'c-1' }),
-    switchPersona: vi.fn().mockResolvedValue({ kind: 'anonymous' }),
-    ...overrides,
-  };
-}
-
 describe('погашение детской ссылки', () => {
   it('не гасит ссылку до явного подтверждения и отдаёт управление наверх', async () => {
-    const api = authApi();
+    const api = testAuthApi();
     const onClaimed = vi.fn();
     render(<JoinScreen api={api} token="tok" onClaimed={onClaimed} />);
 
@@ -39,7 +26,7 @@ describe('погашение детской ссылки', () => {
   // Детская cookie по умолчанию переключает браузер в ученика, поэтому
   // родителю заранее называется смена режима.
   it('предупреждает вошедшего родителя и до его согласия ссылку не жжёт', async () => {
-    const api = authApi({ me: vi.fn().mockResolvedValue({ kind: 'parent', email: 'p@example.org' }) });
+    const api = testAuthApi({ me: vi.fn().mockResolvedValue({ kind: 'parent', email: 'p@example.org' }) });
     const onClaimed = vi.fn();
     render(<JoinScreen api={api} token="tok" onClaimed={onClaimed} />);
 
@@ -57,7 +44,7 @@ describe('погашение детской ссылки', () => {
   // Неудача вопроса «кто здесь» не прячет явное подтверждение: ссылка живёт
   // сутки и одноразова, а обрыв сети на проверке — не повод сжигать её самому.
   it('даёт подтвердить ссылку и тогда, когда узнать предъявителя не вышло', async () => {
-    const api = authApi({ me: vi.fn().mockRejectedValue(new Error('сеть оборвалась')) });
+    const api = testAuthApi({ me: vi.fn().mockRejectedValue(new Error('сеть оборвалась')) });
     const onClaimed = vi.fn();
     render(<JoinScreen api={api} token="tok" onClaimed={onClaimed} />);
 
@@ -67,7 +54,7 @@ describe('погашение детской ссылки', () => {
   });
 
   it('показывает токен агента один раз и не пускает его на занятие', async () => {
-    const api = authApi({
+    const api = testAuthApi({
       claimDevice: vi.fn().mockResolvedValue({ kind: 'agent', childId: 'c-1', token: 'agent-token' }),
     });
     const onClaimed = vi.fn();
@@ -80,7 +67,7 @@ describe('погашение детской ссылки', () => {
   });
 
   it('объясняет протухшую или отозванную ссылку и не оставляет ученика в загрузке', async () => {
-    const api = authApi({
+    const api = testAuthApi({
       claimDevice: vi.fn().mockRejectedValue(new HttpError({
         status: 404,
         message: 'Ссылка недействительна или уже использована',
@@ -103,7 +90,7 @@ describe('погашение детской ссылки', () => {
     const claimDevice = vi.fn()
       .mockRejectedValueOnce(new Error('Не получилось подключить устройство'))
       .mockResolvedValueOnce({ kind: 'child', childId: 'c-1' });
-    const api = authApi({ claimDevice });
+    const api = testAuthApi({ claimDevice });
     const onClaimed = vi.fn();
     render(<JoinScreen api={api} token="tok" onClaimed={onClaimed} />);
 
@@ -119,7 +106,7 @@ describe('погашение детской ссылки', () => {
   });
 
   it('не гасит одноразовую ссылку дважды при повторном запуске эффекта', async () => {
-    const api = authApi();
+    const api = testAuthApi();
     const onClaimed = vi.fn();
     // Именно StrictMode, а не повторный `render` с теми же свойствами: у него
     // не меняются зависимости эффекта, и без двойного запуска замок проверяется

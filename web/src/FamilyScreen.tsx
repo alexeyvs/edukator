@@ -8,8 +8,11 @@ import {
   type FamilyDevice,
   type IssuedInvite,
 } from './family-api';
+import { browserAuthApi, type AuthApi } from './auth-api';
 import { isParentPin } from './pin-format';
+import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, isParentPassword } from './password-format';
 import { BrandLink } from './BrandMark';
+import { inviteUrl } from './invite-url';
 
 const STATUS_NAMES: Record<FamilyChild['status'], string> = {
   provisioning: 'База заводится',
@@ -43,15 +46,6 @@ function deviceState(device: FamilyDevice, now: number): string {
     return `Ссылка просрочена ${when(device.inviteExpiresAt)}`;
   }
   return `Ссылка ждёт до ${when(device.inviteExpiresAt)}`;
-}
-
-/**
- * Целый адрес ссылки. Сервер отдаёт только путь: за прокси он не знает ни
- * схемы, ни внешнего имени, а родитель пришёл сюда ровно по тому адресу,
- * который нужен ребёнку.
- */
-function inviteUrl(path: string): string {
-  return new URL(path, window.location.origin).toString();
 }
 
 function DeviceInvite({ issued }: { issued: IssuedInvite }) {
@@ -227,7 +221,7 @@ function ChildCard({
           ))}
         </ul>}
 
-      <form className="family-device-form" onSubmit={(event) => { void issue(event); }}>
+      <form className="form-row family-device-form" onSubmit={(event) => { void issue(event); }}>
         <label>
           <span>Вид устройства</span>
           <select value={kind} onChange={(event) => setKind(event.target.value as DeviceKind)}>
@@ -260,6 +254,8 @@ function ChildCard({
 
 export interface FamilyScreenProps {
   api?: FamilyApi;
+  /** Вход: экрану семьи из него нужна одна смена собственного пароля. */
+  auth?: AuthApi;
   /** Адрес вошедшего родителя: он известен из `me` ещё до загрузки семьи. */
   email: string;
   onOpenDashboard: (childId: string, children: Array<{ id: string; name: string }>) => void;
@@ -274,6 +270,7 @@ export interface FamilyScreenProps {
 
 export function FamilyScreen({
   api = browserFamilyApi,
+  auth = browserAuthApi,
   email,
   onOpenDashboard,
   onLogout,
@@ -292,6 +289,12 @@ export function FamilyScreen({
   const [pin, setPin] = useState('');
   const [savingPin, setSavingPin] = useState(false);
   const [pinFeedback, setPinFeedback] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [nextPassword, setNextPassword] = useState('');
+  const [repeatPassword, setRepeatPassword] = useState('');
+  const [savingPassword, setSavingPassword] = useState(false);
+  const [passwordFeedback, setPasswordFeedback] =
+    useState<{ kind: 'success' | 'error'; text: string } | null>(null);
   // Попытка загрузки: 503 недоступной управляющей базы или обрыв сети иначе
   // оставляли бы родителя на голом сообщении навсегда — эффект сам не
   // повторится, а «Выйти» живёт в шапке загруженного экрана.
@@ -389,6 +392,47 @@ export function FamilyScreen({
     setSavingPin(false);
   }
 
+  async function savePassword(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    // Второй отправки быть не должно: сервер гасит сессии сменой пароля, и
+    // второй запрос уходил бы уже с погашенной cookie — то есть отвечал бы
+    // «войдите» ровно после удавшейся смены.
+    if (savingPassword) return;
+    if (nextPassword !== repeatPassword) {
+      setPasswordFeedback({ kind: 'error', text: 'Пароли не совпадают' });
+      return;
+    }
+    if (!isParentPassword(nextPassword)) {
+      setPasswordFeedback({
+        kind: 'error',
+        text: `Пароль должен быть от ${String(MIN_PASSWORD_LENGTH)} до ${String(MAX_PASSWORD_LENGTH)} знаков`,
+      });
+      return;
+    }
+    setSavingPassword(true);
+    setPasswordFeedback(null);
+    try {
+      await auth.changePassword(currentPassword, nextPassword);
+    } catch (error: unknown) {
+      // Набранное остаётся на месте: опечатка в одном поле не повод заставлять
+      // набирать заново длинный пароль в двух других.
+      setPasswordFeedback({
+        kind: 'error',
+        text: error instanceof Error ? error.message : 'Не получилось сменить пароль',
+      });
+      setSavingPassword(false);
+      return;
+    }
+    setCurrentPassword('');
+    setNextPassword('');
+    setRepeatPassword('');
+    setPasswordFeedback({
+      kind: 'success',
+      text: 'Пароль сменён. Устройства детей отключены — выпустите им новые ссылки.',
+    });
+    setSavingPassword(false);
+  }
+
   if (family === null) {
     // Адрес известен ещё из `me`: показывать его до загрузки семьи — способ
     // сразу подтвердить родителю, в какую учётную запись он вошёл.
@@ -447,7 +491,7 @@ export function FamilyScreen({
             />
           ))}
 
-        <form className="family-add" onSubmit={(event) => { void addChild(event); }}>
+        <form className="form-row family-add" onSubmit={(event) => { void addChild(event); }}>
           <label>
             <span>Имя ребёнка</span>
             <input
@@ -478,7 +522,7 @@ export function FamilyScreen({
             ? 'PIN настроен. Он спрашивается только на компьютере ученика — вошедшему родителю нет.'
             : 'PIN не настроен: с детской машины режим доступа к компьютеру менять нельзя.'}
         </p>
-        <form className="family-pin" onSubmit={(event) => { void savePin(event); }}>
+        <form className="form-row family-pin" onSubmit={(event) => { void savePin(event); }}>
           <label>
             <span>Новый PIN</span>
             <input
@@ -492,11 +536,69 @@ export function FamilyScreen({
           </label>
           <button disabled={!pinValid || savingPin} type="submit">{savingPin ? 'Сохраняю…' : 'Сохранить PIN'}</button>
         </form>
-        <small>6–12 цифр.</small>
+        <small className="form-hint">6–12 цифр.</small>
         {pinFeedback !== null && <p
           className={`auth-message ${pinFeedback.kind}`}
           role={pinFeedback.kind === 'error' ? 'alert' : 'status'}
         >{pinFeedback.text}</p>}
+      </section>
+
+      <section className="family-panel" aria-labelledby="family-password-title">
+        <div className="section-heading">
+          <p>Вход в учётную запись</p>
+          <h2 id="family-password-title">Пароль родителя</h2>
+        </div>
+        {/* Предупреждение стоит **до** формы, а не под кнопкой: смена пароля
+            отзывает погашенные токены детских устройств — и компьютер ученика,
+            и контроллер доступа перестают работать до новой ссылки. Сказанное
+            после нажатия объясняло бы уже случившееся. */}
+        <p className="family-warning" role="note">
+          Смена пароля закончит все родительские сеансы и отключит устройства детей:
+          компьютеру ученика и контроллеру доступа понадобятся новые ссылки.
+        </p>
+        <form className="form-row family-password" onSubmit={(event) => { void savePassword(event); }}>
+          <label>
+            <span>Текущий пароль</span>
+            <input
+              autoComplete="current-password"
+              maxLength={MAX_PASSWORD_LENGTH}
+              required
+              type="password"
+              value={currentPassword}
+              onChange={(event) => setCurrentPassword(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Новый пароль</span>
+            <input
+              autoComplete="new-password"
+              maxLength={MAX_PASSWORD_LENGTH}
+              required
+              type="password"
+              value={nextPassword}
+              onChange={(event) => setNextPassword(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Новый пароль ещё раз</span>
+            <input
+              autoComplete="new-password"
+              maxLength={MAX_PASSWORD_LENGTH}
+              required
+              type="password"
+              value={repeatPassword}
+              onChange={(event) => setRepeatPassword(event.target.value)}
+            />
+          </label>
+          <button disabled={savingPassword} type="submit">
+            {savingPassword ? 'Меняю…' : 'Сменить пароль'}
+          </button>
+        </form>
+        <small className="form-hint">Не короче {MIN_PASSWORD_LENGTH} знаков.</small>
+        {passwordFeedback !== null && <p
+          className={`auth-message ${passwordFeedback.kind}`}
+          role={passwordFeedback.kind === 'error' ? 'alert' : 'status'}
+        >{passwordFeedback.text}</p>}
       </section>
     </main>
   );
