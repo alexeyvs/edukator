@@ -1,12 +1,16 @@
 # CLAUDE.md
 
-Приложение для подготовки 13-летнего ученика к вступительным тестам в 7 класс за
-40 часов. Спека: `docs/superpowers/specs/2026-08-07-edukator-design.md`,
+Приложение для подготовки детей по назначенным оператором курсам с произвольными
+названием и классом. Исходная спека ядра:
+`docs/superpowers/specs/2026-08-07-edukator-design.md`,
 многоарендность — `docs/plans/20260819-edukator-multi-tenancy.md` (отдельной
 спеки у неё нет: замысел, калибровка и расхождения лежат в разделах «Overview»,
 «Technical Details» и «Где реализация разошлась с замыслом» самого плана),
 админка оператора — `docs/superpowers/specs/2026-08-21-edukator-admin-design.md`
 и план `docs/plans/20260821-edukator-admin.md`,
+настраиваемые курсы —
+`docs/superpowers/specs/2026-08-22-configurable-courses-design.md` и
+`docs/plans/20260822-configurable-courses.md`,
 планы этапов — `docs/plans/`.
 
 ## Команды
@@ -24,15 +28,18 @@ npm start                         # сервер и собранная стат�
 npm run family:setup              # отдельное Python-окружение контроллера Family Safety
 npm run family:login              # первичная авторизация родительского аккаунта
 npm run family:test               # pytest контроллера; `npm test` его не видит
+npm run test:ocr                  # opt-in smoke OCR на Ubuntu с внешними бинарниками
 npm run start:family              # сервер и Family Safety controller одним запуском
-npm run extract-toc               # оглавление учебника из PDF (OCR через swift + Vision)
-npm run build-curriculum          # карта тем по извлечённому оглавлению, через codex
+npm run extract-toc               # legacy-bootstrap: оглавление PDF (macOS Vision)
+npm run build-curriculum          # legacy-bootstrap: файловая карта через codex
 npm run parent -- create|invite|password|pin|disable --email <адрес>  # родители в control.db
 npm run admin -- create|password|disable --email <адрес>  # операторы админки; приглашений по ссылке у них нет
 npm run adopt -- --email <адрес> --name <имя>   # однопользовательская база → первый ребёнок
 npm run backup -- --out <каталог> # копия каталога данных через VACUUM INTO
 npm run prefetch -- --child <id>|--all  # ручной прогрев/экспорт банка; аргумент обязателен
 ./deploy.sh                       # проверка и атомарный деплой чистого HEAD на edukator.ru
+sudo ./scripts/install-ocr-dependencies.sh       # Ubuntu 22.04+; отдельная root-установка OCR
+./scripts/install-ocr-dependencies.sh --check    # read-only preflight версий и rus/eng
 ```
 
 Перед коммитом обязаны быть чистыми все пять: `test`, `coverage`, `typecheck`,
@@ -45,7 +52,8 @@ npm run prefetch -- --child <id>|--all  # ручной прогрев/экспо
   `mastery`, `scheduler`, `forecast`.
 - `scripts/*.ts` — точки входа CLI. Могут импортировать из `server/`,
   **обратное направление запрещено**.
-- **Баз две породы.** `control.db` знает, кто кем владеет и кто сейчас вошёл;
+- **Баз две породы.** `control.db` знает аккаунты, глобальный каталог,
+  назначения и catalog jobs;
   детская база знает, что происходит на занятии. Ни `mastery`, ни `scheduler`,
   ни `run`, ни `daily-gate`, ни `parents` про `control.db` не знают и его
   соединения не получают: доменный модуль, которому понадобился арендатор, —
@@ -53,11 +61,12 @@ npm run prefetch -- --child <id>|--all  # ручной прогрев/экспо
   `children.last_activity_at`: без него список активных детей узнаётся только
   открытием всех баз подряд, что противоречит ленивому реестру.
 - `server/control-db.ts` — управляющая база: своя `CONTROL_SCHEMA_VERSION`
-  (сейчас **2**), своя `migrateControl`, свой `validateControlSchema`.
-  Одиннадцать таблиц: `parents`,
-  `parent_invites`, `parent_sessions`, `children`, `child_devices`,
-  `codex_quota`, `login_attempts` и четыре админских — `admins`,
-  `admin_sessions`, `admin_impersonations`, `admin_audit`. `login_attempts`
+  (сейчас **3**), своя `migrateControl`, свой `validateControlSchema`.
+  Кроме аккаунтов и админского аудита она хранит нормализованные таблицы
+  `courses`, `course_revisions`, `topics`, `revision_topics`, `topic_prereqs`,
+  `course_sources`, `source_pages`, `source_chunks`/FTS,
+  `revision_topic_sources`, `catalog_jobs`, `child_courses` и
+  `child_topic_exclusions`. `login_attempts`
   переехала на `kind IN ('password','pin','admin')`, и `kind` входит в ключ
   `(scope, kind, key)`: счётчик перебора у оператора **отдельный** от семейного.
   Общий означал бы, что перебор чужого родительского пароля запирает вход
@@ -66,6 +75,35 @@ npm run prefetch -- --child <id>|--all  # ручной прогрев/экспо
   и проверяется на принадлежность `children/`. Токены хранятся только
   SHA-256-отпечатком от 256-битного `randomBytes`, погашение приглашения и
   резерв квоты идут `UPDATE ... WHERE` внутри `transaction(...).immediate()`.
+- `server/course-catalog.ts` — единственная запись каталога. На курс допускается
+  одна редактируемая draft-редакция; опубликованная редакция, её темы, ссылки и
+  source artifacts неизменяемы. `edit_version` проверяется optimistic-locking,
+  publish атомарен, ID тем стабильны между редакциями и назначаются сервером.
+  Display `title`/`grade` никогда не являются ключом; старое поле `subject`
+  означает `CourseId`, а `overall` зарезервирован.
+- `server/course-assignments.ts` хранит историю назначения и отрицательный
+  список исключений. Поэтому новая активная тема следующей опубликованной
+  редакции включается автоматически; снятие курса не удаляет детскую историю и
+  не обрывает run.
+- `server/curriculum-provider.ts` — граница между `control.db` и учебным ядром.
+  `CurriculumProvider.get(childId)` возвращает immutable `CurriculumSnapshot`
+  с generation, metadata, revision IDs и персональным `TopicGraph`.
+  `TenantRegistry` обновляет снимок между операциями, но один запрос использует
+  одно поколение. Для уже начатой операции `graphFor(courseId, revisionId)`
+  разрешает закреплённую редакцию без повторной проверки текущего назначения.
+  Маршруты, scheduler, forecast, coordinators и background workers не должны
+  читать catalog tables напрямую и не должны удерживать пожизненный graph.
+- `server/course-artifacts.ts` разрешает пути только под
+  `EDUKATOR_DATA_DIR/catalog`, использует server IDs, `%PDF-`, qpdf, SHA-256,
+  temp + fsync + rename и лимиты 100 МиБ/2000 страниц. Никогда не превращать
+  upload filename в путь. `CourseArtifactStore.cleanupUnused` может удалить
+  только старые temp/orphan и failed draft sources без ссылок/jobs; published
+  artifacts вручную не чистятся.
+- `server/ocr-runner.ts` и `server/catalog-worker.ts` — подменяемая Linux OCR
+  граница и persistent очередь. Работает один OCR job, страницы checkpoint-ятся,
+  `running` восстанавливается после рестарта, shutdown останавливает дочерние
+  процессы. Отказ OCR переводит catalog health в `degraded`, но не должен
+  останавливать обучение по опубликованным курсам.
 - `server/secrets.ts` — `scrypt` с индивидуальной солью и строкой
   `scrypt$N$r$p$соль$хеш`; длина пароля ограничивается **до** KDF, иначе длинный
   пароль становится способом занять процессор. Потолок памяти считается по
@@ -117,7 +155,9 @@ npm run prefetch -- --child <id>|--all  # ручной прогрев/экспо
   (`provisioning` → временный файл → `fsync` → `rename` → `ready`). Прежней
   глобальной точки `EDUKATOR_DB` нет: баз столько, сколько детей.
 - `server/backup.ts` — снимок одной базы через `VACUUM INTO` с `fsync` и
-  `quick_check`; `scripts/backup.ts` обходит им весь каталог данных. Источник
+  `quick_check`; `scripts/backup.ts` обходит им весь каталог данных и копирует
+  каждый указанный в `control.db` PDF/образ страницы с SHA-256/size в
+  `catalog/manifest.json`. Источник
   открывается голым `better-sqlite3` в `readonly` — и управляющая база, и детская.
   Через `openControlDatabase` бэкап включил бы WAL и прогнал бы `migrateControl`,
   то есть снимок, снятый перед обновлением, оказался бы уже обновлённым; а обычное
@@ -131,6 +171,12 @@ npm run prefetch -- --child <id>|--all  # ручной прогрев/экспо
   серверной половины деплоя, и вдобавок запирает путь навсегда — следующий
   запуск упирается в «файл уже есть», то есть ребёнок остаётся в `failed[]` при
   любом числе повторов; убранная молча — уносит с собой причину отказа.
+- `deploy.sh` выполняет OCR `--check` до упаковки, но никогда не ставит пакеты.
+  `scripts/deploy-release.sh` создаёт predeploy backup, ставит `.maintenance`,
+  запускает миграции и снимает marker только после health. При отказе новая
+  версия останавливается, manifest проверяется, базы/children/catalog
+  восстанавливаются, затем запускается предыдущий релиз. Нельзя менять этот
+  порядок: старый код не должен увидеть мигрированные более новой версией БД.
 - `server/client-address.ts` — ключ счётчиков перебора: адрес сокета, а при
   доверенном прокси — разбор `X-Forwarded-For` справа налево. Длинная цепочка
   режется **с правого края** (`slice(-MAX_FORWARDED_HOPS)`): слева лежит то, что
@@ -481,9 +527,11 @@ npm run prefetch -- --child <id>|--all  # ручной прогрев/экспо
   через него нельзя подменить reviewer, воркер и защиту от настоящего codex.
   Сценарий начинается с заведения родителя и ребёнка прямо в `control.db` и
   погашения детской ссылки: cookie предъявителя — часть каждого пути.
-- `content/curriculum/*.json` — истина по составу тем. `topic_state` в базе
-  хранит только прогресс и приводится к карте через `syncTopicState`, который
-  ничего не удаляет.
+- `content/curriculum/*.json` — только источник идемпотентного legacy-bootstrap
+  курсов `math`, `russian`, `english`. Истина новых и опубликованных редакций —
+  catalog tables в `control.db`; новый курс не требует файла репозитория.
+  `topic_state` хранит прогресс и синхронизируется только с разрешимыми темами,
+  не удаляя stale/архивную историю.
 - `content/persona.md` — единственный источник тона напарника, читается до
   первого вызова codex; его отсутствие — ошибка настройки, а не умолчание.
 - `content/seed-bank/*.json` — снимок банка для первого запуска и отката. Это
@@ -503,7 +551,7 @@ npm run prefetch -- --child <id>|--all  # ручной прогрев/экспо
   файл, `fsync`, `rename`. Такой файл пишется только через `writeFileAtomic` —
   оборванная запись оставила бы вместо снимка битый JSON. Уборка в `catch`
   обёрнута своими `try`: отказ закрытия не имеет права заслонить причину.
-- Схема **детской** базы версии 18 содержит пятнадцать таблиц: `profile`, `topic_state`, `task_bank`,
+- Схема **детской** базы версии 19 содержит пятнадцать таблиц: `profile`, `topic_state`, `task_bank`,
   `runs`, `attempts`, `disputes`, `forecast_snapshots`, `boss_batches` и
   `boss_tasks`, `learning_materials`, `learning_runs`, `learning_tasks`,
   `computer_access_override`, `integrity_reviews`, `integrity_items`. Последние
@@ -890,6 +938,10 @@ E2E поднимает `buildServer` внутри процесса. По умо�
 `TaskProducer` и `LearningProducer`. `DisputeReviewer` также подменён, а первым
 в `PATH` стоит исполняемый shim `codex`, который оставил бы маркер вызова.
 После сценария отсутствие маркера проверяется явно.
+Configurable-course сценарий создаёт «География, 5 класс», PDF и управляемые
+OCR/Codex seams во время теста: новый курс не должен зависеть от файла в
+`content/curriculum`. Он покрывает publish, parent assignment/exclusion,
+triage/run и новую редакцию с закреплённым старым run.
 Каждый сценарий получает свой временный каталог данных; статика у всех общая —
 `npm run test:e2e` собирает `web/dist` один раз перед прогоном. Общий `npm start`
 сделал бы сценарии зависимыми от локального профиля и очереди.
@@ -914,6 +966,13 @@ E2E поднимает `buildServer` внутри процесса. По умо�
 Новые внешние процессы запускаются через `runChild`, не напрямую через
 `spawn`. Укажите положительный timeout; stdin остаётся `ignore`, stdout+stderr
 имеют общий предел, а при timeout или переполнении завершается вся группа.
+
+Для catalog/server/UI изменений обязательны `npm test`, `npm run coverage`,
+`npm run typecheck`, `npm run lint`, `npm run build:web` и `npm run test:e2e`.
+`npm run test:ocr` — отдельный opt-in smoke на подготовленной Ubuntu и не должен
+становиться зависимостью обычного Vitest. Coverage держит пофайловый порог 80%
+для новых catalog/provider/assignment/OCR/drafting/routes и admin/family UI
+модулей; новый файл в этом контуре надо добавить в `vitest.config.ts`.
 
 ## Внешние инструменты
 
@@ -947,8 +1006,13 @@ E2E поднимает `buildServer` внутри процесса. По умо�
   `--output-schema` не принимает `minItems`, `pattern`,
   `minimum` и родственные ключевые слова — запрос падает `invalid_json_schema`
   ещё до модели.
-- **swift + Vision** (только macOS) — OCR сканов. Все три учебника оказались
-  сканами, так что в реальности работает именно эта ветка.
+- **OCRmyPDF 13+, Tesseract 5+ (`rus`, `eng`), Poppler 22+ и qpdf 10+** —
+  production OCR на Ubuntu 22.04+. Установка выполняется отдельно от deploy:
+  `scripts/install-ocr-dependencies.sh`; `deploy.sh` запускает только `--check`
+  до упаковки и остановки сервиса. `SystemOcrRunner` всегда передаёт argv без
+  shell, использует timeout/output limit, deskew/rotate и сохраняет
+  оптимизированное изображение страницы. `scripts/ocr-pdf.swift` и Vision —
+  только legacy-инструмент локальной сборки bootstrap-карт на macOS.
 
 ## Отладочные мелочи, стоившие времени
 
@@ -1010,8 +1074,9 @@ E2E поднимает `buildServer` внутри процесса. По умо�
 - `onClose` в Fastify выполняются в **обратном** порядке регистрации, поэтому
   снятие замка каталога данных регистрируется первым: отработать оно обязано
   последним, уже после закрытия арендаторов и управляющей базы.
-- Отказы каркаса точечные: карта тем и `control.db` гасят всё, а испорченная база
-  одного ребёнка — только его. Состав маршрутов больше не выбирается на старте
+- Отказы каркаса точечные: недоступный `control.db` гасит каталог и новые
+  аренды, испорченная база одного ребёнка — только его, а отказ catalog worker
+  оставляет занятия по опубликованным редакциям рабочими. Состав маршрутов больше не выбирается на старте
   навсегда: базу открывает реестр по первому обращению, и недоступность
   выражается ответом `unavailable`, а не отсутствием маршрута. `/api/health`
   подробно проверяет `control.db` и сверяет отпечаток файла по **уже открытым**
