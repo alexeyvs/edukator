@@ -56,6 +56,17 @@ describe('генерация и проверка учебного материа
     expect(calls[1]?.prompt).toContain('Ошибка прошлой попытки');
   });
 
+  it('передаёт динамический курс, OCR context и page images генератору материала', async () => {
+    const calls: CodexRequest[] = [];
+    await generateLearningMaterial({ ...options((request) => { calls.push(request); return Promise.resolve(JSON.stringify(content)); }),
+      courseTitle: 'География', grade: '5 класс', sourceContext: { images: ['/data/page.jpg'], fragments: [{
+        sourceId: 2, sourceName: 'atlas.pdf', pageNumber: 3, text: 'Описание материка',
+      }] } });
+    expect(calls[0]?.images).toEqual(['/data/page.jpg']);
+    expect(calls[0]?.prompt).toContain('География');
+    expect(calls[0]?.prompt).toContain('Описание материка');
+  });
+
   it('не повторяет недоступный codex и проверяет число попыток', async () => {
     let calls = 0;
     await expect(generateLearningMaterial(options(() => {

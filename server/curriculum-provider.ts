@@ -76,7 +76,7 @@ function sameGeneration(left: CurriculumGeneration, right: CurriculumGeneration)
 export class CurriculumProvider {
   readonly #cache = new Map<string, CachedSnapshot>();
 
-  constructor(readonly db: Database) {}
+  constructor(readonly db: Database, readonly dataDir?: string) {}
 
   /**
    * Карта одной редакции для уже начатой операции. Она намеренно не проверяет
@@ -98,7 +98,7 @@ export class CurriculumProvider {
           : `Редакция ${String(revisionId)} не принадлежит курсу «${courseId}»`,
       );
     }
-    return readRevisionGraph(this.db, row.revision_id);
+    return readRevisionGraph(this.db, row.revision_id, this.dataDir === undefined ? {} : { dataDir: this.dataDir });
   }
 
   get(childId: string): CurriculumSnapshot {
@@ -133,7 +133,7 @@ export class CurriculumProvider {
           .all(childId, row.course_id)
           .map((item) => item.topic_id),
       );
-      const revisionGraph = readRevisionGraph(this.db, row.active_revision_id);
+      const revisionGraph = readRevisionGraph(this.db, row.active_revision_id, this.dataDir === undefined ? {} : { dataDir: this.dataDir });
       for (const topic of revisionGraph.order) {
         if (excluded.has(topic.id)) continue;
         allTopics.push({ ...topic, prereqs: topic.prereqs.filter((id) => !excluded.has(id)) });

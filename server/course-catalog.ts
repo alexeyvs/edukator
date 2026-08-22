@@ -4,6 +4,7 @@ import { buildTopicGraph, loadCurriculum, type AnswerFormat, type Topic, type To
 import { invalidateCatalogCurricula, invalidateChildCurriculum } from './curriculum-generation.js';
 import { CURRICULUM_DIR } from './curriculum.js';
 import { requireCourseId, type CourseId } from './db.js';
+import { retrieveCourseSources } from './course-retrieval.js';
 
 export class CatalogNotFoundError extends Error {}
 export class CatalogConflictError extends Error {}
@@ -407,7 +408,7 @@ export function replaceDraftTopics(
   return { revision: toRevision(selectRevision(db, revisionId) as RevisionRow), graph };
 }
 
-export function readRevisionGraph(db: Database, revisionId: number): TopicGraph {
+export function readRevisionGraph(db: Database, revisionId: number, options: { dataDir?: string } = {}): TopicGraph {
   const revision = selectRevision(db, revisionId);
   if (revision === undefined) throw new CatalogNotFoundError(`Редакция ${revisionId} не найдена`);
   const course = requireCourse(db, revision.course_id);
@@ -433,12 +434,71 @@ export function readRevisionGraph(db: Database, revisionId: number): TopicGraph 
     answerFormat: row.answer_format,
     promptSeed: row.prompt_seed,
     prereqs: byTopic.get(row.topic_id) ?? [],
+    courseTitle: course.title,
+    grade: course.grade,
+    sourceContext: retrieveCourseSources(db, {
+      revisionId,
+      topicId: row.topic_id,
+      ...(options.dataDir === undefined ? { maxImages: 0 } : { dataDir: options.dataDir }),
+    }),
   })), [{
     courseId: revision.course_id,
     title: course.title,
     grade: course.grade,
     revisionId,
   }]);
+}
+
+function validateRevisionSources(db: Database, revisionId: number): void {
+  const sources = db.prepare<[number], { id: number; status: string; page_count: number | null }>(
+    'SELECT id, status, page_count FROM course_sources WHERE revision_id = ? ORDER BY id',
+  ).all(revisionId);
+  if (sources.length === 0) return; // A manually authored course may intentionally have no PDF.
+  const incomplete = sources.filter((source) => source.status !== 'ready');
+  if (incomplete.length > 0) {
+    throw new Error(`Редакция ${revisionId}: источники не готовы: ${incomplete.map((row) => row.id).join(', ')}`);
+  }
+  for (const source of sources) {
+    const pages = db.prepare<[number], { total: number; incomplete: number }>(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN status IN ('ready', 'suspicious') THEN 0 ELSE 1 END) AS incomplete
+         FROM source_pages WHERE source_id = ?`,
+    ).get(source.id) ?? { total: 0, incomplete: 0 };
+    if (source.page_count === null || pages.total !== source.page_count || pages.incomplete > 0) {
+      throw new Error(`Редакция ${revisionId}: источник ${source.id} обработан не полностью`);
+    }
+  }
+  const topicWithoutRef = db.prepare<[number], { topic_id: string }>(
+    `SELECT rt.topic_id FROM revision_topics rt
+      WHERE rt.revision_id = ? AND rt.active = 1
+        AND NOT EXISTS (
+          SELECT 1 FROM revision_topic_sources rts
+           WHERE rts.revision_id = rt.revision_id AND rts.topic_id = rt.topic_id
+        ) LIMIT 1`,
+  ).get(revisionId);
+  if (topicWithoutRef !== undefined) {
+    throw new Error(`Редакция ${revisionId}: у темы «${topicWithoutRef.topic_id}» нет ссылки на источник`);
+  }
+  const invalidRef = db.prepare<[number], { source_id: number; page_from: number; page_to: number }>(
+    `SELECT rts.source_id, rts.page_from, rts.page_to
+       FROM revision_topic_sources rts
+      WHERE rts.revision_id = ? AND (
+        NOT EXISTS (SELECT 1 FROM course_sources cs WHERE cs.id = rts.source_id AND cs.revision_id = rts.revision_id)
+        OR EXISTS (
+          WITH RECURSIVE pages(page) AS (
+            SELECT rts.page_from UNION ALL SELECT page + 1 FROM pages WHERE page < rts.page_to
+          )
+          SELECT 1 FROM pages
+           WHERE NOT EXISTS (
+             SELECT 1 FROM source_pages sp WHERE sp.source_id = rts.source_id AND sp.page_number = pages.page
+               AND sp.status IN ('ready', 'suspicious')
+           )
+        )
+      ) LIMIT 1`,
+  ).get(revisionId);
+  if (invalidRef !== undefined) {
+    throw new Error(`Редакция ${revisionId}: неизвестная ссылка source ${invalidRef.source_id}, pages ${invalidRef.page_from}-${invalidRef.page_to}`);
+  }
 }
 
 export function publishRevision(
@@ -455,9 +515,11 @@ export function publishRevision(
   if (graph.order.length === 0) {
     throw new Error(`Редакция ${revisionId} не содержит активных тем`);
   }
+  validateRevisionSources(db, revisionId);
   const at = (options.now ?? new Date()).toISOString();
   db.transaction(() => {
     requireEditableRevision(db, courseId, revisionId, expectedEditVersion);
+    validateRevisionSources(db, revisionId);
     const published = db.prepare(
       `UPDATE course_revisions
           SET status = 'published', published_by = ?, published_at = ?

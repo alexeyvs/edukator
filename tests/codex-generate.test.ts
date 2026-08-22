@@ -123,6 +123,17 @@ describe('generateTaskBatch: успешная генерация', () => {
     expect(request?.prompt).toContain(PERSONA);
   });
 
+  it('передаёт retrieval context и изображения для произвольного курса', async () => {
+    const { requests, run } = recorder([batch()]);
+    await generateTaskBatch({ topic: topic({ subject: 'geography-5' }), difficulty: 2, persona: PERSONA, run,
+      courseTitle: 'География', grade: '5 класс', sourceContext: { images: ['/data/page-1.jpg'], fragments: [{
+        sourceId: 4, sourceName: 'atlas.pdf', pageNumber: 8, text: 'Свойства океанов',
+      }] } });
+    expect(requests[0]?.images).toEqual(['/data/page-1.jpg']);
+    expect(requests[0]?.prompt).toContain('География');
+    expect(requests[0]?.prompt).toContain('Свойства океанов');
+  });
+
   it('берёт модель роли generate, а не роли соседнего вызова', async () => {
     // Иначе перепутанная роль здесь неотличима: без переменных все четыре роли
     // дают одну и ту же модель.

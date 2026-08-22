@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import type { Database } from 'better-sqlite3';
 import { SUBJECT_TITLES, requireCourseId, type CourseId } from './db.js';
 import { describeSchemaErrors, schemaValidator } from './json-schema.js';
+import type { SourceContext } from './course-retrieval.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -36,6 +37,10 @@ export interface Topic {
   prereqs: string[];
   answerFormat: AnswerFormat;
   promptSeed: string;
+  /** Display metadata and bounded source grounding for catalog-backed prompts. */
+  courseTitle?: string;
+  grade?: string;
+  sourceContext?: SourceContext;
 }
 
 export interface CourseMetadata {

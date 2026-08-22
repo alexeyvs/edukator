@@ -7,8 +7,8 @@
  * оглавление, интересы ученика), поэтому вызов идёт без пользовательской
  * конфигурации, в read-only песочнице и с отключёнными инструментами.
  */
-import { readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { closeSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import {
   ChildOutputLimitError,
   ChildTimeoutError,
@@ -175,6 +175,46 @@ export interface CodexRequest {
   timeoutMs?: number;
   /** Общий предел stdout + stderr внешнего процесса. */
   maxOutputBytes?: number;
+  /** Локальные изображения страниц, передаваемые модели как отдельные вложения. */
+  images?: readonly string[];
+}
+
+export const MAX_CODEX_IMAGES = 6;
+export const MAX_CODEX_IMAGE_BYTES = 10 * 1024 * 1024;
+export const MAX_CODEX_IMAGES_BYTES = 30 * 1024 * 1024;
+
+function imageArgs(images: readonly string[] = []): string[] {
+  if (images.length > MAX_CODEX_IMAGES) {
+    throw new RangeError(`codex: изображений больше ${MAX_CODEX_IMAGES}`);
+  }
+  let total = 0;
+  const args: string[] = [];
+  for (const image of images) {
+    if (!isAbsolute(image)) throw new Error(`codex: путь изображения должен быть абсолютным: ${image}`);
+    const stat = statSync(image);
+    if (!stat.isFile()) throw new Error(`codex: изображение не является файлом: ${image}`);
+    if (stat.size > MAX_CODEX_IMAGE_BYTES) {
+      throw new RangeError(`codex: изображение больше ${MAX_CODEX_IMAGE_BYTES} байт: ${image}`);
+    }
+    total += stat.size;
+    if (total > MAX_CODEX_IMAGES_BYTES) {
+      throw new RangeError(`codex: общий размер изображений больше ${MAX_CODEX_IMAGES_BYTES} байт`);
+    }
+    const header = Buffer.alloc(12);
+    const fd = openSync(image, 'r');
+    let bytes: number;
+    try {
+      bytes = readSync(fd, header, 0, header.length, 0);
+    } finally {
+      closeSync(fd);
+    }
+    const jpeg = bytes >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
+    const png = bytes >= 8 && header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const webp = bytes >= 12 && header.toString('ascii', 0, 4) === 'RIFF' && header.toString('ascii', 8, 12) === 'WEBP';
+    if (!jpeg && !png && !webp) throw new Error(`codex: неподдерживаемый формат изображения: ${image}`);
+    args.push('--image', image);
+  }
+  return args;
 }
 
 /** Вызов codex, вынесенный за интерфейс: тесты подменяют его, не запуская модель. */
@@ -227,6 +267,7 @@ export function codexArgs(request: CodexRequest): string[] {
     request.schemaPath,
     '-o',
     request.outPath,
+    ...imageArgs(request.images),
     request.prompt,
   ];
 }
@@ -239,11 +280,14 @@ export function codexArgs(request: CodexRequest): string[] {
  * висит бесконечно, ничего не сообщая.
  */
 export async function runCodexCli(request: CodexRequest): Promise<string> {
+  // Validate attachments before entering spawn-error translation: a missing
+  // page image is bad course input, not evidence that the codex binary vanished.
+  const args = codexArgs(request);
   let result;
   try {
     result = await runChild({
       bin: request.bin ?? 'codex',
-      args: codexArgs(request),
+      args,
       label: 'codex',
       timeoutMs: request.timeoutMs ?? CODEX_TIMEOUT_MS,
       ...(request.maxOutputBytes === undefined ? {} : { maxOutputBytes: request.maxOutputBytes }),

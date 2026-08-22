@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["topics"],
+  "properties": {
+    "topics": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 60,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["client_id", "title", "exam_weight", "difficulty", "prereqs", "answer_format", "prompt_seed", "source_refs"],
+        "properties": {
+          "client_id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+          "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+          "exam_weight": { "type": "integer", "minimum": 0, "maximum": 3 },
+          "difficulty": { "type": "integer", "minimum": 1, "maximum": 3 },
+          "prereqs": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" } },
+          "answer_format": { "enum": ["number", "text", "choice"] },
+          "prompt_seed": { "type": "string", "minLength": 1, "maxLength": 4000 },
+          "source_refs": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["source_id", "page_from", "page_to"],
+              "properties": {
+                "source_id": { "type": "integer", "minimum": 1 },
+                "page_from": { "type": "integer", "minimum": 1, "maximum": 100000 },
+                "page_to": { "type": "integer", "minimum": 1, "maximum": 100000 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

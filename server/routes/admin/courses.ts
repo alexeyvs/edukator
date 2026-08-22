@@ -33,6 +33,7 @@ import {
 } from '../../course-artifacts.js';
 import { dataDir as defaultDataDir } from '../../data-dir.js';
 import type { CatalogWorker } from '../../catalog-worker.js';
+import { buildCourseDraft, type BuildCourseDraftOptions } from '../../course-drafting.js';
 import { ROUTE_ACCESS, failAuth, type AdminContextResolver } from '../tenant-context.js';
 
 export const COURSE_ID_MAX_LENGTH = 80;
@@ -54,6 +55,7 @@ export interface AdminCoursesRoutesOptions {
   dataDir?: string;
   artifacts?: CourseArtifactStore;
   catalogWorker?: CatalogWorker;
+  draftBuilder?: (options: BuildCourseDraftOptions) => Promise<unknown>;
 }
 
 class RequestValidationError extends Error {}
@@ -409,6 +411,54 @@ export function registerAdminCoursesRoutes(
     }
   });
 
+  app.get('/api/admin/courses/:courseId/draft/build', (request, reply) => {
+    const auth = authorize(options, request, reply);
+    if (isReply(auth)) return auth;
+    try {
+      const courseId = courseIdParam(request.params);
+      const revision = listCourseRevisions(options.control, courseId).find((item) => item.status === 'draft');
+      if (revision === undefined) throw new CatalogNotFoundError(`У курса «${courseId}» нет черновика`);
+      const job = options.control.prepare<[number], {
+        id: number; status: string; attempts: number; error: string | null; updated_at: string;
+      }>(
+        `SELECT id, status, attempts, error, updated_at FROM catalog_jobs
+          WHERE type = 'build-curriculum' AND revision_id = ? ORDER BY id DESC LIMIT 1`,
+      ).get(revision.id);
+      return reply.send({ revisionId: revision.id, job: job === undefined ? null : {
+        id: job.id, status: job.status, attempts: job.attempts, error: job.error, updatedAt: job.updated_at,
+      } });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post('/api/admin/courses/:courseId/draft/build', (request, reply) => {
+    const auth = authorize(options, request, reply, true);
+    if (isReply(auth)) return auth;
+    try {
+      const courseId = courseIdParam(request.params);
+      const body = objectBody(request.body, ['revisionId', 'editVersion']);
+      const revisionId = integerField(body, 'revisionId');
+      const editVersion = integerField(body, 'editVersion');
+      const revision = readRevision(options.control, revisionId);
+      if (revision === undefined || revision.courseId !== courseId || revision.status !== 'draft') {
+        throw new CatalogNotFoundError('Черновик курса не найден');
+      }
+      const running = options.control.prepare<[number], { id: number }>(
+        "SELECT id FROM catalog_jobs WHERE type = 'build-curriculum' AND revision_id = ? AND status = 'running'",
+      ).get(revisionId);
+      if (running !== undefined) throw new CatalogConflictError(`Сборка черновика уже выполняется, job ${running.id}`);
+      const builder = options.draftBuilder ?? buildCourseDraft;
+      void builder({ db: options.control, courseId, revisionId, expectedEditVersion: editVersion,
+        dataDir: options.dataDir ?? defaultDataDir(), now }).catch(() => undefined);
+      recordAdminAudit(options.control, { adminId: auth.admin.adminId, action: 'course-retry',
+        detail: `курс ${courseId}, сборка редакции ${revisionId}` }, now());
+      return reply.code(202).send({ revisionId, status: 'running' });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
   app.post('/api/admin/courses/:courseId/archive', (request, reply) => {
     const auth = authorize(options, request, reply, true);
     if (isReply(auth)) return auth;
@@ -547,6 +597,8 @@ export function registerUnavailableAdminCourses(app: FastifyInstance, reason: st
   app.post('/api/admin/courses/:courseId/draft', send);
   app.put('/api/admin/courses/:courseId/draft/topics', send);
   app.post('/api/admin/courses/:courseId/publish', send);
+  app.get('/api/admin/courses/:courseId/draft/build', send);
+  app.post('/api/admin/courses/:courseId/draft/build', send);
   app.post('/api/admin/courses/:courseId/archive', send);
   app.get('/api/admin/courses/:courseId/sources', send);
   app.post('/api/admin/courses/:courseId/sources', send);

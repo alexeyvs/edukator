@@ -171,6 +171,10 @@ describe('admin API источников курса', () => {
       clientId: 'ancient', title: 'Древний мир', examWeight: 1, difficulty: 1,
       prereqs: [], answerFormat: 'text', promptSeed: 'Древние государства',
     }], { createTopicToken: () => 'ancient' });
+    db.prepare("UPDATE course_sources SET status = 'ready' WHERE id = ?").run(sourceId);
+    db.prepare("UPDATE source_pages SET status = 'ready', text = 'Древний мир' WHERE source_id = ?").run(sourceId);
+    db.prepare(`INSERT INTO revision_topic_sources (revision_id, topic_id, source_id, page_from, page_to)
+      VALUES (?, 'history-6.ancient', ?, 1, 2)`).run(draftId, sourceId);
     publishRevision(db, 'history-6', draftId, topics.revision.editVersion);
 
     const removed = await app.inject({

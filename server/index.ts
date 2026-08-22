@@ -332,7 +332,7 @@ export function buildServer(
     if (control !== undefined && graph !== undefined) {
       try {
         bootstrapLegacyCourses(control, curriculumDir);
-        curriculumProvider = new CurriculumProvider(control);
+        curriculumProvider = new CurriculumProvider(control, dataDir);
       } catch (error) {
         curriculum = 'error';
         log(`каталог курсов не подготовлен: ${(error as Error).message}`);

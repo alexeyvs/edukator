@@ -258,20 +258,20 @@ Checkbox-пункты ниже описывают только автомати�
 
 ### Task 11: Построить темы и задания по OCR-источникам
 
-- [ ] расширить `CodexRequest`/`codexArgs` в `server/codex/client.ts` безопасным
+- [x] расширить `CodexRequest`/`codexArgs` в `server/codex/client.ts` безопасным
   массивом `images`, лимитами числа/размера и повторяемым `--image`
-- [ ] реализовать полнотекстовый индекс страниц и retrieval по topic/source refs
+- [x] реализовать полнотекстовый индекс страниц и retrieval по topic/source refs
   с ограниченным числом фрагментов и изображений
-- [ ] реализовать асинхронную сборку draft curriculum из OCR-пакетов с
+- [x] реализовать асинхронную сборку draft curriculum из OCR-пакетов с
   промежуточными конспектами, строгой JSON schema и сохранением page references
-- [ ] расширить `Topic`/промпты генерации, валидации и learning material
+- [x] расширить `Topic`/промпты генерации, валидации и learning material
   динамическими title/grade и source context; всё OCR-содержимое проводить через
   `dataBlock`
-- [ ] запретить публикацию draft с незавершёнными источниками, неизвестными
+- [x] запретить публикацию draft с незавершёнными источниками, неизвестными
   page refs или негодным графом; ручной курс без PDF оставить допустимым
-- [ ] написать тесты image args, prompt injection из OCR, retrieval limits,
+- [x] написать тесты image args, prompt injection из OCR, retrieval limits,
   пакетной сборки, повторов Codex, source refs и ручного курса без PDF
-- [ ] запустить `npx vitest run tests/codex-client.test.ts tests/course-drafting.test.ts tests/course-retrieval.test.ts tests/codex-prompt.test.ts tests/codex-generate.test.ts tests/codex-learning-material.test.ts` и `npm run typecheck`
+- [x] запустить `npx vitest run tests/codex-client.test.ts tests/course-drafting.test.ts tests/course-retrieval.test.ts tests/codex-prompt.test.ts tests/codex-generate.test.ts tests/codex-learning-material.test.ts` и `npm run typecheck`
 
 ### Task 12: Добавить каталог курсов в админский UI
 

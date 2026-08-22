@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Topic } from '../curriculum.js';
 import type { Profile } from '../db.js';
+import type { SourceContext } from '../course-retrieval.js';
 import {
   modelForRole,
   CodexRunError,
@@ -48,6 +49,9 @@ export interface GenerateTasksOptions {
   persona?: string;
   /** Структурированная теория для самостоятельного теста lesson-run. */
   lessonContent?: unknown;
+  courseTitle?: string;
+  grade?: string;
+  sourceContext?: SourceContext;
 }
 
 export interface GenerateTasksResult {
@@ -68,6 +72,7 @@ export async function generateTaskBatch(
   options: GenerateTasksOptions,
 ): Promise<GenerateTasksResult> {
   const { topic } = options;
+  const sourceContext = options.sourceContext ?? topic.sourceContext;
   const maxAttempts = options.attempts ?? DEFAULT_ATTEMPTS;
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
     throw new Error(`Число попыток должно быть положительным целым, получено ${maxAttempts}`);
@@ -99,6 +104,9 @@ export async function generateTaskBatch(
         ...(options.profile === undefined ? {} : { profile: options.profile }),
         ...(options.recent === undefined ? {} : { recent: options.recent }),
         ...(options.lessonContent === undefined ? {} : { lessonContent: options.lessonContent }),
+        ...((options.courseTitle ?? topic.courseTitle) === undefined ? {} : { courseTitle: options.courseTitle ?? topic.courseTitle }),
+        ...((options.grade ?? topic.grade) === undefined ? {} : { grade: options.grade ?? topic.grade }),
+        ...(sourceContext === undefined ? {} : { sourceContext }),
         ...(previousError === undefined ? {} : { previousError }),
       });
 
@@ -108,6 +116,7 @@ export async function generateTaskBatch(
           schemaPath,
           outPath: join(workDir, `batch-${attempt}.json`),
           model,
+          ...(sourceContext === undefined ? {} : { images: sourceContext.images }),
           ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
         });
         const tasks = parseTaskBatch(parseCodexAnswer(answer), topic.answerFormat);

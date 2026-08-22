@@ -4,6 +4,7 @@ import type { Database } from 'better-sqlite3';
 import { writeFileAtomic } from './atomic-write.js';
 import { resolveCatalogPath } from './course-artifacts.js';
 import { SystemOcrRunner, type OcrRunner } from './ocr-runner.js';
+import { indexSourcePage } from './course-retrieval.js';
 
 export const SUSPICIOUS_OCR_LENGTH = 20;
 
@@ -265,6 +266,7 @@ export class CatalogWorker {
             `UPDATE source_pages SET status = ?, text = ?, image_path = ?, error = NULL, updated_at = ?
              WHERE source_id = ? AND page_number = ?`,
           ).run(pageStatus, text, storedImage, this.now().toISOString(), job.source_id, page.page_number);
+          indexSourcePage(this.db, job.source_id, page.page_number, text);
         } catch (error) {
           failures += 1;
           this.markPage(job.id, job.source_id, page.page_number, 'failed', (error as Error).message);

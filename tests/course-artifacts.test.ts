@@ -118,6 +118,12 @@ describe('безопасное хранилище PDF курса', () => {
       answerFormat: 'number',
       promptSeed: 'Скорость и путь',
     }], { createTopicToken: () => 'motion' });
+    db.prepare("UPDATE course_sources SET status = 'ready' WHERE id = ?").run(uploaded.source.id);
+    db.prepare(`INSERT INTO source_pages (source_id, page_number, status, text)
+      VALUES (?, 1, 'ready', 'Скорость'), (?, 2, 'ready', 'Путь'), (?, 3, 'ready', 'Время')`)
+      .run(uploaded.source.id, uploaded.source.id, uploaded.source.id);
+    db.prepare(`INSERT INTO revision_topic_sources (revision_id, topic_id, source_id, page_from, page_to)
+      VALUES (?, 'physics-8.motion', ?, 1, 3)`).run(draftId, uploaded.source.id);
     publishRevision(db, 'physics-8', draftId, topics.revision.editVersion);
 
     await expect(artifacts.remove('physics-8', uploaded.source.id)).rejects.toThrow(/неизменяема/u);

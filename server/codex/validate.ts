@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import type { AnswerFormat, Topic } from '../curriculum.js';
+import type { SourceContext } from '../course-retrieval.js';
 import { checkAnswer } from '../normalize.js';
 import { describeSchemaErrors, schemaValidator } from '../json-schema.js';
 import {
@@ -91,6 +92,9 @@ export interface ValidateTasksOptions {
   /** Подменяемый вызов codex: тесты передают заглушку. */
   run?: CodexRunner;
   timeoutMs?: number;
+  courseTitle?: string;
+  grade?: string;
+  sourceContext?: SourceContext;
 }
 
 /** Пять оценок: всё, кроме собственного ответа проверяющего и замечания. */
@@ -192,6 +196,7 @@ export async function validateTaskBatch(
   options: ValidateTasksOptions,
 ): Promise<ValidateTasksResult> {
   const { topic } = options;
+  const sourceContext = options.sourceContext ?? topic.sourceContext;
   const tasks = [...options.tasks];
   // Пустой батч — не ошибка, а обычный итог генерации, из которой всё отсеяли
   // раньше. Звать ради него codex незачем.
@@ -203,11 +208,15 @@ export async function validateTaskBatch(
   let verdicts: Verdict[];
   try {
     const answer = await run({
-      prompt: buildValidationPrompt({ topic, tasks }),
+      prompt: buildValidationPrompt({ topic, tasks,
+        ...((options.courseTitle ?? topic.courseTitle) === undefined ? {} : { courseTitle: options.courseTitle ?? topic.courseTitle }),
+        ...((options.grade ?? topic.grade) === undefined ? {} : { grade: options.grade ?? topic.grade }),
+        ...(sourceContext === undefined ? {} : { sourceContext }) }),
       schemaPath: writeCodexSchema(workDir, VERDICTS_SCHEMA_PATH),
       outPath: join(workDir, 'verdicts.json'),
       model: options.model ?? modelForRole('validate'),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(sourceContext === undefined ? {} : { images: sourceContext.images }),
     });
     verdicts = parseVerdictBatch(parseCodexAnswer(answer), tasks.length);
   } finally {
