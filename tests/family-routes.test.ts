@@ -25,6 +25,15 @@ import { CHILD_COOKIE, IMPERSONATION_COOKIE, PARENT_COOKIE } from '../server/aut
 import { registerAuthRoutes } from '../server/routes/auth.js';
 import { registerFamilyRoutes } from '../server/routes/family.js';
 import { recordingFailureLog } from './server-harness.js';
+import {
+  archiveCourse,
+  createCourse,
+  createDraft,
+  publishRevision,
+  replaceDraftTopics,
+  type DraftTopicInput,
+} from '../server/course-catalog.js';
+import { CurriculumProvider } from '../server/curriculum-provider.js';
 
 const NOW = new Date('2026-08-19T09:00:00.000Z');
 const PASSWORD = 'пароль-подлиннее';
@@ -106,12 +115,254 @@ describe('маршруты семьи', () => {
     return app.inject({ method: 'POST', url, headers, ...(payload === undefined ? {} : { payload }) });
   }
 
+  function put(
+    url: string,
+    headers: Record<string, string>,
+    payload?: Record<string, unknown>,
+  ): Promise<Injected> {
+    return app.inject({ method: 'PUT', url, headers, ...(payload === undefined ? {} : { payload }) });
+  }
+
+  function remove(url: string, headers: Record<string, string>): Promise<Injected> {
+    return app.inject({ method: 'DELETE', url, headers });
+  }
+
   /** Заводит ребёнка родительским маршрутом и отдаёт его `id`. */
   async function addChild(token: string, name = 'Ученик'): Promise<string> {
     const response = await post('/api/family/children', asParent(token), { name });
     expect(response.statusCode).toBe(201);
     return (response.json() as { child: { id: string } }).child.id;
   }
+
+  function topics(courseId: string, includeNew = false): DraftTopicInput[] {
+    return [
+      {
+        id: `${courseId}.intro`, title: 'Введение', examWeight: 2, difficulty: 1,
+        prereqs: [], answerFormat: 'text', promptSeed: 'Скрытая основа введения',
+      },
+      {
+        id: `${courseId}.next`, title: 'Продолжение', examWeight: 2, difficulty: 2,
+        prereqs: [`${courseId}.intro`], answerFormat: 'text', promptSeed: 'Скрытая основа продолжения',
+      },
+      {
+        id: `${courseId}.inactive`, title: 'Архивная тема', examWeight: 1, difficulty: 1,
+        prereqs: [], answerFormat: 'text', promptSeed: 'Скрытая архивная основа', active: false,
+      },
+      ...(includeNew ? [{
+        id: `${courseId}.new`, title: 'Новая тема', examWeight: 1, difficulty: 2,
+        prereqs: [], answerFormat: 'text' as const, promptSeed: 'Скрытая основа новой темы',
+      }] : []),
+    ];
+  }
+
+  function publishCourse(courseId = 'science-7'): number {
+    const { draft } = createCourse(control, { id: courseId, title: 'Наука', grade: '7 класс' });
+    const changed = replaceDraftTopics(control, courseId, draft.id, draft.editVersion, topics(courseId));
+    publishRevision(control, courseId, draft.id, changed.revision.editVersion);
+    return draft.id;
+  }
+
+  describe('каталог и назначения курсов', () => {
+    it('показывает только опубликованный каталог и текущие назначения ребёнка', async () => {
+      const parent = await parentSession('родитель@example.com');
+      const childId = await addChild(parent);
+      publishCourse('science-7');
+      createCourse(control, { id: 'draft-course', title: 'Черновик', grade: '8 класс' });
+      publishCourse('archived-course');
+      archiveCourse(control, 'archived-course', current);
+
+      const assigned = await put(
+        `/api/family/children/${childId}/courses/science-7`,
+        asParent(parent),
+      );
+      const catalog = await get('/api/family/courses', asParent(parent));
+      const family = await get('/api/family', asParent(parent));
+
+      expect(assigned.statusCode).toBe(200);
+      expect(catalog.statusCode).toBe(200);
+      expect(catalog.json()).toEqual({
+        courses: [{
+          courseId: 'science-7',
+          title: 'Наука',
+          grade: '7 класс',
+          revisionId: expect.any(Number),
+          topics: [
+            { id: 'science-7.intro', title: 'Введение', prereqs: [] },
+            { id: 'science-7.next', title: 'Продолжение', prereqs: ['science-7.intro'] },
+          ],
+        }],
+      });
+      expect(JSON.stringify(catalog.json())).not.toContain('Скрытая основа');
+      const children = (family.json() as {
+        children: { courses: { courseId: string; excludedTopicIds: string[] }[] }[];
+      }).children;
+      expect(children[0]?.courses).toMatchObject([
+        { courseId: 'science-7', excludedTopicIds: [] },
+      ]);
+    });
+
+    it('назначает все темы, заменяет исключения и инвалидирует снимок', async () => {
+      const parent = await parentSession('родитель@example.com');
+      const childId = await addChild(parent);
+      publishCourse();
+      const provider = new CurriculumProvider(control);
+      expect(provider.get(childId).graph.order).toEqual([]);
+
+      const assigned = await put(
+        `/api/family/children/${childId}/courses/science-7`,
+        asParent(parent),
+      );
+      expect(assigned.statusCode).toBe(200);
+      expect(provider.get(childId).graph.order.map((topic) => topic.id)).toEqual([
+        'science-7.intro',
+        'science-7.next',
+      ]);
+
+      const excluded = await put(
+        `/api/family/children/${childId}/courses/science-7`,
+        asParent(parent),
+        { excludedTopicIds: ['science-7.intro'] },
+      );
+      const repeated = await put(
+        `/api/family/children/${childId}/courses/science-7`,
+        asParent(parent),
+        { excludedTopicIds: ['science-7.intro'] },
+      );
+
+      expect(excluded.statusCode).toBe(200);
+      expect(repeated.statusCode).toBe(200);
+      expect(repeated.json()).toMatchObject({
+        assignment: { excludedTopicIds: ['science-7.intro'] },
+      });
+      expect(provider.get(childId).graph.order.map((topic) => topic.id)).toEqual([
+        'science-7.next',
+      ]);
+    });
+
+    it('подхватывает новую тему редакции и сохраняет прежнее исключение', async () => {
+      const parent = await parentSession('родитель@example.com');
+      const childId = await addChild(parent);
+      const firstRevisionId = publishCourse();
+      await put(
+        `/api/family/children/${childId}/courses/science-7`,
+        asParent(parent),
+        { excludedTopicIds: ['science-7.intro'] },
+      );
+
+      const draft = createDraft(control, 'science-7', firstRevisionId, current);
+      const changed = replaceDraftTopics(
+        control,
+        'science-7',
+        draft.id,
+        draft.editVersion,
+        topics('science-7', true),
+      );
+      publishRevision(control, 'science-7', draft.id, changed.revision.editVersion, { now: current });
+
+      const catalog = (await get('/api/family/courses', asParent(parent))).json() as {
+        courses: { topics: { id: string }[] }[];
+      };
+      expect(catalog.courses[0]?.topics.map((topic) => topic.id)).toEqual([
+        'science-7.intro',
+        'science-7.next',
+        'science-7.new',
+      ]);
+      expect(new CurriculumProvider(control).get(childId).graph.order.map((topic) => topic.id)).toEqual([
+        'science-7.next',
+        'science-7.new',
+      ]);
+    });
+
+    it('отвергает неактивную тему и не назначает черновой или архивный курс', async () => {
+      const parent = await parentSession('родитель@example.com');
+      const childId = await addChild(parent);
+      publishCourse();
+      createCourse(control, { id: 'draft-course', title: 'Черновик', grade: '7 класс' });
+      publishCourse('archived-course');
+      archiveCourse(control, 'archived-course', current);
+
+      const missingTopic = await put(
+        `/api/family/children/${childId}/courses/science-7`,
+        asParent(parent),
+        { excludedTopicIds: ['science-7.inactive'] },
+      );
+      const draft = await put(
+        `/api/family/children/${childId}/courses/draft-course`,
+        asParent(parent),
+      );
+      const archived = await put(
+        `/api/family/children/${childId}/courses/archived-course`,
+        asParent(parent),
+      );
+
+      expect(missingTopic.statusCode).toBe(400);
+      expect(draft.statusCode).toBe(404);
+      expect(archived.statusCode).toBe(404);
+      expect(new CurriculumProvider(control).get(childId).courses).toEqual([]);
+    });
+
+    it('повторяет назначение и конкурентные одинаковые запросы без дублей', async () => {
+      const parent = await parentSession('родитель@example.com');
+      const childId = await addChild(parent);
+      publishCourse();
+      const url = `/api/family/children/${childId}/courses/science-7`;
+
+      const responses = await Promise.all([
+        put(url, asParent(parent)),
+        put(url, asParent(parent)),
+        put(url, asParent(parent)),
+      ]);
+
+      expect(responses.map((response) => response.statusCode)).toEqual([200, 200, 200]);
+      expect(control.prepare<[string, string], { count: number }>(
+        `SELECT count(*) AS count FROM child_courses
+          WHERE child_id = ? AND course_id = ? AND unassigned_at IS NULL`,
+      ).get(childId, 'science-7')?.count).toBe(1);
+      expect((responses[1]?.json() as { idempotent: boolean }).idempotent).toBe(true);
+    });
+
+    it('снимает назначение идемпотентно, сохраняя базу и старую редакцию', async () => {
+      const parent = await parentSession('родитель@example.com');
+      const childId = await addChild(parent);
+      const revisionId = publishCourse();
+      const provider = new CurriculumProvider(control);
+      const url = `/api/family/children/${childId}/courses/science-7`;
+      await put(url, asParent(parent));
+
+      const first = await remove(url, asParent(parent));
+      const second = await remove(url, asParent(parent));
+
+      expect(first.statusCode).toBe(200);
+      expect(second.statusCode).toBe(200);
+      expect(second.json()).toMatchObject({ idempotent: true });
+      expect(existsSync(childDatabasePath(dir, childId))).toBe(true);
+      expect(provider.get(childId).courses).toEqual([]);
+      expect(provider.graphFor('science-7', revisionId).order).toHaveLength(2);
+    });
+
+    it('одинаково отвечает для чужого и несуществующего ребёнка', async () => {
+      const first = await parentSession('первый@example.com');
+      const second = await parentSession('второй@example.com');
+      const childId = await addChild(first);
+      publishCourse();
+      const missingId = '00000000000000000000000000000000';
+
+      for (const method of ['PUT', 'DELETE'] as const) {
+        const foreign = await app.inject({
+          method,
+          url: `/api/family/children/${childId}/courses/science-7`,
+          headers: asParent(second),
+        });
+        const missing = await app.inject({
+          method,
+          url: `/api/family/children/${missingId}/courses/science-7`,
+          headers: asParent(second),
+        });
+        expect(foreign.statusCode).toBe(missing.statusCode);
+        expect(foreign.json()).toEqual(missing.json());
+      }
+    });
+  });
 
   describe('успешные пути', () => {
     it('проводит родителя весь путь: ребёнок, ссылка, погашение, отзыв', async () => {
@@ -280,20 +531,24 @@ describe('маршруты семьи', () => {
     function everyRoute(
       childId: string,
       deviceId: number,
-    ): { method: 'GET' | 'POST'; url: string; payload?: Record<string, unknown> }[] {
+    ): { method: 'GET' | 'POST' | 'PUT' | 'DELETE'; url: string; payload?: Record<string, unknown> }[] {
       return [
         { method: 'GET', url: '/api/family' },
+        { method: 'GET', url: '/api/family/courses' },
         { method: 'POST', url: '/api/family/children', payload: { name: 'Чужой' } },
         { method: 'POST', url: `/api/family/children/${childId}/provision` },
         { method: 'POST', url: `/api/family/children/${childId}/devices`, payload: { kind: 'browser' } },
         { method: 'POST', url: `/api/family/devices/${deviceId}/revoke` },
         { method: 'POST', url: '/api/family/pin', payload: { pin: '111111' } },
+        { method: 'PUT', url: `/api/family/children/${childId}/courses/science-7` },
+        { method: 'DELETE', url: `/api/family/children/${childId}/courses/science-7` },
       ];
     }
 
     async function family(): Promise<{ parent: string; childId: string; deviceId: number; childToken: string; agentToken: string }> {
       const parent = await parentSession('родитель@example.com');
       const childId = await addChild(parent);
+      publishCourse();
       const browser = await post(`/api/family/children/${childId}/devices`, asParent(parent), {
         kind: 'browser',
       });

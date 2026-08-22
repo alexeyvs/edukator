@@ -51,6 +51,19 @@ import {
 } from '../auth.js';
 import { hashParentPin, readParentPin, readPinPepper } from '../parent-pin.js';
 import { provisionChildDatabase } from '../data-dir.js';
+import {
+  assignCourse,
+  listCourseAssignments,
+  replaceTopicExclusions,
+  unassignCourse,
+  type CourseAssignment,
+} from '../course-assignments.js';
+import { listCourses, readRevisionTopics } from '../course-catalog.js';
+import { isCourseId, type CourseId } from '../db.js';
+
+const FAMILY_COURSE_ID_MAX_LENGTH = 80;
+const FAMILY_TOPIC_ID_MAX_LENGTH = 180;
+const FAMILY_EXCLUSIONS_MAX = 500;
 
 export interface FamilyRoutesOptions {
   control: Database;
@@ -74,6 +87,11 @@ export interface FamilyRoutesOptions {
 /** Ребёнок в ответе: состояние базы и список устройств, без единого токена. */
 interface FamilyChild extends ChildSummary {
   devices: DeviceSummary[];
+  courses: readonly CourseAssignment[];
+}
+
+interface FamilyCourseBody {
+  excludedTopicIds?: string[];
 }
 
 function readName(body: unknown): string | undefined {
@@ -97,6 +115,29 @@ function readPinBody(body: unknown): string | undefined {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined;
   const pin = (body as Record<string, unknown>)['pin'];
   return typeof pin === 'string' ? pin : undefined;
+}
+
+function courseIdParam(params: unknown): CourseId | undefined {
+  const courseId = (params as { courseId?: unknown }).courseId;
+  return typeof courseId === 'string' && courseId.length <= FAMILY_COURSE_ID_MAX_LENGTH && isCourseId(courseId)
+    ? courseId
+    : undefined;
+}
+
+function readCourseBody(body: unknown): FamilyCourseBody | undefined {
+  if (body === undefined) return {};
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined;
+  const fields = body as Record<string, unknown>;
+  if (Object.keys(fields).some((key) => key !== 'excludedTopicIds')) return undefined;
+  const raw = fields['excludedTopicIds'];
+  if (raw === undefined) return {};
+  if (
+    !Array.isArray(raw) ||
+    raw.length > FAMILY_EXCLUSIONS_MAX ||
+    raw.some((item) => typeof item !== 'string' || item.length === 0 || item.length > FAMILY_TOPIC_ID_MAX_LENGTH) ||
+    new Set(raw).size !== raw.length
+  ) return undefined;
+  return { excludedTopicIds: raw as string[] };
 }
 
 /**
@@ -175,7 +216,17 @@ export function registerFamilyRoutes(app: FastifyInstance, options: FamilyRoutes
 
   /** Ребёнок со своими устройствами. Отпечатков и токенов в этом виде нет. */
   function withDevices(child: ChildSummary): FamilyChild {
-    return { ...child, devices: listDevices(control, child.id) };
+    const publishedCourseIds = new Set(
+      listCourses(control)
+        .filter((course) => course.status === 'published' && course.activeRevisionId !== null)
+        .map((course) => course.id),
+    );
+    return {
+      ...child,
+      devices: listDevices(control, child.id),
+      courses: listCourseAssignments(control, child.id)
+        .filter((assignment) => publishedCourseIds.has(assignment.courseId)),
+    };
   }
 
   app.get('/api/family', (request, reply) => {
@@ -189,6 +240,94 @@ export function registerFamilyRoutes(app: FastifyInstance, options: FamilyRoutes
       pinConfigured: readParentPinHash(control, parent.parentId) !== undefined,
       children: listChildren(control, parent.parentId).map(withDevices),
     });
+  });
+
+  app.get('/api/family/courses', (request, reply) => {
+    const parent = requireParent(request, reply);
+    if (parent === undefined) return reply;
+
+    const courses = listCourses(control)
+      .filter((course) => course.status === 'published' && course.activeRevisionId !== null)
+      .map((course) => ({
+        courseId: course.id,
+        title: course.title,
+        grade: course.grade,
+        revisionId: course.activeRevisionId as number,
+        topics: readRevisionTopics(control, course.activeRevisionId as number)
+          .filter((topic) => topic.active)
+          .map((topic) => ({ id: topic.id, title: topic.title, prereqs: topic.prereqs })),
+      }));
+    return reply.send({ courses });
+  });
+
+  app.put('/api/family/children/:childId/courses/:courseId', (request, reply) => {
+    const parent = requireParent(request, reply);
+    if (parent === undefined) return reply;
+
+    let child: ChildSummary;
+    try {
+      child = authorizeChild(
+        control,
+        { kind: 'parent', parent },
+        (request.params as { childId: string }).childId,
+      );
+    } catch (error) {
+      if (!(error instanceof AuthError)) throw error;
+      return fail(reply, error);
+    }
+    const courseId = courseIdParam(request.params);
+    const body = readCourseBody(request.body);
+    if (courseId === undefined || body === undefined) {
+      return reply.code(400).send({ error: 'Некорректное назначение курса' });
+    }
+    const course = listCourses(control).find((item) => item.id === courseId);
+    if (course?.status !== 'published' || course.activeRevisionId === null) {
+      return reply.code(404).send({ error: 'Курс не найден' });
+    }
+    if (body.excludedTopicIds !== undefined) {
+      const activeTopicIds = new Set(
+        readRevisionTopics(control, course.activeRevisionId)
+          .filter((topic) => topic.active)
+          .map((topic) => topic.id),
+      );
+      if (body.excludedTopicIds.some((topicId) => !activeTopicIds.has(topicId))) {
+        return reply.code(400).send({ error: 'Исключать можно только активные темы курса' });
+      }
+    }
+
+    const previous = listCourseAssignments(control, child.id);
+    const wasAssigned = previous.some((assignment) => assignment.courseId === courseId);
+    let assignment = assignCourse(control, child.id, courseId, now());
+    if (body.excludedTopicIds !== undefined) {
+      assignment = replaceTopicExclusions(control, child.id, courseId, body.excludedTopicIds, now());
+    }
+    return reply.send({ assignment, idempotent: wasAssigned && body.excludedTopicIds === undefined });
+  });
+
+  app.delete('/api/family/children/:childId/courses/:courseId', (request, reply) => {
+    const parent = requireParent(request, reply);
+    if (parent === undefined) return reply;
+
+    let child: ChildSummary;
+    try {
+      child = authorizeChild(
+        control,
+        { kind: 'parent', parent },
+        (request.params as { childId: string }).childId,
+      );
+    } catch (error) {
+      if (!(error instanceof AuthError)) throw error;
+      return fail(reply, error);
+    }
+    const courseId = courseIdParam(request.params);
+    if (courseId === undefined) return reply.code(400).send({ error: 'Некорректный идентификатор курса' });
+    const course = listCourses(control).find((item) => item.id === courseId);
+    if (course?.status !== 'published' || course.activeRevisionId === null) {
+      return reply.code(404).send({ error: 'Курс не найден' });
+    }
+    const active = listCourseAssignments(control, child.id).some((item) => item.courseId === courseId);
+    const assignment = unassignCourse(control, child.id, courseId, now());
+    return reply.send({ assignment: assignment ?? null, idempotent: !active });
   });
 
   app.post('/api/family/children', (request, reply) => {
@@ -332,9 +471,12 @@ export function registerUnavailableFamily(app: FastifyInstance, reason: string):
   const send = (_request: unknown, reply: FastifyReply): FastifyReply =>
     reply.code(503).send({ error: `Управление семьёй недоступно: ${reason}` });
   app.get('/api/family', send);
+  app.get('/api/family/courses', send);
   app.post('/api/family/children', send);
   app.post('/api/family/children/:id/provision', send);
   app.post('/api/family/children/:id/devices', send);
   app.post('/api/family/devices/:id/revoke', send);
   app.post('/api/family/pin', send);
+  app.put('/api/family/children/:childId/courses/:courseId', send);
+  app.delete('/api/family/children/:childId/courses/:courseId', send);
 }
