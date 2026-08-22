@@ -194,19 +194,19 @@ Checkbox-пункты ниже описывают только автомати�
 
 ### Task 7: Реализовать админское API каталога и ручного редактора тем
 
-- [ ] добавить `server/routes/admin/courses.ts` и зарегистрировать маршруты в
+- [x] добавить `server/routes/admin/courses.ts` и зарегистрировать маршруты в
   `server/index.ts`: список, карточка, создание, правка метаданных, draft,
   редактирование тем, публикация и архивирование
-- [ ] ввести строгие схемы/пределы входных данных, idempotency для публикации и
+- [x] ввести строгие схемы/пределы входных данных, idempotency для публикации и
   optimistic conflict при редактировании устаревшего черновика
-- [ ] разрешить операции только существующему admin context; родительские,
+- [x] разрешить операции только существующему admin context; родительские,
   детские и impersonated предъявители должны получать отказ
-- [ ] писать create/update/publish/archive/retry в `admin_audit` без содержания
+- [x] писать create/update/publish/archive/retry в `admin_audit` без содержания
   учебников и без локальных путей
-- [ ] реализовать unavailable-маршруты для случая недоступной управляющей базы
-- [ ] написать route-тесты happy path, невалидного графа, конфликта, повторной
+- [x] реализовать unavailable-маршруты для случая недоступной управляющей базы
+- [x] написать route-тесты happy path, невалидного графа, конфликта, повторной
   публикации, архивирования и всех ролей
-- [ ] запустить `npx vitest run tests/admin-courses-routes.test.ts tests/admin-audit-routes.test.ts tests/auth.test.ts` и `npm run typecheck`
+- [x] запустить `npx vitest run tests/admin-courses-routes.test.ts tests/admin-audit-routes.test.ts tests/auth.test.ts` и `npm run typecheck`
 
 ### Task 8: Реализовать родительское API назначений
 

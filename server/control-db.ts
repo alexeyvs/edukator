@@ -3140,6 +3140,14 @@ export const ADMIN_AUDIT_ACTIONS = [
   'parent-create',
   'parent-invite',
   'parent-password',
+  'course-create',
+  'course-update',
+  'course-publish',
+  'course-archive',
+  // Reserved for the persistent catalog worker routes added with OCR. Keeping
+  // it in the closed vocabulary now prevents that route from inventing a
+  // free-form audit action later.
+  'course-retry',
 ] as const;
 
 export type AdminAuditAction = (typeof ADMIN_AUDIT_ACTIONS)[number];

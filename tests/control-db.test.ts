@@ -2481,6 +2481,11 @@ describe('журнал действий оператора', () => {
       'parent-create',
       'parent-invite',
       'parent-password',
+      'course-create',
+      'course-update',
+      'course-publish',
+      'course-archive',
+      'course-retry',
     ]);
     expect(isAdminAuditAction('impersonation-end')).toBe(true);
     expect(isAdminAuditAction('impersonation')).toBe(false);

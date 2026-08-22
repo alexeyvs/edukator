@@ -121,7 +121,7 @@ describe('GET /api/health', () => {
     writeFileSync(busy, 'не каталог, а файл');
     const unavailable = buildServer(undefined, { dataDir: busy });
     try {
-      for (const url of ['/api/auth/me', '/api/family']) {
+      for (const url of ['/api/auth/me', '/api/family', '/api/admin/courses']) {
         const response = await unavailable.inject({ method: 'GET', url });
         expect(response.statusCode, url).toBe(503);
         expect((response.json() as { error: string }).error, url)

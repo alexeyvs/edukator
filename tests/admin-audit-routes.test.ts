@@ -95,6 +95,24 @@ describe('маршрут журнала действий оператора', ()
     expect(body.entries.map((entry) => entry.action)).toEqual(['login-failed']);
   });
 
+  it('принимает закрытые действия каталога, включая будущий retry worker', async () => {
+    const actions: AdminAuditAction[] = [
+      'course-create',
+      'course-update',
+      'course-publish',
+      'course-archive',
+      'course-retry',
+    ];
+    actions.forEach((action, index) => write(action, index));
+
+    for (const action of actions) {
+      const body = (await get(`/api/admin/audit?action=${action}`)).json() as {
+        entries: AdminAuditEntry[];
+      };
+      expect(body.entries.map((entry) => entry.action)).toEqual([action]);
+    }
+  });
+
   it('отвечает 400 на неизвестное действие, а не пустой лентой', async () => {
     write('login', 0);
     const response = await get('/api/admin/audit?action=импресонация');

@@ -46,6 +46,12 @@ export interface DraftTopicInput {
   active?: boolean;
 }
 
+export interface CatalogRevisionTopic extends Omit<DraftTopicInput, 'clientId'> {
+  id: string;
+  active: boolean;
+  position: number;
+}
+
 interface CourseRow {
   id: string;
   title: string;
@@ -154,6 +160,57 @@ export function readCourse(db: Database, courseId: CourseId): CatalogCourse | un
 export function readRevision(db: Database, revisionId: number): CatalogRevision | undefined {
   const row = selectRevision(db, revisionId);
   return row === undefined ? undefined : toRevision(row);
+}
+
+export function listCourseRevisions(db: Database, courseId: CourseId): CatalogRevision[] {
+  requireCourse(db, requireCourseId(courseId));
+  return db
+    .prepare<[string], RevisionRow>(
+      'SELECT * FROM course_revisions WHERE course_id = ? ORDER BY revision_number DESC',
+    )
+    .all(courseId)
+    .map(toRevision);
+}
+
+export function readRevisionTopics(db: Database, revisionId: number): CatalogRevisionTopic[] {
+  if (selectRevision(db, revisionId) === undefined) {
+    throw new CatalogNotFoundError(`Редакция ${revisionId} не найдена`);
+  }
+  const rows = db.prepare<
+    [number],
+    {
+      topic_id: string;
+      title: string;
+      exam_weight: number;
+      difficulty: number;
+      answer_format: AnswerFormat;
+      prompt_seed: string;
+      position: number;
+      active: number;
+    }
+  >(
+    `SELECT topic_id, title, exam_weight, difficulty, answer_format, prompt_seed, position, active
+       FROM revision_topics WHERE revision_id = ? ORDER BY position`,
+  ).all(revisionId);
+  const prereqs = db.prepare<[number], { topic_id: string; prereq_topic_id: string }>(
+    `SELECT topic_id, prereq_topic_id FROM topic_prereqs
+      WHERE revision_id = ? ORDER BY topic_id, position`,
+  ).all(revisionId);
+  const byTopic = new Map<string, string[]>();
+  for (const row of prereqs) {
+    byTopic.set(row.topic_id, [...(byTopic.get(row.topic_id) ?? []), row.prereq_topic_id]);
+  }
+  return rows.map((row) => ({
+    id: row.topic_id,
+    title: row.title,
+    examWeight: row.exam_weight,
+    difficulty: row.difficulty,
+    prereqs: byTopic.get(row.topic_id) ?? [],
+    answerFormat: row.answer_format,
+    promptSeed: row.prompt_seed,
+    active: row.active === 1,
+    position: row.position,
+  }));
 }
 
 export interface CreateCourseInput {

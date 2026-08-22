@@ -55,6 +55,10 @@ import {
   registerAdminAuditRoutes,
   registerUnavailableAdminAudit,
 } from './routes/admin/audit.js';
+import {
+  registerAdminCoursesRoutes,
+  registerUnavailableAdminCourses,
+} from './routes/admin/courses.js';
 import { registerFamilyRoutes, registerUnavailableFamily } from './routes/family.js';
 import { codexConcurrency, disputeConcurrency, type CodexConcurrency } from './codex/concurrency.js';
 import { createQuotedRunner } from './codex/quota.js';
@@ -530,6 +534,11 @@ export function buildServer(
         insecureCookies,
       });
       registerAdminAuditRoutes(app, { context: adminContext, control });
+      registerAdminCoursesRoutes(app, {
+        context: adminContext,
+        control,
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
       registerAdminParentsRoutes(app, {
         context: adminContext,
         control,
@@ -614,6 +623,7 @@ export function buildServer(
       registerUnavailableAdminLogs(app, reason);
       registerUnavailableAdminImpersonate(app, reason);
       registerUnavailableAdminAudit(app, reason);
+      registerUnavailableAdminCourses(app, reason);
       registerUnavailableAdminParents(app, reason);
       registerUnavailableFamily(app, reason);
       registerUnavailableSession(app, reason);
