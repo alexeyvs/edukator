@@ -134,7 +134,7 @@ describe('доменная модель босса', () => {
     expect(first.task.question).toContain('Босс 1');
     expect(Object.keys(first.task).sort()).toEqual([
       'answerFormat', 'choices', 'difficulty', 'id', 'instruction', 'material',
-      'materialFormat', 'question', 'subject', 'topicId', 'topicTitle',
+      'materialFormat', 'question', 'subject', 'topicId', 'topicTitle', 'wordTiles',
     ]);
     expect(JSON.stringify(first.task)).not.toContain('Секретная подсказка');
 

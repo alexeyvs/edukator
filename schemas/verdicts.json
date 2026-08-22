@@ -18,7 +18,7 @@
     "verdict": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["answer", "unambiguous", "natural", "on_topic", "age_appropriate", "hint_safe", "note"],
+      "required": ["answer", "unambiguous", "natural", "on_topic", "age_appropriate", "hint_safe", "hint_useful", "deep_hint_safe", "deep_hint_useful", "word_order_valid", "note"],
       "properties": {
         "answer": {
           "description": "Твой собственный ответ на задание, в самой короткой записи. Для числовой темы — ровно одно число.",
@@ -43,6 +43,22 @@
         },
         "hint_safe": {
           "description": "Подсказка не раскрывает ответ прямо, через позицию варианта, заполненный пропуск или однозначный пересказ.",
+          "type": "boolean"
+        },
+        "hint_useful": {
+          "description": "Краткая подсказка даёт применимое правило и направление решения, а не общую фразу.",
+          "type": "boolean"
+        },
+        "deep_hint_safe": {
+          "description": "Расширенная подсказка не раскрывает ответ текущего задания и использует в примерах только другие числа, слова или ситуации.",
+          "type": "boolean"
+        },
+        "deep_hint_useful": {
+          "description": "Расширенная подсказка добавляет теорию, содержит два корректных разобранных примера и пригодный чек-лист.",
+          "type": "boolean"
+        },
+        "word_order_valid": {
+          "description": "Для обычного задания true. Для word_tiles — карточки однозначно собираются в естественный ответ, пунктуация прикреплена к словам, а исходный порядок неверный.",
           "type": "boolean"
         },
         "note": {

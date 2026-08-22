@@ -18,7 +18,7 @@
     "task": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["instruction", "material", "material_format", "choices", "answer", "accept", "hint", "explain", "joke", "difficulty"],
+      "required": ["instruction", "material", "material_format", "choices", "word_tiles", "answer", "accept", "hint", "deep_hint", "explain", "joke", "difficulty"],
       "properties": {
         "instruction": {
           "description": "Краткое указание, что нужно сделать. Не дублирует материал.",
@@ -35,10 +35,16 @@
           "enum": ["none", "text", "math"]
         },
         "choices": {
-          "description": "Для choice — от 2 до 6 уникальных вариантов, один из которых буквально равен answer. Для number/text — пустой массив.",
+          "description": "Для choice — от 2 до 6 уникальных вариантов, один из которых буквально равен answer. Для number/text и заданий с word_tiles — пустой массив.",
           "type": "array",
           "maxItems": 6,
           "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "word_tiles": {
+          "description": "Карточки задания на порядок слов. Для обычного задания — пустой массив. Для расстановки слов — от 2 до 12 непустых карточек без пробелов внутри; их мультимножество буквально собирается через один пробел в answer, но здесь они ещё не стоят в правильном порядке. Пунктуация прикреплена к слову.",
+          "type": "array",
+          "maxItems": 12,
           "items": { "type": "string", "minLength": 1 }
         },
         "answer": {
@@ -57,6 +63,37 @@
           "description": "Подсказка из 2-4 предложений: правило, применимость, путь решения и самопроверка. Не содержит ответ, заполненный пропуск, правильный вариант или его позицию.",
           "type": "string",
           "minLength": 1
+        },
+        "deep_hint": {
+          "description": "Расширенная теория объёмом 200–350 слов: правило, дополнительное объяснение, ровно два разобранных похожих примера только с другими числами, словами или ситуациями и короткий чек-лист. Не раскрывает ответ текущего задания.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["rule", "explanation", "examples", "checklist"],
+          "properties": {
+            "rule": { "type": "string", "minLength": 1 },
+            "explanation": { "type": "string", "minLength": 1 },
+            "examples": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["prompt", "answer", "walkthrough"],
+                "properties": {
+                  "prompt": { "type": "string", "minLength": 1 },
+                  "answer": { "type": "string", "minLength": 1 },
+                  "walkthrough": { "type": "string", "minLength": 1 }
+                }
+              }
+            },
+            "checklist": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 5,
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
         },
         "explain": {
           "description": "Разбор решения по шагам: показывается после ответа.",

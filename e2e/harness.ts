@@ -187,6 +187,21 @@ function writeCurriculum(directory: string): void {
 
 function task(subject: Subject, topic: number, index: number): GeneratedTask {
   if (subject === 'russian') {
+    if (index === 2) {
+      return {
+        instruction: `Собери предложение в задании ${subject}.${topic} номер ${index}.`,
+        material: '',
+        material_format: 'none',
+        choices: [],
+        word_tiles: ['winter.', 'in', 'Moscow', 'is', 'cold'],
+        answer: 'Moscow is cold in winter.',
+        accept: ['Moscow is cold in winter.'],
+        hint: 'Сначала найди подлежащее и сказуемое. Затем поставь обстоятельство времени в естественную позицию.',
+        explain: 'Получается законченное предложение: Moscow is cold in winter.',
+        joke: 'Слова встали в очередь без талончиков.',
+        difficulty: index % 3 + 1,
+      };
+    }
     return {
       instruction: `Вставь слово в задании ${subject}.${topic} номер ${index}.`,
       material: 'На полке лежит школьный ___ .',

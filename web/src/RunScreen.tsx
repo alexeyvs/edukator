@@ -93,7 +93,7 @@ export function RunScreen({
   const [current, setCurrent] = useState<NextTaskResponse | null>(null);
   const [progress, setProgress] = useState<RunProgress | null>(null);
   const [answer, setAnswer] = useState('');
-  const [hintUsed, setHintUsed] = useState(false);
+  const [hintLevel, setHintLevel] = useState<0 | 1 | 2>(0);
   const [retryAttemptId, setRetryAttemptId] = useState<number | undefined>();
   const [result, setResult] = useState<AnswerResponse | null>(null);
   const [problem, setProblem] = useState<ScreenProblem | null>(null);
@@ -121,7 +121,7 @@ export function RunScreen({
     setIntegrity(normalized);
     if (normalized.status === 'retry_required') {
       setAnswer('');
-      setHintUsed(false);
+      setHintLevel(0);
       shownAt.current = Date.now();
     }
   }, [kind]);
@@ -189,7 +189,7 @@ export function RunScreen({
     setCurrent(shown);
     setProgress(actualProgress);
     setAnswer(next.retry?.previous_answer ?? '');
-    setHintUsed(false);
+    setHintLevel(0);
     setRetryAttemptId(undefined);
     setResult(next.retry === undefined ? null : {
       attempt_id: next.retry.attempt_id,
@@ -273,7 +273,7 @@ export function RunScreen({
         runId,
         taskId: current.task.id,
         answer,
-        hintUsed,
+        hintUsed: hintLevel > 0,
         durationMs: Math.max(0, Date.now() - shownAt.current),
         ...(retryAttemptId === undefined ? {} : { retryAttemptId }),
       });
@@ -344,7 +344,7 @@ export function RunScreen({
         itemId: integrity.retry.item_id,
         answer,
         durationMs: Math.max(0, Date.now() - shownAt.current),
-        hintUsed,
+        hintUsed: hintLevel > 0,
       });
       if (generation.current === token) acceptIntegrity(state);
     } catch (error) {
@@ -414,13 +414,19 @@ export function RunScreen({
             onAnswerChange={setAnswer}
             answerId="integrity-answer"
             headingId="integrity-question"
-            hintVisible={hintUsed}
+            hintLevel={hintLevel}
             {...(integrity.retry.task.hint === undefined ? {} : { hint: integrity.retry.task.hint })}
+            {...(integrity.retry.task.deep_hint === undefined ? {} : { deepHint: integrity.retry.task.deep_hint })}
           />
           <div className="task-actions">
-            {integrity.retry.task.hint !== undefined && (
-              <button className="secondary" type="button" onClick={() => setHintUsed(true)} disabled={hintUsed}>
-                {hintUsed ? 'Подсказка открыта' : 'Нужна подсказка'}
+            {integrity.retry.task.hint !== undefined && hintLevel === 0 && (
+              <button className="secondary" type="button" onClick={() => setHintLevel(1)}>
+                Нужна подсказка
+              </button>
+            )}
+            {integrity.retry.task.deep_hint !== undefined && hintLevel >= 1 && (
+              <button className="secondary" type="button" onClick={() => setHintLevel(2)} disabled={hintLevel === 2}>
+                {hintLevel === 2 ? 'Теория открыта' : 'Подробнее: теория и примеры'}
               </button>
             )}
             <button className="primary" type="submit" disabled={submitting || answer.trim() === ''}>
@@ -479,12 +485,21 @@ export function RunScreen({
               onAnswerChange={setAnswer}
               answerId="run-answer"
               headingId="task-question"
-              {...(kind === 'lesson' ? {} : { hint: current.task.hint, hintVisible: hintUsed })}
+              {...(kind === 'lesson' ? {} : {
+                hint: current.task.hint,
+                deepHint: current.task.deep_hint,
+                hintLevel,
+              })}
             />
             <div className="task-actions">
-              {kind !== 'lesson' && (
-                <button className="secondary" type="button" onClick={() => setHintUsed(true)} disabled={hintUsed}>
-                  {hintUsed ? 'Подсказка открыта' : 'Нужна подсказка'}
+              {kind !== 'lesson' && current.task.hint !== undefined && hintLevel === 0 && (
+                <button className="secondary" type="button" onClick={() => setHintLevel(1)}>
+                  Нужна подсказка
+                </button>
+              )}
+              {kind !== 'lesson' && current.task.deep_hint !== undefined && hintLevel >= 1 && (
+                <button className="secondary" type="button" onClick={() => setHintLevel(2)} disabled={hintLevel === 2}>
+                  {hintLevel === 2 ? 'Теория открыта' : 'Подробнее: теория и примеры'}
                 </button>
               )}
               <button className="primary" type="submit" disabled={submitting || answer.trim() === ''}>
@@ -501,7 +516,11 @@ export function RunScreen({
             answerId="run-answer-result"
             headingId="task-question"
             readOnly
-            {...(kind === 'lesson' ? {} : { hint: current.task.hint, hintVisible: hintUsed })}
+            {...(kind === 'lesson' ? {} : {
+              hint: current.task.hint,
+              deepHint: current.task.deep_hint,
+              hintLevel,
+            })}
           />
           {result.integrity_check === true ? (
             <div className="answer-result integrity-held">

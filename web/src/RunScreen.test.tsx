@@ -16,6 +16,16 @@ import type { FinishLearningResponse } from './learning-api';
 
 afterEach(cleanup);
 
+const DEEP_HINT: NonNullable<NextTaskResponse['task']['deep_hint']> = {
+  rule: 'Складывай величины одного вида.',
+  explanation: 'Сначала проверь действие, затем выполни обратную проверку.',
+  examples: [
+    { prompt: 'Три плюс три.', answer: 'Шесть.', walkthrough: 'Объединяем две равные группы.' },
+    { prompt: 'Пять плюс пять.', answer: 'Десять.', walkthrough: 'Удваиваем исходное число.' },
+  ],
+  checklist: ['Действие выбрано.', 'Результат проверен.'],
+};
+
 function task(id: number, question = `Сколько будет ${id} + ${id}?`): NextTaskResponse {
   return {
     task: {
@@ -25,6 +35,7 @@ function task(id: number, question = `Сколько будет ${id} + ${id}?`)
       subject: 'math',
       question,
       hint: 'Сложи одинаковые числа.',
+      deep_hint: DEEP_HINT,
       difficulty: 2,
       answer_format: 'number',
     },
@@ -194,6 +205,10 @@ describe('экран забега', () => {
     expect(screen.getByLabelText('Прогресс: 0 из 12')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Нужна подсказка' }));
     expect(screen.getByText('Сложи одинаковые числа.')).toBeInTheDocument();
+    expect(screen.queryByText('Складывай величины одного вида.')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Подробнее: теория и примеры' }));
+    expect(screen.getByText('Складывай величины одного вида.')).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { name: /Похожий пример/u })).toHaveLength(2);
 
     fireEvent.change(screen.getByLabelText('Число'), { target: { value: '2' } });
     fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));

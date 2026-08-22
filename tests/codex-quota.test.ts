@@ -23,6 +23,7 @@ import { CodexQuotaError, createQuotedRunner } from '../server/codex/quota.js';
 import { createValidatingProducer, runWarmupCycle } from '../server/codex/worker.js';
 import { reviewDispute } from '../server/codex/dispute.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
+import { TEST_DEEP_HINT } from './generated-task-fixture.js';
 
 function topic(id = 'math.fractions', patch: Partial<Topic> = {}): Topic {
   return {
@@ -44,9 +45,11 @@ function task(index: number): GeneratedTask {
     material: '',
     material_format: 'none',
     choices: [],
+    word_tiles: [],
     answer: '45',
     accept: ['45', '45 монет'],
     hint: 'Раздели девяносто пополам. Потом проверь обратным действием.',
+    deep_hint: TEST_DEEP_HINT,
     explain: '90 : 2 = 45.',
     joke: 'Кошелёк похудел вдвое.',
     difficulty: 2,
@@ -68,6 +71,10 @@ function verdicts(count: number): string {
       on_topic: true,
       age_appropriate: true,
       hint_safe: true,
+      hint_useful: true,
+      deep_hint_safe: true,
+      deep_hint_useful: true,
+      word_order_valid: true,
       note: '',
     })),
   });

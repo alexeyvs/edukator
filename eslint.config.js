@@ -12,6 +12,7 @@ export default tseslint.config(
       '.tmp/**',
       'controller/.venv/**',
       'controller/build/**',
+      '.claude/**',
     ],
   },
   js.configs.recommended,

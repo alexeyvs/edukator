@@ -1,5 +1,15 @@
 export type AnswerFormat = 'number' | 'text' | 'choice';
 
+export interface DeepHint {
+  rule: string;
+  explanation: string;
+  examples: [
+    { prompt: string; answer: string; walkthrough: string },
+    { prompt: string; answer: string; walkthrough: string },
+  ];
+  checklist: string[];
+}
+
 export interface RunProgress {
   total: number;
   correct: number;
@@ -22,7 +32,9 @@ export interface RunTask {
   material?: string;
   material_format?: 'none' | 'text' | 'math';
   choices?: string[];
+  word_tiles?: string[];
   hint?: string;
+  deep_hint?: DeepHint;
   difficulty: number;
   answer_format: AnswerFormat;
 }
@@ -93,7 +105,7 @@ export interface FinishRunResponse {
 }
 
 export type NextTriageResponse =
-  | { status: 'ok'; task: Omit<RunTask, 'hint'>; progress: RunProgress }
+  | { status: 'ok'; task: Omit<RunTask, 'hint' | 'deep_hint'>; progress: RunProgress }
   | { status: 'done'; total: number; target: number };
 
 export type DisputeStatus = 'open' | 'upheld' | 'rejected';

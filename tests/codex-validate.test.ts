@@ -16,6 +16,7 @@ import {
   validateTaskBatch,
   type Verdict,
 } from '../server/codex/validate.js';
+import { TEST_DEEP_HINT } from './generated-task-fixture.js';
 
 function topic(patch: Partial<Topic> = {}): Topic {
   return {
@@ -34,9 +35,11 @@ function topic(patch: Partial<Topic> = {}): Topic {
 function task(patch: Partial<GeneratedTask> = {}): GeneratedTask {
   return {
     instruction: 'Реши задачу.', material: 'В инвентаре 90 монет, половину потратил. Сколько осталось?', material_format: 'text', choices: [],
+    word_tiles: [],
     answer: '45',
     accept: ['45', '45 монет'],
     hint: 'Половина от девяноста',
+    deep_hint: TEST_DEEP_HINT,
     explain: '90 : 2 = 45',
     joke: 'Кошелёк похудел вдвое — как и шансы на новый скин',
     difficulty: 2,
@@ -53,6 +56,10 @@ function verdict(patch: Partial<Verdict> = {}): unknown {
     onTopic: true,
     ageAppropriate: true,
     hintSafe: true,
+    hintUseful: true,
+    deepHintSafe: true,
+    deepHintUseful: true,
+    wordOrderValid: true,
     note: '',
     ...patch,
   };
@@ -64,6 +71,10 @@ function verdict(patch: Partial<Verdict> = {}): unknown {
     on_topic: full.onTopic,
     age_appropriate: full.ageAppropriate,
     hint_safe: full.hintSafe,
+    hint_useful: full.hintUseful,
+    deep_hint_safe: full.deepHintSafe,
+    deep_hint_useful: full.deepHintUseful,
+    word_order_valid: full.wordOrderValid,
     note: full.note,
   };
 }
@@ -135,6 +146,10 @@ describe('validateTaskBatch: совпадающие ответы', () => {
     expect(prompt).toContain('В инвентаре 90 монет');
     expect(prompt).toContain('Половина от девяноста');
     expect(prompt).toContain('hint_safe');
+    expect(prompt).toContain(TEST_DEEP_HINT.rule);
+    expect(prompt).toContain('deep_hint_safe');
+    expect(prompt).toContain('deep_hint_useful');
+    expect(prompt).toContain('word_order_valid');
     expect(prompt).not.toContain('90 : 2 = 45');
     expect(prompt).not.toContain('новый скин');
     // «45» встречается в условии как часть числа 90 не может, поэтому проверка
@@ -274,12 +289,17 @@ describe('validateTaskBatch: сверка идёт нормализатором'
     expect(result.rejected[0]?.reason).toContain('«45»');
   });
 
-  it('отбраковывает задание при провале любой из четырёх оценок', async () => {
+  it('отбраковывает задание при провале любой оценки обоих уровней и карточек', async () => {
     const checks = [
       { patch: { unambiguous: false }, reason: /неоднозначно/u },
       { patch: { natural: false }, reason: /натянут/u },
       { patch: { onTopic: false }, reason: /не о заявленной теме/u },
       { patch: { ageAppropriate: false }, reason: /не годится подростку/u },
+      { patch: { hintSafe: false }, reason: /подсказка раскрывает/u },
+      { patch: { hintUseful: false }, reason: /не даёт полезного направления/u },
+      { patch: { deepHintSafe: false }, reason: /расширенная подсказка раскрывает/u },
+      { patch: { deepHintUseful: false }, reason: /не даёт полезной теории/u },
+      { patch: { wordOrderValid: false }, reason: /карточки нельзя однозначно собрать/u },
     ];
 
     for (const { patch, reason } of checks) {
@@ -402,6 +422,10 @@ describe('parseVerdictBatch', () => {
       onTopic: false,
       ageAppropriate: true,
       hintSafe: true,
+      hintUseful: true,
+      deepHintSafe: true,
+      deepHintUseful: true,
+      wordOrderValid: true,
       note: 'это про проценты',
     });
   });

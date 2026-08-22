@@ -5,7 +5,7 @@ import { LEARNING_TASK_COUNT } from './learning-constants.js';
  * Версия схемы. Хранится в `PRAGMA user_version`; миграция сравнивает её со
  * своей и пропускает работу, если база уже актуальна.
  */
-export const SCHEMA_VERSION = 17;
+export const SCHEMA_VERSION = 18;
 
 /** Таблицы приложения. Тесты сверяют состав базы именно с этим списком. */
 export const TABLES = [
@@ -104,9 +104,11 @@ const CORE_SCHEMA = `
     material   TEXT,
     material_format TEXT CHECK (material_format IN ('none', 'text', 'math')),
     choices    TEXT,
+    word_tiles TEXT,
     answer     TEXT    NOT NULL,
     accept     TEXT    NOT NULL DEFAULT '[]',
     hint       TEXT,
+    deep_hint  TEXT,
     explain    TEXT,
     joke       TEXT,
     difficulty INTEGER NOT NULL CHECK (difficulty BETWEEN 1 AND 3),
@@ -154,6 +156,8 @@ const CORE_SCHEMA = `
     answer      TEXT    NOT NULL,
     is_correct  INTEGER NOT NULL CHECK (is_correct IN (0, 1)),
     hint_used   INTEGER NOT NULL DEFAULT 0 CHECK (hint_used IN (0, 1)),
+    -- Старые попытки сохраняют прежний штраф независимо от новых правил.
+    hint_penalty_applied INTEGER NOT NULL DEFAULT 0 CHECK (hint_penalty_applied IN (0, 1)),
     duration_ms INTEGER NOT NULL DEFAULT 0 CHECK (duration_ms >= 0),
     is_current  INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1)),
     life_charged INTEGER NOT NULL DEFAULT 0 CHECK (life_charged IN (0, 1)),
@@ -917,6 +921,47 @@ export function migrate(db: Database.Database): void {
       `);
     }
 
+    if (version <= 17) {
+      const bankColumns = db
+        .prepare<[], { name: string }>('PRAGMA table_info(task_bank)')
+        .all()
+        .map((column) => column.name);
+      if (!bankColumns.includes('word_tiles')) {
+        db.exec('ALTER TABLE task_bank ADD COLUMN word_tiles TEXT;');
+      }
+      if (!bankColumns.includes('deep_hint')) {
+        db.exec('ALTER TABLE task_bank ADD COLUMN deep_hint TEXT;');
+      }
+
+      const attemptColumns = db
+        .prepare<[], { name: string }>('PRAGMA table_info(attempts)')
+        .all()
+        .map((column) => column.name);
+      if (!attemptColumns.includes('hint_penalty_applied')) {
+        db.exec(`
+          ALTER TABLE attempts ADD COLUMN hint_penalty_applied INTEGER NOT NULL DEFAULT 0
+            CHECK (hint_penalty_applied IN (0, 1));
+        `);
+      }
+      // До v18 факт подсказки и факт штрафа совпадали. После миграции новые
+      // попытки получают ноль, а пересчёт старой истории читает этот снимок.
+      db.exec('UPDATE attempts SET hint_penalty_applied = hint_used;');
+
+      // Старую обычную очередь новый интерфейс выдавать не должен: у неё нет
+      // второго уровня подсказки. Уже выданные, исторические и подготовленные
+      // boss/lesson-наборы сохраняются — активный забег важнее обновления формата.
+      db.exec(`
+        UPDATE task_bank SET status = 'rejected'
+         WHERE status IN ('pending', 'valid')
+           AND (word_tiles IS NULL OR deep_hint IS NULL)
+           AND EXISTS (SELECT 1 FROM attempts WHERE attempts.task_id = task_bank.id);
+        DELETE FROM task_bank
+         WHERE status IN ('pending', 'valid')
+           AND (word_tiles IS NULL OR deep_hint IS NULL)
+           AND NOT EXISTS (SELECT 1 FROM attempts WHERE attempts.task_id = task_bank.id);
+      `);
+    }
+
     // CREATE TRIGGER IF NOT EXISTS не обновляет текст уже установленного
     // триггера, поэтому v14 должна получить и новые инварианты, и русские ошибки.
     db.exec(`
@@ -941,9 +986,9 @@ export function migrate(db: Database.Database): void {
 const REQUIRED_COLUMNS: Readonly<Record<(typeof TABLES)[number], readonly string[]>> = {
   profile: ['id', 'name', 'interests', 'exam_date', 'partner_name'],
   topic_state: ['topic_id', 'mastery', 'confidence', 'attempts', 'last_seen', 'next_review', 'closed_at'],
-  task_bank: ['id', 'topic_id', 'question', 'instruction', 'material', 'material_format', 'choices', 'answer', 'accept', 'hint', 'explain', 'joke', 'difficulty', 'status', 'fingerprint', 'issued_run_id', 'created_at'],
+  task_bank: ['id', 'topic_id', 'question', 'instruction', 'material', 'material_format', 'choices', 'word_tiles', 'answer', 'accept', 'hint', 'deep_hint', 'explain', 'joke', 'difficulty', 'status', 'fingerprint', 'issued_run_id', 'created_at'],
   runs: ['id', 'subject', 'kind', 'topic_id', 'started_at', 'finished_at', 'summary', 'total', 'correct', 'lives_remaining', 'retry_task_id'],
-  attempts: ['id', 'task_id', 'topic_id', 'run_id', 'answer', 'is_correct', 'hint_used', 'duration_ms', 'is_current', 'life_charged', 'affects_progress', 'created_at'],
+  attempts: ['id', 'task_id', 'topic_id', 'run_id', 'answer', 'is_correct', 'hint_used', 'hint_penalty_applied', 'duration_ms', 'is_current', 'life_charged', 'affects_progress', 'created_at'],
   disputes: ['id', 'attempt_id', 'status', 'resolution', 'created_at', 'resolved_at'],
   forecast_snapshots: ['id', 'subject', 'score', 'band', 'created_at'],
   boss_batches: ['id', 'topic_id', 'run_id', 'status', 'created_at', 'activated_at', 'finished_at'],

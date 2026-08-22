@@ -18,6 +18,7 @@ import {
 } from '../server/control-db.js';
 import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
 import type { FailureRecord } from '../server/log.js';
+import { TEST_DEEP_HINT } from './generated-task-fixture.js';
 import {
   DEFAULT_MAX_OPEN_TENANTS,
   TenantError,
@@ -54,9 +55,11 @@ const SEED = {
           material: '',
           material_format: 'none',
           choices: [],
+          word_tiles: [],
           answer: '4',
           accept: ['4', '4 штуки'],
           hint: 'Сложи числа по разрядам. Проверь результат обратным действием.',
+          deep_hint: TEST_DEEP_HINT,
           explain: 'Два плюс два — четыре.',
           joke: 'Не Нобелевка, но зачёт.',
           difficulty: 2,

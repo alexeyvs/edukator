@@ -4,7 +4,10 @@ export const XP_NO_HINT = 5;
 export interface TaskXpInput {
   difficulty: number;
   correct: boolean;
-  hintUsed: boolean;
+  /** Сохранённый штраф старой попытки; для новых ответов false. */
+  hintPenaltyApplied?: boolean;
+  /** Совместимость со старыми прямыми вызовами. */
+  hintUsed?: boolean;
 }
 
 export function taskXp(input: TaskXpInput): number {
@@ -14,5 +17,6 @@ export function taskXp(input: TaskXpInput): number {
 
   if (!input.correct) return 0;
 
-  return XP_BASE * input.difficulty + (input.hintUsed ? 0 : XP_NO_HINT);
+  const penalized = input.hintPenaltyApplied ?? input.hintUsed ?? false;
+  return XP_BASE * input.difficulty + (penalized ? 0 : XP_NO_HINT);
 }

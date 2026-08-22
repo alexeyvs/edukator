@@ -39,6 +39,50 @@ function prompt(value = '', onChange = vi.fn(), overrides: Partial<RunTask> = {}
 }
 
 describe('структурированное задание', () => {
+  it('раскрывает краткую подсказку раньше теории с двумя примерами', () => {
+    const deepHint: NonNullable<RunTask['deep_hint']> = {
+      rule: 'Сначала определи правило.',
+      explanation: 'Проверь, почему оно применимо.',
+      examples: [
+        { prompt: 'Другой вопрос один.', answer: 'Другой ответ один.', walkthrough: 'Разбор один.' },
+        { prompt: 'Другой вопрос два.', answer: 'Другой ответ два.', walkthrough: 'Разбор два.' },
+      ],
+      checklist: ['Правило выбрано.', 'Ответ проверен.'],
+    };
+    const view = render(
+      <TaskPrompt
+        task={task()}
+        answer=""
+        onAnswerChange={vi.fn()}
+        answerId="answer"
+        headingId="question"
+        hint="Короткое направление. Проверь шаги."
+        deepHint={deepHint}
+        hintLevel={1}
+      />,
+    );
+
+    expect(screen.getByText('Короткое направление. Проверь шаги.')).toBeInTheDocument();
+    expect(screen.queryByRole('complementary', { name: 'Теория и похожие примеры' }))
+      .not.toBeInTheDocument();
+
+    view.rerender(
+      <TaskPrompt
+        task={task()}
+        answer=""
+        onAnswerChange={vi.fn()}
+        answerId="answer"
+        headingId="question"
+        hint="Короткое направление. Проверь шаги."
+        deepHint={deepHint}
+        hintLevel={2}
+      />,
+    );
+    expect(screen.getByRole('complementary', { name: 'Теория и похожие примеры' })).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { name: /Похожий пример/u })).toHaveLength(2);
+    expect(screen.getByText('Ответ проверен.')).toBeInTheDocument();
+  });
+
   it('рендерит inline и display LaTeX внутри обычного текста', () => {
     const { container } = render(<SafeRichText source={String.raw`Дробь \(\frac{2}{3}\), затем \[x=4\].`} />);
 

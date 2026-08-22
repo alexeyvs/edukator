@@ -7,6 +7,10 @@
     "validate": "gpt-5.6-sol"
   },
   "command": "npm run prefetch -- --topics 18 --target 8 --threshold 8 --batches 4 --cycles 3 --seed-dir <empty> --db <fresh>/bank.sqlite --out <fresh>/out --export",
+  "format_upgrade": {
+    "date": "2026-08-22",
+    "description": "Добавлены обязательные word_tiles и deep_hint; позиции choice сбалансированы внутри тем. Содержание исходных заданий сохранено, одно английское задание переведено в механику порядка слов."
+  },
   "result": {
     "topics": 18,
     "tasks": 168,
@@ -17,17 +21,17 @@
       "math": {
         "topics": 6,
         "tasks": 59,
-        "sha256": "c8099f4c9bc4c34c79931eb2d2c099cc9f1c26a45de5476004d116d88959c0aa"
+        "sha256": "02fd82faf4a067bd60b4c9bbae5ebe688e651bc863fea1d82f24059c5d135cea"
       },
       "russian": {
         "topics": 6,
         "tasks": 55,
-        "sha256": "324dfdde2a4a7495294c18971a817e70ca21130c7ad5a1378028acdf7ed64583"
+        "sha256": "b30a7a8205b695c357693500e237b0fafdf4a5c310c9ca4e7e26e1051801e0a7"
       },
       "english": {
         "topics": 6,
         "tasks": 54,
-        "sha256": "ddd56f9c7d07e81f99c4b6fce972b6ad4425d73a5e61747ccc2e56d465449f91"
+        "sha256": "686c709f092f49053c401dbe16b6a67a82306a6bc8c6de310b71959ceca02172"
       }
     }
   }

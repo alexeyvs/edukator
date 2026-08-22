@@ -244,8 +244,12 @@ function replaceIntegrityAttempt(
       id: number; topic_id: string; answer: string; accept: string; choices: string | null;
     }>('SELECT id, topic_id, answer, accept, choices FROM task_bank WHERE id = ?').get(item.task_id);
     const previous = db.prepare<[number], {
-      id: number; is_correct: number; affects_progress: number;
-    }>('SELECT id, is_correct, affects_progress FROM attempts WHERE id = ? AND is_current = 1')
+      id: number; is_correct: number; hint_used: number;
+      hint_penalty_applied: number; affects_progress: number;
+    }>(
+      `SELECT id, is_correct, hint_used, hint_penalty_applied, affects_progress
+         FROM attempts WHERE id = ? AND is_current = 1`,
+    )
       .get(item.attempt_id);
     if (task === undefined || previous === undefined) {
       throw new IntegrityError('attempt-changed', 'Проверяемый ответ изменился до повторной попытки');
@@ -260,12 +264,14 @@ function replaceIntegrityAttempt(
     db.prepare('UPDATE attempts SET is_current = 0 WHERE id = ?').run(previous.id);
     const inserted = db.prepare(
       `INSERT INTO attempts
-        (task_id, topic_id, run_id, answer, is_correct, hint_used, duration_ms,
-         is_current, life_charged, affects_progress, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
+        (task_id, topic_id, run_id, answer, is_correct, hint_used, hint_penalty_applied,
+         duration_ms, is_current, life_charged, affects_progress, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
     ).run(
       task.id, task.topic_id, runId, answer.trim(), checked.correct ? 1 : 0,
-      hintUsed ? 1 : 0, durationMs, previous.affects_progress, at,
+      hintUsed || previous.hint_used === 1 ? 1 : 0,
+      previous.hint_penalty_applied,
+      durationMs, previous.affects_progress, at,
     );
     const attemptId = Number(inserted.lastInsertRowid);
     db.prepare('UPDATE runs SET correct = correct + ? - ? WHERE id = ?')

@@ -2,14 +2,18 @@ import katex from 'katex';
 import 'katex/dist/katex.min.css';
 import { memo, type ChangeEvent, type ReactNode } from 'react';
 import type { RunTask } from './run-api';
+import { WordTiles } from './WordTiles';
 
 export interface TaskPromptProps {
-  task: Omit<RunTask, 'hint'>;
+  task: Omit<RunTask, 'hint' | 'deep_hint'>;
   answer: string;
   onAnswerChange: (answer: string) => void;
   answerId: string;
   headingId: string;
   hint?: string;
+  deepHint?: RunTask['deep_hint'];
+  hintLevel?: 0 | 1 | 2;
+  /** Совместимость изолированных вызовов старого компонента. */
   hintVisible?: boolean;
   /** Оставляет условие после отправки, не позволяя ответить второй раз. */
   readOnly?: boolean;
@@ -102,7 +106,19 @@ function ChoiceAnswer({ task, answer, onAnswerChange, readOnly }: Pick<TaskPromp
   );
 }
 
-export function TaskPrompt({ task, answer, onAnswerChange, answerId, headingId, hint, hintVisible = false, readOnly = false }: TaskPromptProps) {
+export function TaskPrompt({
+  task,
+  answer,
+  onAnswerChange,
+  answerId,
+  headingId,
+  hint,
+  deepHint,
+  hintLevel = 0,
+  hintVisible = false,
+  readOnly = false,
+}: TaskPromptProps) {
+  const effectiveHintLevel = hintLevel === 0 && hintVisible ? 1 : hintLevel;
   const instruction = task.instruction ?? task.question;
   const materialFormat = task.material_format ?? 'none';
   const material = task.material ?? '';
@@ -122,7 +138,15 @@ export function TaskPrompt({ task, answer, onAnswerChange, answerId, headingId, 
             : <SafeRichText as="p" source={material} />}
         </section>
       )}
-      {task.answer_format === 'choice' && (task.choices?.length ?? 0) > 0 ? (
+      {(task.word_tiles?.length ?? 0) > 0 ? (
+        <WordTiles
+          taskId={task.id}
+          words={task.word_tiles ?? []}
+          answer={answer}
+          onAnswerChange={onAnswerChange}
+          readOnly={readOnly}
+        />
+      ) : task.answer_format === 'choice' && (task.choices?.length ?? 0) > 0 ? (
         <ChoiceAnswer task={task} answer={answer} onAnswerChange={onAnswerChange} readOnly={readOnly} />
       ) : (
         <div className="answer-field">
@@ -138,8 +162,26 @@ export function TaskPrompt({ task, answer, onAnswerChange, answerId, headingId, 
           />
         </div>
       )}
-      {hintVisible && hint !== undefined && (
-        <aside className="hint"><span>Подсказка</span><SafeRichText as="p" source={hint} /></aside>
+      {effectiveHintLevel >= 1 && hint !== undefined && (
+        <aside className="hint"><span>Короткая подсказка</span><SafeRichText as="p" source={hint} /></aside>
+      )}
+      {effectiveHintLevel >= 2 && deepHint !== undefined && (
+        <aside className="deep-hint" aria-label="Теория и похожие примеры">
+          <header><span>Разобраться глубже</span><h2>Теория и похожие примеры</h2></header>
+          <section><h3>Правило</h3><SafeRichText as="p" source={deepHint.rule} /></section>
+          <section><h3>Почему это работает</h3><SafeRichText as="p" source={deepHint.explanation} /></section>
+          <div className="deep-hint-examples">
+            {deepHint.examples.map((example, index) => (
+              <section key={`${String(index)}:${example.prompt}`}>
+                <h3>Похожий пример {index + 1}</h3>
+                <SafeRichText as="p" source={example.prompt} />
+                <p className="deep-hint-example-answer"><strong>Ответ примера:</strong> {example.answer}</p>
+                <SafeRichText as="p" source={example.walkthrough} />
+              </section>
+            ))}
+          </div>
+          <section><h3>Проверь себя</h3><ul>{deepHint.checklist.map((item) => <li key={item}>{item}</li>)}</ul></section>
+        </aside>
       )}
     </>
   );

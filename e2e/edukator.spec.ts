@@ -62,6 +62,45 @@ async function answerBoss(page: import('@playwright/test').Page, answer: string)
   await page.getByRole('button', { name: 'Проверить' }).click();
 }
 
+async function dragTileWithMouse(
+  page: import('@playwright/test').Page,
+  source: import('@playwright/test').Locator,
+  target: import('@playwright/test').Locator,
+): Promise<void> {
+  const from = await source.boundingBox();
+  const to = await target.boundingBox();
+  if (from === null || to === null) throw new Error('Карточка не получила координаты для mouse drag');
+  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 8 });
+  await page.mouse.up();
+}
+
+async function dragTileWithTouch(
+  page: import('@playwright/test').Page,
+  source: import('@playwright/test').Locator,
+  target: import('@playwright/test').Locator,
+): Promise<void> {
+  const from = await source.boundingBox();
+  const to = await target.boundingBox();
+  if (from === null || to === null) throw new Error('Карточка не получила координаты для touch drag');
+  const session = await page.context().newCDPSession(page);
+  const start = { x: from.x + from.width / 2, y: from.y + from.height / 2 };
+  const finish = { x: to.x + to.width / 2, y: to.y + to.height / 2 };
+  await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [start] });
+  for (let step = 1; step <= 8; step += 1) {
+    await session.send('Input.dispatchTouchEvent', {
+      type: 'touchMove',
+      touchPoints: [{
+        x: start.x + (finish.x - start.x) * step / 8,
+        y: start.y + (finish.y - start.y) * step / 8,
+      }],
+    });
+  }
+  await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await session.detach();
+}
+
 test('главная показывает и открывает незавершённый забег прошлого дня', async ({ context, page }) => {
   const harness = await startE2eHarness({ context, triagePassed: 'math' });
   try {
@@ -181,6 +220,71 @@ test('текстовый ответ проходит обычный забег',
     await page.getByLabel('Ответ').fill('учебник');
     await page.getByRole('button', { name: 'Проверить' }).click();
     await expect(page.locator('.verdict')).toContainText('Верно');
+    harness.assertCodexNotCalled();
+  } finally {
+    await harness.close();
+  }
+});
+
+test('карточки слов собираются клавиатурой и кнопками и отправляют строку ответа', async ({ context, page }) => {
+  const harness = await startE2eHarness({ context, triagePassed: 'russian' });
+  try {
+    harness.db.prepare(
+      `UPDATE task_bank SET status = 'rejected'
+        WHERE topic_id LIKE 'russian.%' AND word_tiles = '[]'`,
+    ).run();
+    const runId = await startRunDirectly(page, harness, 'russian');
+    await page.goto(`${harness.url}/?runId=${runId}`);
+
+    await expect(page.getByRole('heading', { name: /Собери предложение/u })).toBeVisible();
+    await expect(page.getByLabel('Ответ')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Нужна подсказка' }).click();
+    await expect(page.getByText(/Сначала найди подлежащее/u)).toBeVisible();
+    await page.getByRole('button', { name: 'Подробнее: теория и примеры' }).click();
+    await expect(page.getByRole('complementary', { name: 'Теория и похожие примеры' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Похожий пример/u })).toHaveCount(2);
+    const words = page.locator('.word-tile-text');
+    const handles = page.getByRole('button', { name: /Перетащить слово/u });
+    const beforeMouse = await words.allTextContents();
+    await dragTileWithMouse(page, handles.first(), page.locator('.word-tile').last());
+    await expect.poll(() => words.allTextContents()).not.toEqual(beforeMouse);
+
+    const beforeTouch = await words.allTextContents();
+    await dragTileWithTouch(page, handles.first(), page.locator('.word-tile').last());
+    await expect.poll(() => words.allTextContents()).not.toEqual(beforeTouch);
+
+    const beforeKeyboard = await words.allTextContents();
+    const firstHandle = handles.first();
+    await firstHandle.focus();
+    await firstHandle.press('Space');
+    await firstHandle.press('ArrowRight');
+    await firstHandle.press('Space');
+    await expect.poll(() => words.allTextContents()).not.toEqual(beforeKeyboard);
+
+    const target = ['Moscow', 'is', 'cold', 'in', 'winter.'];
+    for (let targetIndex = 0; targetIndex < target.length; targetIndex += 1) {
+      const word = target[targetIndex] as string;
+      for (;;) {
+        const current = await words.allTextContents();
+        const currentIndex = current.indexOf(word);
+        if (currentIndex === targetIndex) break;
+        const direction = currentIndex > targetIndex ? 'влево' : 'вправо';
+        await page.getByRole('button', { name: `Передвинуть «${word}» ${direction}` }).click();
+      }
+    }
+    await expect(words).toHaveText(target);
+
+    await page.getByRole('button', { name: 'Проверить' }).click();
+    await expect(page.locator('.verdict')).toContainText('Верно');
+    await expect(page.getByRole('button', { name: /Передвинуть/u })).toHaveCount(0);
+    expect(harness.db.prepare<[], {
+      answer: string; hint_used: number; hint_penalty_applied: number;
+    }>(
+      `SELECT answer, hint_used, hint_penalty_applied
+         FROM attempts ORDER BY id DESC LIMIT 1`,
+    ).get()).toEqual({
+      answer: 'Moscow is cold in winter.', hint_used: 1, hint_penalty_applied: 0,
+    });
     harness.assertCodexNotCalled();
   } finally {
     await harness.close();

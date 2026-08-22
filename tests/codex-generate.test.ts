@@ -13,6 +13,7 @@ import {
 import { readPersona, TASK_BATCH_SIZE } from '../server/codex/prompt.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import { generateTaskBatch } from '../server/codex/generate.js';
+import { TEST_DEEP_HINT } from './generated-task-fixture.js';
 
 const PERSONA = 'Ты напарник, а не учитель.';
 
@@ -47,9 +48,11 @@ function task(index: number, patch: Partial<GeneratedTask> = {}): GeneratedTask 
     material: '',
     material_format: 'none',
     choices: [],
+    word_tiles: [],
     answer: '45',
     accept: ['45', '45 монет'],
     hint: 'Приведи дроби к общему знаменателю. Затем вычти и проверь обратным действием.',
+    deep_hint: TEST_DEEP_HINT,
     explain: 'Общий знаменатель 6, дальше обычное вычитание.',
     joke: 'Дроби целы, монеты тоже.',
     difficulty: 2,

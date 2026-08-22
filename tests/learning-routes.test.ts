@@ -130,6 +130,7 @@ describe('Learning API', () => {
         progress: { total: number; correct: number; target: number; done: boolean };
       };
       expect(body.task).not.toHaveProperty('hint');
+      expect(body.task).not.toHaveProperty('deep_hint');
       expect(body.progress).toMatchObject({ total: index, target: 5, done: false });
       const response = await app.inject({
         method: 'POST', url: '/api/session/answer',

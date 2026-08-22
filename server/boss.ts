@@ -199,7 +199,7 @@ function ensureProgress(fight: BossFight): void {
   }
 }
 
-export type BossIssuedTask = Omit<IssuedTask, 'hint'>;
+export type BossIssuedTask = Omit<IssuedTask, 'hint' | 'deepHint'>;
 
 function projectBossTask(topic: Topic, task: BankTask): BossIssuedTask {
   return {
@@ -213,6 +213,7 @@ function projectBossTask(topic: Topic, task: BankTask): BossIssuedTask {
       material: task.material ?? '',
       materialFormat: task.material_format ?? 'none',
       choices: task.choices ?? [],
+      wordTiles: task.word_tiles ?? [],
     }),
     difficulty: task.difficulty,
     answerFormat: topic.answerFormat,

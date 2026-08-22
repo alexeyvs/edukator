@@ -106,6 +106,7 @@ describe('маршруты босса', () => {
       expect(body.task).not.toHaveProperty('answer');
       expect(body.task).not.toHaveProperty('accept');
       expect(body.task).not.toHaveProperty('hint');
+      expect(body.task).not.toHaveProperty('deep_hint');
 
       const answer = await app.inject({
         method: 'POST', url: `/api/boss/${runId}/answer`,

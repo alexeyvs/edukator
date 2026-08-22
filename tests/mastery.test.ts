@@ -390,9 +390,13 @@ describe('модель знаний', () => {
       hintUsed = false,
     ): void {
       db.prepare(
-        `INSERT INTO attempts (task_id, topic_id, answer, is_correct, hint_used, created_at)
-         VALUES (?, 'math.fractions', '45', ?, ?, ?)`,
-      ).run(addTask(difficulty), correct ? 1 : 0, hintUsed ? 1 : 0, at(day).toISOString());
+        `INSERT INTO attempts
+          (task_id, topic_id, answer, is_correct, hint_used, hint_penalty_applied, created_at)
+         VALUES (?, 'math.fractions', '45', ?, ?, ?, ?)`,
+      ).run(
+        addTask(difficulty), correct ? 1 : 0, hintUsed ? 1 : 0,
+        hintUsed ? 1 : 0, at(day).toISOString(),
+      );
     }
 
     beforeEach(() => {

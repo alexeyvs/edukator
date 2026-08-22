@@ -16,7 +16,7 @@ import { childHeaders, startTenantServer } from './server-harness.js';
 import { countAvailable, storeTasks, takeTask } from '../server/codex/bank.js';
 import { CodexUnavailableError } from '../server/codex/client.js';
 import { runWarmupCycle } from '../server/codex/worker.js';
-import type { GeneratedTask } from '../server/codex/task-schema.js';
+import { deepHintWordCount, type GeneratedTask } from '../server/codex/task-schema.js';
 import {
   collectSeedTasks,
   formatSeedBank,
@@ -28,6 +28,7 @@ import {
   SEED_BANK_DIR,
   takeTaskOrSeed,
 } from '../server/codex/seed-bank.js';
+import { TEST_DEEP_HINT } from './generated-task-fixture.js';
 
 function topic(id: string, patch: Partial<Topic> = {}): Topic {
   return {
@@ -51,9 +52,11 @@ const GRAPH: TopicGraph = buildTopicGraph([
 function task(patch: Partial<GeneratedTask> = {}): GeneratedTask {
   return {
     instruction: 'Сколько будет 2 + 2?', material: '', material_format: 'none', choices: [],
+    word_tiles: [],
     answer: '4',
     accept: ['4', '4 штуки'],
     hint: 'Сложи числа по разрядам. Проверь результат обратным действием.',
+    deep_hint: TEST_DEEP_HINT,
     explain: 'Два плюс два — четыре.',
     joke: 'Не Нобелевка, но зачёт.',
     difficulty: 2,
@@ -622,6 +625,8 @@ describe('посевной банк', () => {
 
     it('проходит проверки разбора батча целиком', () => {
       const hintsByTopic = new Map<string, Set<string>>();
+      const correctChoicePositions = new Set<number>();
+      let wordOrderTasks = 0;
       for (const subject of SUBJECTS) {
         const bank = readSeedBank(graph, subject, SEED_BANK_DIR);
 
@@ -637,6 +642,15 @@ describe('посевной банк', () => {
               /^(none|text|math)$/u,
             );
             expect(seededTask.choices, `${entry.topicId}: choices`).toBeInstanceOf(Array);
+            expect(seededTask.word_tiles, `${entry.topicId}: word_tiles`).toBeInstanceOf(Array);
+            expect(deepHintWordCount(seededTask.deep_hint!), `${entry.topicId}: deep_hint`)
+              .toBeGreaterThanOrEqual(200);
+            expect(deepHintWordCount(seededTask.deep_hint!), `${entry.topicId}: deep_hint`)
+              .toBeLessThanOrEqual(350);
+            if (seededTask.choices.length > 0) {
+              correctChoicePositions.add(seededTask.choices.indexOf(seededTask.answer));
+            }
+            if ((seededTask.word_tiles?.length ?? 0) > 0) wordOrderTasks += 1;
             const sentences = seededTask.hint.trim().split(/(?<=[.!?])(?:\s+|$)/u).filter(Boolean);
             expect(sentences.length, `${entry.topicId}: подробная подсказка`).toBeGreaterThanOrEqual(2);
             expect(sentences.length, `${entry.topicId}: подробная подсказка`).toBeLessThanOrEqual(4);
@@ -663,6 +677,8 @@ describe('посевной банк', () => {
         }
       }
       expect([...hintsByTopic.values()].every((hints) => hints.size > 0)).toBe(true);
+      expect(correctChoicePositions.size).toBeGreaterThan(1);
+      expect(wordOrderTasks).toBeGreaterThan(0);
       const math = readSeedBank(graph, 'math', SEED_BANK_DIR);
       expect(math?.topics.flatMap((entry) => entry.tasks)
         .filter((seededTask) => seededTask.material_format === 'math').length).toBeGreaterThan(5);

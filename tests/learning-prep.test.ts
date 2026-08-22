@@ -19,6 +19,7 @@ import { CodexUnavailableError, type CodexRequest } from '../server/codex/client
 import { CodexConcurrency } from '../server/codex/concurrency.js';
 import type { LearningMaterialContent } from '../server/codex/learning-material-schema.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
+import { TEST_DEEP_HINT } from './generated-task-fixture.js';
 import { storeTasks } from '../server/codex/bank.js';
 import { everyRefillFailed, runWarmupCycle } from '../server/codex/worker.js';
 import { claimLearningMaterial } from '../server/learning.js';
@@ -60,8 +61,9 @@ function task(label: string): GeneratedTask {
   sequence += 1;
   return {
     instruction: `Самостоятельный вопрос ${label}-${sequence}`,
-    material: '', material_format: 'none', choices: [], answer: '4', accept: ['4'],
-    hint: 'Вспомни правило. Затем проверь шаги.', explain: 'Получается четыре.',
+    material: '', material_format: 'none', choices: [], word_tiles: [], answer: '4', accept: ['4'],
+    hint: 'Вспомни правило. Затем проверь шаги.', deep_hint: TEST_DEEP_HINT,
+    explain: 'Получается четыре.',
     joke: 'Сошлось.', difficulty: 2,
   };
 }
@@ -436,7 +438,8 @@ describe('производитель полного комплекта', () => {
     const generatedTasks = Array.from({ length: 5 }, (_, index) => task(`codex-${index}`));
     const verdicts = generatedTasks.map(() => ({
       answer: '4', unambiguous: true, natural: true, on_topic: true,
-      age_appropriate: true, hint_safe: true, note: '',
+      age_appropriate: true, hint_safe: true, hint_useful: true,
+      deep_hint_safe: true, deep_hint_useful: true, word_order_valid: true, note: '',
     }));
     const answers = [
       JSON.stringify(content),
@@ -468,7 +471,8 @@ describe('производитель полного комплекта', () => {
     const third = [task('принят-5')];
     const accepted = (items: readonly GeneratedTask[]) => items.map(() => ({
       answer: '4', unambiguous: true, natural: true, on_topic: true,
-      age_appropriate: true, hint_safe: true, note: '',
+      age_appropriate: true, hint_safe: true, hint_useful: true,
+      deep_hint_safe: true, deep_hint_useful: true, word_order_valid: true, note: '',
     }));
     const firstVerdicts = accepted(first);
     if (firstVerdicts[2] !== undefined) firstVerdicts[2].natural = false;
@@ -503,7 +507,8 @@ describe('производитель полного комплекта', () => {
       storeTasks(db, 'math.best', [duplicate]);
       const verdict = {
         answer: '4', unambiguous: true, natural: true, on_topic: true,
-        age_appropriate: true, hint_safe: true, note: '',
+        age_appropriate: true, hint_safe: true, hint_useful: true,
+        deep_hint_safe: true, deep_hint_useful: true, word_order_valid: true, note: '',
       };
       const answers = [
         JSON.stringify(content),

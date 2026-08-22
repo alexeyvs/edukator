@@ -369,7 +369,7 @@ describe('база данных', () => {
     // рабочую базу, поэтому число прибито буквально и меняется только вместе с
     // новой ступенью и её тестом обновления.
     it('держит номер версии схемы', () => {
-      expect(SCHEMA_VERSION).toBe(17);
+      expect(SCHEMA_VERSION).toBe(18);
     });
 
     it('создаёт все тринадцать таблиц на пустой базе', () => {
@@ -1170,7 +1170,7 @@ describe('база данных', () => {
       const migrated = openDatabase(path);
       try {
         expect((migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version)
-          .toBe(17);
+          .toBe(18);
         expect(migrated.prepare('SELECT * FROM computer_access_override').all()).toEqual([]);
         expect(migrated.prepare('SELECT topic_id FROM topic_state').get())
           .toEqual({ topic_id: 'math.saved' });
@@ -1189,10 +1189,58 @@ describe('база данных', () => {
       const migrated = openDatabase(path);
       try {
         expect((migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version)
-          .toBe(17);
+          .toBe(18);
         expect(tableNames(migrated)).toEqual(expect.arrayContaining([
           'integrity_reviews', 'integrity_items',
         ]));
+      } finally {
+        migrated.close();
+      }
+    });
+
+    it('мигрирует v17→v18, сохраняет активные наборы и фиксирует прежний штраф', () => {
+      const path = join(tempDir, 'v17.db');
+      const legacy = openDatabase(path);
+      seedTopic(legacy, 'math.saved');
+      const insertTask = legacy.prepare<{ status: string; question: string }, { id: number }>(
+        `INSERT INTO task_bank (topic_id, question, answer, difficulty, status)
+         VALUES ('math.saved', @question, '4', 2, @status) RETURNING id`,
+      );
+      const pending = insertTask.get({ status: 'pending', question: 'Старая pending' })?.id;
+      const valid = insertTask.get({ status: 'valid', question: 'Старая valid' })?.id;
+      const issued = insertTask.get({ status: 'used', question: 'Активная выдача' })?.id;
+      const historical = insertTask.get({ status: 'used', question: 'Историческая выдача' })?.id;
+      const boss = insertTask.get({ status: 'boss_reserved', question: 'Подготовленный босс' })?.id;
+      const lesson = insertTask.get({ status: 'lesson_reserved', question: 'Подготовленный урок' })?.id;
+      legacy.prepare(
+        `INSERT INTO attempts (task_id, topic_id, answer, is_correct, hint_used)
+         VALUES (?, 'math.saved', '4', 1, 1)`,
+      ).run(historical);
+      legacy.exec(`
+        ALTER TABLE task_bank DROP COLUMN word_tiles;
+        ALTER TABLE task_bank DROP COLUMN deep_hint;
+        ALTER TABLE attempts DROP COLUMN hint_penalty_applied;
+      `);
+      legacy.pragma('user_version = 17');
+      legacy.close();
+
+      const migrated = openDatabase(path);
+      try {
+        expect((migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version)
+          .toBe(18);
+        expect(migrated.prepare('SELECT id, status FROM task_bank ORDER BY id').all()).toEqual([
+          { id: issued, status: 'used' },
+          { id: historical, status: 'used' },
+          { id: boss, status: 'boss_reserved' },
+          { id: lesson, status: 'lesson_reserved' },
+        ]);
+        expect(migrated.prepare(
+          'SELECT hint_used, hint_penalty_applied FROM attempts WHERE task_id = ?',
+        ).get(historical)).toEqual({ hint_used: 1, hint_penalty_applied: 1 });
+        expect(migrated.prepare(
+          'SELECT word_tiles, deep_hint FROM task_bank WHERE id = ?',
+        ).get(issued)).toEqual({ word_tiles: null, deep_hint: null });
+        expect([pending, valid]).not.toContain(undefined);
       } finally {
         migrated.close();
       }

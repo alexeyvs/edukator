@@ -607,9 +607,15 @@ export function submitAnswer(
     const affectsProgress = run?.kind !== 'lesson' || lessonContext?.attempt_number === 1;
     const currentAttempt = db.prepare<
       [number, number | null, number],
-      { id: number; is_correct: number; hint_used: number; run_id: number | null }
+      {
+        id: number;
+        is_correct: number;
+        hint_used: number;
+        hint_penalty_applied: number;
+        run_id: number | null;
+      }
     >(
-      `SELECT id, is_correct, hint_used, run_id FROM attempts
+      `SELECT id, is_correct, hint_used, hint_penalty_applied, run_id FROM attempts
         WHERE task_id = ? AND is_current = 1
           AND (? IS NULL OR run_id = ?)
         ORDER BY id DESC LIMIT 1`,
@@ -682,6 +688,7 @@ export function submitAnswer(
     }
 
     const effectiveHintUsed = hintUsed || currentAttempt?.hint_used === 1;
+    const hintPenaltyApplied = currentAttempt?.hint_penalty_applied === 1;
     if (retrying) {
       db.prepare('UPDATE attempts SET is_current = 0 WHERE id = ?').run(currentAttempt?.id);
     }
@@ -690,10 +697,10 @@ export function submitAnswer(
     const info = db
       .prepare(
         `INSERT INTO attempts
-          (task_id, topic_id, run_id, answer, is_correct, hint_used, duration_ms,
+          (task_id, topic_id, run_id, answer, is_correct, hint_used, hint_penalty_applied, duration_ms,
            is_current, life_charged, affects_progress, created_at)
          VALUES
-          (@taskId, @topicId, @runId, @answer, @isCorrect, @hintUsed, @durationMs,
+          (@taskId, @topicId, @runId, @answer, @isCorrect, @hintUsed, @hintPenaltyApplied, @durationMs,
            1, @lifeCharged, @affectsProgress, @createdAt)`,
       )
       .run({
@@ -705,6 +712,7 @@ export function submitAnswer(
         answer: request.answer.trim(),
         isCorrect: check.correct ? 1 : 0,
         hintUsed: effectiveHintUsed ? 1 : 0,
+        hintPenaltyApplied: hintPenaltyApplied ? 1 : 0,
         durationMs,
         lifeCharged: lifeCharged ? 1 : 0,
         affectsProgress: affectsProgress ? 1 : 0,
@@ -718,14 +726,14 @@ export function submitAnswer(
       : recordAttempt(db, row.topic_id, {
           correct: check.correct,
           difficulty: row.difficulty,
-          hintUsed: effectiveHintUsed,
+          hintPenaltyApplied,
           at,
         });
     const xp = affectsProgress
       ? taskXp({
           difficulty: row.difficulty,
           correct: check.correct,
-          hintUsed: effectiveHintUsed,
+          hintPenaltyApplied,
         })
       : 0;
     if (run?.kind === 'run') {
@@ -974,6 +982,7 @@ interface DisputeRow {
   is_correct: number;
   life_charged: number;
   hint_used: number;
+  hint_penalty_applied: number;
   difficulty: number;
   affects_progress: number;
 }
@@ -984,7 +993,11 @@ function disputeProgress(db: Database, row: DisputeRow): RunProgress | null {
 
 function disputeXp(row: DisputeRow): number {
   return row.status === 'upheld' && row.is_current === 1 && row.affects_progress === 1
-    ? taskXp({ difficulty: row.difficulty, correct: true, hintUsed: row.hint_used === 1 })
+    ? taskXp({
+        difficulty: row.difficulty,
+        correct: true,
+        hintPenaltyApplied: row.hint_penalty_applied === 1,
+      })
     : 0;
 }
 
@@ -994,7 +1007,8 @@ function readDispute(db: Database, disputeId: number): DisputeRow {
       `SELECT disputes.id, disputes.status, disputes.resolution,
               attempts.id AS attempt_id, attempts.run_id, runs.kind AS run_kind,
               attempts.topic_id, attempts.is_current, attempts.is_correct,
-              attempts.life_charged, attempts.hint_used, attempts.affects_progress,
+              attempts.life_charged, attempts.hint_used, attempts.hint_penalty_applied,
+              attempts.affects_progress,
               attempts.answer AS given,
               task_bank.id AS task_id, task_bank.question, task_bank.answer, task_bank.accept,
               task_bank.difficulty

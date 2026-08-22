@@ -22,7 +22,10 @@ export interface Attempt {
   correct: boolean;
   /** 1-3, сложность задания из `task_bank`. */
   difficulty: number;
-  hintUsed: boolean;
+  /** Сохранённый исторический штраф; новые попытки всегда передают false. */
+  hintPenaltyApplied?: boolean;
+  /** Совместимость прямых вызовов: до v18 этот флаг одновременно означал штраф. */
+  hintUsed?: boolean;
   /** Время попытки; по умолчанию — сейчас. Задаётся явно в тестах и при импорте истории. */
   at?: Date;
 }
@@ -116,7 +119,8 @@ export function nextMastery(mastery: number, attempt: Attempt): number {
   const index = checkDifficulty(attempt.difficulty) - 1;
 
   if (attempt.correct) {
-    const alpha = ALPHA * (ALPHA_BY_DIFFICULTY[index] as number) * (attempt.hintUsed ? HINT_FACTOR : 1);
+    const penalized = attempt.hintPenaltyApplied ?? attempt.hintUsed ?? false;
+    const alpha = ALPHA * (ALPHA_BY_DIFFICULTY[index] as number) * (penalized ? HINT_FACTOR : 1);
     return clamp01(mastery + alpha * (1 - mastery));
   }
 
@@ -301,7 +305,7 @@ export function recordAttempt(db: Database, topicId: string, attempt: Attempt): 
 
 interface HistoryRow {
   is_correct: number;
-  hint_used: number;
+  hint_penalty_applied: number;
   difficulty: number;
   created_at: string;
 }
@@ -324,7 +328,8 @@ export function recomputeTopicState(db: Database, topicId: string): TopicState {
     // неустойчивом порядке пересчёт то падал бы, то нет.
     const rows = db
       .prepare<[string], HistoryRow>(
-        `SELECT attempts.is_correct, attempts.hint_used, task_bank.difficulty, attempts.created_at
+        `SELECT attempts.is_correct, attempts.hint_penalty_applied,
+                task_bank.difficulty, attempts.created_at
            FROM attempts
            JOIN task_bank ON task_bank.id = attempts.task_id
           WHERE attempts.topic_id = ? AND attempts.is_current = 1
@@ -338,7 +343,7 @@ export function recomputeTopicState(db: Database, topicId: string): TopicState {
       state = applyAttempt(state, {
         correct: row.is_correct === 1,
         difficulty: row.difficulty,
-        hintUsed: row.hint_used === 1,
+        hintPenaltyApplied: row.hint_penalty_applied === 1,
         at: new Date(row.created_at),
       });
     }

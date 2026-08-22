@@ -13,16 +13,28 @@
  * молча вернуть «заданий нет» значило бы спрятать опечатку в `topic_id`.
  */
 import type { Database } from 'better-sqlite3';
+import { randomInt } from 'node:crypto';
 import { questionFingerprint } from '../normalize.js';
 import { parseLearningMaterial } from './learning-material-schema.js';
 import { RECENT_LIMIT } from './prompt.js';
-import { taskPromptText, type GeneratedTask, type MaterialFormat } from './task-schema.js';
+import {
+  taskPromptText,
+  type DeepHint,
+  type GeneratedTask,
+  type MaterialFormat,
+} from './task-schema.js';
 import { LEARNING_TASK_COUNT } from '../learning-constants.js';
 
 /** Задание, лежащее в банке: поля генератора плюс то, чем его различает база. */
-type StoredTaskBody = Omit<GeneratedTask, 'instruction' | 'material' | 'material_format' | 'choices'>;
-export type BankTask = StoredTaskBody & { id: number; topicId: string; question: string } & (
-  | Pick<GeneratedTask, 'instruction' | 'material' | 'material_format' | 'choices'>
+type StoredTaskBody = Pick<GeneratedTask, 'answer' | 'accept' | 'hint' | 'explain' | 'joke' | 'difficulty'>;
+export type BankTask = StoredTaskBody & {
+  id: number;
+  topicId: string;
+  question: string;
+  /** Историческое или уже выданное задание может быть создано до v18. */
+  deep_hint?: DeepHint;
+} & (
+  | Pick<GeneratedTask, 'instruction' | 'material' | 'material_format' | 'choices' | 'word_tiles'>
   | { question: string; instruction?: undefined }
 );
 
@@ -61,20 +73,56 @@ interface TaskRow {
   material: string | null;
   material_format: MaterialFormat | null;
   choices: string | null;
+  word_tiles: string | null;
   answer: string;
   accept: string;
   hint: string | null;
+  deep_hint: string | null;
   explain: string | null;
   joke: string | null;
   difficulty: number;
 }
 
 interface PreparedTask {
+  source: GeneratedTask;
   task: GeneratedTask;
   prompt: string;
   fingerprint: string;
   choices: string;
+  wordTiles: string;
   accept: string;
+  deepHint: string;
+}
+
+/**
+ * Внутренние производители и старые посевные снимки до v18 могли передать
+ * уже доверенное задание без второго уровня. На границе банка дополняем его,
+ * чтобы ни одно новое выданное задание не продолжало старый формат. Ответ и
+ * конкретные данные задания намеренно не используются в тексте.
+ */
+function compatibilityDeepHint(shortHint: string): DeepHint {
+  return {
+    rule: shortHint.trim() || 'Сначала определи правило, затем применяй его по шагам.',
+    explanation: 'Отдели общее правило от конкретных данных вопроса. Сначала найди в условии признак, который подсказывает подход, и назови этот подход своими словами. Затем разбей решение на короткие шаги и после каждого спроси себя, действительно ли он следует из правила. Не угадывай результат по знакомой формулировке: похожие задания иногда отличаются одним важным условием. Заранее представь форму ответа — число, слово, форму слова или законченную фразу. Это помогает заметить лишнее действие и не потерять часть вопроса. Если есть несколько условий, сопоставь каждому из них отдельную проверку. В конце пройди рассуждение в обратную сторону: подставь результат в исходную ситуацию, перечитай получившееся предложение целиком или используй обратное действие. Хорошее решение одновременно согласуется со смыслом, правилом и требуемой формой ответа. Если одна из этих проверок не проходит, вернись к месту, где был сделан первый неподтверждённый шаг, а не меняй итог наугад.',
+    examples: [
+      {
+        prompt: 'Рассмотри похожее тренировочное условие с другими словами и найди признак, который определяет нужное правило.',
+        answer: 'Учебный вывод сформулирован после проверки правила.',
+        walkthrough: 'Отметь ключевой сигнал и назови правило своими словами. Выполни только тот шаг, который из него следует, не перенося детали исходного задания. Сверь промежуточный вывод с условием и убедись, что выбранная форма ответа соответствует вопросу.',
+      },
+      {
+        prompt: 'Возьми другую похожую ситуацию и сравни два возможных хода решения.',
+        answer: 'Контрольный вывод получен независимым способом.',
+        walkthrough: 'Сначала исключи ход, который противоречит правилу, затем собери решение по оставшимся признакам. Перечитай готовую запись как целое и проведи обратную проверку. Если объяснение каждого шага остаётся ясным, ход решения устойчив.',
+      },
+    ],
+    checklist: [
+      'Я назвал правило до вычислений или выбора формы.',
+      'Каждый шаг опирается на данные условия.',
+      'Форма записи отвечает именно на заданный вопрос.',
+      'Обратная проверка не обнаружила противоречий.',
+    ],
+  };
 }
 
 function ensureTopic(db: Database, topicId: string): void {
@@ -118,6 +166,46 @@ function parseChoices(raw: string | null, id: number): string[] {
   return parsed as string[];
 }
 
+function parseStringArray(raw: string | null, id: number, field: string): string[] {
+  if (raw === null) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`Банк заданий: задание ${id} хранит ${field} не как JSON (${raw})`);
+  }
+  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== 'string')) {
+    throw new Error(`Банк заданий: ${field} задания ${id} должен быть массивом строк`);
+  }
+  return parsed as string[];
+}
+
+function parseDeepHint(raw: string | null, id: number): DeepHint | undefined {
+  if (raw === null) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`Банк заданий: задание ${id} хранит deep_hint не как JSON (${raw})`);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`Банк заданий: deep_hint задания ${id} должен быть объектом`);
+  }
+  const hint = parsed as Partial<DeepHint>;
+  if (
+    typeof hint.rule !== 'string' || typeof hint.explanation !== 'string' ||
+    !Array.isArray(hint.examples) || hint.examples.length !== 2 ||
+    hint.examples.some((example) =>
+      typeof example !== 'object' || example === null ||
+      typeof example.prompt !== 'string' || typeof example.answer !== 'string' ||
+      typeof example.walkthrough !== 'string') ||
+    !Array.isArray(hint.checklist) || hint.checklist.some((item) => typeof item !== 'string')
+  ) {
+    throw new Error(`Банк заданий: deep_hint задания ${id} имеет неверную структуру`);
+  }
+  return hint as DeepHint;
+}
+
 function toBankTask(row: TaskRow): BankTask {
   const structured = row.instruction === null
     ? { question: row.question }
@@ -127,7 +215,9 @@ function toBankTask(row: TaskRow): BankTask {
         material: row.material ?? '',
         material_format: row.material_format ?? 'none',
         choices: parseChoices(row.choices, row.id),
+        word_tiles: parseStringArray(row.word_tiles, row.id, 'word_tiles'),
       };
+  const deepHint = parseDeepHint(row.deep_hint, row.id);
   return {
     id: row.id,
     topicId: row.topic_id,
@@ -135,6 +225,7 @@ function toBankTask(row: TaskRow): BankTask {
     answer: row.answer,
     accept: parseAccept(row.accept, row.id),
     hint: row.hint ?? '',
+    ...(deepHint === undefined ? {} : { deep_hint: deepHint }),
     explain: row.explain ?? '',
     joke: row.joke ?? '',
     difficulty: row.difficulty,
@@ -165,21 +256,77 @@ function toBankTaskOrReject(db: Database, row: TaskRow): BankTask {
 }
 
 const TASK_COLUMNS = `id, topic_id, question, instruction, material, material_format, choices,
-  answer, accept, hint, explain, joke, difficulty`;
+  word_tiles, answer, accept, hint, deep_hint, explain, joke, difficulty`;
+
+function shuffle<T>(values: readonly T[]): T[] {
+  const result = [...values];
+  for (let index = result.length - 1; index > 0; index -= 1) {
+    const other = randomInt(index + 1);
+    [result[index], result[other]] = [result[other] as T, result[index] as T];
+  }
+  return result;
+}
+
+function shuffledWordTiles(tiles: readonly string[], answer: string): string[] {
+  if (tiles.length === 0) return [];
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const result = shuffle(tiles);
+    if (result.join(' ') !== answer) return result;
+  }
+  for (let shift = 1; shift < tiles.length; shift += 1) {
+    const result = [...tiles.slice(shift), ...tiles.slice(0, shift)];
+    if (result.join(' ') !== answer) return result;
+  }
+  throw new Error('Банк заданий: word_tiles нельзя перемешать в порядок, отличный от ответа');
+}
+
+/** Один батч получает сбалансированные позиции ответа и случайный порядок дистракторов. */
+function randomizedTasks(tasks: readonly GeneratedTask[]): GeneratedTask[] {
+  const positionCounts = Array.from({ length: 6 }, () => 0);
+  return tasks.map((task) => {
+    let choices = [...task.choices];
+    if (choices.length > 0) {
+      const minimum = Math.min(...positionCounts.slice(0, choices.length));
+      const candidates = positionCounts
+        .slice(0, choices.length)
+        .flatMap((count, index) => count === minimum ? [index] : []);
+      const answerPosition = candidates[randomInt(candidates.length)] as number;
+      const distractors = shuffle(choices.filter((choice) => choice !== task.answer));
+      choices = [...distractors];
+      choices.splice(answerPosition, 0, task.answer);
+      positionCounts[answerPosition] = (positionCounts[answerPosition] ?? 0) + 1;
+    }
+    return {
+      ...task,
+      choices,
+      word_tiles: shuffledWordTiles(task.word_tiles ?? [], task.answer),
+      deep_hint: task.deep_hint ?? compatibilityDeepHint(task.hint),
+    };
+  });
+}
 
 function prepareTasks(tasks: readonly GeneratedTask[]): PreparedTask[] {
-  return tasks.map((task) => {
+  const randomized = randomizedTasks(tasks);
+  return randomized.map((task, index) => {
     const prompt = taskPromptText(task);
-    const fingerprint = questionFingerprint(prompt);
+    const canonical = taskPromptText({
+      ...task,
+      choices: [...task.choices].sort(),
+      word_tiles: [...(task.word_tiles ?? [])].sort(),
+    });
+    const fingerprint = questionFingerprint(canonical);
     if (fingerprint === '') {
       throw new Error(`Банк заданий: формулировка «${prompt}» пуста после нормализации`);
     }
     return {
       task,
+      source: tasks[index] as GeneratedTask,
       prompt,
       fingerprint,
       choices: JSON.stringify(task.choices),
+      wordTiles: JSON.stringify(task.word_tiles ?? []),
       accept: JSON.stringify(task.accept),
+      deepHint: JSON.stringify(task.deep_hint),
     };
   });
 }
@@ -200,9 +347,11 @@ function insertPreparedTasks(
       material: string | null;
       materialFormat: MaterialFormat | null;
       choices: string;
+      wordTiles: string;
       answer: string;
       accept: string;
       hint: string;
+      deepHint: string;
       explain: string;
       joke: string;
       difficulty: number;
@@ -212,10 +361,10 @@ function insertPreparedTasks(
     { id: number }
   >(
     `INSERT INTO task_bank
-       (topic_id, question, instruction, material, material_format, choices,
-        answer, accept, hint, explain, joke, difficulty, status, fingerprint)
-     VALUES (@topicId, @question, @instruction, @material, @materialFormat, @choices,
-             @answer, @accept, @hint, @explain, @joke, @difficulty, @status, @fingerprint)
+       (topic_id, question, instruction, material, material_format, choices, word_tiles,
+        answer, accept, hint, deep_hint, explain, joke, difficulty, status, fingerprint)
+     VALUES (@topicId, @question, @instruction, @material, @materialFormat, @choices, @wordTiles,
+             @answer, @accept, @hint, @deepHint, @explain, @joke, @difficulty, @status, @fingerprint)
      ON CONFLICT DO NOTHING
      RETURNING id`,
   );
@@ -223,7 +372,7 @@ function insertPreparedTasks(
   const stored: BankTask[] = [];
   const duplicates: GeneratedTask[] = [];
   for (const item of prepared) {
-    const { task, fingerprint, prompt } = item;
+    const { task, source, fingerprint, prompt } = item;
     const row = insert.get({
       topicId,
       question: prompt,
@@ -231,9 +380,11 @@ function insertPreparedTasks(
       material: task.material,
       materialFormat: task.material_format,
       choices: item.choices,
+      wordTiles: item.wordTiles,
       answer: task.answer,
       accept: item.accept,
       hint: task.hint,
+      deepHint: item.deepHint,
       explain: task.explain,
       joke: task.joke,
       difficulty: task.difficulty,
@@ -241,7 +392,7 @@ function insertPreparedTasks(
       fingerprint,
     });
 
-    if (row === undefined) duplicates.push(task);
+    if (row === undefined) duplicates.push(source);
     else stored.push({ ...task, question: prompt, accept: [...task.accept], id: row.id, topicId });
   }
   return { stored, duplicates };

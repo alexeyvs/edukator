@@ -311,7 +311,7 @@ describe('маршруты забега', () => {
     expect(corrected.statusCode).toBe(200);
     expect(corrected.json()).toMatchObject({
       correct: true,
-      xp: 20,
+      xp: 25,
       progress: {
         total: 1,
         correct: 1,

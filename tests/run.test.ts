@@ -62,8 +62,8 @@ describe('жизненный цикл забега', () => {
     );
     db.prepare(
       `INSERT INTO attempts
-        (task_id, topic_id, run_id, answer, is_correct, hint_used, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        (task_id, topic_id, run_id, answer, is_correct, hint_used, hint_penalty_applied, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       taskId,
       options.topicId,
@@ -71,12 +71,14 @@ describe('жизненный цикл забега', () => {
       'ответ',
       options.correct ? 1 : 0,
       hintUsed ? 1 : 0,
+      0,
       options.now.toISOString(),
     );
     recordAttempt(db, options.topicId, {
       correct: options.correct,
       difficulty,
       hintUsed,
+      hintPenaltyApplied: false,
       at: options.now,
     });
     if (options.runId !== undefined) {
@@ -286,7 +288,7 @@ describe('жизненный цикл забега', () => {
 
     expect(result.total).toBe(3);
     expect(result.correct).toBe(2);
-    expect(result.xp).toBe(55);
+    expect(result.xp).toBe(60);
     expect(result.touchedTopics).toEqual([
       expect.objectContaining({ topicId: 'math.a', title: 'math.a' }),
       expect.objectContaining({ topicId: 'math.b', title: 'math.b' }),

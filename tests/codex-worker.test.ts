@@ -17,6 +17,7 @@ import {
 } from '../server/codex/client.js';
 import { CodexQuotaError } from '../server/codex/quota.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
+import { TEST_DEEP_HINT } from './generated-task-fixture.js';
 import type { BossPreparationReport } from '../server/boss-prep.js';
 import {
   everyRefillFailed,
@@ -70,9 +71,11 @@ function task(topicId: string, patch: Partial<GeneratedTask> = {}): GeneratedTas
     material: '',
     material_format: 'none',
     choices: [],
+    word_tiles: [],
     answer: '45',
     accept: ['45', '45 монет'],
     hint: 'Выдели известные величины. Посчитай по шагам и проверь результат.',
+    deep_hint: TEST_DEEP_HINT,
     explain: 'Сорок пять — то, что осталось.',
     joke: 'Не Нобелевка, но зачёт.',
     difficulty: 2,
@@ -358,6 +361,10 @@ describe('воркер тёплой очереди', () => {
         on_topic: true,
         age_appropriate: true,
         hint_safe: true,
+        hint_useful: true,
+        deep_hint_safe: true,
+        deep_hint_useful: true,
+        word_order_valid: true,
         note: '',
         ...patch,
       };

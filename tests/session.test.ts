@@ -119,6 +119,7 @@ describe('занятие', () => {
       expect(Object.keys(result.task).sort()).toEqual([
         'answerFormat',
         'choices',
+        'deepHint',
         'difficulty',
         'hint',
         'id',
@@ -129,6 +130,7 @@ describe('занятие', () => {
         'subject',
         'topicId',
         'topicTitle',
+        'wordTiles',
       ]);
       expect(JSON.stringify(result.task)).not.toContain('45');
     });
@@ -430,15 +432,17 @@ describe('занятие', () => {
         taskId, runId, answer: '45', retryAttemptId: wrong.attemptId,
       });
 
-      expect(fixed).toMatchObject({ correct: true, xp: 30 });
+      expect(fixed).toMatchObject({ correct: true, xp: 35 });
       expect(fixed.progress).toMatchObject({
         total: 1, correct: 1,
         lives: { remaining: 2, retryAvailable: false },
       });
       expect(readTopicState(db, 'math.a').attempts).toBe(1);
       expect(db.prepare(
-        'SELECT is_current, is_correct, hint_used FROM attempts WHERE id = ?',
-      ).get(fixed.attemptId)).toEqual({ is_current: 1, is_correct: 1, hint_used: 1 });
+        'SELECT is_current, is_correct, hint_used, hint_penalty_applied FROM attempts WHERE id = ?',
+      ).get(fixed.attemptId)).toEqual({
+        is_current: 1, is_correct: 1, hint_used: 1, hint_penalty_applied: 0,
+      });
     });
 
     it('считает финальные correct и XP только по текущим версиям', () => {
@@ -458,7 +462,7 @@ describe('занятие', () => {
 
       const summary = finishRun(db, graph, runId);
 
-      expect(summary).toMatchObject({ total: 12, correct: 12, xp: 305 });
+      expect(summary).toMatchObject({ total: 12, correct: 12, xp: 310 });
       const finalState = readTopicState(db, 'math.a');
       expect(finalState.attempts).toBe(12);
       expect(summary.touchedTopics).toEqual([{
@@ -648,7 +652,7 @@ describe('занятие', () => {
       expect(readTopicState(db, 'math.a').mastery).toBe(second.state.mastery);
     });
 
-    it('учитывает подсказку: с ней рост слабее', () => {
+    it('записывает подсказку, но не уменьшает рост новой попытки', () => {
       // Темы разные, но состояние у обеих нулевое, так что сравниваются именно
       // сдвиги за одну попытку.
       const plain = submitAnswer(db, graph, { taskId: issue('russian.a'), answer: '45' });
@@ -659,13 +663,13 @@ describe('занятие', () => {
         durationMs: 4200,
       });
 
-      expect(hinted.state.mastery).toBeLessThan(plain.state.mastery);
+      expect(hinted.state.mastery).toBe(plain.state.mastery);
       const row = db
-        .prepare<[number], { hint_used: number; duration_ms: number }>(
-          'SELECT hint_used, duration_ms FROM attempts WHERE id = ?',
+        .prepare<[number], { hint_used: number; hint_penalty_applied: number; duration_ms: number }>(
+          'SELECT hint_used, hint_penalty_applied, duration_ms FROM attempts WHERE id = ?',
         )
         .get(hinted.attemptId);
-      expect(row).toEqual({ hint_used: 1, duration_ms: 4200 });
+      expect(row).toEqual({ hint_used: 1, hint_penalty_applied: 0, duration_ms: 4200 });
     });
 
     it('пишет попытку и счётчики забега вместе, начисляя XP и возвращая прогресс', () => {

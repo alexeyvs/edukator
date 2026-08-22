@@ -154,6 +154,7 @@ describe('маршруты занятия', () => {
       expect(Object.keys(issued).sort()).toEqual([
         'answer_format',
         'choices',
+        'deep_hint',
         'difficulty',
         'hint',
         'id',
@@ -164,6 +165,7 @@ describe('маршруты занятия', () => {
         'subject',
         'topic_id',
         'topic_title',
+        'word_tiles',
       ]);
       // Ни эталона, ни разбора, ни реакции: всё это выдаёт ответ на задание.
       expect(JSON.stringify(issued)).not.toContain('45');

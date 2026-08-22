@@ -4,12 +4,15 @@ import { codexOutputSchema } from '../server/codex/client.js';
 import { checkAnswer } from '../server/normalize.js';
 import {
   fitsAccept,
+  deepHintWordCount,
   MIN_REVEAL_LENGTH,
   parseTaskBatch,
   taskPromptText,
   TASKS_SCHEMA_PATH,
   type GeneratedTask,
+  type DeepHint,
 } from '../server/codex/task-schema.js';
+import { TEST_DEEP_HINT } from './generated-task-fixture.js';
 
 /** Задание по числовой теме: от него отталкиваются все проверки инвариантов. */
 function task(patch: Partial<GeneratedTask> = {}): unknown {
@@ -18,9 +21,11 @@ function task(patch: Partial<GeneratedTask> = {}): unknown {
     material: 'В инвентаре 90 монет, половину потратили.',
     material_format: 'text',
     choices: [],
+    word_tiles: [],
     answer: '45',
     accept: ['45', '45 монет'],
     hint: 'Найди половину исходного количества. Проверь, что две равные части дают целое.',
+    deep_hint: TEST_DEEP_HINT,
     explain: '90 : 2 = 45',
     joke: 'Кошелёк похудел вдвое — как и шансы на новый скин',
     difficulty: 2,
@@ -30,6 +35,20 @@ function task(patch: Partial<GeneratedTask> = {}): unknown {
 
 function batch(...items: unknown[]): unknown {
   return { items };
+}
+
+function deepHintAtWords(total: number): DeepHint {
+  const result: DeepHint = {
+    ...TEST_DEEP_HINT,
+    explanation: '',
+    examples: TEST_DEEP_HINT.examples.map((example) => ({ ...example })) as DeepHint['examples'],
+    checklist: [...TEST_DEEP_HINT.checklist],
+  };
+  const remaining = total - deepHintWordCount(result);
+  if (remaining < 1) throw new Error(`Нельзя собрать deep_hint из ${total} слов`);
+  result.explanation = Array.from({ length: remaining }, () => 'пояснение').join(' ');
+  expect(deepHintWordCount(result)).toBe(total);
+  return result;
 }
 
 describe('схема батча', () => {
@@ -49,9 +68,11 @@ describe('схема батча', () => {
       'material',
       'material_format',
       'choices',
+      'word_tiles',
       'answer',
       'accept',
       'hint',
+      'deep_hint',
       'explain',
       'joke',
       'difficulty',
@@ -76,9 +97,11 @@ describe('parseTaskBatch: успешный разбор', () => {
       material: 'В инвентаре 90 монет, половину потратили.',
       material_format: 'text',
       choices: [],
+      word_tiles: [],
       answer: '45',
       accept: ['45', '45 монет'],
       hint: 'Найди половину исходного количества. Проверь, что две равные части дают целое.',
+      deep_hint: TEST_DEEP_HINT,
       explain: '90 : 2 = 45',
       joke: 'Кошелёк похудел вдвое — как и шансы на новый скин',
       difficulty: 2,
@@ -158,6 +181,92 @@ describe('parseTaskBatch: нарушения схемы', () => {
 });
 
 describe('parseTaskBatch: нарушения инвариантов', () => {
+  describe('карточки порядка слов', () => {
+    it('принимает повторяющиеся слова, когда их мультимножество буквально собирает ответ', () => {
+      const [parsed] = parseTaskBatch(batch(task({
+        instruction: 'Собери английскую фразу.',
+        answer: 'to be or not to be',
+        accept: ['to be or not to be'],
+        word_tiles: ['be', 'to', 'or', 'not', 'to', 'be'],
+        hint: 'Найди устойчивое начало фразы. Затем проверь порядок служебных слов.',
+        explain: 'Фраза собрана.',
+      })), 'text');
+
+      expect(parsed?.word_tiles).toEqual(['be', 'to', 'or', 'not', 'to', 'be']);
+    });
+
+    it('разрешает карточки только текстовой теме и без choices', () => {
+      const wordOrder = {
+        answer: 'Moscow is cold.', accept: ['Moscow is cold.'],
+        word_tiles: ['cold.', 'Moscow', 'is'],
+      };
+      expect(() => parseTaskBatch(batch(task(wordOrder)), 'number')).toThrow(/только.*текстового/su);
+      expect(() => parseTaskBatch(batch(task({ ...wordOrder, choices: ['yes', 'no'] })), 'text'))
+        .toThrow(/word_tiles.*choices.*пустым/su);
+    });
+
+    it('отвергает слишком короткий набор, правильный начальный порядок и несовпадающее мультимножество', () => {
+      expect(() => parseTaskBatch(batch(task({
+        answer: 'Hello', accept: ['Hello'], word_tiles: ['Hello'],
+      })), 'text')).toThrow(/от 2 до 12/su);
+      expect(() => parseTaskBatch(batch(task({
+        answer: 'Moscow is cold.', accept: ['Moscow is cold.'],
+        word_tiles: ['Moscow', 'is', 'cold.'],
+      })), 'text')).toThrow(/правильном порядке/su);
+      expect(() => parseTaskBatch(batch(task({
+        answer: 'Moscow is cold.', accept: ['Moscow is cold.'],
+        word_tiles: ['Moscow', 'is', 'Cold.'],
+      })), 'text')).toThrow(/мультимножество/su);
+    });
+
+    it('требует прикреплять пунктуацию к слову-карточке', () => {
+      expect(() => parseTaskBatch(batch(task({
+        answer: 'Hello , world', accept: ['Hello , world'],
+        word_tiles: ['world', ',', 'Hello'],
+      })), 'text')).toThrow(/пунктуация.*прикреплена/su);
+    });
+  });
+
+  describe('расширенная подсказка', () => {
+    it('принимает обе границы объёма 200–350 слов', () => {
+      expect(() => parseTaskBatch(batch(task({ deep_hint: deepHintAtWords(200) })), 'number'))
+        .not.toThrow();
+      expect(() => parseTaskBatch(batch(task({ deep_hint: deepHintAtWords(350) })), 'number'))
+        .not.toThrow();
+    });
+
+    it('отвергает 199 и 351 слово', () => {
+      expect(() => parseTaskBatch(batch(task({ deep_hint: deepHintAtWords(199) })), 'number'))
+        .toThrow(/200–350.*199/su);
+      expect(() => parseTaskBatch(batch(task({ deep_hint: deepHintAtWords(351) })), 'number'))
+        .toThrow(/200–350.*351/su);
+    });
+
+    it('требует все секции и ровно два разобранных примера', () => {
+      const missing = task({ deep_hint: { ...TEST_DEEP_HINT } }) as Record<string, unknown>;
+      delete (missing['deep_hint'] as Record<string, unknown>)['rule'];
+      expect(() => parseTaskBatch(batch(missing), 'number')).toThrow(/схеме.*rule/su);
+      expect(() => parseTaskBatch(batch(task({
+        deep_hint: { ...TEST_DEEP_HINT, examples: [TEST_DEEP_HINT.examples[0]] } as never,
+      })), 'number')).toThrow(/схеме.*examples/su);
+    });
+
+    it('не позволяет второму уровню раскрывать ответ или повторять текущее задание', () => {
+      expect(() => parseTaskBatch(batch(task({
+        deep_hint: { ...TEST_DEEP_HINT, explanation: `${TEST_DEEP_HINT.explanation} Ответ равен 45.` },
+      })), 'number')).toThrow(/расширенная подсказка содержит ответ/su);
+      expect(() => parseTaskBatch(batch(task({
+        deep_hint: {
+          ...TEST_DEEP_HINT,
+          examples: [
+            { ...TEST_DEEP_HINT.examples[0], prompt: 'Сколько осталось?' },
+            TEST_DEEP_HINT.examples[1],
+          ] as DeepHint['examples'],
+        },
+      })), 'number')).toThrow(/повторяет текущее задание/su);
+    });
+  });
+
   it('проверяет согласованность формата и материала', () => {
     expect(() => parseTaskBatch(batch(task({ material: 'лишнее', material_format: 'none' })), 'number'))
       .toThrow(/material_format=none/s);

@@ -24,6 +24,7 @@ import type { AnswerFormat, Topic, TopicGraph } from '../curriculum.js';
 import { SUBJECTS, type Subject } from '../db.js';
 import { storeTasks, takeTask, type BankTask, type TakeTaskOptions } from './bank.js';
 import { parseTaskBatch, type GeneratedTask, type MaterialFormat } from './task-schema.js';
+import type { DeepHint } from './task-schema.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -366,9 +367,11 @@ interface SeedRow {
   material: string | null;
   material_format: MaterialFormat | null;
   choices: string | null;
+  word_tiles: string | null;
   answer: string;
   accept: string;
   hint: string | null;
+  deep_hint: string | null;
   explain: string | null;
   joke: string | null;
   difficulty: number;
@@ -407,8 +410,8 @@ export function collectSeedTasks(db: Database, graph: TopicGraph, subject: Subje
 
   const rows = db
     .prepare<string[], SeedRow>(
-      `SELECT topic_id, question, instruction, material, material_format, choices,
-              answer, accept, hint, explain, joke, difficulty
+      `SELECT topic_id, question, instruction, material, material_format, choices, word_tiles,
+              answer, accept, hint, deep_hint, explain, joke, difficulty
          FROM task_bank
         WHERE topic_id IN (${ids.map(() => '?').join(', ')})
           AND status <> 'rejected'
@@ -420,6 +423,8 @@ export function collectSeedTasks(db: Database, graph: TopicGraph, subject: Subje
   for (const row of rows) {
     let accept: unknown;
     let choices: unknown;
+    let wordTiles: unknown;
+    let deepHint: unknown;
     try {
       accept = JSON.parse(row.accept);
     } catch (error) {
@@ -442,15 +447,28 @@ export function collectSeedTasks(db: Database, graph: TopicGraph, subject: Subje
     }
     // Старые строки остаются доступны для истории попыток, но обратно в строго
     // структурированный посевной банк не выгружаются.
-    if (row.instruction === null) continue;
+    if (row.instruction === null || row.word_tiles === null || row.deep_hint === null) continue;
+    try {
+      wordTiles = JSON.parse(row.word_tiles);
+      deepHint = JSON.parse(row.deep_hint);
+    } catch (error) {
+      throw new Error(
+        `Посевной банк: новые поля задания «${row.question}» не разбираются как JSON: ${(error as Error).message}`,
+      );
+    }
+    if (!Array.isArray(wordTiles) || wordTiles.some((item) => typeof item !== 'string')) {
+      throw new Error(`Посевной банк: word_tiles задания «${row.question}» не массив строк`);
+    }
     const task: GeneratedTask = {
       instruction: row.instruction,
       material: row.material ?? '',
       material_format: row.material_format ?? 'none',
       choices: choices as string[],
+      word_tiles: wordTiles as string[],
       answer: row.answer,
       accept: accept as string[],
       hint: requireSeedText(row.hint, 'hint', row.question),
+      deep_hint: deepHint as DeepHint,
       explain: requireSeedText(row.explain, 'explain', row.question),
       joke: requireSeedText(row.joke, 'joke', row.question),
       difficulty: row.difficulty,

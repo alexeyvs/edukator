@@ -47,6 +47,10 @@ export interface Verdict {
   onTopic: boolean;
   ageAppropriate: boolean;
   hintSafe: boolean;
+  hintUseful?: boolean;
+  deepHintSafe?: boolean;
+  deepHintUseful?: boolean;
+  wordOrderValid?: boolean;
   note: string;
 }
 
@@ -58,6 +62,10 @@ interface VerdictJson {
   on_topic: boolean;
   age_appropriate: boolean;
   hint_safe: boolean;
+  hint_useful: boolean;
+  deep_hint_safe: boolean;
+  deep_hint_useful: boolean;
+  word_order_valid: boolean;
   note: string;
 }
 
@@ -86,7 +94,9 @@ export interface ValidateTasksOptions {
 }
 
 /** Пять оценок: всё, кроме собственного ответа проверяющего и замечания. */
-type VerdictCheck = 'unambiguous' | 'natural' | 'onTopic' | 'ageAppropriate' | 'hintSafe';
+type VerdictCheck =
+  | 'unambiguous' | 'natural' | 'onTopic' | 'ageAppropriate'
+  | 'hintSafe' | 'hintUseful' | 'deepHintSafe' | 'deepHintUseful' | 'wordOrderValid';
 
 /** Оценки вердикта и текст отбраковки, когда оценка провалена. */
 const CHECKS: { key: VerdictCheck; problem: string }[] = [
@@ -95,6 +105,10 @@ const CHECKS: { key: VerdictCheck; problem: string }[] = [
   { key: 'onTopic', problem: 'задание не о заявленной теме' },
   { key: 'ageAppropriate', problem: 'содержание не годится подростку' },
   { key: 'hintSafe', problem: 'подсказка раскрывает ответ прямо или однозначно' },
+  { key: 'hintUseful', problem: 'краткая подсказка не даёт полезного направления' },
+  { key: 'deepHintSafe', problem: 'расширенная подсказка раскрывает ответ или повторяет данные задания' },
+  { key: 'deepHintUseful', problem: 'расширенная подсказка не даёт полезной теории и двух разборов' },
+  { key: 'wordOrderValid', problem: 'карточки нельзя однозначно собрать или они уже стоят правильно' },
 ];
 
 /** Разбирает ответ валидатора. `expected` — сколько заданий ушло на проверку. */
@@ -118,6 +132,10 @@ export function parseVerdictBatch(raw: unknown, expected: number): Verdict[] {
     onTopic: item.on_topic,
     ageAppropriate: item.age_appropriate,
     hintSafe: item.hint_safe,
+    hintUseful: item.hint_useful,
+    deepHintSafe: item.deep_hint_safe,
+    deepHintUseful: item.deep_hint_useful,
+    wordOrderValid: item.word_order_valid,
     note: item.note,
   }));
 }

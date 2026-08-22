@@ -130,6 +130,7 @@ interface RunAttemptRow {
   run_id: number | null;
   is_correct: number;
   hint_used: number;
+  hint_penalty_applied: number;
   difficulty: number;
   created_at: string;
   affects_progress: number;
@@ -293,7 +294,8 @@ function topicChanges(
   const rows = db
     .prepare<unknown[], RunAttemptRow>(
       `SELECT attempts.id, attempts.topic_id, attempts.run_id, attempts.is_correct,
-              attempts.hint_used, task_bank.difficulty, attempts.created_at,
+              attempts.hint_used, attempts.hint_penalty_applied,
+              task_bank.difficulty, attempts.created_at,
               attempts.affects_progress
          FROM attempts
          JOIN task_bank ON task_bank.id = attempts.task_id
@@ -328,7 +330,7 @@ function topicChanges(
       state = applyAttempt(state, {
         correct: row.is_correct === 1,
         difficulty: row.difficulty,
-        hintUsed: row.hint_used === 1,
+        hintPenaltyApplied: row.hint_penalty_applied === 1,
         at: new Date(row.created_at),
       });
       if (row.id === lastRunAttempt?.id) break;
@@ -388,7 +390,8 @@ export function finishRun(
     const attempts = db
       .prepare<[number], RunAttemptRow>(
         `SELECT attempts.id, attempts.topic_id, attempts.run_id, attempts.is_correct,
-                attempts.hint_used, task_bank.difficulty, attempts.created_at,
+                attempts.hint_used, attempts.hint_penalty_applied,
+                task_bank.difficulty, attempts.created_at,
                 attempts.affects_progress
            FROM attempts
            JOIN task_bank ON task_bank.id = attempts.task_id
@@ -453,7 +456,7 @@ export function finishRun(
           ? taskXp({
               difficulty: attempt.difficulty,
               correct: attempt.is_correct === 1,
-              hintUsed: attempt.hint_used === 1,
+              hintPenaltyApplied: attempt.hint_penalty_applied === 1,
             })
           : 0),
       0,

@@ -9,6 +9,7 @@ import {
   countAvailable,
   issuedTask,
   learningTaskAtPosition,
+  readBankTask,
   recentQuestions,
   reserveBossTasks,
   reserveLearningTasks,
@@ -81,6 +82,49 @@ describe('банк заданий', () => {
   });
 
   describe('запись и выдача', () => {
+    it('балансирует позиции правильных choice-ответов внутри записываемого батча', () => {
+      const choices = ['Правильный', 'Первый дистрактор', 'Второй дистрактор', 'Третий дистрактор'];
+      const generated = Array.from({ length: 12 }, (_, index) => task({
+        instruction: `Выбор ${index + 1}: найди правильную карточку.`,
+        choices,
+        answer: 'Правильный',
+        accept: ['Правильный'],
+      }));
+
+      const { stored } = storeTasks(db, TOPIC, generated);
+      const counts = [0, 0, 0, 0];
+      for (const item of stored) {
+        if (!('choices' in item)) throw new Error('choice сохранился в старом формате');
+        const position = item.choices.indexOf(item.answer);
+        counts[position] = (counts[position] ?? 0) + 1;
+        expect(new Set(item.choices)).toEqual(new Set(choices));
+      }
+
+      expect(counts).toEqual([3, 3, 3, 3]);
+    });
+
+    it('один раз перемешивает word_tiles и сохраняет полученный порядок', () => {
+      const { stored } = storeTasks(db, TOPIC, [task({
+        instruction: 'Собери предложение о погоде.',
+        answer: 'Moscow is colder in winter.',
+        accept: ['Moscow is colder in winter.'],
+        word_tiles: ['winter.', 'colder', 'Moscow', 'in', 'is'],
+      })]);
+      const id = stored[0]?.id;
+      expect(id).toBeDefined();
+
+      const first = readBankTask(db, id as number);
+      const second = readBankTask(db, id as number);
+      const firstTiles = first !== null && 'word_tiles' in first ? first.word_tiles : undefined;
+      const secondTiles = second !== null && 'word_tiles' in second ? second.word_tiles : undefined;
+      expect(firstTiles?.join(' ')).not.toBe('Moscow is colder in winter.');
+      expect(firstTiles).toEqual(secondTiles);
+      expect(firstTiles?.toSorted()).toEqual(
+        ['Moscow', 'is', 'colder', 'in', 'winter.'].toSorted(),
+      );
+      expect(first?.deep_hint).toBeDefined();
+    });
+
     it('считает fingerprint и историю по полному структурированному тексту', () => {
       const structured = (material: string): GeneratedTask => ({
         instruction: 'Вычисли значение.', material, material_format: 'math', choices: [],

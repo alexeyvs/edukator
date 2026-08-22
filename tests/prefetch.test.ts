@@ -8,6 +8,7 @@ import { openDatabase, SUBJECTS, type Subject } from '../server/db.js';
 import { countAvailable } from '../server/codex/bank.js';
 import { CodexUnavailableError } from '../server/codex/client.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
+import { TEST_DEEP_HINT } from './generated-task-fixture.js';
 import type { ProduceRequest } from '../server/codex/worker.js';
 import {
   DEFAULT_CYCLES,
@@ -64,10 +65,11 @@ let counter = 0;
 function task(topicId: string): GeneratedTask {
   counter += 1;
   return {
-    instruction: `Задание ${counter} по теме ${topicId}: сколько монет останется?`, material: '', material_format: 'none', choices: [],
+    instruction: `Задание ${counter} по теме ${topicId}: сколько монет останется?`, material: '', material_format: 'none', choices: [], word_tiles: [],
     answer: '45',
     accept: ['45', '45 монет'],
     hint: 'Определи нужные действия. Проверь вычисление обратным действием.',
+    deep_hint: TEST_DEEP_HINT,
     explain: 'Сорок пять — то, что осталось.',
     joke: 'Не Нобелевка, но зачёт.',
     difficulty: 2,

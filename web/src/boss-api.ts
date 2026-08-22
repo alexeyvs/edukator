@@ -1,7 +1,7 @@
 import type { DisputeResponse, RunProgress, RunTask } from './run-api';
 import { jsonRequest, requestJson } from './http';
 
-export type BossTask = Omit<RunTask, 'hint'>;
+export type BossTask = Omit<RunTask, 'hint' | 'deep_hint'>;
 
 export interface NextBossTaskResponse {
   batchId: number;

@@ -133,6 +133,7 @@ describe('маршруты триажа', () => {
       },
     });
     expect(first.task).not.toHaveProperty('hint');
+    expect(first.task).not.toHaveProperty('deep_hint');
 
     const answer = await app.inject({
       method: 'POST',

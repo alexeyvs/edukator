@@ -25,20 +25,36 @@ export interface GeneratedTask {
   material: string;
   material_format: MaterialFormat;
   choices: string[];
+  /** Карточки для расстановки слов; пустой массив у обычного задания. */
+  word_tiles?: string[];
   answer: string;
   /** Равноправные записи ответа, включая сам `answer`: с ними сверяется нормализатор. */
   accept: string[];
   hint: string;
+  deep_hint?: DeepHint;
   explain: string;
   joke: string;
   /** 1-3. */
   difficulty: number;
 }
 
+export interface DeepHintExample {
+  prompt: string;
+  answer: string;
+  walkthrough: string;
+}
+
+export interface DeepHint {
+  rule: string;
+  explanation: string;
+  examples: [DeepHintExample, DeepHintExample];
+  checklist: string[];
+}
+
 export type MaterialFormat = 'none' | 'text' | 'math';
 
 export type TaskPromptFields =
-  | Pick<GeneratedTask, 'instruction' | 'material' | 'material_format' | 'choices'>
+  | Pick<GeneratedTask, 'instruction' | 'material' | 'material_format' | 'choices' | 'word_tiles'>
   | { question: string; instruction?: undefined };
 
 /** Стабильное текстовое представление полного условия для сравнения и проверки. */
@@ -49,11 +65,16 @@ export function taskPromptText(task: TaskPromptFields): string {
   if ((task.choices?.length ?? 0) > 0) {
     parts.push((task.choices ?? []).map((choice, index) => `${String.fromCharCode(65 + index)}. ${choice.trim()}`).join('\n'));
   }
+  if ((task.word_tiles?.length ?? 0) > 0) {
+    parts.push(`Карточки: ${(task.word_tiles ?? []).join(' | ')}`);
+  }
   return parts.filter(Boolean).join('\n\n');
 }
 
+type SchemaTask = GeneratedTask & { word_tiles: string[]; deep_hint: DeepHint };
+
 interface TaskBatchJson {
-  items: GeneratedTask[];
+  items: SchemaTask[];
 }
 
 /**
@@ -205,7 +226,34 @@ function revealsAnswer(hint: string, answer: string): boolean {
   return boundary.test(normalizeText(hint));
 }
 
-function taskProblems(task: GeneratedTask, format: AnswerFormat): string[] {
+function deepHintStrings(hint: DeepHint): string[] {
+  return [
+    hint.rule,
+    hint.explanation,
+    ...hint.examples.flatMap((example) => [example.prompt, example.answer, example.walkthrough]),
+    ...hint.checklist,
+  ];
+}
+
+/** Число слов во всём втором уровне подсказки, независимо от разбиения на секции. */
+export function deepHintWordCount(hint: DeepHint): number {
+  return deepHintStrings(hint).join(' ').match(/[\p{L}\p{N}]+(?:[-’'][\p{L}\p{N}]+)*/gu)?.length ?? 0;
+}
+
+function sameMultiset(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const counts = new Map<string, number>();
+  for (const value of left) counts.set(value, (counts.get(value) ?? 0) + 1);
+  for (const value of right) {
+    const count = counts.get(value) ?? 0;
+    if (count === 0) return false;
+    if (count === 1) counts.delete(value);
+    else counts.set(value, count - 1);
+  }
+  return counts.size === 0;
+}
+
+function taskProblems(task: SchemaTask, format: AnswerFormat): string[] {
   const problems: string[] = [];
 
   if (task.instruction?.trim() === '') problems.push('поле instruction состоит из одних пробелов');
@@ -225,6 +273,7 @@ function taskProblems(task: GeneratedTask, format: AnswerFormat): string[] {
   const prose = [
     task.instruction ?? '',
     task.hint ?? '',
+    ...deepHintStrings(task.deep_hint),
     task.explain ?? '',
     task.joke ?? '',
     task.material_format === 'math' ? '' : (task.material ?? ''),
@@ -248,6 +297,31 @@ function taskProblems(task: GeneratedTask, format: AnswerFormat): string[] {
     }
   } else if ((task.choices?.length ?? 0) !== 0) {
     problems.push(`для формата ${format} поле choices должно быть пустым массивом`);
+  }
+
+  const tiles = task.word_tiles ?? [];
+  if (tiles.length > 0) {
+    if (format !== 'text') problems.push('word_tiles разрешены только для текстового формата ответа');
+    if (task.choices.length > 0) problems.push('у задания с word_tiles поле choices должно быть пустым');
+    if (tiles.length < 2 || tiles.length > 12) {
+      problems.push('для word_tiles требуется от 2 до 12 карточек');
+    }
+    if (tiles.some((tile) => tile.trim() === '' || /\s/u.test(tile))) {
+      problems.push('каждая карточка word_tiles должна быть одним непустым словом без пробелов');
+    }
+    if (tiles.some((tile) => /^\p{P}+$/u.test(tile))) {
+      problems.push('пунктуация в word_tiles должна быть прикреплена к слову');
+    }
+    const answerTiles = task.answer.split(' ');
+    if (!sameMultiset(tiles, answerTiles)) {
+      problems.push('мультимножество word_tiles должно буквально собираться в answer через пробел');
+    }
+    if (tiles.join(' ') === task.answer) {
+      problems.push('карточки word_tiles уже стоят в правильном порядке');
+    }
+    if (new Set(tiles).size < 2) {
+      problems.push('одинаковые карточки word_tiles нельзя переставить в отличающийся порядок');
+    }
   }
 
   // Числовая пригодность проверяется первой: сверка `answer` с `accept[]` идёт
@@ -327,6 +401,8 @@ function taskProblems(task: GeneratedTask, format: AnswerFormat): string[] {
   // где `fitsAccept` отсекает пустую запись `accept[]`, и ровно по той причине.
   for (const [field, value] of [
     ['hint', task.hint],
+    ['deep_hint.rule', task.deep_hint.rule],
+    ['deep_hint.explanation', task.deep_hint.explanation],
     ['explain', task.explain],
     ['joke', task.joke],
   ] as const) {
@@ -335,6 +411,38 @@ function taskProblems(task: GeneratedTask, format: AnswerFormat): string[] {
 
   if (revealsAnswer(task.hint, task.answer)) {
     problems.push(`подсказка содержит ответ «${task.answer}»`);
+  }
+
+  if (deepHintStrings(task.deep_hint).some((value) => revealsAnswer(value, task.answer))) {
+    problems.push(`расширенная подсказка содержит ответ «${task.answer}»`);
+  }
+
+  if (task.deep_hint.examples.length !== 2) {
+    problems.push('расширенная подсказка должна содержать ровно два примера');
+  }
+  if (task.deep_hint.checklist.length < 2 || task.deep_hint.checklist.length > 5) {
+    problems.push('чек-лист расширенной подсказки должен содержать 2–5 пунктов');
+  }
+  task.deep_hint.examples.forEach((example, index) => {
+    for (const [field, value] of Object.entries(example)) {
+      if (value.trim() === '') problems.push(`поле deep_hint.examples[${index}].${field} пусто`);
+    }
+    if (normalizeText(example.answer) === normalizeText(task.answer)) {
+      problems.push(`пример ${index + 1} расширенной подсказки повторяет ответ задания`);
+    }
+    if (
+      normalizeText(example.prompt) === normalizeText(task.instruction) ||
+      (task.material.trim() !== '' && normalizeText(example.prompt) === normalizeText(task.material))
+    ) {
+      problems.push(`пример ${index + 1} расширенной подсказки повторяет текущее задание`);
+    }
+  });
+  for (const [index, item] of task.deep_hint.checklist.entries()) {
+    if (item.trim() === '') problems.push(`пункт ${index + 1} чек-листа расширенной подсказки пуст`);
+  }
+  const deepWords = deepHintWordCount(task.deep_hint);
+  if (deepWords < 200 || deepWords > 350) {
+    problems.push(`расширенная подсказка должна содержать 200–350 слов, получено ${deepWords}`);
   }
 
   const sentences = task.hint.trim().split(/(?<=[.!?])(?:\s+|$)/u).filter(Boolean);
@@ -366,5 +474,15 @@ export function parseTaskBatch(
     throw new Error(`Батч заданий: ${problems.join('; ')}`);
   }
 
-  return raw.items.map((task) => ({ ...task, accept: [...task.accept] }));
+  return raw.items.map((task) => ({
+    ...task,
+    choices: [...task.choices],
+    word_tiles: [...task.word_tiles],
+    accept: [...task.accept],
+    deep_hint: {
+      ...task.deep_hint,
+      examples: task.deep_hint.examples.map((example) => ({ ...example })) as [DeepHintExample, DeepHintExample],
+      checklist: [...task.deep_hint.checklist],
+    },
+  }));
 }
