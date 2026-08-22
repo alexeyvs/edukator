@@ -58,6 +58,7 @@ import {
 import {
   registerAdminCoursesRoutes,
   registerUnavailableAdminCourses,
+  CourseDraftBuildRunner,
   type AdminCoursesRoutesOptions,
 } from './routes/admin/courses.js';
 import { registerFamilyRoutes, registerUnavailableFamily } from './routes/family.js';
@@ -376,6 +377,7 @@ export function buildServer(
       // Отдельная привязка, а не сам `control`: сужение типа не доживает до тела
       // вложенной функции, а квота списывается именно оттуда.
       const controlDb = control;
+      const draftBuildRunner = new CourseDraftBuildRunner(options.catalogDraftBuilder);
       if (options.catalogWorker !== false) {
         catalogWorker = new CatalogWorker(controlDb, dataDir, {
           ...(options.catalogWorker ?? {}),
@@ -571,6 +573,7 @@ export function buildServer(
         ...(catalogWorker === undefined ? {} : { catalogWorker }),
         ...(options.courseArtifacts === undefined ? {} : { artifacts: options.courseArtifacts }),
         ...(options.catalogDraftBuilder === undefined ? {} : { draftBuilder: options.catalogDraftBuilder }),
+        draftBuildRunner,
         ...(options.now === undefined ? {} : { now: options.now }),
       });
       registerAdminParentsRoutes(app, {
@@ -639,6 +642,7 @@ export function buildServer(
       app.addHook('onClose', async () => {
         await catalogWorker?.stop();
         await dispatcher?.stop();
+        await draftBuildRunner.stop();
         // Соединения имперсонации первыми: они ничего не пишут и никого не
         // ждут, а держат дескриптор той же базы, которую сейчас закроет реестр.
         impersonations.closeAll();

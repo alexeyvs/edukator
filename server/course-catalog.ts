@@ -28,6 +28,8 @@ export interface CatalogRevision {
   status: 'draft' | 'published';
   basedOnRevisionId: number | null;
   editVersion: number;
+  title: string;
+  grade: string;
   publishedBy: string | null;
   createdAt: string;
   publishedAt: string | null;
@@ -45,6 +47,14 @@ export interface DraftTopicInput {
   answerFormat: AnswerFormat;
   promptSeed: string;
   active?: boolean;
+  /** Page evidence for this topic. Omit to preserve existing references. */
+  sourceRefs?: TopicSourceRef[];
+}
+
+export interface TopicSourceRef {
+  sourceId: number;
+  pageFrom: number;
+  pageTo: number;
 }
 
 export interface CatalogRevisionTopic extends Omit<DraftTopicInput, 'clientId'> {
@@ -71,6 +81,8 @@ interface RevisionRow {
   status: CatalogRevision['status'];
   based_on_revision_id: number | null;
   edit_version: number;
+  title: string;
+  grade: string;
   published_by: string | null;
   created_at: string;
   published_at: string | null;
@@ -97,6 +109,8 @@ function toRevision(row: RevisionRow): CatalogRevision {
     status: row.status,
     basedOnRevisionId: row.based_on_revision_id,
     editVersion: row.edit_version,
+    title: row.title,
+    grade: row.grade,
     publishedBy: row.published_by,
     createdAt: row.created_at,
     publishedAt: row.published_at,
@@ -131,6 +145,10 @@ function requireEditableRevision(
   revisionId: number,
   expectedEditVersion?: number,
 ): RevisionRow {
+  const course = requireCourse(db, courseId);
+  if (course.status === 'archived') {
+    throw new CatalogConflictError(`Курс «${courseId}» архивирован`);
+  }
   const row = selectRevision(db, revisionId);
   if (row === undefined || row.course_id !== courseId) {
     throw new CatalogNotFoundError(`Редакция ${revisionId} курса «${courseId}» не найдена`);
@@ -201,6 +219,16 @@ export function readRevisionTopics(db: Database, revisionId: number): CatalogRev
   for (const row of prereqs) {
     byTopic.set(row.topic_id, [...(byTopic.get(row.topic_id) ?? []), row.prereq_topic_id]);
   }
+  const sourceRows = db.prepare<[number], {
+    topic_id: string; source_id: number; page_from: number; page_to: number;
+  }>(`SELECT topic_id, source_id, page_from, page_to FROM revision_topic_sources
+       WHERE revision_id = ? ORDER BY topic_id, source_id, page_from, page_to`).all(revisionId);
+  const sourceRefs = new Map<string, TopicSourceRef[]>();
+  for (const ref of sourceRows) {
+    sourceRefs.set(ref.topic_id, [...(sourceRefs.get(ref.topic_id) ?? []), {
+      sourceId: ref.source_id, pageFrom: ref.page_from, pageTo: ref.page_to,
+    }]);
+  }
   return rows.map((row) => ({
     id: row.topic_id,
     title: row.title,
@@ -211,6 +239,7 @@ export function readRevisionTopics(db: Database, revisionId: number): CatalogRev
     promptSeed: row.prompt_seed,
     active: row.active === 1,
     position: row.position,
+    sourceRefs: sourceRefs.get(row.topic_id) ?? [],
   }));
 }
 
@@ -239,9 +268,9 @@ export function createCourse(
       return Number(
         db.prepare(
           `INSERT INTO course_revisions
-             (course_id, revision_number, status, edit_version, created_at)
-           VALUES (?, 1, 'draft', 1, ?)`,
-        ).run(courseId, at).lastInsertRowid,
+             (course_id, revision_number, status, edit_version, title, grade, created_at)
+           VALUES (?, 1, 'draft', 1, ?, ?, ?)`,
+        ).run(courseId, title, grade, at).lastInsertRowid,
       );
     }).immediate();
     return {
@@ -289,9 +318,9 @@ export function createDraft(
     );
     const result = db.prepare(
       `INSERT INTO course_revisions
-         (course_id, revision_number, status, based_on_revision_id, edit_version, created_at)
-       VALUES (?, ?, 'draft', ?, 1, ?)`,
-    ).run(courseId, nextNumber, expectedActiveRevisionId, now.toISOString());
+         (course_id, revision_number, status, based_on_revision_id, edit_version, title, grade, created_at)
+       SELECT ?, ?, 'draft', ?, 1, title, grade, ? FROM course_revisions WHERE id = ?`,
+    ).run(courseId, nextNumber, expectedActiveRevisionId, now.toISOString(), expectedActiveRevisionId);
     const draftId = Number(result.lastInsertRowid);
     db.prepare(
       `INSERT INTO revision_topics
@@ -302,6 +331,11 @@ export function createDraft(
     db.prepare(
       `INSERT INTO topic_prereqs (revision_id, topic_id, prereq_topic_id, position)
        SELECT ?, topic_id, prereq_topic_id, position FROM topic_prereqs WHERE revision_id = ?`,
+    ).run(draftId, expectedActiveRevisionId);
+    db.prepare(
+      `INSERT INTO revision_topic_sources (revision_id, topic_id, source_id, page_from, page_to)
+       SELECT ?, topic_id, source_id, page_from, page_to
+         FROM revision_topic_sources WHERE revision_id = ?`,
     ).run(draftId, expectedActiveRevisionId);
     return draftId;
   }).immediate();
@@ -358,6 +392,10 @@ export function replaceDraftTopics(
 
   db.transaction(() => {
     requireEditableRevision(db, courseId, revisionId, expectedEditVersion);
+    const preservedRefs = db.prepare<[number], {
+      topic_id: string; source_id: number; page_from: number; page_to: number;
+    }>(`SELECT topic_id, source_id, page_from, page_to
+          FROM revision_topic_sources WHERE revision_id = ?`).all(revisionId);
     const knownRows = db
       .prepare<[string], { id: string }>('SELECT id FROM topics WHERE course_id = ?')
       .all(courseId);
@@ -395,6 +433,43 @@ export function replaceDraftTopics(
     topics.forEach((topic) => {
       topic.prereqs.forEach((prereq, position) => insertPrereq.run(revisionId, topic.id, prereq, position));
     });
+    const insertRef = db.prepare(
+      `INSERT INTO revision_topic_sources
+         (revision_id, topic_id, source_id, page_from, page_to)
+       VALUES (?, ?, ?, ?, ?)`,
+    );
+    const preservedByTopic = new Map<string, TopicSourceRef[]>();
+    for (const ref of preservedRefs) {
+      preservedByTopic.set(ref.topic_id, [...(preservedByTopic.get(ref.topic_id) ?? []), {
+        sourceId: ref.source_id, pageFrom: ref.page_from, pageTo: ref.page_to,
+      }]);
+    }
+    topics.forEach((topic, index) => {
+      const refs = inputs[index]?.sourceRefs ?? preservedByTopic.get(topic.id) ?? [];
+      for (const ref of refs) {
+        if (!Number.isSafeInteger(ref.sourceId) || !Number.isSafeInteger(ref.pageFrom)
+          || !Number.isSafeInteger(ref.pageTo) || ref.pageFrom < 1 || ref.pageTo < ref.pageFrom) {
+          throw new Error(`Тема «${topic.id}»: некорректная ссылка на источник`);
+        }
+        const pages = db.prepare<[number, number, number, number, number], { count: number }>(
+          `SELECT COUNT(*) AS count FROM source_pages sp
+             JOIN course_sources cs ON cs.id = sp.source_id
+             JOIN course_revisions cr ON cr.id = ?
+            WHERE cs.id = ? AND (
+              cs.revision_id = ? OR EXISTS (
+                SELECT 1 FROM revision_topic_sources inherited
+                 WHERE inherited.revision_id = cr.based_on_revision_id
+                   AND inherited.source_id = cs.id
+              )
+            ) AND sp.page_number BETWEEN ? AND ?
+              AND sp.status IN ('ready', 'suspicious')`,
+        ).get(revisionId, ref.sourceId, revisionId, ref.pageFrom, ref.pageTo)?.count ?? 0;
+        if (pages !== ref.pageTo - ref.pageFrom + 1) {
+          throw new Error(`Тема «${topic.id}»: ссылка ведёт на неизвестные или неготовые страницы`);
+        }
+        insertRef.run(revisionId, topic.id, ref.sourceId, ref.pageFrom, ref.pageTo);
+      }
+    });
     const changed = db.prepare(
       `UPDATE course_revisions SET edit_version = edit_version + 1
        WHERE id = ? AND status = 'draft' AND edit_version = ?`,
@@ -411,7 +486,6 @@ export function replaceDraftTopics(
 export function readRevisionGraph(db: Database, revisionId: number, options: { dataDir?: string } = {}): TopicGraph {
   const revision = selectRevision(db, revisionId);
   if (revision === undefined) throw new CatalogNotFoundError(`Редакция ${revisionId} не найдена`);
-  const course = requireCourse(db, revision.course_id);
   const rows = db.prepare<
     [number],
     { topic_id: string; title: string; exam_weight: number; difficulty: number; answer_format: AnswerFormat; prompt_seed: string }
@@ -434,8 +508,8 @@ export function readRevisionGraph(db: Database, revisionId: number, options: { d
     answerFormat: row.answer_format,
     promptSeed: row.prompt_seed,
     prereqs: byTopic.get(row.topic_id) ?? [],
-    courseTitle: course.title,
-    grade: course.grade,
+    courseTitle: revision.title,
+    grade: revision.grade,
     sourceContext: retrieveCourseSources(db, {
       revisionId,
       topicId: row.topic_id,
@@ -443,17 +517,26 @@ export function readRevisionGraph(db: Database, revisionId: number, options: { d
     }),
   })), [{
     courseId: revision.course_id,
-    title: course.title,
-    grade: course.grade,
+    title: revision.title,
+    grade: revision.grade,
     revisionId,
   }]);
 }
 
 function validateRevisionSources(db: Database, revisionId: number): void {
-  const sources = db.prepare<[number], { id: number; status: string; page_count: number | null }>(
-    'SELECT id, status, page_count FROM course_sources WHERE revision_id = ? ORDER BY id',
-  ).all(revisionId);
-  if (sources.length === 0) return; // A manually authored course may intentionally have no PDF.
+  const revision = selectRevision(db, revisionId);
+  if (revision === undefined) throw new CatalogNotFoundError(`Редакция ${revisionId} не найдена`);
+  const sources = db.prepare<[number, number], { id: number; status: string; page_count: number | null }>(
+    `SELECT DISTINCT cs.id, cs.status, cs.page_count
+       FROM course_sources cs
+      WHERE cs.revision_id = ?
+         OR EXISTS (
+           SELECT 1 FROM revision_topic_sources rts
+            WHERE rts.revision_id = ? AND rts.source_id = cs.id
+         )
+      ORDER BY cs.id`,
+  ).all(revisionId, revisionId);
+  if (sources.length === 0) return; // A course authored manually may have no PDF.
   const incomplete = sources.filter((source) => source.status !== 'ready');
   if (incomplete.length > 0) {
     throw new Error(`Редакция ${revisionId}: источники не готовы: ${incomplete.map((row) => row.id).join(', ')}`);
@@ -479,11 +562,14 @@ function validateRevisionSources(db: Database, revisionId: number): void {
   if (topicWithoutRef !== undefined) {
     throw new Error(`Редакция ${revisionId}: у темы «${topicWithoutRef.topic_id}» нет ссылки на источник`);
   }
-  const invalidRef = db.prepare<[number], { source_id: number; page_from: number; page_to: number }>(
+  const invalidRef = db.prepare<[number, string], { source_id: number; page_from: number; page_to: number }>(
     `SELECT rts.source_id, rts.page_from, rts.page_to
        FROM revision_topic_sources rts
       WHERE rts.revision_id = ? AND (
-        NOT EXISTS (SELECT 1 FROM course_sources cs WHERE cs.id = rts.source_id AND cs.revision_id = rts.revision_id)
+        NOT EXISTS (
+          SELECT 1 FROM course_sources cs
+           WHERE cs.id = rts.source_id AND cs.course_id = ?
+        )
         OR EXISTS (
           WITH RECURSIVE pages(page) AS (
             SELECT rts.page_from UNION ALL SELECT page + 1 FROM pages WHERE page < rts.page_to
@@ -495,7 +581,7 @@ function validateRevisionSources(db: Database, revisionId: number): void {
            )
         )
       ) LIMIT 1`,
-  ).get(revisionId);
+  ).get(revisionId, revision.course_id);
   if (invalidRef !== undefined) {
     throw new Error(`Редакция ${revisionId}: неизвестная ссылка source ${invalidRef.source_id}, pages ${invalidRef.page_from}-${invalidRef.page_to}`);
   }
@@ -512,6 +598,8 @@ export function publishRevision(
   // version is checked again inside the transaction.
   requireEditableRevision(db, courseId, revisionId, expectedEditVersion);
   const graph = readRevisionGraph(db, revisionId);
+  const publishedMetadata = graph.courses.get(courseId);
+  if (publishedMetadata === undefined) throw new Error(`Редакция ${revisionId}: нет метаданных курса`);
   if (graph.order.length === 0) {
     throw new Error(`Редакция ${revisionId} не содержит активных тем`);
   }
@@ -528,9 +616,9 @@ export function publishRevision(
     if (published.changes !== 1) throw new CatalogConflictError(`Черновик ${revisionId} уже изменён`);
     db.prepare(
       `UPDATE courses
-          SET status = 'published', active_revision_id = ?, updated_at = ?, archived_at = NULL
+          SET title = ?, grade = ?, status = 'published', active_revision_id = ?, updated_at = ?, archived_at = NULL
         WHERE id = ?`,
-    ).run(revisionId, at, courseId);
+    ).run(publishedMetadata.title, publishedMetadata.grade, revisionId, at, courseId);
     db.prepare(
       `UPDATE topics SET archived_at = ?
         WHERE course_id = ? AND id NOT IN
@@ -563,19 +651,18 @@ export function updateCourseMetadata(
   revisionId: number,
   expectedEditVersion: number,
   metadata: { title: string; grade: string },
-  now: Date = new Date(),
+  _now: Date = new Date(),
 ): CatalogRevision {
   db.transaction(() => {
     requireEditableRevision(db, courseId, revisionId, expectedEditVersion);
-    db.prepare('UPDATE courses SET title = ?, grade = ?, updated_at = ? WHERE id = ?').run(
+    db.prepare('UPDATE course_revisions SET title = ?, grade = ?, edit_version = edit_version + 1 WHERE id = ?').run(
       requireText(metadata.title, 'Название курса'),
       requireText(metadata.grade, 'Класс курса'),
-      now.toISOString(),
-      courseId,
+      revisionId,
     );
-    db.prepare('UPDATE course_revisions SET edit_version = edit_version + 1 WHERE id = ?').run(revisionId);
   }).immediate();
-  return toRevision(selectRevision(db, revisionId) as RevisionRow);
+  const result = toRevision(selectRevision(db, revisionId) as RevisionRow);
+  return result;
 }
 
 export function bootstrapLegacyCourses(

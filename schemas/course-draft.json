@@ -11,9 +11,10 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["client_id", "title", "exam_weight", "difficulty", "prereqs", "answer_format", "prompt_seed", "source_refs"],
+        "required": ["client_id", "existing_id", "title", "exam_weight", "difficulty", "prereqs", "answer_format", "prompt_seed", "source_refs"],
         "properties": {
           "client_id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+          "existing_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 200 },
           "title": { "type": "string", "minLength": 1, "maxLength": 240 },
           "exam_weight": { "type": "integer", "minimum": 0, "maximum": 3 },
           "difficulty": { "type": "integer", "minimum": 1, "maximum": 3 },

@@ -7,12 +7,6 @@ export interface CourseJson {
   courseTitle: string;
   grade: string;
   revision: number | null;
-  course: {
-    courseId: CourseId;
-    title: string;
-    grade: string;
-    revision: number | null;
-  };
 }
 
 /** Единые публичные метаданные курса для карточек учебного HTTP API. */
@@ -25,15 +19,7 @@ export function courseJson(graph: TopicGraph, courseId: CourseId): CourseJson {
     grade: course.grade,
     revision: course.revisionId,
   };
-  return {
-    ...value,
-    course: {
-      courseId: value.courseId,
-      title: value.courseTitle,
-      grade: value.grade,
-      revision: value.revision,
-    },
-  };
+  return value;
 }
 
 /** Даёт домену самому вернуть штатный 404, если run не существует. */

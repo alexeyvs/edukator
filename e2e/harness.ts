@@ -262,8 +262,14 @@ function task(subject: Subject, topic: number, index: number): GeneratedTask {
   };
 }
 
-function seedTasks(db: Database): void {
+function seedTasks(db: Database, control: Database): void {
   for (const subject of SUBJECTS) {
+    const courseRevisionId = control.prepare<[string], { active_revision_id: number }>(
+      'SELECT active_revision_id FROM courses WHERE id = ?',
+    ).get(subject)?.active_revision_id;
+    if (courseRevisionId === undefined) {
+      throw new Error(`E2E: у курса ${subject} нет активной редакции`);
+    }
     for (let topic = 1; topic <= TOPICS_PER_SUBJECT; topic += 1) {
       storeTasks(
         db,
@@ -272,6 +278,7 @@ function seedTasks(db: Database): void {
           { length: TASKS_PER_TOPIC },
           (_, index) => task(subject, topic, index + 1),
         ),
+        { courseRevisionId },
       );
     }
   }
@@ -306,7 +313,12 @@ function seedLearningForecastFixture(db: Database, subject: Subject): void {
  * первом открытии базы, а помощник приходит раньше него — и банк заданий без
  * строк `topic_state` не принял бы ни одного задания.
  */
-function seedChildDatabase(db: Database, graph: TopicGraph, seed: SeedChildOptions): void {
+function seedChildDatabase(
+  db: Database,
+  control: Database,
+  graph: TopicGraph,
+  seed: SeedChildOptions,
+): void {
   syncTopicState(db, graph);
   writeProfile(db, {
     name: seed.name ?? CHILD_NAME,
@@ -314,7 +326,7 @@ function seedChildDatabase(db: Database, graph: TopicGraph, seed: SeedChildOptio
     interests: ['скейт'],
     examDate: '2027-05-20',
   });
-  seedTasks(db);
+  seedTasks(db, control);
   if (seed.triagePassed !== undefined) markTriagePassed(db, seed.triagePassed);
   if (seed.learningForecastFixture !== undefined) {
     seedLearningForecastFixture(db, seed.learningForecastFixture);
@@ -521,6 +533,7 @@ export async function startE2eHarness(
           ).get()?.id);
           return JSON.stringify({ topics: Array.from({ length: 14 }, (_, index) => ({
             client_id: index === 0 ? 'map' : index === 1 ? 'continents' : `region-${String(index + 1)}`,
+            existing_id: null,
             title: index === 0 ? 'Географическая карта' : index === 1 ? 'Материки и океаны' : `Географический регион ${String(index + 1)}`,
             exam_weight: 3,
             difficulty: index % 3 + 1,
@@ -536,7 +549,7 @@ export async function startE2eHarness(
   const db = openDatabase(dbPath);
 
   try {
-    seedChildDatabase(db, graph, options);
+    seedChildDatabase(db, control, graph, options);
     const url = await app.listen({ host: HOST, port: 0 });
     if (options.context !== undefined) await signIn(options.context, options.signIn ?? 'child');
 
@@ -581,7 +594,7 @@ export async function startE2eHarness(
         // забег шёл бы зелёным по базе, которую создал сам тест.
         const childDb = openDatabase(childDatabasePath(dataDir, id), { fileMustExist: true });
         try {
-          seedChildDatabase(childDb, graph, seed);
+          seedChildDatabase(childDb, control, graph, seed);
         } finally {
           childDb.close();
         }
@@ -590,17 +603,17 @@ export async function startE2eHarness(
         bootstrapLegacyCourses(control, curriculumDir);
       },
       seedCourseTasks(courseId: string): void {
-        const topicIds = control.prepare<[string], { topic_id: string }>(
-          `SELECT rt.topic_id FROM courses c
+        const rows = control.prepare<[string], { topic_id: string; revision_id: number }>(
+          `SELECT rt.topic_id, rt.revision_id FROM courses c
              JOIN revision_topics rt ON rt.revision_id = c.active_revision_id
             WHERE c.id = ? AND rt.active = 1 ORDER BY rt.position`,
-        ).all(courseId).map((row) => row.topic_id);
-        for (const [topicIndex, topicId] of topicIds.entries()) {
+        ).all(courseId);
+        for (const [topicIndex, { topic_id: topicId, revision_id: courseRevisionId }] of rows.entries()) {
           db.prepare('INSERT OR IGNORE INTO topic_state (topic_id) VALUES (?)').run(topicId);
           storeTasks(db, topicId, Array.from(
             { length: TASKS_PER_TOPIC },
             (_, index) => task(courseId, topicIndex + 1, index + 1),
-          ));
+          ), { courseRevisionId });
         }
       },
       assertCodexNotCalled,

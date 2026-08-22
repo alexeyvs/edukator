@@ -101,6 +101,17 @@ describe('CurriculumProvider', () => {
     expect(provider.get('abcdef01').courses).toEqual([]);
   });
 
+  it('разрешает legacy-run без revision ID через импортированную первую редакцию', () => {
+    const legacyRevision = publish('math', 'Математика', '7 класс', [topic('math', 'legacy')]);
+    const draft = createDraft(db, 'math', legacyRevision);
+    const changed = replaceDraftTopics(db, 'math', draft.id, draft.editVersion, [topic('math', 'new')]);
+    publishRevision(db, 'math', draft.id, changed.revision.editVersion);
+
+    const graph = new CurriculumProvider(db).graphFor('math', null);
+    expect([...graph.byId.keys()]).toEqual(['math.legacy']);
+    expect(graph.courses.get('math')?.revisionId).toBe(legacyRevision);
+  });
+
   it('не возвращает снятый курс и не включает архивную тему новой редакции', () => {
     const firstRevision = publish('science-7', 'Наука', '7 класс', [
       topic('science-7', 'old'),

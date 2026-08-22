@@ -201,6 +201,49 @@ describe('readParentsDashboard', () => {
     ]);
   });
 
+  it('показывает сводку и детали забега для произвольного course ID', () => {
+    const { db, graph } = setup([
+      topic('geography.maps', 'geography-5', 'Географические карты', 3),
+    ]);
+    const completed = run(
+      db, 'geography-5', 'geography.maps', 'run',
+      '2026-08-08T09:00:00.000Z', '2026-08-08T09:20:00.000Z', 1, 1,
+    );
+    attempt(db, 'geography.maps', '2026-08-08T09:10:00.000Z', 60_000, completed);
+    snapshot(db, 'geography-5', 3.5, 0.4, '2026-08-08T11:00:00.000Z');
+
+    const dashboard = readParentsDashboard(db, graph, NOW);
+    expect(dashboard.activity).toEqual([
+      expect.objectContaining({ runId: completed, subject: 'geography-5', activeMinutes: 1 }),
+    ]);
+    expect(dashboard.forecasts[0]).toMatchObject({
+      subject: 'geography-5',
+      currentSnapshot: { score: 3.5, band: 0.4 },
+    });
+    expect(readParentsRunDetail(db, graph, completed, NOW)).toMatchObject({
+      runId: completed,
+      subject: 'geography-5',
+      attempts: [expect.objectContaining({ topicTitle: 'Географические карты' })],
+    });
+  });
+
+  it('сохраняет недельную историю темы, которой больше нет в текущем графе', () => {
+    const { db } = setup([
+      topic('geography.old-maps', 'geography-5', 'Старые карты', 3),
+    ]);
+    const completed = run(
+      db, 'geography-5', 'geography.old-maps', 'run',
+      '2026-08-07T09:00:00.000Z', '2026-08-07T09:20:00.000Z', 1, 1,
+    );
+    attempt(db, 'geography.old-maps', '2026-08-07T09:10:00.000Z', 90_000, completed);
+
+    const dashboard = readParentsDashboard(db, buildTopicGraph([]), NOW);
+    expect(dashboard.time.actualMinutes).toBe(1.5);
+    expect(dashboard.activity).toEqual([
+      expect.objectContaining({ runId: completed, subject: 'geography-5', activeMinutes: 1.5 }),
+    ]);
+  });
+
   it('учитывает в общем времени только ответы lesson-run, без времени чтения', () => {
     const { db, graph } = setup();
     const lesson = run(

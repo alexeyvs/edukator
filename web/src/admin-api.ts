@@ -386,6 +386,8 @@ export interface AdminCourseRevision {
   status: AdminRevisionStatus;
   basedOnRevisionId: number | null;
   editVersion: number;
+  title: string;
+  grade: string;
   publishedBy: string | null;
   createdAt: string;
   publishedAt: string | null;
@@ -401,6 +403,13 @@ export interface AdminCourseTopic {
   promptSeed: string;
   active: boolean;
   position: number;
+  sourceRefs?: AdminTopicSourceRef[];
+}
+
+export interface AdminTopicSourceRef {
+  sourceId: number;
+  pageFrom: number;
+  pageTo: number;
 }
 
 export interface AdminDraftTopicInput extends Omit<AdminCourseTopic, 'id' | 'position'> {

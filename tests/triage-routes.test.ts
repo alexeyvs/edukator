@@ -76,10 +76,13 @@ describe('маршруты триажа', () => {
     app = server.app;
     db = openDatabase(server.dbPath);
     for (const subject of SUBJECTS) {
+      const revisionId = server.control.prepare<[string], { active_revision_id: number }>(
+        'SELECT active_revision_id FROM courses WHERE id = ?',
+      ).get(subject)?.active_revision_id;
       for (let topicNumber = 1; topicNumber <= 3; topicNumber += 1) {
         storeTasks(db, `${subject}.${topicNumber}`, [1, 2, 3].map(
           (difficulty) => task(subject, topicNumber, difficulty),
-        ));
+        ), { courseRevisionId: revisionId ?? null });
       }
     }
   });

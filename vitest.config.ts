@@ -87,6 +87,12 @@ export default defineConfig({
           functions: 80,
           lines: 80,
         },
+        'server/{catalog-worker,course-artifacts,course-drafting,ocr-runner}.ts': {
+          statements: 80,
+          branches: 80,
+          functions: 80,
+          lines: 80,
+        },
         // Каталог данных, замок каталога, адрес клиента, снимок базы и
         // разделённое спорное состояние появились вместе с арендаторами и
         // тоже не попадали ни под один порог.

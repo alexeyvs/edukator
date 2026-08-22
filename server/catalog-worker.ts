@@ -3,8 +3,9 @@ import { dirname } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import { writeFileAtomic } from './atomic-write.js';
 import { resolveCatalogPath } from './course-artifacts.js';
-import { SystemOcrRunner, type OcrRunner } from './ocr-runner.js';
+import { OcrStoppedError, SystemOcrRunner, type OcrRunner } from './ocr-runner.js';
 import { indexSourcePage } from './course-retrieval.js';
+import { CatalogConflictError } from './course-catalog.js';
 
 export const SUSPICIOUS_OCR_LENGTH = 20;
 
@@ -114,6 +115,12 @@ export class CatalogWorker {
 
   retrySource(sourceId: number, range: RetryRange = {}): number {
     const source = this.source(sourceId);
+    const running = this.db.prepare<[number], { id: number }>(
+      "SELECT id FROM catalog_jobs WHERE source_id = ? AND type = 'ocr' AND status = 'running' LIMIT 1",
+    ).get(sourceId);
+    if (running !== undefined) {
+      throw new CatalogConflictError(`OCR источника ${sourceId} уже выполняется, job ${running.id}`);
+    }
     const from = range.fromPage ?? 1;
     const to = range.toPage ?? source.page_count;
     if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1 || to < from || to > source.page_count) {
@@ -121,6 +128,12 @@ export class CatalogWorker {
     }
     const at = this.now().toISOString();
     this.db.transaction(() => {
+      const live = this.db.prepare<[number], { id: number }>(
+        "SELECT id FROM catalog_jobs WHERE source_id = ? AND type = 'ocr' AND status = 'running' LIMIT 1",
+      ).get(sourceId);
+      if (live !== undefined) {
+        throw new CatalogConflictError(`OCR источника ${sourceId} уже выполняется, job ${live.id}`);
+      }
       this.db.prepare(
         `UPDATE source_pages SET status = 'pending', text = NULL, image_path = NULL,
              error = NULL, updated_at = ?
@@ -217,7 +230,10 @@ export class CatalogWorker {
     const at = this.now().toISOString();
     this.db.transaction(() => {
       this.db.prepare(
-        "UPDATE catalog_jobs SET status = 'queued', error = 'Перезапущено после остановки процесса', updated_at = ? WHERE status = 'running'",
+        "UPDATE catalog_jobs SET status = 'queued', error = 'Перезапущено после остановки процесса', updated_at = ? WHERE status = 'running' AND type = 'ocr'",
+      ).run(at);
+      this.db.prepare(
+        "UPDATE catalog_jobs SET status = 'failed', error = 'Сборка прервана перезапуском; запустите её повторно', updated_at = ? WHERE status = 'running' AND type = 'build-curriculum'",
       ).run(at);
       this.db.prepare(
         "UPDATE source_pages SET status = 'pending', error = NULL, updated_at = ? WHERE status = 'processing'",
@@ -248,7 +264,7 @@ export class CatalogWorker {
       const source = this.source(job.source_id);
       const pdfPath = resolveCatalogPath(this.dataDir, source.artifact_path);
       const pages = this.db.prepare<[number], { page_number: number }>(
-        "SELECT page_number FROM source_pages WHERE source_id = ? AND status IN ('pending', 'failed') ORDER BY page_number",
+        "SELECT page_number FROM source_pages WHERE source_id = ? AND status = 'pending' ORDER BY page_number",
       ).all(job.source_id);
       let failures = 0;
       for (const page of pages) {
@@ -268,12 +284,21 @@ export class CatalogWorker {
           ).run(pageStatus, text, storedImage, this.now().toISOString(), job.source_id, page.page_number);
           indexSourcePage(this.db, job.source_id, page.page_number, text);
         } catch (error) {
+          if (this.stopping || error instanceof OcrStoppedError) {
+            this.markPage(job.id, job.source_id, page.page_number, 'pending', null);
+            throw error;
+          }
           failures += 1;
           this.markPage(job.id, job.source_id, page.page_number, 'failed', (error as Error).message);
           this.log(`OCR источника ${job.source_id}, страница ${page.page_number}: ${(error as Error).message}`);
         }
       }
-      if (failures > 0) throw new Error(`Не распознано страниц: ${failures}`);
+      const remainingFailures = this.db.prepare<[number], { count: number }>(
+        "SELECT COUNT(*) AS count FROM source_pages WHERE source_id = ? AND status = 'failed'",
+      ).get(job.source_id)?.count ?? 0;
+      if (failures > 0 || remainingFailures > 0) {
+        throw new Error(`Не распознано страниц: ${remainingFailures}`);
+      }
       this.db.transaction(() => {
         const doneAt = this.now().toISOString();
         this.db.prepare(
@@ -289,8 +314,8 @@ export class CatalogWorker {
         this.db.prepare(
           'UPDATE catalog_jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?',
         ).run(status, message, this.now().toISOString(), job.id);
-        this.db.prepare("UPDATE course_sources SET status = 'failed', error = ? WHERE id = ?")
-          .run(message, job.source_id);
+        this.db.prepare('UPDATE course_sources SET status = ?, error = ? WHERE id = ?')
+          .run(this.stopping ? 'processing' : 'failed', this.stopping ? null : message, job.source_id);
       }).immediate();
       this.lastError = message;
       this.log(`OCR job ${job.id}: ${message}`);
@@ -303,7 +328,7 @@ export class CatalogWorker {
     jobId: number,
     sourceId: number,
     page: number,
-    status: 'processing' | 'failed',
+    status: 'pending' | 'processing' | 'failed',
     error: string | null,
   ): void {
     this.db.transaction(() => {

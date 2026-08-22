@@ -62,6 +62,7 @@ backup_dir="$backup_root/$release_id"
 service_stopped=0
 previous_saved=0
 new_installed=0
+data_may_be_modified=0
 deploy_succeeded=0
 
 on_exit() {
@@ -78,6 +79,11 @@ on_exit() {
     fi
     if ((previous_saved)) && [[ -d "$previous_dir" && ! -e "$app_dir" ]]; then
       mv "$previous_dir" "$app_dir" || true
+    fi
+    if ((data_may_be_modified)); then
+      restore_snapshot "$EDUKATOR_DATA_DIR"
+    else
+      rm -f -- "$EDUKATOR_DATA_DIR/$maintenance_name"
     fi
     "$systemctl_bin" start "$service" >/dev/null 2>&1 || true
   fi
@@ -260,6 +266,10 @@ if ! mv "$stage_dir" "$app_dir"; then
 fi
 new_installed=1
 
+# С этого момента новая версия может открыть и мигрировать базы прежде, чем
+# оборвётся SSH/скрипт. Любой аварийный EXIT обязан вернуть не только код, но и
+# согласованный predeploy snapshot.
+data_may_be_modified=1
 if ! "$systemctl_bin" start "$service"; then
   show_failure
   rollback
@@ -282,6 +292,7 @@ if ! wait_for_health; then
   rollback
 fi
 deploy_succeeded=1
+data_may_be_modified=0
 
 old_releases=()
 while IFS= read -r old_release; do

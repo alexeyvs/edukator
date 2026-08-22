@@ -56,6 +56,7 @@ interface MaterialCardRow {
   status: 'ready' | 'active';
   recommendation_reason: string;
   estimated_minutes: number;
+  course_revision_id: number | null;
 }
 
 interface MaterialViewRow {
@@ -68,6 +69,7 @@ interface MaterialViewRow {
   estimated_minutes: number;
   latest_run_id: number | null;
   latest_run_finished_at: string | null;
+  course_revision_id: number | null;
 }
 
 interface FinishLearningRow {
@@ -90,9 +92,12 @@ export interface LearningMaterialCard {
   recommendationReason: string;
   estimatedMinutes: number;
   status: 'ready' | 'active';
+  courseRevisionId: number | null;
 }
 
 export interface LearningMaterialView extends LearningMaterialCard {
+  latestRunId: number | null;
+  latestRunFinishedAt: string | null;
   /** Теория скрывается после первого ответа: lesson-run не допускает подсказок. */
   content: LearningMaterialContent | null;
   progress: RunProgress;
@@ -107,6 +112,7 @@ export interface ClaimLearningMaterialOptions {
   estimatedMinutes?: number;
   now?: Date;
   staleAfterMs?: number;
+  courseRevisionId?: number | null;
 }
 
 export interface LearningMaterialClaim {
@@ -192,20 +198,27 @@ function materialStartRow(db: Database, materialId: number): MaterialStartRow {
 }
 
 /** Карточки главного экрана: claim и закрытая история наружу не попадают. */
-export function learningMaterialCards(db: Database): LearningMaterialCard[] {
+export function learningMaterialCards(
+  db: Database,
+  revisions?: ReadonlyMap<string, number>,
+): LearningMaterialCard[] {
   return db.prepare<[], MaterialCardRow>(
-    `SELECT id, subject, topic_id, status, recommendation_reason, estimated_minutes
+    `SELECT id, subject, topic_id, status, recommendation_reason, estimated_minutes,
+            course_revision_id
        FROM learning_materials
       WHERE status IN ('ready', 'active')
       ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, created_at, id`,
-  ).all().map((row) => ({
-    id: row.id,
-    subject: row.subject,
-    topicId: row.topic_id,
-    recommendationReason: row.recommendation_reason,
-    estimatedMinutes: row.estimated_minutes,
-    status: row.status as 'ready' | 'active',
-  }));
+  ).all().filter((row) => revisions === undefined ||
+    row.course_revision_id === revisions.get(row.subject))
+    .map((row) => ({
+      id: row.id,
+      subject: row.subject,
+      topicId: row.topic_id,
+      recommendationReason: row.recommendation_reason,
+      estimatedMinutes: row.estimated_minutes,
+      status: row.status as 'ready' | 'active',
+      courseRevisionId: row.course_revision_id,
+    }));
 }
 
 /** Безопасно разбирает только опубликованное содержимое и текущий прогресс. */
@@ -218,6 +231,7 @@ export function readLearningMaterial(db: Database, materialId: number): Learning
      )
      SELECT learning_materials.id, learning_materials.subject,
             learning_materials.topic_id, learning_materials.status,
+            learning_materials.course_revision_id,
             learning_materials.content,
             learning_materials.recommendation_reason, learning_materials.estimated_minutes,
             latest_run.run_id AS latest_run_id,
@@ -249,6 +263,9 @@ export function readLearningMaterial(db: Database, materialId: number): Learning
       recommendationReason: row.recommendation_reason,
       estimatedMinutes: row.estimated_minutes,
       status: row.status,
+      courseRevisionId: row.course_revision_id,
+      latestRunId: row.latest_run_id,
+      latestRunFinishedAt: row.latest_run_finished_at,
       content: null,
       passScore: LEARNING_PASS_SCORE,
       progress,
@@ -279,6 +296,9 @@ export function readLearningMaterial(db: Database, materialId: number): Learning
     recommendationReason: row.recommendation_reason,
     estimatedMinutes: row.estimated_minutes,
     status: row.status,
+    courseRevisionId: row.course_revision_id,
+    latestRunId: row.latest_run_id,
+    latestRunFinishedAt: row.latest_run_finished_at,
     content,
     passScore: LEARNING_PASS_SCORE,
     progress,
@@ -321,21 +341,23 @@ export function claimLearningMaterial(
 
     const expiredTopics = expireStaleLearningClaimsInTransaction(db, now, staleAfterMs);
 
-    const live = db.prepare<[string, string], { id: number }>(
+    const live = db.prepare<[string, string, number | null], { id: number }>(
       `SELECT id FROM learning_materials
         WHERE (topic_id = ? OR subject = ?)
+          AND course_revision_id IS ?
           AND status IN ('preparing', 'ready', 'active') LIMIT 1`,
-    ).get(options.topicId, options.subject);
+    ).get(options.topicId, options.subject, options.courseRevisionId ?? null);
     if (live !== undefined) return undefined;
 
     const result = db.prepare(
       `INSERT INTO learning_materials
-         (subject, topic_id, recommendation_reason, estimated_minutes,
+         (subject, topic_id, course_revision_id, recommendation_reason, estimated_minutes,
           mastery_before, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       options.subject,
       options.topicId,
+      options.courseRevisionId ?? null,
       options.recommendationReason.trim(),
       estimatedMinutes,
       options.masteryBefore,

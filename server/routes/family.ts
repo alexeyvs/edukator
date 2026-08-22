@@ -52,9 +52,8 @@ import {
 import { hashParentPin, readParentPin, readPinPepper } from '../parent-pin.js';
 import { provisionChildDatabase } from '../data-dir.js';
 import {
-  assignCourse,
+  assignCourseWithExclusions,
   listCourseAssignments,
-  replaceTopicExclusions,
   unassignCourse,
   type CourseAssignment,
 } from '../course-assignments.js';
@@ -297,10 +296,7 @@ export function registerFamilyRoutes(app: FastifyInstance, options: FamilyRoutes
 
     const previous = listCourseAssignments(control, child.id);
     const wasAssigned = previous.some((assignment) => assignment.courseId === courseId);
-    let assignment = assignCourse(control, child.id, courseId, now());
-    if (body.excludedTopicIds !== undefined) {
-      assignment = replaceTopicExclusions(control, child.id, courseId, body.excludedTopicIds, now());
-    }
+    const assignment = assignCourseWithExclusions(control, child.id, courseId, body.excludedTopicIds, now());
     return reply.send({ assignment, idempotent: wasAssigned && body.excludedTopicIds === undefined });
   });
 

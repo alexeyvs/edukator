@@ -323,7 +323,11 @@ export function readChildDetail(
       materials: readMaterials(db),
       disputes: readDisputes(db),
       bosses: readBosses(db),
-      gate: readDailyGate(db, now),
+      gate: readDailyGate(db, now, new Map(
+        [...graph.courses].flatMap(([courseId, metadata]) =>
+          metadata.revisionId === null || metadata.revisionId === undefined
+            ? [] : [[courseId, metadata.revisionId]]),
+      )),
     }));
   } catch (error) {
     // Отказ базы одного ребёнка — сама жалоба, а не помеха отчёту: карточка

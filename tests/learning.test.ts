@@ -118,6 +118,21 @@ describe('слой данных учебных материалов', () => {
     ]);
   });
 
+  it('разрешает отдельные live-материалы одной темы для разных редакций', () => {
+    const first = claimLearningMaterial(db, {
+      subject: 'math', topicId: TOPIC, recommendationReason: 'Первая редакция',
+      masteryBefore: 0.3, now: START, courseRevisionId: 1,
+    });
+    const second = claimLearningMaterial(db, {
+      subject: 'math', topicId: TOPIC, recommendationReason: 'Вторая редакция',
+      masteryBefore: 0.3, now: START, courseRevisionId: 2,
+    });
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    expect(db.prepare('SELECT course_revision_id FROM learning_materials ORDER BY id').all())
+      .toEqual([{ course_revision_id: 1 }, { course_revision_id: 2 }]);
+  });
+
   it('публикует содержимое и ровно пять задач одной транзакцией', () => {
     const { materialId, taskIds } = readyMaterial(db);
 

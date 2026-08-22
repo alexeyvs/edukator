@@ -84,7 +84,11 @@ describe('HTTP-поток проверки осмысленности', () => {
     app = server.app;
     db = openDatabase(server.dbPath);
     setParentPin(server.control, server.parentId, hashParentPin(PIN, PIN_PEPPER));
-    storeTasks(db, 'math.a', Array.from({ length: 12 }, (_, index) => task(index)));
+    storeTasks(db, 'math.a', Array.from({ length: 12 }, (_, index) => task(index)), {
+      courseRevisionId: server.control.prepare<[string], { active_revision_id: number }>(
+        'SELECT active_revision_id FROM courses WHERE id = ?',
+      ).get('math')?.active_revision_id ?? null,
+    });
   });
 
   afterEach(async () => {

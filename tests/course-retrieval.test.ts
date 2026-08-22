@@ -3,7 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createCourse, replaceDraftTopics } from '../server/course-catalog.js';
+import {
+  createCourse,
+  createDraft,
+  publishRevision,
+  replaceDraftTopics,
+} from '../server/course-catalog.js';
 import { indexSourcePage, retrieveCourseSources } from '../server/course-retrieval.js';
 import { openControlDatabase } from '../server/control-db.js';
 
@@ -49,5 +54,25 @@ describe('course source retrieval', () => {
     indexSourcePage(db, sourceId, 1, 'Только цитоплазма');
     expect(retrieveCourseSources(db, { revisionId, query: 'мембрана' }).fragments).toEqual([]);
     expect(retrieveCourseSources(db, { revisionId, query: 'цитоплазма' }).fragments).toHaveLength(1);
+  });
+
+  it('читает ссылки на source, унаследованные новой опубликованной редакцией', () => {
+    publishRevision(db, 'biology-6', revisionId, 2);
+    const inherited = createDraft(db, 'biology-6', revisionId);
+    publishRevision(db, 'biology-6', inherited.id, inherited.editVersion);
+
+    expect(retrieveCourseSources(db, {
+      revisionId: inherited.id,
+      topicId: 'biology-6.cell',
+      query: 'мембрана',
+    }).fragments).toEqual([
+      expect.objectContaining({ sourceId, pageNumber: 1 }),
+    ]);
+    expect(retrieveCourseSources(db, {
+      revisionId: inherited.id,
+      query: 'наследственную',
+    }).fragments).toEqual([
+      expect.objectContaining({ sourceId, pageNumber: 2 }),
+    ]);
   });
 });

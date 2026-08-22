@@ -19,7 +19,7 @@ import type { Readable } from 'node:stream';
 import { promisify } from 'node:util';
 import type { Database } from 'better-sqlite3';
 import { syncDirectory } from './atomic-write.js';
-import { CatalogNotFoundError, PublishedRevisionError } from './course-catalog.js';
+import { CatalogConflictError, CatalogNotFoundError, PublishedRevisionError } from './course-catalog.js';
 import { requireCourseId, type CourseId } from './db.js';
 
 export const CATALOG_DIR = 'catalog';
@@ -208,9 +208,22 @@ export class CourseArtifactStore {
     requireCourseId(courseId);
     const course = this.db.prepare<[string], { id: string }>('SELECT id FROM courses WHERE id = ?').get(courseId);
     if (course === undefined) throw new CatalogNotFoundError(`Курс «${courseId}» не найден`);
-    return this.db.prepare<[string], SourceRow>(
-      `SELECT * FROM course_sources WHERE course_id = ? ORDER BY revision_id DESC, id`,
-    ).all(courseId).map(sourceFromRow);
+    const target = this.db.prepare<[string, string], { revision_id: number | null }>(
+      `SELECT COALESCE(
+         (SELECT id FROM course_revisions WHERE course_id = ? AND status = 'draft' LIMIT 1),
+         (SELECT active_revision_id FROM courses WHERE id = ?)
+       ) AS revision_id`,
+    ).get(courseId, courseId)?.revision_id;
+    if (target === null || target === undefined) return [];
+    return this.db.prepare<[string, number, number], SourceRow>(
+      `SELECT DISTINCT cs.* FROM course_sources cs
+        WHERE cs.course_id = ? AND (
+          cs.revision_id = ? OR EXISTS (
+            SELECT 1 FROM revision_topic_sources rts
+             WHERE rts.revision_id = ? AND rts.source_id = cs.id
+          )
+        ) ORDER BY cs.id`,
+    ).all(courseId, target, target).map(sourceFromRow);
   }
 
   async uploadToCurrentDraft(
@@ -335,6 +348,12 @@ export class CourseArtifactStore {
     const row = this.db.prepare<[number], SourceRow>('SELECT * FROM course_sources WHERE id = ?').get(sourceId);
     if (row === undefined || row.course_id !== courseId) throw new ArtifactNotFoundError('Источник не найден');
     requireDraft(this.db, courseId, row.revision_id);
+    const running = this.db.prepare<[number], { id: number }>(
+      "SELECT id FROM catalog_jobs WHERE source_id = ? AND type = 'ocr' AND status = 'running' LIMIT 1",
+    ).get(sourceId);
+    if (running !== undefined) {
+      throw new CatalogConflictError(`OCR источника ${sourceId} уже выполняется, job ${running.id}`);
+    }
     const sourcePath = resolveCatalogPath(this.dataDir, row.artifact_path);
     const trashRoot = resolveCatalogPath(this.dataDir, CATALOG_TEMP_DIR);
     await mkdir(trashRoot, { recursive: true });
@@ -349,6 +368,12 @@ export class CourseArtifactStore {
     try {
       this.db.transaction(() => {
         requireDraft(this.db, courseId, row.revision_id);
+        const live = this.db.prepare<[number], { id: number }>(
+          "SELECT id FROM catalog_jobs WHERE source_id = ? AND type = 'ocr' AND status = 'running' LIMIT 1",
+        ).get(sourceId);
+        if (live !== undefined) {
+          throw new CatalogConflictError(`OCR источника ${sourceId} уже выполняется, job ${live.id}`);
+        }
         const deleted = this.db.prepare('DELETE FROM course_sources WHERE id = ?').run(sourceId);
         if (deleted.changes !== 1) throw new ArtifactNotFoundError('Источник не найден');
       }).immediate();
@@ -384,6 +409,9 @@ export class CourseArtifactStore {
       this.db.prepare<[], { artifact_path: string }>('SELECT artifact_path FROM course_sources')
         .all().map((row) => row.artifact_path),
     );
+    for (const row of this.db.prepare<[], { image_path: string }>(
+      'SELECT image_path FROM source_pages WHERE image_path IS NOT NULL',
+    ).all()) referenced.add(row.image_path);
     const visit = async (storedDir: string): Promise<void> => {
       const root = resolveCatalogPath(this.dataDir, storedDir);
       let entries;

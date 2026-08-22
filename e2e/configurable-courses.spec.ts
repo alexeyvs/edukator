@@ -120,16 +120,15 @@ test('География, 5 класс проходит OCR, назначени�
     const oldRevision = activeRun?.course_revision_id as number;
     const nextDraft = createDraft(harness.control, 'geography-5', oldRevision);
     const oldTopics = readRevisionTopics(harness.control, nextDraft.id);
+    const changedTopics = oldTopics.map((topic, index) => index === oldTopics.length - 1
+      ? { ...topic, title: 'Климатические пояса' }
+      : topic);
     const changed = replaceDraftTopics(
       harness.control,
       'geography-5',
       nextDraft.id,
       nextDraft.editVersion,
-      [...oldTopics, {
-        id: 'geography-5.climate', title: 'Климатические пояса', examWeight: 2,
-        difficulty: 2, prereqs: [oldTopics[0]!.id], answerFormat: 'number',
-        promptSeed: 'Различать климатические пояса.', active: true,
-      }],
+      changedTopics,
     );
     const published = publishRevision(
       harness.control, 'geography-5', nextDraft.id, changed.revision.editVersion,
@@ -152,7 +151,7 @@ test('География, 5 класс проходит OCR, назначени�
     ).get(activeRun!.id)).toMatchObject({ course_revision_id: oldRevision, finished_at: expect.any(String) });
 
     await page.getByRole('link', { name: 'На главный экран' }).last().click();
-    await expect(page.getByRole('heading', { name: 'Климатические пояса' })).toBeVisible();
+    await expect(page.getByText('Климатические пояса', { exact: true })).toBeVisible();
     await expect(page.getByText('Материки и океаны', { exact: true })).toHaveCount(0);
     expect(harness.db.prepare<[], { count: number }>(
       `SELECT COUNT(*) AS count FROM attempts a JOIN runs r ON r.id = a.run_id

@@ -126,7 +126,12 @@ describe('маршруты занятия', () => {
     app = server.app;
 
     db = openDatabase(server.dbPath);
-    for (const subject of SUBJECTS) storeTasks(db, `${subject}.a`, [task(), task()]);
+    for (const subject of SUBJECTS) {
+      const revisionId = server.control.prepare<[string], { active_revision_id: number }>(
+        'SELECT active_revision_id FROM courses WHERE id = ?',
+      ).get(subject)?.active_revision_id;
+      storeTasks(db, `${subject}.a`, [task(), task()], { courseRevisionId: revisionId ?? null });
+    }
   });
 
   afterEach(async () => {
@@ -154,7 +159,6 @@ describe('маршруты занятия', () => {
       expect(Object.keys(issued).sort()).toEqual([
         'answer_format',
         'choices',
-        'course',
         'courseId',
         'courseTitle',
         'deep_hint',
@@ -175,10 +179,6 @@ describe('маршруты занятия', () => {
       expect(issued).toMatchObject({
         courseId: issued['subject'], courseTitle: expect.any(String), grade: '7 класс',
         revision: expect.any(Number),
-        course: {
-          courseId: issued['subject'], title: expect.any(String), grade: '7 класс',
-          revision: expect.any(Number),
-        },
       });
       // Ни эталона, ни разбора, ни реакции: всё это выдаёт ответ на задание.
       expect(JSON.stringify(issued)).not.toContain('45');

@@ -44,6 +44,7 @@ export const TOPIC_ID_MAX_LENGTH = 180;
 export const TOPIC_TITLE_MAX_LENGTH = 300;
 export const TOPIC_PROMPT_SEED_MAX_LENGTH = 4_000;
 export const TOPIC_PREREQS_MAX = 100;
+export const TOPIC_SOURCE_REFS_MAX = 100;
 export const IDEMPOTENCY_KEY_MAX_LENGTH = 128;
 
 export interface AdminCoursesRoutesOptions {
@@ -56,6 +57,30 @@ export interface AdminCoursesRoutesOptions {
   artifacts?: CourseArtifactStore;
   catalogWorker?: CatalogWorker;
   draftBuilder?: (options: BuildCourseDraftOptions) => Promise<unknown>;
+  draftBuildRunner?: CourseDraftBuildRunner;
+}
+
+/** Owns asynchronous curriculum builds so shutdown can cancel and await them. */
+export class CourseDraftBuildRunner {
+  readonly #active = new Map<Promise<void>, AbortController>();
+  #stopping = false;
+
+  constructor(private readonly build: (options: BuildCourseDraftOptions) => Promise<unknown> = buildCourseDraft) {}
+
+  start(options: BuildCourseDraftOptions): void {
+    if (this.#stopping) throw new CatalogConflictError('Сервер завершает работу; новые сборки запрещены');
+    const controller = new AbortController();
+    const tracked = this.build({ ...options, signal: controller.signal })
+      .then(() => undefined, () => undefined)
+      .finally(() => this.#active.delete(tracked));
+    this.#active.set(tracked, controller);
+  }
+
+  async stop(): Promise<void> {
+    this.#stopping = true;
+    for (const controller of this.#active.values()) controller.abort();
+    await Promise.allSettled(this.#active.keys());
+  }
 }
 
 class RequestValidationError extends Error {}
@@ -145,6 +170,7 @@ function parseTopics(value: unknown): DraftTopicInput[] {
     const body = objectBody(raw, [
       'id', 'clientId', 'title', 'examWeight', 'difficulty', 'prereqs',
       'answerFormat', 'promptSeed', 'active',
+      'sourceRefs',
     ]);
     const id = textField(body, 'id', TOPIC_ID_MAX_LENGTH, { optional: true });
     const clientId = textField(body, 'clientId', TOPIC_ID_MAX_LENGTH, { optional: true });
@@ -165,6 +191,16 @@ function parseTopics(value: unknown): DraftTopicInput[] {
     if (active !== undefined && typeof active !== 'boolean') {
       throw new RequestValidationError(`Тема ${index + 1}: active должен быть boolean`);
     }
+    const rawRefs = body['sourceRefs'];
+    if (rawRefs !== undefined && (!Array.isArray(rawRefs) || rawRefs.length > TOPIC_SOURCE_REFS_MAX)) {
+      throw new RequestValidationError(`Тема ${index + 1}: sourceRefs должен быть массивом до ${TOPIC_SOURCE_REFS_MAX} ссылок`);
+    }
+    const sourceRefs = rawRefs === undefined ? undefined : rawRefs.map((rawRef) => {
+      const ref = objectBody(rawRef, ['sourceId', 'pageFrom', 'pageTo']);
+      const pageFrom = integerField(ref, 'pageFrom');
+      const pageTo = integerField(ref, 'pageTo', pageFrom);
+      return { sourceId: integerField(ref, 'sourceId'), pageFrom, pageTo };
+    });
     return {
       ...(id === undefined ? {} : { id }),
       ...(clientId === undefined ? {} : { clientId }),
@@ -175,6 +211,7 @@ function parseTopics(value: unknown): DraftTopicInput[] {
       answerFormat: answerFormat as AnswerFormat,
       promptSeed: textField(body, 'promptSeed', TOPIC_PROMPT_SEED_MAX_LENGTH) as string,
       ...(active === undefined ? {} : { active }),
+      ...(sourceRefs === undefined ? {} : { sourceRefs }),
     };
   });
 }
@@ -230,6 +267,10 @@ export function registerAdminCoursesRoutes(
   options: AdminCoursesRoutesOptions,
 ): void {
   const now = options.now ?? (() => new Date());
+  const draftBuildRunner = options.draftBuildRunner ?? new CourseDraftBuildRunner(options.draftBuilder);
+  if (options.draftBuildRunner === undefined) {
+    app.addHook('onClose', () => draftBuildRunner.stop());
+  }
   const artifacts = options.artifacts ?? new CourseArtifactStore(
     options.control,
     options.dataDir ?? defaultDataDir(),
@@ -394,6 +435,14 @@ export function registerAdminCoursesRoutes(
       }
       const at = now();
       const revision = options.control.transaction(() => {
+        const running = options.control.prepare<[number], { id: number }>(
+          `SELECT id FROM catalog_jobs
+            WHERE type = 'build-curriculum' AND revision_id = ? AND status IN ('queued', 'running')
+            LIMIT 1`,
+        ).get(revisionId);
+        if (running !== undefined) {
+          throw new CatalogConflictError(`Сборка черновика ещё выполняется, job ${running.id}`);
+        }
         const published = publishRevision(options.control, courseId, revisionId, editVersion, {
           adminId: auth.admin.adminId,
           now: at,
@@ -444,13 +493,17 @@ export function registerAdminCoursesRoutes(
       if (revision === undefined || revision.courseId !== courseId || revision.status !== 'draft') {
         throw new CatalogNotFoundError('Черновик курса не найден');
       }
+      if (revision.editVersion !== editVersion) {
+        throw new CatalogConflictError(
+          `Черновик ${revisionId} уже изменён: ожидалась версия ${editVersion}, текущая ${revision.editVersion}`,
+        );
+      }
       const running = options.control.prepare<[number], { id: number }>(
         "SELECT id FROM catalog_jobs WHERE type = 'build-curriculum' AND revision_id = ? AND status = 'running'",
       ).get(revisionId);
       if (running !== undefined) throw new CatalogConflictError(`Сборка черновика уже выполняется, job ${running.id}`);
-      const builder = options.draftBuilder ?? buildCourseDraft;
-      void builder({ db: options.control, courseId, revisionId, expectedEditVersion: editVersion,
-        dataDir: options.dataDir ?? defaultDataDir(), now }).catch(() => undefined);
+      draftBuildRunner.start({ db: options.control, courseId, revisionId, expectedEditVersion: editVersion,
+        dataDir: options.dataDir ?? defaultDataDir(), now });
       recordAdminAudit(options.control, { adminId: auth.admin.adminId, action: 'course-retry',
         detail: `курс ${courseId}, сборка редакции ${revisionId}` }, now());
       return reply.code(202).send({ revisionId, status: 'running' });

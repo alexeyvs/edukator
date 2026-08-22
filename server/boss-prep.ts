@@ -30,6 +30,7 @@ interface BatchRow {
   id: number;
   topic_id: string;
   created_at: string;
+  course_revision_id: number | null;
 }
 
 export interface BossPreparationOptions {
@@ -71,9 +72,10 @@ function validNow(now: Date): Date {
  */
 function claimBoss(db: Database, graph: TopicGraph, now: Date): BatchClaim | undefined {
   return db.transaction((): BatchClaim | undefined => {
+    const revisions = new Map(graph.courses.entries());
     const cutoff = new Date(now.getTime() - PREPARING_STALE_MS).toISOString();
     const stale = db.prepare<[string], BatchRow>(
-      `SELECT id, topic_id, created_at FROM boss_batches
+      `SELECT id, topic_id, created_at, course_revision_id FROM boss_batches
         WHERE status = 'preparing' AND created_at <= ?
         ORDER BY created_at, id LIMIT 1`,
     ).get(cutoff);
@@ -85,9 +87,12 @@ function claimBoss(db: Database, graph: TopicGraph, now: Date): BatchClaim | und
     }
 
     const preparing = db.prepare<[], BatchRow>(
-      `SELECT id, topic_id, created_at FROM boss_batches
-        WHERE status = 'preparing' ORDER BY created_at, id LIMIT 1`,
-    ).get();
+      `SELECT id, topic_id, created_at, course_revision_id FROM boss_batches
+        WHERE status = 'preparing' ORDER BY created_at, id`,
+    ).all().find((row) => {
+      const topic = graph.byId.get(row.topic_id);
+      return topic !== undefined && row.course_revision_id === (revisions.get(topic.subject)?.revisionId ?? null);
+    });
     if (preparing !== undefined) {
       const topic = graph.byId.get(preparing.topic_id);
       if (topic === undefined) {
@@ -108,17 +113,19 @@ function claimBoss(db: Database, graph: TopicGraph, now: Date): BatchClaim | und
         (state.mastery <= BOSS_MASTERY && !hasPriorBossLoss(db, topic.id)) ||
         state.closed_at !== null
       ) return false;
-      const live = db.prepare<[string], { id: number }>(
+      const live = db.prepare<[string, number | null], { id: number }>(
         `SELECT id FROM boss_batches
-          WHERE topic_id = ? AND status IN ('preparing', 'ready', 'active') LIMIT 1`,
-      ).get(topic.id);
+          WHERE topic_id = ? AND course_revision_id IS ?
+            AND status IN ('preparing', 'ready', 'active') LIMIT 1`,
+      ).get(topic.id, revisions.get(topic.subject)?.revisionId ?? null);
       return live === undefined;
     });
     if (eligible === undefined) return undefined;
 
     const info = db.prepare(
-      "INSERT INTO boss_batches (topic_id, status, created_at) VALUES (?, 'preparing', ?)",
-    ).run(eligible.id, now.toISOString());
+      `INSERT INTO boss_batches (topic_id, course_revision_id, status, created_at)
+       VALUES (?, ?, 'preparing', ?)`,
+    ).run(eligible.id, revisions.get(eligible.subject)?.revisionId ?? null, now.toISOString());
     return {
       batchId: Number(info.lastInsertRowid),
       topic: eligible,
@@ -127,10 +134,10 @@ function claimBoss(db: Database, graph: TopicGraph, now: Date): BatchClaim | und
   }).immediate();
 }
 
-function knownFingerprints(db: Database, topicId: string): Set<string> {
-  return new Set(db.prepare<[string], { fingerprint: string }>(
-    'SELECT fingerprint FROM task_bank WHERE topic_id = ?',
-  ).all(topicId).map(({ fingerprint }) => fingerprint));
+function knownFingerprints(db: Database, topicId: string, courseRevisionId: number | null): Set<string> {
+  return new Set(db.prepare<[string, number | null], { fingerprint: string }>(
+    'SELECT fingerprint FROM task_bank WHERE topic_id = ? AND course_revision_id IS ?',
+  ).all(topicId, courseRevisionId).map(({ fingerprint }) => fingerprint));
 }
 
 /** Один ограниченный проход подготовки; исключения модели остаются в отчёте. */
@@ -150,7 +157,8 @@ export async function prepareNextBoss(
   const log = options.log ?? defaultLog;
   const budget = options.budget ?? codexConcurrency;
   const profile = readProfile(options.db);
-  const fingerprints = knownFingerprints(options.db, claim.topic.id);
+  const courseRevisionId = options.graph.courses.get(claim.topic.subject)?.revisionId ?? null;
+  const fingerprints = knownFingerprints(options.db, claim.topic.id, courseRevisionId);
   const gathered: GeneratedTask[] = [];
   let batches = 0;
 
@@ -162,7 +170,7 @@ export async function prepareNextBoss(
         difficulty: claim.topic.difficulty,
         profile,
         recent: [
-          ...recentQuestions(options.db, claim.topic.id),
+          ...recentQuestions(options.db, claim.topic.id, undefined, courseRevisionId),
           ...gathered.map(taskPromptText),
         ],
       }));

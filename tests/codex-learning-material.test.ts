@@ -16,6 +16,11 @@ const topic: Topic = {
   difficulty: 2, prereqs: [], answerFormat: 'number', promptSeed: 'Сложение дробей.',
 };
 
+const geographyTopic: Topic = {
+  ...topic, id: 'geography-5.maps', subject: 'geography-5', title: 'Карты',
+  courseTitle: 'География', grade: '5 класс',
+};
+
 const content: LearningMaterialContent = {
   introduction: 'Дроби похожи на части шкалы.',
   objectives: ['Складывать дроби'],
@@ -65,6 +70,22 @@ describe('генерация и проверка учебного материа
     expect(calls[0]?.images).toEqual(['/data/page.jpg']);
     expect(calls[0]?.prompt).toContain('География');
     expect(calls[0]?.prompt).toContain('Описание материка');
+    expect(calls[0]?.prompt).not.toContain('13 лет');
+  });
+
+  it('проверяет учебный материал на уровне динамического класса', async () => {
+    const requests: CodexRequest[] = [];
+    await validateLearningMaterial({
+      topic: geographyTopic,
+      material: content,
+      run: (request) => {
+        requests.push(request);
+        return Promise.resolve(JSON.stringify({ accepted: true, accurate: true, complete: true,
+          age_appropriate: true, grounded: true, note: '' }));
+      },
+    });
+    expect(requests[0]?.prompt).toContain('5 класс');
+    expect(requests[0]?.prompt).not.toContain('13 лет');
   });
 
   it('не повторяет недоступный codex и проверяет число попыток', async () => {

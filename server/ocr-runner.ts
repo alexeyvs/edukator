@@ -1,10 +1,12 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 export const DEFAULT_OCR_TIMEOUT_MS = 120_000;
 export const DEFAULT_OCR_OUTPUT_LIMIT = 4 * 1024 * 1024;
+export const DEFAULT_OCR_IMAGE_LIMIT = 8 * 1024 * 1024;
+export const DEFAULT_OCR_IMAGE_MAX_DIMENSION = 2400;
 
 export class OcrDependencyError extends Error {}
 export class OcrTimeoutError extends Error {}
@@ -40,6 +42,7 @@ export interface OcrRunnerOptions {
   binaries?: Partial<OcrBinaries>;
   timeoutMs?: number;
   outputLimit?: number;
+  imageLimit?: number;
   tempRoot?: string;
 }
 
@@ -61,6 +64,7 @@ export class SystemOcrRunner implements OcrRunner {
   private readonly binaries: OcrBinaries;
   private readonly timeoutMs: number;
   private readonly outputLimit: number;
+  private readonly imageLimit: number;
   private readonly tempRoot: string;
   private readonly children = new Set<ChildProcess>();
   private stopping = false;
@@ -69,6 +73,7 @@ export class SystemOcrRunner implements OcrRunner {
     this.binaries = { ...DEFAULT_BINARIES, ...options.binaries };
     this.timeoutMs = options.timeoutMs ?? DEFAULT_OCR_TIMEOUT_MS;
     this.outputLimit = options.outputLimit ?? DEFAULT_OCR_OUTPUT_LIMIT;
+    this.imageLimit = options.imageLimit ?? DEFAULT_OCR_IMAGE_LIMIT;
     this.tempRoot = options.tempRoot ?? tmpdir();
   }
 
@@ -113,12 +118,21 @@ export class SystemOcrRunner implements OcrRunner {
       );
       await this.command(this.binaries.pdftoppm, [
         '-f', '1', '-singlefile', '-jpeg', '-r', '144',
+        '-scale-to', String(DEFAULT_OCR_IMAGE_MAX_DIMENSION),
         '-jpegopt', 'quality=78,optimize=y', searchablePdf, imagePrefix,
       ], request.signal);
+      const imagePath = `${imagePrefix}.jpg`;
       let image: Buffer;
       try {
-        image = await readFile(`${imagePrefix}.jpg`);
-      } catch {
+        const metadata = await stat(imagePath);
+        if (metadata.size > this.imageLimit) {
+          throw new OcrOutputError(
+            `Poppler создал слишком большое изображение страницы: ${String(metadata.size)} байт`,
+          );
+        }
+        image = await readFile(imagePath);
+      } catch (error) {
+        if (error instanceof OcrOutputError) throw error;
         throw new OcrOutputError('Poppler не создал изображение страницы');
       }
       if (image.length === 0) throw new OcrOutputError('Poppler создал пустое изображение страницы');

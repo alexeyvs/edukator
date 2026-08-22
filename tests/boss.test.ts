@@ -58,10 +58,10 @@ describe('доменная модель босса', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  function prepare(database: Database = db): number {
+  function prepare(database: Database = db, courseRevisionId: number | null = null): number {
     const batchId = Number(database.prepare(
-      "INSERT INTO boss_batches (topic_id, status) VALUES (?, 'preparing')",
-    ).run(TOPIC).lastInsertRowid);
+      "INSERT INTO boss_batches (topic_id, course_revision_id, status) VALUES (?, ?, 'preparing')",
+    ).run(TOPIC, courseRevisionId).lastInsertRowid);
     expect(reserveBossTasks(database, batchId, tasks()).ready).toBe(true);
     return batchId;
   }
@@ -104,9 +104,11 @@ describe('доменная модель босса', () => {
   });
 
   it('активирует готовый полный батч и после перезагрузки подхватывает тот же бой', () => {
-    const batchId = prepare();
+    const batchId = prepare(db, 17);
     const first = startBoss(db, graph, TOPIC, { now: NOW, courseRevisionId: 17 });
-    const second = startBoss(db, graph, TOPIC, { now: new Date(NOW.getTime() + 1000) });
+    const second = startBoss(db, graph, TOPIC, {
+      now: new Date(NOW.getTime() + 1000), courseRevisionId: 17,
+    });
 
     expect(first).toEqual({ batchId, runId: first.runId, resumed: false });
     expect(second).toEqual({ batchId, runId: first.runId, resumed: true });

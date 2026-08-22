@@ -285,7 +285,9 @@ export function loadSeedBank(
     // молча хоронил бы восемнадцать следующих.
     for (const { topicId, tasks } of bank.topics) {
       try {
-        const { stored, duplicates } = storeTasks(db, topicId, tasks);
+        const { stored, duplicates } = storeTasks(db, topicId, tasks, {
+          courseRevisionId: graph.courses.get(subject)?.revisionId ?? null,
+        });
         result.loaded += stored.length;
         result.skipped += duplicates.length;
       } catch (error) {
@@ -329,13 +331,16 @@ export function takeTaskOrSeed(
   options: TakeTaskOrSeedOptions = {},
 ): BankTask | null {
   const { dir, seeded, ...take } = options;
-  const first = takeTask(db, topicId, take);
-  if (first !== null) return first;
-
   const topic = graph.byId.get(topicId);
   if (topic === undefined) {
     throw new Error(`Посевной банк: темы «${topicId}» нет в карте`);
   }
+  const scopedTake = {
+    ...take,
+    courseRevisionId: graph.courses.get(topic.subject)?.revisionId ?? null,
+  };
+  const first = takeTask(db, topicId, scopedTake);
+  if (first !== null) return first;
   if (seeded !== undefined && seeded.has(topic.subject)) return null;
   seeded?.add(topic.subject);
 
@@ -355,7 +360,7 @@ export function takeTaskOrSeed(
     process.stderr.write(`посевной банк не дозалит: ${(error as Error).message}\n`);
   }
 
-  return takeTask(db, topicId, take);
+  return takeTask(db, topicId, scopedTake);
 }
 
 interface SeedRow {

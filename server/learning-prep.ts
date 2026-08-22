@@ -134,11 +134,15 @@ interface LiveMaterial {
   status: 'preparing' | 'ready' | 'active';
 }
 
-function liveMaterials(db: Database): Map<Subject, LiveMaterial> {
-  return new Map(db.prepare<[], { subject: Subject; topic_id: string; status: LiveMaterial['status'] }>(
-    `SELECT subject, topic_id, status FROM learning_materials
+function liveMaterials(db: Database, graph: TopicGraph): Map<Subject, LiveMaterial> {
+  return new Map(db.prepare<[], {
+    subject: Subject; topic_id: string; status: LiveMaterial['status']; course_revision_id: number | null;
+  }>(
+    `SELECT subject, topic_id, status, course_revision_id FROM learning_materials
       WHERE status IN ('preparing', 'ready', 'active') ORDER BY id`,
-  ).all().map((row) => [row.subject, {
+  ).all().filter((row) =>
+    row.course_revision_id === (graph.courses.get(row.subject)?.revisionId ?? null))
+    .map((row) => [row.subject, {
     topicId: row.topic_id,
     status: row.status,
   }]));
@@ -248,7 +252,7 @@ export async function prepareLearningMaterials(
   const retired = retireResolvedMaterials(options.db, options.graph, now);
   const recoveredTopics = expireStaleLearningClaims(options.db, { now });
   const candidates = selectLearningTopics(options.db, options.graph, now);
-  const live = liveMaterials(options.db);
+  const live = liveMaterials(options.db, options.graph);
   const producer = options.produce ?? createLearningProducer({
     log,
     ...(options.run === undefined ? {} : { run: options.run }),
@@ -271,6 +275,7 @@ export async function prepareLearningMaterials(
       recommendationReason: candidate.recommendationReason,
       masteryBefore: candidate.mastery,
       now,
+      courseRevisionId: options.graph.courses.get(candidate.topic.subject)?.revisionId ?? null,
     });
     if (claim === undefined) continue;
     live.set(candidate.topic.subject, {
@@ -287,7 +292,12 @@ export async function prepareLearningMaterials(
         profile,
         recentErrors: recentErrors(options.db, candidate.topic.id),
         previousApproaches: previousApproaches(options.db, candidate.topic.id),
-        recent: recentQuestions(options.db, candidate.topic.id),
+        recent: recentQuestions(
+          options.db,
+          candidate.topic.id,
+          undefined,
+          options.graph.courses.get(candidate.topic.subject)?.revisionId ?? null,
+        ),
       }));
       const published = reserveLearningTasks(
         options.db,

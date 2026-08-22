@@ -205,7 +205,7 @@ describe('openControlDatabase', () => {
   });
 
   it('держит константы спеки: номер версии и состав таблиц', () => {
-    expect(CONTROL_SCHEMA_VERSION).toBe(3);
+    expect(CONTROL_SCHEMA_VERSION).toBe(4);
     expect([...CONTROL_TABLES]).toEqual([
       'parents',
       'parent_invites',
@@ -300,7 +300,7 @@ describe('ограничения схемы', () => {
     const db = open();
     db.prepare("INSERT INTO courses (id, title, grade) VALUES ('science-7', 'Наука', '7 класс')").run();
     const revisionId = Number(db.prepare(
-      "INSERT INTO course_revisions (course_id, revision_number, status) VALUES ('science-7', 1, 'draft')",
+      "INSERT INTO course_revisions (course_id, revision_number, status, title, grade) VALUES ('science-7', 1, 'draft', 'Наука', '7 класс')",
     ).run().lastInsertRowid);
     const sourceId = Number(db.prepare(
       `INSERT INTO course_sources
@@ -475,7 +475,23 @@ function createVersionOneDatabase(target: string): Database {
   return legacy;
 }
 
-describe('обновление управляющей базы до версии 3', () => {
+describe('обновление управляющей базы до версии 4', () => {
+  it('переносит display metadata в редакции из версии 3', () => {
+    open().close();
+    const legacy = new BetterSqlite3(path);
+    legacy.prepare("INSERT INTO courses (id, title, grade, status) VALUES ('science-7', 'Наука', '7 класс', 'draft')").run();
+    legacy.prepare(`INSERT INTO course_revisions
+      (course_id, revision_number, status, title, grade) VALUES ('science-7', 1, 'draft', 'Наука', '7 класс')`).run();
+    legacy.exec('ALTER TABLE course_revisions DROP COLUMN title; ALTER TABLE course_revisions DROP COLUMN grade;');
+    legacy.pragma('user_version = 3');
+    legacy.close();
+
+    const migrated = open();
+    expect(migrated.prepare('SELECT title, grade FROM course_revisions').get())
+      .toEqual({ title: 'Наука', grade: '7 класс' });
+    expect(migrated.pragma('user_version', { simple: true })).toBe(4);
+  });
+
   it('заводит админские таблицы и сохраняет счётчики перебора', () => {
     const legacy = createVersionOneDatabase(path);
     legacy
@@ -495,7 +511,7 @@ describe('обновление управляющей базы до версии
     const db = open();
 
     const [version] = db.pragma('user_version') as [{ user_version: number }];
-    expect(version.user_version).toBe(3);
+    expect(version.user_version).toBe(4);
     expect(tableNames(db)).toEqual([...CONTROL_TABLES].sort());
 
     // Обнулить счётчики миграцией значит открыть окно перебора в предсказуемое
@@ -565,7 +581,7 @@ describe('обновление управляющей базы до версии
 
     const migrated = open();
     expect(tableNames(migrated)).toEqual([...CONTROL_TABLES].sort());
-    expect(migrated.pragma('user_version', { simple: true })).toBe(3);
+    expect(migrated.pragma('user_version', { simple: true })).toBe(4);
     expect(migrated.pragma('foreign_key_check')).toEqual([]);
   });
 
@@ -644,12 +660,12 @@ describe('обновление управляющей базы до версии
     expect(admins).toEqual([{ email: 'operator@example.com' }]);
   });
 
-  it('отвергает управляющую базу версии 4', () => {
+  it('отвергает управляющую базу версии 5', () => {
     const legacy = createVersionOneDatabase(path);
-    legacy.pragma('user_version = 4');
+    legacy.pragma('user_version = 5');
     legacy.close();
 
-    expect(() => open()).toThrow(/более новой версией схемы \(4 > 3\)/);
+    expect(() => open()).toThrow(/более новой версией схемы \(5 > 4\)/);
   });
 
   it('отвергает базу версии 2 без админской таблицы и без её индекса', () => {

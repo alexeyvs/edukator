@@ -14,6 +14,7 @@ import { registerLearningRoutes, registerUnavailableLearning } from '../server/r
 import { loadCurriculum } from '../server/curriculum.js';
 import { resolveDispute } from '../server/session.js';
 import { fakeContext } from './tenant-context-helper.js';
+import { createDraft, publishRevision } from '../server/course-catalog.js';
 
 const NOW = new Date('2026-08-09T12:00:00.000Z');
 
@@ -80,8 +81,11 @@ describe('Learning API', () => {
     app = server.app;
     db = openDatabase(server.dbPath);
     for (const subject of SUBJECTS) {
+      const revisionId = server.control.prepare<[string], { active_revision_id: number }>(
+        'SELECT active_revision_id FROM courses WHERE id = ?',
+      ).get(subject)?.active_revision_id;
       storeTasks(db, `${subject}.a`, Array.from({ length: 12 }, (_, index) =>
-        task(`обычный-${subject}`, index)));
+        task(`обычный-${subject}`, index)), { courseRevisionId: revisionId ?? null });
     }
   });
 
@@ -91,14 +95,17 @@ describe('Learning API', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  function readyMaterial(): { materialId: number; taskIds: number[] } {
+  function readyMaterial(subject = 'math'): { materialId: number; taskIds: number[] } {
     serial += 1;
-    const mastery = db.prepare<[], { mastery: number }>(
-      "SELECT mastery FROM topic_state WHERE topic_id = 'math.a'",
-    ).get()?.mastery ?? 0;
+    const mastery = db.prepare<[string], { mastery: number }>(
+      'SELECT mastery FROM topic_state WHERE topic_id = ?',
+    ).get(`${subject}.a`)?.mastery ?? 0;
     const claim = claimLearningMaterial(db, {
-      subject: 'math', topicId: 'math.a', recommendationReason: 'Ошибки со знаменателями',
+      subject, topicId: `${subject}.a`, recommendationReason: 'Ошибки со знаменателями',
       masteryBefore: mastery, estimatedMinutes: 12, now: NOW,
+      courseRevisionId: server.control.prepare<[string], { active_revision_id: number }>(
+        'SELECT active_revision_id FROM courses WHERE id = ?',
+      ).get(subject)?.active_revision_id ?? null,
     });
     if (claim === undefined) throw new Error('material claim не создан');
     const reserved = reserveLearningTasks(
@@ -110,6 +117,15 @@ describe('Learning API', () => {
     );
     if (!reserved.ready) throw new Error('material не опубликован');
     return { materialId: claim.materialId, taskIds: reserved.stored.map(({ id }) => id) };
+  }
+
+  function publishNextRevision(subject: string): void {
+    const active = server.control.prepare<[string], { active_revision_id: number }>(
+      'SELECT active_revision_id FROM courses WHERE id = ?',
+    ).get(subject)?.active_revision_id;
+    if (active === undefined) throw new Error(`Нет активной редакции ${subject}`);
+    const draft = createDraft(server.control, subject, active);
+    publishRevision(server.control, subject, draft.id, draft.editVersion);
   }
 
   async function openAndStart(materialId: number): Promise<number> {
@@ -182,6 +198,33 @@ describe('Learning API', () => {
     expect(second.json()).toMatchObject({ materialId, resumed: true, material: { status: 'active' } });
     expect((await app.inject({ method: 'GET', url: '/api/run/plan' })).json())
       .toMatchObject({ learning: [{ id: materialId, status: 'active' }] });
+  });
+
+  it('не выдаёт материал старой редакции, но продолжает уже начатый lesson-run', async () => {
+    const staleReady = readyMaterial('math');
+    const started = readyMaterial('russian');
+    const runId = await openAndStart(started.materialId);
+
+    publishNextRevision('math');
+    publishNextRevision('russian');
+
+    const plan = await app.inject({ method: 'GET', url: '/api/run/plan' });
+    expect((plan.json() as { learning: Array<{ id: number }> }).learning)
+      .not.toContainEqual(expect.objectContaining({ id: staleReady.materialId }));
+    for (const suffix of ['', '/open', '/test']) {
+      const response = await app.inject({
+        method: suffix === '' ? 'GET' : 'POST',
+        url: `/api/learning/${staleReady.materialId}${suffix}`,
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({ code: 'learning-not-ready' });
+    }
+
+    const continued = await app.inject({ method: 'GET', url: `/api/learning/${started.materialId}` });
+    expect(continued.statusCode).toBe(200);
+    const resumed = await app.inject({ method: 'POST', url: `/api/learning/${started.materialId}/test` });
+    expect(resumed.statusCode).toBe(200);
+    expect(resumed.json()).toMatchObject({ runId, resumed: true });
   });
 
   it('создаёт один lesson-run, сохраняет порядок и не меняет обычный план', async () => {
@@ -285,8 +328,10 @@ describe('Learning API', () => {
 
     db.prepare('UPDATE topic_state SET mastery = .8 WHERE topic_id = ?').run('math.a');
     const batchId = Number(db.prepare(
-      "INSERT INTO boss_batches (topic_id, status) VALUES (?, 'preparing')",
-    ).run('math.a').lastInsertRowid);
+      "INSERT INTO boss_batches (topic_id, course_revision_id, status) VALUES (?, ?, 'preparing')",
+    ).run('math.a', server.control.prepare<[string], { active_revision_id: number }>(
+      'SELECT active_revision_id FROM courses WHERE id = ?',
+    ).get('math')?.active_revision_id ?? null).lastInsertRowid);
     expect(reserveBossTasks(
       db,
       batchId,
@@ -559,13 +604,18 @@ describe('Learning API', () => {
   );
 
   it('помечает завершение добровольного материала как необязательное', async () => {
+    const russianRevision = server.control.prepare<[string], { active_revision_id: number }>(
+      'SELECT active_revision_id FROM courses WHERE id = ?',
+    ).get('russian')?.active_revision_id;
+    if (russianRevision === undefined) throw new Error('Нет редакции русского курса');
     db.prepare(
       `INSERT INTO learning_materials
-        (subject, topic_id, status, recommendation_reason, mastery_before,
+        (subject, topic_id, course_revision_id, status, recommendation_reason, mastery_before,
          created_at, updated_at, ready_at, finished_at)
-       VALUES ('russian', 'russian.a', 'retired', 'Снятый первый разбор', 0.2,
+       VALUES ('russian', 'russian.a', ?, 'retired', 'Снятый первый разбор', 0.2,
                ?, ?, ?, ?)`,
     ).run(
+      russianRevision,
       '2026-08-09T10:00:00.000Z',
       '2026-08-09T10:30:00.000Z',
       '2026-08-09T10:00:00.000Z',

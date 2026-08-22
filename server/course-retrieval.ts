@@ -87,20 +87,27 @@ export function retrieveCourseSources(
   const maxImages = bounded(options.maxImages, DEFAULT_RETRIEVAL_IMAGES, MAX_RETRIEVAL_IMAGES, 'Изображения');
   if (maxFragments === 0) return { fragments: [], images: [] };
   const match = ftsQuery(options.query ?? '');
-  const params: Array<string | number> = [options.revisionId];
+  const params: Array<string | number> = [];
   let topicJoin = '';
-  let topicWhere = '';
+  let revisionWhere = '';
   if (options.topicId !== undefined) {
     topicJoin = `JOIN revision_topic_sources rts ON rts.source_id = sc.source_id
       AND sc.page_number BETWEEN rts.page_from AND rts.page_to`;
-    topicWhere = 'AND rts.revision_id = ? AND rts.topic_id = ?';
+    revisionWhere = 'AND rts.revision_id = ? AND rts.topic_id = ?';
     params.push(options.revisionId, options.topicId);
+  } else {
+    revisionWhere = `AND EXISTS (
+      SELECT 1 FROM revision_topic_sources rts
+       WHERE rts.revision_id = ? AND rts.source_id = sc.source_id
+         AND sc.page_number BETWEEN rts.page_from AND rts.page_to
+    )`;
+    params.push(options.revisionId);
   }
   let ftsJoin = '';
   let rank = 'sc.source_id, sc.page_number, sc.chunk_number';
   if (match !== null) {
     ftsJoin = 'JOIN source_chunks_fts fts ON fts.rowid = sc.id';
-    topicWhere += ' AND source_chunks_fts MATCH ?';
+    revisionWhere += ' AND source_chunks_fts MATCH ?';
     params.push(match);
     rank = 'bm25(source_chunks_fts), sc.source_id, sc.page_number, sc.chunk_number';
   }
@@ -113,7 +120,7 @@ export function retrieveCourseSources(
        JOIN course_sources cs ON cs.id = sc.source_id
        JOIN source_pages sp ON sp.source_id = sc.source_id AND sp.page_number = sc.page_number
        ${ftsJoin} ${topicJoin}
-      WHERE cs.revision_id = ? AND cs.status = 'ready' ${topicWhere}
+      WHERE cs.status = 'ready' ${revisionWhere}
       ORDER BY ${rank} LIMIT ?`,
   ).all(...params);
   const images: string[] = [];

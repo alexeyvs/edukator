@@ -212,9 +212,13 @@ async function pool<T>(
 }
 
 /** Остаток очереди для отчёта об уже случившейся ошибке — см. место вызова. */
-function countOrZero(db: Database, topicId: string): number {
+function revisionFor(graph: TopicGraph, topic: Topic): number | null {
+  return graph.courses.get(topic.subject)?.revisionId ?? null;
+}
+
+function countOrZero(db: Database, topicId: string, courseRevisionId: number | null): number {
   try {
-    return countAvailable(db, topicId);
+    return countAvailable(db, topicId, courseRevisionId);
   } catch {
     return 0;
   }
@@ -229,6 +233,7 @@ interface RefillContext {
   log: WorkerLog;
   aborted: () => boolean;
   budget: CodexConcurrency;
+  graph: TopicGraph;
 }
 
 /**
@@ -238,7 +243,8 @@ interface RefillContext {
  */
 async function refillTopic(topic: Topic, context: RefillContext): Promise<RefillReport> {
   const { db, log, target } = context;
-  let available = countAvailable(db, topic.id);
+  const courseRevisionId = revisionFor(context.graph, topic);
+  let available = countAvailable(db, topic.id, courseRevisionId);
   let batches = 0;
   let stored = 0;
 
@@ -253,7 +259,7 @@ async function refillTopic(topic: Topic, context: RefillContext): Promise<Refill
           // Целевая сложность — базовая сложность темы: очередь греется заранее,
           // когда точность ученика по теме ещё неизвестна.
           difficulty: topic.difficulty,
-          recent: recentQuestions(db, topic.id),
+          recent: recentQuestions(db, topic.id, undefined, courseRevisionId),
           profile: context.profile,
         }),
       );
@@ -269,9 +275,9 @@ async function refillTopic(topic: Topic, context: RefillContext): Promise<Refill
     // из отчёта всё, что тема успела налить прошлыми батчами.
     let result: ReturnType<typeof storeTasks>;
     try {
-      result = storeTasks(db, topic.id, tasks);
+      result = storeTasks(db, topic.id, tasks, { courseRevisionId });
       stored += result.stored.length;
-      available = countAvailable(db, topic.id);
+      available = countAvailable(db, topic.id, courseRevisionId);
     } catch (error) {
       const message = (error as Error).message;
       log(`воркер: тема «${topic.id}» не пополнена: ${message}`);
@@ -366,12 +372,14 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
   // ушёл в получасовой отступ при полностью исправной модели. Ноль означает
   // «голодная»: причина назовётся в отчёте по теме, когда `refillTopic` упрётся
   // в тот же запрос.
-  const hungry = topics.filter((topic) => countOrZero(db, topic.id) < threshold);
+  const hungry = topics.filter((topic) =>
+    countOrZero(db, topic.id, revisionFor(graph, topic)) < threshold);
 
   const refilled: RefillReport[] = [];
   let unavailable = false;
   const context: RefillContext = {
     db,
+    graph,
     produce,
     profile,
     target,
@@ -414,7 +422,7 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
         // доступа к теме (нет строки в `topic_state`), и тогда тот же запрос
         // упал бы второй раз — уже мимо всякой обработки, обрушив весь цикл
         // из-за одной темы. Причина уже названа в `error`.
-        available: countOrZero(db, topic.id),
+        available: countOrZero(db, topic.id, revisionFor(graph, topic)),
         error: message,
       });
     }

@@ -11,6 +11,7 @@ import { closeSync, openSync, readFileSync, readSync, statSync, writeFileSync } 
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import {
   ChildOutputLimitError,
+  ChildAbortError,
   ChildTimeoutError,
   MAX_CHILD_OUTPUT_BYTES,
   runChild,
@@ -177,6 +178,8 @@ export interface CodexRequest {
   maxOutputBytes?: number;
   /** Локальные изображения страниц, передаваемые модели как отдельные вложения. */
   images?: readonly string[];
+  /** Cancels the owned CLI process during graceful shutdown. */
+  signal?: AbortSignal;
 }
 
 export const MAX_CODEX_IMAGES = 6;
@@ -228,6 +231,9 @@ export type CodexRunner = (request: CodexRequest) => Promise<string>;
  * что просто не повезло с темой.
  */
 export class CodexUnavailableError extends Error {}
+
+/** The enclosing operation was deliberately cancelled; callers must not retry it. */
+export class CodexCancelledError extends Error {}
 
 /**
  * Сорвался сам запуск: ненулевой код возврата или не записанный файл ответа.
@@ -291,12 +297,14 @@ export async function runCodexCli(request: CodexRequest): Promise<string> {
       label: 'codex',
       timeoutMs: request.timeoutMs ?? CODEX_TIMEOUT_MS,
       ...(request.maxOutputBytes === undefined ? {} : { maxOutputBytes: request.maxOutputBytes }),
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
     });
   } catch (error) {
     const bin = request.bin ?? 'codex';
     if (error instanceof ChildTimeoutError) {
       throw new CodexUnavailableError(`codex не ответил: ${error.message}`);
     }
+    if (error instanceof ChildAbortError) throw new CodexCancelledError(error.message);
     // Разговорившийся процесс — беда одного вызова, а не всего codex: следующий
     // придёт с другим промптом. Но и замечанием к модели это не является.
     if (error instanceof ChildOutputLimitError) throw new CodexRunError(error.message);

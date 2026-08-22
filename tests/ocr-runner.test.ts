@@ -84,6 +84,60 @@ printf 'jpeg-page' > "$last.jpg"`),
       .rejects.toThrow(/не создал изображение/u);
   }, 15_000);
 
+  it('не читает в память изображение страницы сверх лимита', async () => {
+    const runner = new SystemOcrRunner({
+      binaries: workingBinaries(),
+      tempRoot: dir,
+      imageLimit: 4,
+    });
+    await expect(runner.processPage({ pdfPath: join(dir, 'book.pdf'), pageNumber: 1 }))
+      .rejects.toThrow(/слишком большое изображение/u);
+  }, 15_000);
+
+  it('валидирует страницу, пустой image и запрет работы после stop', async () => {
+    const binaries = workingBinaries();
+    const runner = new SystemOcrRunner({ binaries, tempRoot: dir });
+    await expect(runner.processPage({ pdfPath: join(dir, 'book.pdf'), pageNumber: 0 }))
+      .rejects.toThrow(/положительным/u);
+    await expect(runner.processPage({ pdfPath: join(dir, 'book.pdf'), pageNumber: 1.5 }))
+      .rejects.toThrow(/положительным/u);
+    binaries.pdftoppm = binary('empty-image', `
+if [ "\${1:-}" = "-v" ]; then exit 0; fi
+for last do :; done
+: > "$last.jpg"`);
+    await expect(new SystemOcrRunner({ binaries, tempRoot: dir }).processPage({
+      pdfPath: join(dir, 'book.pdf'), pageNumber: 1,
+    })).rejects.toThrow(/пустое изображение/u);
+    await runner.stop();
+    await expect(runner.checkDependencies()).rejects.toThrow(OcrStoppedError);
+    await expect(runner.processPage({ pdfPath: join(dir, 'book.pdf'), pageNumber: 1 }))
+      .rejects.toThrow(OcrStoppedError);
+  }, 15_000);
+
+  it('передаёт stderr/code/signal, abort и прочие spawn-ошибки', async () => {
+    let binaries = workingBinaries();
+    binaries.qpdf = binary('failed-qpdf', "printf 'bad qpdf' >&2; exit 7");
+    await expect(new SystemOcrRunner({ binaries }).checkDependencies())
+      .rejects.toThrow(/кодом 7: bad qpdf/u);
+
+    binaries = workingBinaries();
+    binaries.qpdf = binary('signalled-qpdf', 'kill -TERM $$');
+    await expect(new SystemOcrRunner({ binaries }).checkDependencies())
+      .rejects.toThrow(/сигналом/u);
+
+    binaries = workingBinaries();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(new SystemOcrRunner({ binaries }).checkDependencies(controller.signal))
+      .rejects.toThrow(OcrStoppedError);
+
+    const forbidden = join(dir, 'not-executable');
+    writeFileSync(forbidden, 'plain text');
+    binaries = { ...workingBinaries(), qpdf: forbidden };
+    await expect(new SystemOcrRunner({ binaries }).checkDependencies())
+      .rejects.toThrow(/Не удалось запустить/u);
+  }, 15_000);
+
   it('при shutdown завершает активный дочерний процесс', async () => {
     const binaries = workingBinaries();
     binaries.qpdf = binary('shutdown-qpdf', `

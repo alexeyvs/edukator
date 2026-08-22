@@ -107,7 +107,7 @@ const CHECKS: { key: VerdictCheck; problem: string }[] = [
   { key: 'unambiguous', problem: 'условие читается неоднозначно или данных не хватает' },
   { key: 'natural', problem: 'ситуация натянута' },
   { key: 'onTopic', problem: 'задание не о заявленной теме' },
-  { key: 'ageAppropriate', problem: 'содержание не годится подростку' },
+  { key: 'ageAppropriate', problem: 'содержание не соответствует уровню курса' },
   { key: 'hintSafe', problem: 'подсказка раскрывает ответ прямо или однозначно' },
   { key: 'hintUseful', problem: 'краткая подсказка не даёт полезного направления' },
   { key: 'deepHintSafe', problem: 'расширенная подсказка раскрывает ответ или повторяет данные задания' },

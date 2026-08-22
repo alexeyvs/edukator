@@ -110,7 +110,11 @@ describe('воркер рабочего сервера', () => {
     const graph = loadCurriculum();
     const topic = activeTopics(db, graph, 1)[0];
     if (topic === undefined) throw new Error('планировщик не выбрал тему для теста');
-    storeTasks(db, topic.id, [generated('В инвентаре 90 монет, половину потратили. Сколько осталось?')]);
+    storeTasks(db, topic.id, [generated('В инвентаре 90 монет, половину потратили. Сколько осталось?')], {
+      courseRevisionId: server.control.prepare<[string], { active_revision_id: number }>(
+        'SELECT active_revision_id FROM courses WHERE id = ?',
+      ).get(topic.subject)?.active_revision_id ?? null,
+    });
     db.close();
 
     // Воркер заводится на уже открытую базу при переходе сервера к
@@ -372,7 +376,11 @@ describe('воркер рабочего сервера', () => {
     const db = openDatabase(server.dbPath);
     const topic = activeTopics(db, loadCurriculum(), 1)[0];
     if (topic === undefined) throw new Error('планировщик не выбрал тему для теста');
-    storeTasks(db, topic.id, [generated('В инвентаре 90 монет, половину потратили. Сколько осталось?')]);
+    storeTasks(db, topic.id, [generated('В инвентаре 90 монет, половину потратили. Сколько осталось?')], {
+      courseRevisionId: server.control.prepare<[string], { active_revision_id: number }>(
+        'SELECT active_revision_id FROM courses WHERE id = ?',
+      ).get(topic.subject)?.active_revision_id ?? null,
+    });
     db.close();
 
     await app.listen({ host: HOST, port: 0 });

@@ -461,7 +461,8 @@ describe('разрешение предъявителя и аренды', () => 
 
       expect(byChild.bearer.kind).toBe('browser');
       expect(byParent.bearer.kind).toBe('parent');
-      expect(byChild.tenant).toBe(byParent.tenant);
+      expect(byChild.tenant).not.toBe(byParent.tenant);
+      expect(byChild.tenant.db).toBe(byParent.tenant.db);
       expect(tenants.opened).toEqual([alpha.childId, alpha.childId]);
     });
 

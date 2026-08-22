@@ -77,6 +77,12 @@ function task(topicId: string): GeneratedTask {
   };
 }
 
+function countAvailableAcrossRevisions(db: ReturnType<typeof openDatabase>, topicId: string): number {
+  return db.prepare<[string], { count: number }>(
+    "SELECT COUNT(*) AS count FROM task_bank WHERE topic_id = ? AND status = 'valid'",
+  ).get(topicId)?.count ?? 0;
+}
+
 describe('prefetch', () => {
   let tempDir: string;
   let curriculumDir: string;
@@ -149,9 +155,9 @@ describe('prefetch', () => {
 
       const db = openDatabase(dbPath);
       try {
-        const warmed = SUBJECTS.filter((subject) => countAvailable(db, `${subject}.a`) > 0);
+        const warmed = SUBJECTS.filter((subject) => countAvailableAcrossRevisions(db, `${subject}.a`) > 0);
         expect(warmed).toHaveLength(2);
-        expect(countAvailable(db, `${warmed[0] ?? 'math'}.a`)).toBeGreaterThanOrEqual(8);
+        expect(countAvailableAcrossRevisions(db, `${warmed[0] ?? 'math'}.a`)).toBeGreaterThanOrEqual(8);
       } finally {
         db.close();
       }
@@ -275,7 +281,7 @@ describe('prefetch', () => {
 
       const db = openDatabase(dbPath);
       try {
-        expect(countAvailable(db, 'math.a')).toBeGreaterThan(0);
+        expect(countAvailableAcrossRevisions(db, 'math.a')).toBeGreaterThan(0);
       } finally {
         db.close();
       }
@@ -668,7 +674,7 @@ describe('prefetch', () => {
       expect(prefetchChildrenFailed(result)).toBe(false);
       const db = openDatabase(join(dataDir, 'children', `${childId}.db`));
       try {
-        const warmed = SUBJECTS.filter((subject) => countAvailable(db, `${subject}.a`) > 0);
+        const warmed = SUBJECTS.filter((subject) => countAvailableAcrossRevisions(db, `${subject}.a`) > 0);
         expect(warmed).toHaveLength(1);
       } finally {
         db.close();
@@ -877,7 +883,7 @@ describe('prefetch', () => {
       for (const id of [first, third]) {
         const db = openDatabase(childDatabasePath(dataDir, id));
         try {
-          expect(SUBJECTS.some((subject) => countAvailable(db, `${subject}.a`) > 0)).toBe(true);
+          expect(SUBJECTS.some((subject) => countAvailableAcrossRevisions(db, `${subject}.a`) > 0)).toBe(true);
         } finally {
           db.close();
         }

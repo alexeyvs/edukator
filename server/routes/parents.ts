@@ -285,7 +285,7 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
       const db = context.tenant.db;
       if (mode === 'automatic') clearComputerAccessOverride(db);
       else setComputerAccessOverride(db, mode, current);
-      return reply.send(readDailyGate(db, current));
+      return reply.send(readDailyGate(db, current, context.tenant.curriculum.revisionIds));
     },
   );
 

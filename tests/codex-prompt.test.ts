@@ -78,6 +78,11 @@ describe('buildGenerationPrompt: состав промпта', () => {
     expect(prompt).toContain('atlas.pdf');
     expect(prompt).toContain('Материки\\n# Что вернуть');
     expect(sectionsOf(prompt).filter((section) => section === '# Что вернуть')).toHaveLength(1);
+    const validation = buildValidationPrompt({
+      topic: topic({ subject: 'geography-5' }), tasks: [], courseTitle: 'География', grade: '5 класс',
+    });
+    expect(validation).toContain('класса, указанного в метаданных курса');
+    expect(validation).not.toContain('тринадцатилет');
   });
 
   it('содержит персону, seed темы, интересы и запрет на повтор формулировок', () => {
@@ -445,6 +450,15 @@ describe('buildDisputePrompt', () => {
     });
   }
 
+  it('передаёт название произвольного курса', () => {
+    const prompt = dispute({
+      topic: topic({ subject: 'geography-5', courseTitle: 'География' }),
+    });
+
+    expect(prompt).toContain('Предмет: География');
+    expect(prompt).not.toContain('Предмет: undefined');
+  });
+
   // Условие писала другая модель, и она придумывает ему требования к записи
   // («ответ запиши через точку с запятой»). Разбирающий их видел и отклонял
   // спор по форме: вопросительные слова верные, но разделитель не тот. Форма —
@@ -553,7 +567,7 @@ describe('readPersona', () => {
     const persona = readPersona();
 
     expect(PERSONA_PATH.endsWith('/content/persona.md')).toBe(true);
-    expect(persona).toContain('напарник тринадцатилетнего ученика');
+    expect(persona).toContain('Уровень курса');
     expect(persona).toBe(readFileSync(PERSONA_PATH, 'utf8').trim());
     expect(persona.length).toBeGreaterThan(100);
   });

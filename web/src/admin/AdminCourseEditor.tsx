@@ -24,6 +24,10 @@ function editableTopics(draft: AdminCourseDraft): EditableTopic[] {
   return draft.topics.map((topic) => ({ ...topic, key: topic.id }));
 }
 
+function topicReference(topic: EditableTopic): string {
+  return topic.id ?? topic.clientId ?? topic.key;
+}
+
 function StatusPages({ status }: { status: AdminSourceProcessingStatus | undefined }) {
   if (status === undefined) return <p className="admin-empty">Диагностика страниц ещё не загружена</p>;
   return (
@@ -61,7 +65,7 @@ export function AdminCourseEditor({
   const [draft, setDraft] = useState<AdminCourseDraft | null>(null);
   const [sources, setSources] = useState<AdminCourseSource[]>([]);
   const [sourceStatus, setSourceStatus] = useState<Record<number, AdminSourceProcessingStatus>>({});
-  const [buildStatus, setBuildStatus] = useState<string>('не запускалась');
+  const [buildStatus, setBuildStatus] = useState<string>('загрузка');
   const [topics, setTopics] = useState<EditableTopic[]>([]);
   const [title, setTitle] = useState('');
   const [grade, setGrade] = useState('');
@@ -81,15 +85,16 @@ export function AdminCourseEditor({
       const [loadedCard, loadedSources] = await Promise.all([api.course(courseId), api.courseSources(courseId)]);
       const foundDraft = loadedCard.revisions.find((revision) => revision.status === 'draft');
       setCard(loadedCard);
-      setTitle(loadedCard.course.title);
-      setGrade(loadedCard.course.grade);
       setSources(loadedSources.sources);
       if (foundDraft === undefined) {
         setDraft(null);
         setTopics([]);
         setBuildStatus('нет черновика');
       } else {
+        setBuildStatus('загрузка');
         const loadedDraft = { revision: foundDraft, topics: foundDraft.topics };
+        setTitle(foundDraft.title);
+        setGrade(foundDraft.grade);
         setDraft(loadedDraft);
         setTopics(editableTopics(loadedDraft));
         void api.courseBuild(courseId).then(({ job }) => setBuildStatus(job?.status ?? 'не запускалась'))
@@ -121,7 +126,11 @@ export function AdminCourseEditor({
         }).catch(() => undefined);
       }
       if (buildStatus === 'running' || buildStatus === 'queued') {
-        void api.courseBuild(courseId).then(({ job }) => setBuildStatus(job?.status ?? 'не запускалась'))
+        void api.courseBuild(courseId).then(async ({ job }) => {
+          const status = job?.status ?? 'не запускалась';
+          if (status === 'succeeded') await load();
+          else setBuildStatus(status);
+        })
           .catch(() => undefined);
       }
     }, 2_000);
@@ -129,7 +138,8 @@ export function AdminCourseEditor({
   }, [api, buildStatus, courseId, sources]);
 
   const sourceReady = sources.every((source) => source.status === 'ready');
-  const publishBlocked = draft === null || !sourceReady || buildStatus === 'running' || buildStatus === 'failed';
+  const publishBlocked = draft === null || !sourceReady || buildStatus === 'загрузка' ||
+    buildStatus === 'queued' || buildStatus === 'running' || buildStatus === 'failed';
   const revisionLabels = useMemo(() => card?.revisions.map((revision) =>
     `Редакция ${String(revision.revisionNumber)} — ${revision.status === 'draft' ? 'черновик' : 'опубликована'}`) ?? [], [card]);
 
@@ -142,7 +152,11 @@ export function AdminCourseEditor({
         revisionId: draft.revision.id, editVersion: draft.revision.editVersion,
         title: title.trim(), grade: grade.trim(),
       });
-      setCard((current) => current === null ? current : { ...current, course: result.course });
+      setCard((current) => current === null ? current : {
+        ...current,
+        revisions: current.revisions.map((revision) => revision.id === result.revision.id
+          ? { ...revision, ...result.revision } : revision),
+      });
       setDraft((current) => current === null ? current : { ...current, revision: result.revision });
       setNotice('Метаданные сохранены');
     } catch (error: unknown) { fail(error, 'Не получилось сохранить метаданные'); }
@@ -171,8 +185,20 @@ export function AdminCourseEditor({
     const token = `new-${String(Date.now())}-${String(topics.length + 1)}`;
     setTopics((items) => [...items, {
       key: token, clientId: token, title: '', examWeight: 1, difficulty: 1,
-      prereqs: [], answerFormat: 'text', promptSeed: '', active: true,
+      prereqs: [], answerFormat: 'text', promptSeed: '', active: true, sourceRefs: [],
     }]);
+  }
+
+  function removeTopic(key: string): void {
+    setTopics((items) => {
+      const removed = items.find((item) => item.key === key);
+      if (removed === undefined) return items;
+      const reference = topicReference(removed);
+      return items.filter((item) => item.key !== key).map((item) => ({
+        ...item,
+        prereqs: item.prereqs.filter((prereq) => prereq !== reference),
+      }));
+    });
   }
 
   async function upload(event: ChangeEvent<HTMLInputElement>): Promise<void> {
@@ -306,9 +332,60 @@ export function AdminCourseEditor({
                     <label><span>Сложность</span><select value={topic.difficulty} onChange={(event) => changeTopic(topic.key, { difficulty: Number(event.target.value) })}><option value={1}>1</option><option value={2}>2</option><option value={3}>3</option></select></label>
                     <label><span>Ответ</span><select value={topic.answerFormat} onChange={(event) => changeTopic(topic.key, { answerFormat: event.target.value as EditableTopic['answerFormat'] })}><option value="text">Текст</option><option value="number">Число</option><option value="choice">Выбор</option></select></label>
                   </div>
-                  <label><span>Зависимости (ID через запятую)</span><input value={topic.prereqs.join(', ')} onChange={(event) => changeTopic(topic.key, { prereqs: event.target.value.split(',').map((part) => part.trim()).filter(Boolean) })} /></label>
+                  <fieldset className="admin-topic-prereqs">
+                    <legend>Зависимости</legend>
+                    {topics.filter((candidate) => candidate.key !== topic.key).length === 0
+                      ? <span>Других тем пока нет</span>
+                      : topics.filter((candidate) => candidate.key !== topic.key).map((candidate) => {
+                        const reference = topicReference(candidate);
+                        return (
+                          <label key={candidate.key}>
+                            <input
+                              checked={topic.prereqs.includes(reference)}
+                              type="checkbox"
+                              onChange={(event) => changeTopic(topic.key, {
+                                prereqs: event.target.checked
+                                  ? [...topic.prereqs, reference]
+                                  : topic.prereqs.filter((item) => item !== reference),
+                              })}
+                            />
+                            <span>{candidate.title.trim() === '' ? 'Новая тема' : candidate.title}</span>
+                            <code>{reference}</code>
+                          </label>
+                        );
+                      })}
+                  </fieldset>
+                  {sources.length > 0 && (
+                    <fieldset className="admin-topic-prereqs">
+                      <legend>Страницы-основания</legend>
+                      {sources.map((source) => {
+                        const refs = topic.sourceRefs ?? [];
+                        const selected = refs.find((ref) => ref.sourceId === source.id);
+                        return (
+                          <div className="admin-topic-options" key={source.id}>
+                            <label className="admin-check">
+                              <input
+                                checked={selected !== undefined}
+                                type="checkbox"
+                                onChange={(event) => changeTopic(topic.key, {
+                                  sourceRefs: event.target.checked
+                                    ? [...refs, { sourceId: source.id, pageFrom: 1, pageTo: source.pageCount ?? 1 }]
+                                    : refs.filter((ref) => ref.sourceId !== source.id),
+                                })}
+                              />
+                              <span>{source.uploadName}</span>
+                            </label>
+                            {selected !== undefined && <>
+                              <label><span>С</span><input aria-label={`Первая страница ${source.uploadName}`} min={1} max={source.pageCount ?? undefined} type="number" value={selected.pageFrom} onChange={(event) => changeTopic(topic.key, { sourceRefs: refs.map((ref) => ref.sourceId === source.id ? { ...ref, pageFrom: Number(event.target.value) } : ref) })} /></label>
+                              <label><span>По</span><input aria-label={`Последняя страница ${source.uploadName}`} min={selected.pageFrom} max={source.pageCount ?? undefined} type="number" value={selected.pageTo} onChange={(event) => changeTopic(topic.key, { sourceRefs: refs.map((ref) => ref.sourceId === source.id ? { ...ref, pageTo: Number(event.target.value) } : ref) })} /></label>
+                            </>}
+                          </div>
+                        );
+                      })}
+                    </fieldset>
+                  )}
                   <label className="admin-check"><input checked={topic.active} type="checkbox" onChange={(event) => changeTopic(topic.key, { active: event.target.checked })} /><span>Тема активна</span></label>
-                  <button className="quiet" type="button" onClick={() => setTopics((items) => items.filter((item) => item.key !== topic.key))}>Удалить тему</button>
+                  <button className="quiet" type="button" onClick={() => removeTopic(topic.key)}>Удалить тему</button>
                 </fieldset>
               ))}
             </div>

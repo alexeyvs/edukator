@@ -82,6 +82,16 @@ describe('банк заданий', () => {
   });
 
   describe('запись и выдача', () => {
+    it('изолирует одинаковую тему и формулировку по редакции курса', () => {
+      const oldStored = storeTasks(db, TOPIC, [task()], { courseRevisionId: 10 }).stored[0];
+      const newStored = storeTasks(db, TOPIC, [task()], { courseRevisionId: 11 }).stored[0];
+      expect(countAvailable(db, TOPIC, 10)).toBe(1);
+      expect(countAvailable(db, TOPIC, 11)).toBe(1);
+      expect(recentQuestions(db, TOPIC, 10, 11)).toHaveLength(1);
+      expect(takeTask(db, TOPIC, { courseRevisionId: 11 })?.id).toBe(newStored?.id);
+      expect(takeTask(db, TOPIC, { courseRevisionId: 11 })).toBeNull();
+      expect(takeTask(db, TOPIC, { courseRevisionId: 10 })?.id).toBe(oldStored?.id);
+    });
     it('балансирует позиции правильных choice-ответов внутри записываемого батча', () => {
       const choices = ['Правильный', 'Первый дистрактор', 'Второй дистрактор', 'Третий дистрактор'];
       const generated = Array.from({ length: 12 }, (_, index) => task({
@@ -305,6 +315,16 @@ describe('банк заданий', () => {
   });
 
   describe('резерв босса', () => {
+    it('пишет задания в редакцию boss-батча', () => {
+      const batchId = preparingBatch(db);
+      db.prepare('UPDATE boss_batches SET course_revision_id = 17 WHERE id = ?').run(batchId);
+      expect(reserveBossTasks(db, batchId, batch(5)).ready).toBe(true);
+      expect(db.prepare<[string], { revisions: number }>(
+        'SELECT COUNT(DISTINCT course_revision_id) AS revisions FROM task_bank WHERE status = ?',
+      ).get('boss_reserved')).toEqual({ revisions: 1 });
+      expect(db.prepare("SELECT MIN(course_revision_id) AS revision FROM task_bank WHERE status = 'boss_reserved'").get())
+        .toEqual({ revision: 17 });
+    });
     it('сохраняет контракт обычной вставки и атомарной выдачи', () => {
       const ordinary = task({ instruction: 'Обычный контракт: сколько будет 6 + 7?' });
 
@@ -420,6 +440,13 @@ describe('банк заданий', () => {
   });
 
   describe('резерв материала', () => {
+    it('пишет задания в редакцию learning material', () => {
+      const materialId = preparingMaterial(db);
+      db.prepare('UPDATE learning_materials SET course_revision_id = 23 WHERE id = ?').run(materialId);
+      expect(reserveLearningTasks(db, materialId, LEARNING_CONTENT, batch(5)).ready).toBe(true);
+      expect(db.prepare("SELECT MIN(course_revision_id) AS revision FROM task_bank WHERE status = 'lesson_reserved'").get())
+        .toEqual({ revision: 23 });
+    });
     it('читает тест строго по позиции и не повторяет отвеченное', () => {
       const materialId = preparingMaterial(db);
       const { stored, ready } = reserveLearningTasks(

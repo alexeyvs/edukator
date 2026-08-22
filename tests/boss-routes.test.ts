@@ -70,8 +70,10 @@ describe('маршруты босса', () => {
   function ready(): number {
     db.prepare('UPDATE topic_state SET mastery = .8 WHERE topic_id = ?').run(TOPIC);
     const id = Number(db.prepare(
-      "INSERT INTO boss_batches (topic_id, status) VALUES (?, 'preparing')",
-    ).run(TOPIC).lastInsertRowid);
+      "INSERT INTO boss_batches (topic_id, course_revision_id, status) VALUES (?, ?, 'preparing')",
+    ).run(TOPIC, server.control.prepare<[string], { active_revision_id: number }>(
+      'SELECT active_revision_id FROM courses WHERE id = ?',
+    ).get('math')?.active_revision_id ?? null).lastInsertRowid);
     expect(reserveBossTasks(db, id, tasks()).ready).toBe(true);
     return id;
   }
@@ -149,8 +151,10 @@ describe('маршруты босса', () => {
     expect((await app.inject({ method: 'GET', url: '/api/boss/nope/next' })).statusCode).toBe(400);
 
     const batchId = Number(db.prepare(
-      "INSERT INTO boss_batches (topic_id, status) VALUES (?, 'preparing')",
-    ).run(TOPIC).lastInsertRowid);
+      "INSERT INTO boss_batches (topic_id, course_revision_id, status) VALUES (?, ?, 'preparing')",
+    ).run(TOPIC, server.control.prepare<[string], { active_revision_id: number }>(
+      'SELECT active_revision_id FROM courses WHERE id = ?',
+    ).get('math')?.active_revision_id ?? null).lastInsertRowid);
     reserveBossTasks(db, batchId, tasks());
     const started = await app.inject({ method: 'POST', url: '/api/boss/start', payload: { topic_id: TOPIC } });
     const runId = (started.json() as { runId: number }).runId;

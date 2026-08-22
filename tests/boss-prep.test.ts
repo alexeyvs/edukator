@@ -73,6 +73,18 @@ describe('подготовка боёв с боссом', () => {
     expect(db.prepare('SELECT status FROM boss_batches WHERE id = ?').get(report.batchId)).toEqual({ status: 'ready' });
   });
 
+  it('создаёт boss batch и задания в редакции снимка', async () => {
+    const scoped = buildTopicGraph(graph.order, [{
+      courseId: 'math', title: 'Математика', grade: '7 класс', revisionId: 17,
+    }]);
+    db.prepare('UPDATE topic_state SET mastery = 0.8 WHERE topic_id = ?').run(TOPIC);
+    const report = await prepareNextBoss({ db, graph: scoped, produce: () => Promise.resolve(five('r17')), now: NOW });
+    expect(db.prepare('SELECT course_revision_id FROM boss_batches WHERE id = ?').get(report.batchId))
+      .toEqual({ course_revision_id: 17 });
+    expect(db.prepare("SELECT MIN(course_revision_id) AS revision FROM task_bank WHERE status = 'boss_reserved'").get())
+      .toEqual({ revision: 17 });
+  });
+
   it('собирает пять уникальных заданий из ограниченного числа отдельных батчей', async () => {
     db.prepare('UPDATE topic_state SET mastery = 0.8 WHERE topic_id = ?').run(TOPIC);
     let calls = 0;

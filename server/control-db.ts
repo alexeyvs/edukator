@@ -10,7 +10,7 @@ import { MAX_SECRET_LENGTH, hashSecret, verifySecret } from './secrets.js';
  * и живёт отдельно от `SCHEMA_VERSION` детской базы: это разные файлы с разной
  * историей, и общий номер заставлял бы мигрировать одну ради изменений другой.
  */
-export const CONTROL_SCHEMA_VERSION = 3;
+export const CONTROL_SCHEMA_VERSION = 4;
 
 /** Таблицы управляющей базы. Тесты сверяют состав файла именно с этим списком. */
 export const CONTROL_TABLES = [
@@ -187,6 +187,8 @@ const COURSE_CATALOG_SCHEMA = `
     status               TEXT NOT NULL CHECK (status IN ('draft', 'published')),
     based_on_revision_id INTEGER REFERENCES course_revisions (id),
     edit_version         INTEGER NOT NULL DEFAULT 1 CHECK (edit_version > 0),
+    title                TEXT NOT NULL CHECK (title <> ''),
+    grade                TEXT NOT NULL CHECK (grade <> ''),
     published_by         TEXT REFERENCES admins (id),
     created_at           TEXT NOT NULL DEFAULT (${NOW_ISO}),
     published_at         TEXT,
@@ -474,6 +476,27 @@ function catalogSentinelCount(db: Database.Database): number {
     .get(...CATALOG_SENTINEL_OBJECTS)?.count ?? 0;
 }
 
+function migrateRevisionMetadata(db: Database.Database): void {
+  const table = db.prepare<[], { name: string }>(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'course_revisions'",
+  ).get();
+  if (table === undefined) return;
+  const columns = new Set((db.pragma('table_info(course_revisions)') as Array<{ name: string }>).map((column) => column.name));
+  const hasTitle = columns.has('title');
+  const hasGrade = columns.has('grade');
+  if (hasTitle !== hasGrade) {
+    throw new Error('Схема course_revisions содержит только часть display metadata');
+  }
+  if (hasTitle) return;
+  db.exec(`
+    ALTER TABLE course_revisions ADD COLUMN title TEXT;
+    ALTER TABLE course_revisions ADD COLUMN grade TEXT;
+    UPDATE course_revisions
+       SET title = (SELECT courses.title FROM courses WHERE courses.id = course_revisions.course_id),
+           grade = (SELECT courses.grade FROM courses WHERE courses.id = course_revisions.course_id);
+  `);
+}
+
 /**
  * Приводит управляющую базу к текущей версии схемы. Идемпотентна: на уже
  * мигрированной базе ничего не выполняет. Вся DDL идёт одной транзакцией —
@@ -512,7 +535,7 @@ export function migrateControl(db: Database.Database): void {
       return;
     }
 
-    if (version !== 1 && version !== 2) {
+    if (version !== 1 && version !== 2 && version !== 3) {
       // Молчаливое «ничего не делаем» превратило бы пропущенный переход в
       // порчу данных, поэтому неизвестная версия — отказ, а не умолчание.
       throw new Error(
@@ -534,7 +557,7 @@ export function migrateControl(db: Database.Database): void {
           SELECT scope, kind, key, failures, first_failed_at, last_failed_at FROM login_attempts_v1;
         DROP TABLE login_attempts_v1;
       `);
-    } else {
+    } else if (version === 2) {
       const catalogObjects = catalogSentinelCount(db);
       // Ранняя версия 2 могла быть выпущена до каталога. Полностью пустую форму
       // достраиваем, частично повреждённую оставляем валидатору.
@@ -542,6 +565,7 @@ export function migrateControl(db: Database.Database): void {
     }
 
     db.exec(COURSE_ASSIGNMENTS_SCHEMA);
+    migrateRevisionMetadata(db);
 
     db.pragma(`user_version = ${CONTROL_SCHEMA_VERSION}`);
   }).immediate();
@@ -629,6 +653,8 @@ const REQUIRED_CONTROL_COLUMNS: Record<ControlTable, readonly string[]> = {
     'status',
     'based_on_revision_id',
     'edit_version',
+    'title',
+    'grade',
     'published_by',
     'created_at',
     'published_at',

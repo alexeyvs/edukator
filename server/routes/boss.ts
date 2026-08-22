@@ -93,7 +93,11 @@ export function registerBossRoutes(app: FastifyInstance, options: BossRoutesOpti
           title: topic.title,
           subject: topic.subject,
           ...courseJson(graph, topic.subject),
-          readiness: bossTopicState(context.tenant.db, topic.id),
+          readiness: bossTopicState(
+            context.tenant.db,
+            topic.id,
+            graph.courses.get(topic.subject)?.revisionId ?? null,
+          ),
         })),
       });
     } catch (error) {

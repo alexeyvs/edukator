@@ -1,5 +1,5 @@
 import type { Database } from 'better-sqlite3';
-import type { Subject } from './db.js';
+import { requireCourseId, type Subject } from './db.js';
 import type { TopicGraph } from './curriculum.js';
 import { computeForecast, MIN_SCORE, MAX_SCORE } from './forecast.js';
 import { confidenceAt, readTopicStates } from './mastery.js';
@@ -187,10 +187,7 @@ function requireDate(value: string, label: string): Date {
 }
 
 function subjectOf(value: string, label: string): Subject {
-  if (value !== 'math' && value !== 'russian' && value !== 'english') {
-    throw new Error(`Дашборд родителей: неизвестный предмет ${label} (${value})`);
-  }
-  return value;
+  return requireCourseId(value, `Дашборд родителей: повреждённый course ID ${label} (${value})`);
 }
 
 function kindOf(value: string): RunKind {
@@ -261,24 +258,24 @@ function readRuns(db: Database, since: string, until: string): { rows: RunRow[];
   return { rows, byId };
 }
 
-function validateAttempts(attempts: AttemptRow[], graph: TopicGraph): AttemptRow[] {
+function validateAttempts(attempts: AttemptRow[], graph?: TopicGraph): AttemptRow[] {
   for (const attempt of attempts) {
     requireDate(attempt.created_at, 'attempts.created_at');
     if (!Number.isSafeInteger(attempt.duration_ms) || attempt.duration_ms < 0) {
       throw new Error(`Дашборд родителей: повреждённая длительность попытки (${attempt.duration_ms})`);
     }
-    if (!graph.byId.has(attempt.topic_id)) {
+    if (graph !== undefined && !graph.byId.has(attempt.topic_id)) {
       throw new Error(`Дашборд родителей: попытка с неизвестной темой (${attempt.topic_id})`);
     }
   }
   return attempts;
 }
 
-function readWindowAttempts(db: Database, graph: TopicGraph, since: string, until: string): AttemptRow[] {
+function readWindowAttempts(db: Database, since: string, until: string): AttemptRow[] {
   return validateAttempts(db.prepare<[string, string], AttemptRow>(
     `SELECT run_id, topic_id, duration_ms, created_at FROM attempts
       WHERE created_at >= ? AND created_at <= ? ORDER BY created_at, id`,
-  ).all(since, until), graph);
+  ).all(since, until));
 }
 
 function readSnapshots(db: Database, since: string, until: string): SnapshotRow[] {
@@ -372,7 +369,6 @@ function buildGaps(
 
 function readActivity(
   db: Database,
-  graph: TopicGraph,
   runs: Map<number, ValidatedRun>,
   since: string,
   until: string,
@@ -383,7 +379,7 @@ function readActivity(
       WHERE runs.finished_at >= ? AND runs.finished_at <= ?
         AND (runs.kind = 'boss' OR runs.summary IS NOT NULL)
       ORDER BY attempts.created_at, attempts.id`,
-  ).all(since, until), graph);
+  ).all(since, until));
   const milliseconds = new Map<number, number>();
   for (const attempt of attempts) {
     if (attempt.run_id !== null && runs.has(attempt.run_id)) {
@@ -503,6 +499,9 @@ export function readParentsRunDetail(
   if (row === undefined) return null;
 
   const subject = subjectOf(row.subject, `runs.id=${row.id}`);
+  if (!graph.bySubject.has(subject)) {
+    throw new Error(`Дашборд родителей: run ${row.id} не принадлежит закреплённой редакции курса`);
+  }
   const kind = kindOf(row.kind);
   const startedAt = requireDate(row.started_at, `runs.started_at id=${row.id}`);
   const finishedAt = row.finished_at === null
@@ -624,19 +623,25 @@ export function readParentsDashboard(
   const until = now.toISOString();
   const since = new Date(now.getTime() - WINDOW_DAYS * DAY_MS).toISOString();
   const { rows: runs, byId: runById } = readRuns(db, since, until);
-  const attempts = readWindowAttempts(db, graph, since, until);
+  // Агрегаты недельной истории не зависят от текущих назначений:
+  // тема могла быть исключена, удалена в новой редакции или весь курс снят.
+  const attempts = readWindowAttempts(db, since, until);
   const states = readTopicStates(db);
   const forecast = buildForecasts(
     graph, states, readSnapshots(db, since, until), runs, now, since, until,
   );
   return {
     generatedAt: until,
-    computerAccess: readDailyGate(db, now),
+    computerAccess: readDailyGate(db, now, new Map(
+      [...graph.courses].flatMap(([courseId, metadata]) =>
+        metadata.revisionId === null || metadata.revisionId === undefined
+          ? [] : [[courseId, metadata.revisionId]]),
+    )),
     window: { since, until },
     forecasts: forecast.forecasts,
     time: buildTime(attempts),
     gaps: buildGaps(graph, states, now),
-    activity: readActivity(db, graph, runById, since, until),
+    activity: readActivity(db, runById, since, until),
     integrityReviews: readIntegrityReviews(db, since, until),
     flags: {
       threeFullDaysWithoutRun: missedThreeFullDays(runs, now),

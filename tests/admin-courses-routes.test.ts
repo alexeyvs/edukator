@@ -27,6 +27,7 @@ import { createAdminContext } from '../server/routes/tenant-context.js';
 import {
   registerAdminCoursesRoutes,
   registerUnavailableAdminCourses,
+  CourseDraftBuildRunner,
 } from '../server/routes/admin/courses.js';
 import { createAdminAccount, signInAdmin } from './server-harness.js';
 
@@ -243,6 +244,47 @@ describe('админские маршруты каталога курсов', ()
     ]);
   });
 
+  it('не публикует черновик во время его фоновой сборки', async () => {
+    const created = await createBiology();
+    const replaced = await request(
+      'PUT', '/api/admin/courses/biology-7/draft/topics',
+      topicsPayload(created.draft.id, created.draft.editVersion),
+    );
+    const revision = (replaced.json() as { revision: { editVersion: number } }).revision;
+    control.prepare(
+      `INSERT INTO catalog_jobs (job_key, type, status, course_id, revision_id)
+       VALUES (?, 'build-curriculum', 'running', 'biology-7', ?)`,
+    ).run(`build:${String(created.draft.id)}`, created.draft.id);
+
+    const response = await request('POST', '/api/admin/courses/biology-7/publish', {
+      revisionId: created.draft.id,
+      editVersion: revision.editVersion,
+      idempotencyKey: 'publish-during-build',
+    });
+    expect(response.statusCode).toBe(409);
+    expect(control.prepare<[number], { status: string }>(
+      'SELECT status FROM course_revisions WHERE id = ?',
+    ).get(created.draft.id)?.status).toBe('draft');
+  });
+
+  it('отменяет и дожидается принадлежащих серверу фоновых сборок', async () => {
+    let cancelled = false;
+    const runner = new CourseDraftBuildRunner(({ signal }) => new Promise((_resolve, reject) => {
+      signal?.addEventListener('abort', () => {
+        cancelled = true;
+        reject(new Error('cancelled'));
+      }, { once: true });
+    }));
+    runner.start({
+      db: control, courseId: 'biology-7', revisionId: 1, expectedEditVersion: 1, dataDir: dir,
+    });
+    await runner.stop();
+    expect(cancelled).toBe(true);
+    expect(() => runner.start({
+      db: control, courseId: 'biology-7', revisionId: 1, expectedEditVersion: 1, dataDir: dir,
+    })).toThrow(/завершает работу/u);
+  });
+
   it('строго ограничивает поля и размеры запросов', async () => {
     expect((await request('POST', '/api/admin/courses', {
       id: 'biology-7', title: 'Биология', grade: '7', extra: true,
@@ -267,6 +309,9 @@ describe('админские маршруты каталога курсов', ()
     expect((await request('POST', '/api/admin/courses/biology-7/draft/build', {
       revisionId: created.draft.id, editVersion: created.draft.editVersion,
     })).statusCode).toBe(202);
+    expect((await request('POST', '/api/admin/courses/biology-7/draft/build', {
+      revisionId: created.draft.id, editVersion: created.draft.editVersion + 1,
+    })).statusCode).toBe(409);
 
     const sourceId = Number(control.prepare(
       `INSERT INTO course_sources

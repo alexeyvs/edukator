@@ -72,6 +72,23 @@ describe('readDailyGate', () => {
     });
   });
 
+  it('не переносит обязательство от материала прежней редакции курса', () => {
+    const db = setup();
+    const materialId = addMaterial(db, '2026-08-08T08:00:00.000Z');
+    db.prepare('UPDATE learning_materials SET course_revision_id = 11 WHERE id = ?').run(materialId);
+
+    expect(readDailyGate(
+      db,
+      new Date('2026-08-08T12:00:00.000Z'),
+      new Map([['math', 12]]),
+    ).learning).toEqual({ materialId: null, required: false, passed: false });
+    expect(readDailyGate(
+      db,
+      new Date('2026-08-08T12:00:00.000Z'),
+      new Map([['math', 11]]),
+    ).learning).toEqual({ materialId, required: true, passed: false });
+  });
+
   it('не считает другие виды, незавершённые строки и результат без summary', () => {
     const db = setup();
     addRun(db, 'triage', '2026-08-08T08:00:00.000Z');

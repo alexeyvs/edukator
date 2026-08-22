@@ -77,6 +77,7 @@ export function nextTriageTask(
       const task = issuedTask(db, topic.id, runId) ?? takeTask(db, topic.id, {
         difficulty: targetDifficulty,
         runId,
+        courseRevisionId: graph.courses.get(topic.subject)?.revisionId ?? null,
       });
       if (task !== null) return { status: 'ok', task: issued(task, topic) };
     }

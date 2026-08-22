@@ -1,7 +1,6 @@
 /** HTTP-граница персонального материала; состояние и атомарность живут в learning.ts. */
-import type { Database } from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import type { TopicGraph } from '../curriculum.js';
+import type { Tenant } from '../tenant-registry.js';
 import {
   assertLearningReadyForIntegrity,
   finishLearningMaterial,
@@ -53,8 +52,20 @@ function fail(reply: FastifyReply, error: unknown): FastifyReply {
   return failAuth(reply, error);
 }
 
-function materialJson(db: Database, graph: TopicGraph, materialId: number): Record<string, unknown> {
-  const material = readLearningMaterial(db, materialId);
+function materialJson(tenant: Tenant, materialId: number): Record<string, unknown> {
+  const material = readLearningMaterial(tenant.db, materialId);
+  const currentRevision = tenant.curriculum.revisionIds.get(material.subject);
+  const graph = material.courseRevisionId === currentRevision
+    ? tenant.curriculum.graph
+    : material.latestRunId !== null && material.latestRunFinishedAt === null
+      ? tenant.graphForRun(material.latestRunId)
+      : undefined;
+  if (graph === undefined) {
+    throw new LearningError(
+      'learning-not-ready',
+      `Материал ${materialId} относится к неактуальной редакции курса`,
+    );
+  }
   const topic = graph.byId.get(material.topicId);
   if (topic === undefined || topic.subject !== material.subject) {
     throw new LearningError(
@@ -84,10 +95,8 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
       const context = options.context(request, { allow: ROUTE_ACCESS.child });
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
-      const graph = context.tenant.curriculum.graph;
       return reply.send(materialJson(
-        context.tenant.db,
-        graph,
+        context.tenant,
         readPathId(request.params.id, 'Идентификатор материала'),
       ));
     } catch (error) {
@@ -101,10 +110,10 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
       const db = context.tenant.db;
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
-      const graph = context.tenant.curriculum.graph;
       const materialId = readPathId(request.params.id, 'Идентификатор материала');
+      materialJson(context.tenant, materialId);
       const opened = openLearningMaterial(db, materialId, { now: now() });
-      return reply.send({ ...opened, material: materialJson(db, graph, materialId) });
+      return reply.send({ ...opened, material: materialJson(context.tenant, materialId) });
     } catch (error) {
       return fail(reply, error);
     }
@@ -117,7 +126,7 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
       const materialId = readPathId(request.params.id, 'Идентификатор материала');
-      materialJson(db, context.tenant.curriculum.graph, materialId);
+      materialJson(context.tenant, materialId);
       const started = startLearningRun(
         db,
         materialId,
@@ -141,7 +150,7 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
       const state = context.tenant.integrity.begin(runId);
       if (state.status !== 'completed') return reply.send(integrityPublicJson(state));
       const result = state.result as unknown as ReturnType<typeof finishLearningMaterial>;
-      const learningGate = readDailyGate(db, at).learning;
+      const learningGate = readDailyGate(db, at, context.tenant.curriculum.revisionIds).learning;
       return reply.send({
         ...result,
         required: learningGate.required && learningGate.materialId === result.materialId,

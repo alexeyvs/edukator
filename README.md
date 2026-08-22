@@ -15,7 +15,9 @@
 [`docs/plans/completed/20260809-background-learning-materials.md`](docs/plans/completed/20260809-background-learning-materials.md) (персональные разборы),
 [`docs/plans/completed/20260813-required-personal-review-gate.md`](docs/plans/completed/20260813-required-personal-review-gate.md) (обязательный первый разбор),
 [`docs/plans/20260819-edukator-multi-tenancy.md`](docs/plans/20260819-edukator-multi-tenancy.md) (многоарендность),
-[`docs/plans/20260821-edukator-admin.md`](docs/plans/20260821-edukator-admin.md) (админка оператора).
+[`docs/plans/20260821-edukator-admin.md`](docs/plans/20260821-edukator-admin.md) (админка оператора),
+[`docs/superpowers/specs/2026-08-22-configurable-courses-design.md`](docs/superpowers/specs/2026-08-22-configurable-courses-design.md) и
+[`docs/plans/20260822-configurable-courses.md`](docs/plans/20260822-configurable-courses.md) (настраиваемые курсы).
 
 ## Что уже есть
 

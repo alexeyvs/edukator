@@ -69,6 +69,9 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
         'marker=normal',
         '[[ -e "$EDUKATOR_DATA_DIR/.maintenance" ]] && marker=maintenance',
         'printf \'systemctl %s %s\\n\' "$*" "$marker" >> "$EDUKATOR_DEPLOY_TEST_LOG"',
+        'if [[ "${EDUKATOR_DEPLOY_TEST_HEALTH:-ok}" == "unexpected-stop" ]] &&',
+        '   [[ "${1:-}" == "stop" ]] &&',
+        '   [[ "$(cat "$EDUKATOR_DEPLOY_APP_ROOT/app/version" 2>/dev/null)" == "new" ]]; then exit 9; fi',
         '',
       ].join('\n'),
     );
@@ -110,6 +113,12 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
         '  printf \'child-migrated\\n\' > "$EDUKATOR_DATA_DIR/children/child.db"',
         '  printf \'pdf-migrated\\n\' > "$EDUKATOR_DATA_DIR/catalog/artifacts/book.pdf"',
         '  exit 22',
+        'fi',
+        'if [[ "${EDUKATOR_DEPLOY_TEST_HEALTH:-ok}" == "unexpected-stop" ]] &&',
+        '   [[ "$(cat "$EDUKATOR_DEPLOY_APP_ROOT/app/version" 2>/dev/null)" == "new" ]]; then',
+        '  printf \'control-migrated\\n\' > "$EDUKATOR_DATA_DIR/control.db"',
+        '  printf \'child-migrated\\n\' > "$EDUKATOR_DATA_DIR/children/child.db"',
+        '  printf \'pdf-migrated\\n\' > "$EDUKATOR_DATA_DIR/catalog/artifacts/book.pdf"',
         'fi',
         'exit 0',
         '',
@@ -163,6 +172,18 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
       .toBe('pdf-before\n');
     expect(existsSync(join(root, 'data', '.maintenance'))).toBe(false);
     expect(`${result.stdout}${result.stderr}`).not.toContain('deploy-secret');
+  });
+
+  it('на неожиданном EXIT после миграции возвращает код и predeploy snapshot', () => {
+    const result = deploy('unexpected-stop');
+
+    expect(result.status).toBe(9);
+    expect(readFileSync(join(appRoot, 'app', 'version'), 'utf8')).toBe('old\n');
+    expect(readFileSync(join(root, 'data', 'control.db'), 'utf8')).toBe('control-before\n');
+    expect(readFileSync(join(root, 'data', 'children', 'child.db'), 'utf8')).toBe('child-before\n');
+    expect(readFileSync(join(root, 'data', 'catalog', 'artifacts', 'book.pdf'), 'utf8'))
+      .toBe('pdf-before\n');
+    expect(existsSync(join(root, 'data', '.maintenance'))).toBe(false);
   });
 
   it('отказывается деплоить без каталога данных и с каталогом внутри релиза', () => {
@@ -238,14 +259,14 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
     chmodSync(path, 0o755);
   }
 
-  function deploy(health: 'ok' | 'new-fails') {
+  function deploy(health: 'ok' | 'new-fails' | 'unexpected-stop') {
     return spawnSync('bash', [helper, archive, releaseId], {
       encoding: 'utf8',
       env: deployEnv(health),
     });
   }
 
-  function deployEnv(health: 'ok' | 'new-fails'): NodeJS.ProcessEnv {
+  function deployEnv(health: 'ok' | 'new-fails' | 'unexpected-stop'): NodeJS.ProcessEnv {
     return {
       ...process.env,
       EDUKATOR_DEPLOY_APP_ROOT: appRoot,

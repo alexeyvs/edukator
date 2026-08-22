@@ -86,7 +86,12 @@ describe('маршруты забега', () => {
     app = server.app;
     db = openDatabase(server.dbPath);
     for (const subject of SUBJECTS) {
-      storeTasks(db, `${subject}.a`, Array.from({ length: 12 }, (_, index) => task(subject, index)));
+      const revisionId = server.control.prepare<[string], { active_revision_id: number }>(
+        'SELECT active_revision_id FROM courses WHERE id = ?',
+      ).get(subject)?.active_revision_id;
+      storeTasks(db, `${subject}.a`, Array.from({ length: 12 }, (_, index) => task(subject, index)), {
+        courseRevisionId: revisionId ?? null,
+      });
     }
   });
 

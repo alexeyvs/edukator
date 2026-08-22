@@ -61,19 +61,23 @@ function topicRow(db: Database, topicId: string): TopicStateRow {
   return row;
 }
 
-function liveBatch(db: Database, topicId: string): BatchRow | undefined {
-  return db.prepare<[string], BatchRow>(
+function liveBatch(db: Database, topicId: string, courseRevisionId: number | null): BatchRow | undefined {
+  return db.prepare<[string, number | null], BatchRow>(
     `SELECT id, topic_id, run_id, status, course_revision_id FROM boss_batches
-      WHERE topic_id = ? AND status IN ('preparing', 'ready', 'active')
+      WHERE topic_id = ? AND course_revision_id IS ? AND status IN ('preparing', 'ready', 'active')
       ORDER BY id DESC LIMIT 1`,
-  ).get(topicId);
+  ).get(topicId, courseRevisionId);
 }
 
 /** Состояние карты босса. Закрытие темы имеет приоритет над оставшейся битой строкой батча. */
-export function bossTopicState(db: Database, topicId: string): BossTopicState {
+export function bossTopicState(
+  db: Database,
+  topicId: string,
+  courseRevisionId: number | null = null,
+): BossTopicState {
   const state = topicRow(db, topicId);
   if (state.closed_at !== null) return { status: 'closed', eligible: false };
-  const batch = liveBatch(db, topicId);
+  const batch = liveBatch(db, topicId, courseRevisionId);
   const eligible = state.mastery > BOSS_MASTERY || (
     batch !== undefined && hasPriorBossLoss(db, topicId, batch.id)
   );
@@ -134,7 +138,8 @@ export function startBoss(
     if (state.closed_at !== null) {
       throw new BossError('boss-closed', `Босс: тема «${topicId}» уже закрыта`);
     }
-    const batch = liveBatch(db, topicId);
+    const desiredRevisionId = options.courseRevisionId ?? null;
+    const batch = liveBatch(db, topicId, desiredRevisionId);
     if (batch?.status === 'active') {
       const fight = readFight(db, batch.run_id ?? -1);
       validateFight(fight, topic);
@@ -149,7 +154,7 @@ export function startBoss(
     }
     ensureCompleteBatch(db, batch);
 
-    const revisionId = options.courseRevisionId ?? batch.course_revision_id ?? null;
+    const revisionId = desiredRevisionId;
     const runId = Number(db.prepare(
       `INSERT INTO runs
         (subject, course_revision_id, kind, topic_id, started_at, lives_remaining)

@@ -171,7 +171,8 @@ describe('реестр детских баз', () => {
       current = snapshot(secondGraph, 42);
       const refreshed = tenants.open(childId);
 
-      expect(refreshed).toBe(first);
+      expect(refreshed).not.toBe(first);
+      expect(first.curriculum.generation.catalog).toBe(41);
       expect(refreshed.curriculum).toBe(current);
       expect(refreshed.db.prepare<[], { topic_id: string }>(
         'SELECT topic_id FROM topic_state ORDER BY topic_id',
@@ -220,7 +221,8 @@ describe('реестр детских баз', () => {
       // Второе обращение обязано застать готовую аренду: своё соединение
       // означало бы второй посев и вторую пару отпечатков на один файл.
       expect(opens).toBe(1);
-      expect(second).toBe(first);
+      expect(second).not.toBe(first);
+      expect(second.db).toBe(first.db);
       expect(tenants.size).toBe(1);
       expect(log.filter((line) => line.startsWith('посевной банк'))).toHaveLength(1);
 
@@ -234,10 +236,10 @@ describe('реестр детских баз', () => {
       const first = tenants.open(childId);
       const second = tenants.open(childId);
 
-      expect(second).toBe(first);
+      expect(second).not.toBe(first);
       expect(second.db).toBe(first.db);
-      expect(tenants.peek(childId)).toBe(first);
-      expect(tenants.list()).toEqual([first]);
+      expect(tenants.peek(childId)?.db).toBe(first.db);
+      expect(tenants.list().map((tenant) => tenant.db)).toEqual([first.db]);
 
       await tenants.closeAll();
     });
@@ -378,7 +380,7 @@ describe('реестр детских баз', () => {
       // Вытеснения нет: чужое соединение живо, и отпечаток вместе с ним.
       expect(tenants.size).toBe(1);
       expect(one.db.prepare<[], { one: number }>('SELECT 1 AS one').get()?.one).toBe(1);
-      expect(tenants.open(first)).toBe(one);
+      expect(tenants.open(first).db).toBe(one.db);
       expect(log.some((line) => line.includes('открытые базы не тронуты'))).toBe(true);
 
       await tenants.closeAll();

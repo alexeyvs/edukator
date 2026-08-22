@@ -17,6 +17,7 @@ export interface RunChildOptions {
   label: string;
   timeoutMs: number;
   maxOutputBytes?: number;
+  signal?: AbortSignal;
 }
 
 export interface ChildOutput {
@@ -35,6 +36,9 @@ export class ChildTimeoutError extends Error {}
 
 /** Процесс перебрал общий предел вывода и был снят вместе с группой. */
 export class ChildOutputLimitError extends Error {}
+
+/** The owner cancelled the child because its enclosing operation is shutting down. */
+export class ChildAbortError extends Error {}
 
 /**
  * Живые группы процессов: снимаются, если родитель уходит раньше них.
@@ -120,6 +124,10 @@ export function runChild(options: RunChildOptions): Promise<ChildOutput> {
     return Promise.reject(new Error(`${options.label}: срок должен быть положительным числом`));
   }
   return new Promise((resolve, reject) => {
+    if (options.signal?.aborted === true) {
+      reject(new ChildAbortError(`${options.label}: выполнение отменено`));
+      return;
+    }
     const grouped = process.platform !== 'win32';
     const child = spawn(options.bin, options.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -144,6 +152,7 @@ export function runChild(options: RunChildOptions): Promise<ChildOutput> {
       clearTimeout(timeout);
       if (killTimer !== undefined) clearTimeout(killTimer);
       if (abandonTimer !== undefined) clearTimeout(abandonTimer);
+      options.signal?.removeEventListener('abort', abort);
     };
 
     // Ошибка снятия не выбрасывается наружу ни в каком виде: `signal` зовётся из
@@ -182,6 +191,9 @@ export function runChild(options: RunChildOptions): Promise<ChildOutput> {
         reject(error);
       }, KILL_GRACE_MS + ABANDON_GRACE_MS);
     };
+
+    const abort = (): void => stop(new ChildAbortError(`${options.label}: выполнение отменено`));
+    options.signal?.addEventListener('abort', abort, { once: true });
 
     const append = (target: 'stdout' | 'stderr', chunk: string): void => {
       if (failure !== undefined) return;

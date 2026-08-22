@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { runChild } from '../server/run-child.js';
+import { ChildAbortError, runChild } from '../server/run-child.js';
 
 const projectRoot = resolve('.');
 const tsxCli = join(projectRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
@@ -60,6 +60,16 @@ async function waitUntilDead(pid: number): Promise<boolean> {
 }
 
 describe('runChild', () => {
+  it.skipIf(process.platform === 'win32')('снимает группу по отмене владельца', async () => {
+    const controller = new AbortController();
+    const pending = runChild({
+      bin: '/bin/sh', args: ['-c', 'while :; do sleep 1; done'], label: 'отмена',
+      timeoutMs: 60_000, signal: controller.signal,
+    });
+    controller.abort();
+    await expect(pending).rejects.toBeInstanceOf(ChildAbortError);
+  });
+
   // Без срока `setTimeout(…, 0)` срабатывает сразу, а на NaN не срабатывает
   // никогда — то есть внешний вызов либо гибнет мгновенно, либо висит вечно.
   it('требует положительный конечный срок', async () => {

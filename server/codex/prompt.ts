@@ -417,7 +417,7 @@ export function buildDisputePrompt(request: DisputePromptRequest): string {
 
     '# Тема',
     [
-      `Предмет: ${SUBJECT_TITLES[topic.subject]}`,
+      `Предмет: ${inlineField(topic.courseTitle ?? SUBJECT_TITLES[topic.subject] ?? topic.subject)}`,
       `Тема: «${inlineField(topic.title)}» (${topic.id})`,
       `Формат ответа: ${topic.answerFormat} — ${FORMAT_ANSWERS[topic.answerFormat]}.`,
     ].join('\n'),
@@ -515,7 +515,7 @@ export function buildValidationPrompt(request: ValidationPromptRequest): string 
 
   return [
     '# Задача',
-    'Ты проверяешь чужие задания перед тем, как их увидит тринадцатилетний ученик. ' +
+    'Ты проверяешь чужие задания перед тем, как их увидит ученик указанного в метаданных класса. ' +
       'Ответов тебе не дали намеренно: реши каждое задание сам, а потом оцени его. ' +
       'Соглашаться не с чем — сверку сделают без тебя.',
 
@@ -554,7 +554,7 @@ export function buildValidationPrompt(request: ValidationPromptRequest): string 
       '- unambiguous — true, если условие читается однозначно и данных для ответа хватает;',
       '- natural — true, если ситуация не натянута и в неё можно поверить;',
       '- on_topic — true, если задание проверяет заявленную тему, а не соседнюю;',
-      '- age_appropriate — true, если содержание уместно для тринадцатилетнего;',
+      '- age_appropriate — true, если содержание уместно для класса, указанного в метаданных курса;',
       '- hint_safe — true, только если подсказка не раскрывает ответ прямо или однозначно: ' +
         'не называет правильный вариант/позицию, не заполняет пропуск и не выполняет финальный шаг;',
       '- hint_useful — true, если краткая подсказка действительно даёт правило и направление, ' +

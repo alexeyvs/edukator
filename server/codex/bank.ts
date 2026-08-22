@@ -63,6 +63,8 @@ export interface TakeTaskOptions {
   difficulty?: number;
   /** Забег-владелец выдачи; отсутствие означает занятие без забега. */
   runId?: number;
+  /** Catalog revision that authored the task; null is migrated legacy content. */
+  courseRevisionId?: number | null;
 }
 
 interface TaskRow {
@@ -338,6 +340,7 @@ function insertPreparedTasks(
   topicId: string,
   prepared: readonly PreparedTask[],
   status: InsertStatus,
+  courseRevisionId: number | null,
 ): StoreTasksResult {
   const insert = db.prepare<
     {
@@ -357,14 +360,15 @@ function insertPreparedTasks(
       difficulty: number;
       status: InsertStatus;
       fingerprint: string;
+      courseRevisionId: number | null;
     },
     { id: number }
   >(
     `INSERT INTO task_bank
        (topic_id, question, instruction, material, material_format, choices, word_tiles,
-        answer, accept, hint, deep_hint, explain, joke, difficulty, status, fingerprint)
+        answer, accept, hint, deep_hint, explain, joke, difficulty, status, fingerprint, course_revision_id)
      VALUES (@topicId, @question, @instruction, @material, @materialFormat, @choices, @wordTiles,
-             @answer, @accept, @hint, @deepHint, @explain, @joke, @difficulty, @status, @fingerprint)
+             @answer, @accept, @hint, @deepHint, @explain, @joke, @difficulty, @status, @fingerprint, @courseRevisionId)
      ON CONFLICT DO NOTHING
      RETURNING id`,
   );
@@ -390,6 +394,7 @@ function insertPreparedTasks(
       difficulty: task.difficulty,
       status,
       fingerprint,
+      courseRevisionId,
     });
 
     if (row === undefined) duplicates.push(source);
@@ -407,13 +412,14 @@ export function storeTasks(
   db: Database,
   topicId: string,
   tasks: readonly GeneratedTask[],
+  options: { courseRevisionId?: number | null } = {},
 ): StoreTasksResult {
   const prepared = prepareTasks(tasks);
 
   return db.transaction((): StoreTasksResult => {
     ensureTopic(db, topicId);
 
-    return insertPreparedTasks(db, topicId, prepared, 'valid');
+    return insertPreparedTasks(db, topicId, prepared, 'valid', options.courseRevisionId ?? null);
   }).immediate();
 }
 
@@ -429,8 +435,8 @@ export function reserveBossTasks(
   const prepared = prepareTasks(tasks);
 
   return db.transaction((): ReserveBossTasksResult => {
-    const batch = db.prepare<[number], { topic_id: string; status: string }>(
-      'SELECT topic_id, status FROM boss_batches WHERE id = ?',
+    const batch = db.prepare<[number], { topic_id: string; status: string; course_revision_id: number | null }>(
+      'SELECT topic_id, status, course_revision_id FROM boss_batches WHERE id = ?',
     ).get(batchId);
     if (batch === undefined) throw new Error(`Банк заданий: boss-батч ${batchId} не найден`);
     if (batch.status !== 'preparing') {
@@ -438,7 +444,9 @@ export function reserveBossTasks(
     }
     ensureTopic(db, batch.topic_id);
 
-    const result = insertPreparedTasks(db, batch.topic_id, prepared, 'boss_reserved');
+    const result = insertPreparedTasks(
+      db, batch.topic_id, prepared, 'boss_reserved', batch.course_revision_id,
+    );
     if (tasks.length !== 5 || result.stored.length !== 5 || result.duplicates.length > 0) {
       if (result.stored.length > 0) {
         const ids = result.stored.map(({ id }) => id);
@@ -475,8 +483,8 @@ export function reserveLearningTasks(
   const nowIso = now.toISOString();
 
   const publication = db.transaction((): ReserveLearningTasksResult | Error => {
-    const material = db.prepare<[number], { topic_id: string; status: string }>(
-      'SELECT topic_id, status FROM learning_materials WHERE id = ?',
+    const material = db.prepare<[number], { topic_id: string; status: string; course_revision_id: number | null }>(
+      'SELECT topic_id, status, course_revision_id FROM learning_materials WHERE id = ?',
     ).get(materialId);
     if (material === undefined) throw new Error(`Банк заданий: материал ${materialId} не найден`);
     if (material.status !== 'preparing') {
@@ -499,7 +507,9 @@ export function reserveLearningTasks(
     }
 
     const prepared = prepareTasks(tasks);
-    const result = insertPreparedTasks(db, material.topic_id, prepared, 'lesson_reserved');
+    const result = insertPreparedTasks(
+      db, material.topic_id, prepared, 'lesson_reserved', material.course_revision_id,
+    );
     if (
       tasks.length !== LEARNING_TASK_COUNT || result.stored.length !== LEARNING_TASK_COUNT ||
       result.duplicates.length > 0
@@ -617,16 +627,21 @@ export function takeTask(
     : 'ABS(difficulty - @difficulty), created_at, id';
 
   const row = db
-    .prepare<{ topicId: string; difficulty?: number; runId: number | null }, TaskRow>(
+    .prepare<{ topicId: string; difficulty?: number; runId: number | null; courseRevisionId: number | null }, TaskRow>(
       `UPDATE task_bank SET status = 'used', issued_run_id = @runId
         WHERE id = (
           SELECT id FROM task_bank
-           WHERE topic_id = @topicId AND status = 'valid'
+           WHERE topic_id = @topicId AND course_revision_id IS @courseRevisionId AND status = 'valid'
            ORDER BY ${order}
            LIMIT 1)
        RETURNING ${TASK_COLUMNS}`,
     )
-    .get({ topicId, runId: options.runId ?? null, ...(difficulty === undefined ? {} : { difficulty }) });
+    .get({
+      topicId,
+      runId: options.runId ?? null,
+      courseRevisionId: options.courseRevisionId ?? null,
+      ...(difficulty === undefined ? {} : { difficulty }),
+    });
 
   return row === undefined ? null : toBankTaskOrReject(db, row);
 }
@@ -669,6 +684,7 @@ export function recentQuestions(
   db: Database,
   topicId: string,
   limit: number = RECENT_LIMIT,
+  courseRevisionId: number | null = null,
 ): string[] {
   ensureTopic(db, topicId);
   if (!Number.isInteger(limit) || limit < 1) {
@@ -676,25 +692,30 @@ export function recentQuestions(
   }
 
   return db
-    .prepare<[string, number], { question: string }>(
+    .prepare<[string, number | null, number], { question: string }>(
       `SELECT question FROM task_bank
-        WHERE topic_id = ?
+        WHERE topic_id = ? AND course_revision_id IS ?
         ORDER BY created_at DESC, id DESC
         LIMIT ?`,
     )
-    .all(topicId, limit)
+    .all(topicId, courseRevisionId, limit)
     .map((row) => row.question)
     .reverse();
 }
 
 /** Остаток непросмотренных заданий темы: по нему воркер решает, пора ли доливать. */
-export function countAvailable(db: Database, topicId: string): number {
+export function countAvailable(
+  db: Database,
+  topicId: string,
+  courseRevisionId: number | null = null,
+): number {
   ensureTopic(db, topicId);
 
   const row = db
-    .prepare<[string], { n: number }>(
-      `SELECT COUNT(*) AS n FROM task_bank WHERE topic_id = ? AND status = 'valid'`,
+    .prepare<[string, number | null], { n: number }>(
+      `SELECT COUNT(*) AS n FROM task_bank
+        WHERE topic_id = ? AND course_revision_id IS ? AND status = 'valid'`,
     )
-    .get(topicId);
+    .get(topicId, courseRevisionId);
   return row?.n ?? 0;
 }

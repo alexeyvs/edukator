@@ -37,6 +37,8 @@ interface DailyGateParams {
   previousDayStart: string;
   now: string;
   targetOffset: number;
+  revisionScope: number;
+  revisionsJson: string;
 }
 
 /**
@@ -44,7 +46,11 @@ interface DailyGateParams {
  * поздняя публикация не отбирает уже полученный доступ. Закрытые до начала дня
  * материалы не участвуют, а незачёт переносит тот же разбор дальше.
  */
-export function readDailyGate(db: Database, now: Date = new Date()): DailyGateState {
+export function readDailyGate(
+  db: Database,
+  now: Date = new Date(),
+  revisions?: ReadonlyMap<string, number>,
+): DailyGateState {
   const [start, next] = moscowDayBounds(now);
   const [previousStart] = moscowDayBounds(new Date(Date.parse(start) - 1));
   const row = db.prepare<DailyGateParams, DailyGateRow>(
@@ -72,6 +78,11 @@ export function readDailyGate(db: Database, now: Date = new Date()): DailyGateSt
        LEFT JOIN learning_materials ON learning_materials.id = (
          SELECT id FROM learning_materials
           WHERE ready_at IS NOT NULL
+            AND (@revisionScope = 0 OR EXISTS (
+              SELECT 1 FROM json_each(@revisionsJson) revision
+               WHERE revision.key = learning_materials.subject
+                 AND CAST(revision.value AS INTEGER) IS learning_materials.course_revision_id
+            ))
             AND (
               (ready_at <= COALESCE(current_day_gate.third_finished_at, @now)
                 AND (
@@ -93,6 +104,8 @@ export function readDailyGate(db: Database, now: Date = new Date()): DailyGateSt
     previousDayStart: previousStart,
     now: now.toISOString(),
     targetOffset: DAILY_RUN_TARGET - 1,
+    revisionScope: revisions === undefined ? 0 : 1,
+    revisionsJson: JSON.stringify(Object.fromEntries(revisions ?? [])),
   });
   const completed = row?.completed ?? 0;
   const remaining = Math.max(0, DAILY_RUN_TARGET - completed);

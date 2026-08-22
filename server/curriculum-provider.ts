@@ -81,12 +81,16 @@ export class CurriculumProvider {
   /**
    * Карта одной редакции для уже начатой операции. Она намеренно не проверяет
    * текущее назначение ребёнка: снятие курса не должно ломать сохранённый run.
-   * У legacy-run без revision ID берётся активная редакция курса.
+   * У legacy-run без revision ID берётся первая опубликованная редакция:
+   * bootstrap импортирует файловую карту именно в неё, а active revision
+   * после следующих публикаций уже может указывать на другой учебник.
    */
   graphFor(courseId: CourseId, revisionId: number | null): TopicGraph {
     const row = revisionId === null
       ? this.db.prepare<[string], { revision_id: number }>(
-          'SELECT active_revision_id AS revision_id FROM courses WHERE id = ? AND active_revision_id IS NOT NULL',
+          `SELECT id AS revision_id FROM course_revisions
+            WHERE course_id = ? AND status = 'published'
+            ORDER BY revision_number LIMIT 1`,
         ).get(courseId)
       : this.db.prepare<[number, string], { revision_id: number }>(
           'SELECT id AS revision_id FROM course_revisions WHERE id = ? AND course_id = ?',
@@ -94,7 +98,7 @@ export class CurriculumProvider {
     if (row === undefined) {
       throw new Error(
         revisionId === null
-          ? `У курса «${courseId}» нет активной редакции`
+          ? `У курса «${courseId}» нет опубликованной legacy-редакции`
           : `Редакция ${String(revisionId)} не принадлежит курсу «${courseId}»`,
       );
     }

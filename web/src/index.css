@@ -4005,6 +4005,11 @@ button.parents-home {
 .admin-topic-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: .6rem; }
 .admin-topic .admin-check { display: flex; align-items: center; align-self: center; }
 .admin-topic .admin-check input { width: 1rem; min-height: 1rem; }
+.admin-topic-prereqs { display: grid; gap: .45rem; padding: .65rem; border: 1px solid #dfe6e1; border-radius: .7rem; }
+.admin-topic-prereqs legend { font-size: .78rem; }
+.admin-topic-prereqs label { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: .15rem .5rem; }
+.admin-topic-prereqs label input { grid-row: 1 / span 2; width: 1rem; min-height: 1rem; }
+.admin-topic-prereqs code { color: #66756f; font-size: .68rem; overflow-wrap: anywhere; }
 .admin-topic > button { justify-self: end; }
 .admin-editor-actions { justify-content: end; }
 .admin-publish-panel { grid-template-columns: minmax(0, 1fr) auto; }

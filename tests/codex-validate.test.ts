@@ -294,7 +294,7 @@ describe('validateTaskBatch: сверка идёт нормализатором'
       { patch: { unambiguous: false }, reason: /неоднозначно/u },
       { patch: { natural: false }, reason: /натянут/u },
       { patch: { onTopic: false }, reason: /не о заявленной теме/u },
-      { patch: { ageAppropriate: false }, reason: /не годится подростку/u },
+      { patch: { ageAppropriate: false }, reason: /не соответствует уровню курса/u },
       { patch: { hintSafe: false }, reason: /подсказка раскрывает/u },
       { patch: { hintUseful: false }, reason: /не даёт полезного направления/u },
       { patch: { deepHintSafe: false }, reason: /расширенная подсказка раскрывает/u },

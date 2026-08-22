@@ -27,7 +27,7 @@ export function registerGateRoutes(app: FastifyInstance, options: GateRoutesOpti
           error: 'Состояние доступа недоступно: файл базы заменён, нужен перезапуск',
         });
       }
-      return reply.send(readDailyGate(tenant.db, now()));
+      return reply.send(readDailyGate(tenant.db, now(), tenant.curriculum.revisionIds));
     } catch (error) {
       return failAuth(reply, error);
     }

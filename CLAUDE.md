@@ -61,7 +61,7 @@ sudo ./scripts/install-ocr-dependencies.sh       # Ubuntu 22.04+; отдельн
   `children.last_activity_at`: без него список активных детей узнаётся только
   открытием всех баз подряд, что противоречит ленивому реестру.
 - `server/control-db.ts` — управляющая база: своя `CONTROL_SCHEMA_VERSION`
-  (сейчас **3**), своя `migrateControl`, свой `validateControlSchema`.
+  (сейчас **4**), своя `migrateControl`, свой `validateControlSchema`.
   Кроме аккаунтов и админского аудита она хранит нормализованные таблицы
   `courses`, `course_revisions`, `topics`, `revision_topics`, `topic_prereqs`,
   `course_sources`, `source_pages`, `source_chunks`/FTS,
@@ -77,7 +77,8 @@ sudo ./scripts/install-ocr-dependencies.sh       # Ubuntu 22.04+; отдельн
   резерв квоты идут `UPDATE ... WHERE` внутри `transaction(...).immediate()`.
 - `server/course-catalog.ts` — единственная запись каталога. На курс допускается
   одна редактируемая draft-редакция; опубликованная редакция, её темы, ссылки и
-  source artifacts неизменяемы. `edit_version` проверяется optimistic-locking,
+  source artifacts неизменяемы. Display metadata черновика хранится на редакции
+  и попадает в `courses` только атомарно при publish. `edit_version` проверяется optimistic-locking,
   publish атомарен, ID тем стабильны между редакциями и назначаются сервером.
   Display `title`/`grade` никогда не являются ключом; старое поле `subject`
   означает `CourseId`, а `overall` зарезервирован.
@@ -540,7 +541,9 @@ sudo ./scripts/install-ocr-dependencies.sh       # Ubuntu 22.04+; отдельн
 - `schemas/*.json` — схемы данных: `curriculum.json` (карта тем), `tasks.json`
   (батч заданий), `verdicts.json` (вердикты проверяющего), `dispute.json`
   (разбор спора), `learning-material.json` (безопасная теория) и
-  `learning-verdict.json` (вердикт методиста). Рукописной копии в коде нет; вариант для codex получается из
+  `learning-verdict.json` (вердикт методиста), `course-draft.json` (граф тем со
+  ссылками на источники) и `course-source-summary.json` (конспект одного
+  источника). Рукописной копии в коде нет; вариант для codex получается из
   той же схемы вырезанием запрещённых ключевых слов (`codexOutputSchema`), а
   ограничения, которые оно снимает, проверяет разбор ответа.
 - `server/json-schema.ts` — общая обвязка над Ajv: компиляция схемы из файла и

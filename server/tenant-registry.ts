@@ -282,12 +282,14 @@ export class TenantRegistry {
 
   /** Уже открытая аренда, без попытки открыть новую. */
   peek(childId: string): Tenant | undefined {
-    return this.#tenants.get(childId);
+    const cached = this.#tenants.get(childId);
+    return cached === undefined ? undefined : this.#requestView(cached, cached.curriculum);
   }
 
   /** Все открытые аренды. Порядок — порядок открытия. */
   list(): Tenant[] {
-    return [...this.#tenants.values()];
+    return [...this.#tenants.values()].map((tenant) =>
+      this.#requestView(tenant, tenant.curriculum));
   }
 
   /**
@@ -311,7 +313,7 @@ export class TenantRegistry {
         cached.curriculum = snapshot;
         this.#seedBank(childId, cached.db, snapshot.graph);
       }
-      return cached;
+      return this.#requestView(cached, snapshot);
     }
 
     if (this.#opening.has(childId)) {
@@ -439,7 +441,12 @@ export class TenantRegistry {
         `незакрытые споры ребёнка ${childId} не восстановлены: ${(error as Error).message}`,
       );
     }
-    return tenant;
+    return this.#requestView(tenant, tenant.curriculum);
+  }
+
+  /** Freeze the curriculum identity seen by one request while reusing resources. */
+  #requestView(tenant: Tenant, curriculum: CurriculumSnapshot): Tenant {
+    return { ...tenant, curriculum };
   }
 
   /**
@@ -503,7 +510,11 @@ export class TenantRegistry {
         const operationGraph = graphForRun(runId);
         if (kind === 'lesson') {
           const result = finishLearningMaterial(opened.db, operationGraph, runId, { now: at });
-          const learningGate = readDailyGate(opened.db, at).learning;
+          const learningGate = readDailyGate(
+            opened.db,
+            at,
+            this.#snapshot(childId).revisionIds,
+          ).learning;
           const completed = {
             ...result,
             required: learningGate.required && learningGate.materialId === result.materialId,

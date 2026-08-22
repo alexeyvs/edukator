@@ -5,6 +5,7 @@ import type { Database } from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   assignCourse,
+  assignCourseWithExclusions,
   listCourseAssignments,
   readCourseAssignment,
   replaceTopicExclusions,
@@ -80,6 +81,14 @@ describe('course assignments', () => {
     expect(readCourseAssignment(db, 'abcdef01', 'science-7')?.excludedTopicIds)
       .toEqual(['science-7.intro']);
     expect(replaceTopicExclusions(db, 'abcdef01', 'science-7', [])?.excludedTopicIds).toEqual([]);
+  });
+
+  it('не оставляет назначение, если исключения не удалось сохранить', () => {
+    publish();
+    expect(() => assignCourseWithExclusions(
+      db, 'abcdef01', 'science-7', ['science-7.intro', 'science-7.missing'],
+    )).toThrow(/не принадлежит/u);
+    expect(readCourseAssignment(db, 'abcdef01', 'science-7')).toBeUndefined();
   });
 
   it('legacy-bootstrap назначает исходные курсы, но не восстанавливает снятые', () => {

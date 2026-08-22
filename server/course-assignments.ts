@@ -91,6 +91,50 @@ export function assignCourse(
   return readCourseAssignment(db, childId, courseId) as CourseAssignment;
 }
 
+/** Assigns a course and replaces its exclusions as one externally visible mutation. */
+export function assignCourseWithExclusions(
+  db: Database,
+  childId: string,
+  courseId: CourseId,
+  topicIds: readonly string[] | undefined,
+  now: Date = new Date(),
+): CourseAssignment {
+  requireCourseId(courseId);
+  const stamp = now.toISOString();
+  db.transaction(() => {
+    requireChild(db, childId);
+    requireCourse(db, courseId);
+    const active = db.prepare<[string, string], { found: number }>(
+      `SELECT 1 AS found FROM child_courses
+        WHERE child_id = ? AND course_id = ? AND unassigned_at IS NULL`,
+    ).get(childId, courseId);
+    if (active === undefined) {
+      db.prepare('INSERT INTO child_courses (child_id, course_id, assigned_at) VALUES (?, ?, ?)')
+        .run(childId, courseId, stamp);
+    }
+    if (topicIds !== undefined) {
+      if (new Set(topicIds).size !== topicIds.length) throw new Error('Список исключений содержит дубли');
+      const topicExists = db.prepare<[string, string], { found: number }>(
+        'SELECT 1 AS found FROM topics WHERE course_id = ? AND id = ?',
+      );
+      for (const topicId of topicIds) {
+        if (topicExists.get(courseId, topicId) === undefined) {
+          throw new Error(`Тема «${topicId}» не принадлежит курсу «${courseId}»`);
+        }
+      }
+      db.prepare('DELETE FROM child_topic_exclusions WHERE child_id = ? AND course_id = ?')
+        .run(childId, courseId);
+      const insert = db.prepare(
+        `INSERT INTO child_topic_exclusions (child_id, course_id, topic_id, excluded_at)
+         VALUES (?, ?, ?, ?)`,
+      );
+      for (const topicId of topicIds) insert.run(childId, courseId, topicId, stamp);
+    }
+    invalidateChildCurriculum(db, childId);
+  }).immediate();
+  return readCourseAssignment(db, childId, courseId) as CourseAssignment;
+}
+
 export function unassignCourse(
   db: Database,
   childId: string,

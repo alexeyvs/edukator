@@ -129,7 +129,7 @@ function planResponse(tenant: Tenant, at: Date): Record<string, unknown> {
   const triaged = new Set<Subject>(
     graph.subjects.filter((subject) => calibrations.get(subject)?.triagePassed),
   );
-  const gate = readDailyGate(db, at);
+  const gate = readDailyGate(db, at, curriculum.revisionIds);
   const active = activeRunCards(db, tenant, triaged);
   const planned = planFromDatabase(
     db,
@@ -167,11 +167,11 @@ function planResponse(tenant: Tenant, at: Date): Record<string, unknown> {
       subject: topic.subject,
       ...courseJson(graph, topic.subject),
       bossProgress: bossProgress(state.mastery),
-      readiness: bossTopicState(db, topic.id),
+      readiness: bossTopicState(db, topic.id, graph.courses.get(topic.subject)?.revisionId ?? null),
     };
   });
 
-  const learning = learningMaterialCards(db).flatMap((material) => {
+  const learning = learningMaterialCards(db, curriculum.revisionIds).flatMap((material) => {
     const topic = graph.byId.get(material.topicId);
     if (topic === undefined || topic.subject !== material.subject) return [];
     return [{

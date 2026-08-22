@@ -14,11 +14,13 @@ beforeEach(() => vi.spyOn(window, 'confirm').mockReturnValue(true));
 const revision = {
   id: 11, courseId: 'history-6', revisionNumber: 2, status: 'draft' as const,
   basedOnRevisionId: 10, editVersion: 3, publishedBy: null,
+  title: 'История', grade: '6 класс',
   createdAt: '2026-08-22T10:00:00.000Z', publishedAt: null,
 };
 const topic = {
   id: 'history-6.ancient', title: 'Древний мир', examWeight: 2, difficulty: 1,
   prereqs: [], answerFormat: 'text' as const, promptSeed: 'Древние государства', active: true, position: 0,
+  sourceRefs: [],
 };
 const card: AdminCourseCard = {
   course: {
@@ -60,16 +62,16 @@ describe('редактор курса', () => {
     fireEvent.change(screen.getAllByLabelText('Вес')[0] as HTMLElement, { target: { value: '3' } });
     fireEvent.change(screen.getAllByLabelText('Сложность')[0] as HTMLElement, { target: { value: '2' } });
     fireEvent.change(screen.getAllByLabelText('Ответ')[0] as HTMLElement, { target: { value: 'number' } });
-    fireEvent.change(screen.getAllByLabelText('Зависимости (ID через запятую)')[1] as HTMLElement, {
-      target: { value: 'history-6.ancient, ' },
-    });
+    fireEvent.click(screen.getByRole('checkbox', { name: /Античный мир history-6\.ancient/u }));
     fireEvent.click(screen.getAllByLabelText('Тема активна')[1] as HTMLElement);
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить карту тем' }));
 
     await waitFor(() => expect(replaceCourseTopics).toHaveBeenCalled());
     expect(replaceCourseTopics.mock.calls[0]?.[1]).toMatchObject({
       revisionId: 11, editVersion: 3,
-      topics: [{ title: 'Античный мир' }, { title: 'Средние века', clientId: expect.any(String) }],
+      topics: [{ title: 'Античный мир' }, {
+        title: 'Средние века', clientId: expect.any(String), prereqs: ['history-6.ancient'],
+      }],
     });
     fireEvent.click(screen.getByRole('button', { name: 'Опубликовать редакцию' }));
     await waitFor(() => expect(publishCourse).toHaveBeenCalledWith('history-6', expect.objectContaining({
@@ -96,7 +98,7 @@ describe('редактор курса', () => {
     });
     render(<AdminCourseEditor api={api} courseId="history-6" onBack={vi.fn()} onSignedOut={vi.fn()} />);
 
-    expect(await screen.findByText('учебник.pdf')).toBeInTheDocument();
+    expect((await screen.findAllByText('учебник.pdf')).length).toBeGreaterThan(0);
     expect(await screen.findByLabelText('Страницы-основания')).toHaveTextContent('Слишком мало текста');
     expect(screen.getByRole('button', { name: 'Опубликовать редакцию' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Повторить OCR' }));
@@ -164,7 +166,7 @@ describe('редактор курса', () => {
     });
     render(<AdminCourseEditor api={api} courseId="history-6" onBack={vi.fn()} onSignedOut={vi.fn()} />);
 
-    await screen.findByText('учебник.pdf');
+    expect((await screen.findAllByText('учебник.pdf')).length).toBeGreaterThan(0);
     fireEvent.change(screen.getAllByLabelText('Название')[0] as HTMLElement, { target: { value: 'История мира' } });
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить' }));
     await waitFor(() => expect(updateCourse).toHaveBeenCalled());
@@ -178,6 +180,40 @@ describe('редактор курса', () => {
     await waitFor(() => expect(deleteCourseSource).toHaveBeenCalledWith('history-6', 5));
     fireEvent.click(screen.getByRole('button', { name: 'В архив' }));
     await waitFor(() => expect(archiveCourse).toHaveBeenCalledWith('history-6'));
+  });
+
+  it('после успешной сборки перечитывает темы, editVersion и страницы-основания', async () => {
+    const source = {
+      id: 5, courseId: 'history-6', revisionId: 11, uploadName: 'учебник.pdf', sha256: 'a'.repeat(64),
+      pageCount: 2, status: 'ready' as const, error: null, createdAt: '2026-08-22T10:00:00.000Z',
+    };
+    const generatedTopic = { ...topic, title: 'Тема из OCR', sourceRefs: [{ sourceId: 5, pageFrom: 1, pageTo: 2 }] };
+    const generatedCard = {
+      ...card,
+      revisions: card.revisions.map((item) => item.id === 11
+        ? { ...item, editVersion: 4, topics: [generatedTopic] } : item),
+    };
+    const course = vi.fn().mockResolvedValueOnce(card).mockResolvedValue(generatedCard);
+    const courseBuild = vi.fn()
+      .mockResolvedValueOnce({ revisionId: 11, job: { status: 'running' } })
+      .mockResolvedValueOnce({ revisionId: 11, job: { status: 'succeeded' } })
+      .mockResolvedValue({ revisionId: 11, job: { status: 'succeeded' } });
+    const api = baseApi({
+      course, courseBuild,
+      courseSources: vi.fn().mockResolvedValue({ sources: [source] }),
+      courseSourceStatus: vi.fn().mockResolvedValue({
+        sourceId: 5, sourceStatus: 'ready', job: null,
+        pages: [{ pageNumber: 1, status: 'ready', error: null }, { pageNumber: 2, status: 'ready', error: null }],
+      }),
+    });
+    render(<AdminCourseEditor api={api} courseId="history-6" onBack={vi.fn()} onSignedOut={vi.fn()} />);
+    await screen.findByDisplayValue('Древний мир');
+    await screen.findByText('running', { selector: 'strong' });
+
+    expect(await screen.findByDisplayValue('Тема из OCR', {}, { timeout: 3_000 })).toBeInTheDocument();
+    expect(screen.getByText('Черновик · версия 4')).toBeInTheDocument();
+    expect(screen.getByLabelText('Первая страница учебник.pdf')).toHaveValue(1);
+    expect(screen.getByLabelText('Последняя страница учебник.pdf')).toHaveValue(2);
   });
 
   it('создаёт новый черновик опубликованной редакции и обрабатывает 401', async () => {

@@ -1,5 +1,5 @@
 import { Readable } from 'node:stream';
-import { existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -7,9 +7,11 @@ import type { Database } from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   ArtifactValidationError,
+  ArtifactStorageError,
   CATALOG_ARTIFACTS_DIR,
   CATALOG_TEMP_DIR,
   CourseArtifactStore,
+  QpdfInspector,
   resolveCatalogPath,
 } from '../server/course-artifacts.js';
 import {
@@ -21,6 +23,36 @@ import { openControlDatabase } from '../server/control-db.js';
 import { controlDatabasePath, ensureDataDir } from '../server/data-dir.js';
 
 const PDF = Buffer.from('%PDF-1.7\nsmall test document\n%%EOF\n');
+
+describe('QpdfInspector', () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'edukator-qpdf-')); });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  function binary(body: string): string {
+    const path = join(dir, 'qpdf');
+    writeFileSync(path, `#!/bin/sh\nset -eu\n${body}\n`);
+    chmodSync(path, 0o755);
+    return path;
+  }
+
+  it('проверяет структуру, число страниц и диагностику процесса', async () => {
+    const pdf = join(dir, 'book.pdf');
+    writeFileSync(pdf, PDF);
+    await expect(new QpdfInspector(binary(
+      'if [ "$1" = "--check" ]; then exit 0; fi; printf "12\\n"',
+    )).inspect(pdf)).resolves.toEqual({ pageCount: 12 });
+    await expect(new QpdfInspector(binary(
+      'if [ "$1" = "--check" ]; then exit 0; fi; printf "zero\\n"',
+    )).inspect(pdf)).rejects.toThrow(/число страниц/u);
+    await expect(new QpdfInspector(binary('printf "сломанный xref" >&2; exit 2')).inspect(pdf))
+      .rejects.toThrow(/сломанный xref/u);
+    await expect(new QpdfInspector(binary('exit 2')).inspect(pdf))
+      .rejects.toThrow(/структуру PDF/u);
+    await expect(new QpdfInspector(join(dir, 'missing')).inspect(pdf))
+      .rejects.toBeInstanceOf(ArtifactStorageError);
+  });
+});
 
 describe('безопасное хранилище PDF курса', () => {
   let dir: string;
@@ -87,6 +119,30 @@ describe('безопасное хранилище PDF курса', () => {
       .toBe(0);
   });
 
+  it('валидирует имена, адреса, пустой каталог и пропавший duplicate', async () => {
+    const artifacts = store();
+    expect(artifacts.list('physics-8')).toEqual([]);
+    expect(() => artifacts.list('missing-course')).toThrow(/не найден/u);
+    await expect(artifacts.upload('physics-8', draftId, '\0.pdf', Readable.from(PDF)))
+      .rejects.toThrow(/запрещённый символ/u);
+    await expect(artifacts.upload('physics-8', draftId, '   ', Readable.from(PDF)))
+      .rejects.toThrow(/Имя файла/u);
+    await expect(artifacts.upload('physics-8', draftId, `${'x'.repeat(256)}.pdf`, Readable.from(PDF)))
+      .rejects.toThrow(/Имя файла/u);
+    await expect(artifacts.upload('wrong-course', draftId, 'book.pdf', Readable.from(PDF)))
+      .rejects.toThrow(/не найден/u);
+    await expect(artifacts.remove('physics-8', 999)).rejects.toThrow(/не найден/u);
+
+    const uploaded = await artifacts.uploadToCurrentDraft('physics-8', 'book.pdf', Readable.from(PDF));
+    const storedPath = db.prepare<[number], { artifact_path: string }>(
+      'SELECT artifact_path FROM course_sources WHERE id = ?',
+    ).get(uploaded.source.id)?.artifact_path;
+    if (storedPath === undefined) throw new Error('нет пути fixture');
+    rmSync(resolveCatalogPath(dir, storedPath));
+    await expect(artifacts.upload('physics-8', draftId, 'copy.pdf', Readable.from(PDF)))
+      .rejects.toThrow(/отсутствует на диске/u);
+  });
+
   it('не допускает path traversal в сохранённых путях', () => {
     expect(() => resolveCatalogPath(dir, '../control.db')).toThrow(/выходит/u);
     expect(() => resolveCatalogPath(dir, '/etc/passwd')).toThrow(/Некорректный/u);
@@ -150,12 +206,16 @@ describe('безопасное хранилище PDF курса', () => {
     ).get(uploaded.source.id)?.artifact_path;
     if (referenced === undefined) throw new Error('нет пути источника');
     const orphan = resolveCatalogPath(dir, `${CATALOG_ARTIFACTS_DIR}/physics-8/${draftId}/orphan.pdf`);
+    const pageImageStored = `${CATALOG_ARTIFACTS_DIR}/physics-8/${draftId}/pages/${uploaded.source.id}-1.jpg`;
+    const pageImage = resolveCatalogPath(dir, pageImageStored);
     const temporary = resolveCatalogPath(dir, `${CATALOG_TEMP_DIR}/old.upload.tmp`);
-    for (const path of [orphan, temporary]) {
+    for (const path of [orphan, temporary, pageImage]) {
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, 'unused');
       utimesSync(path, new Date(0), new Date(0));
     }
+    db.prepare(`INSERT INTO source_pages (source_id, page_number, status, image_path)
+      VALUES (?, 1, 'ready', ?)`).run(uploaded.source.id, pageImageStored);
 
     const removed = await artifacts.cleanupUnused(new Date('2026-01-01T00:00:00Z'));
     expect(removed).toEqual([
@@ -164,6 +224,7 @@ describe('безопасное хранилище PDF курса', () => {
       failedPath,
     ].sort());
     expect(existsSync(resolveCatalogPath(dir, referenced))).toBe(true);
+    expect(existsSync(pageImage)).toBe(true);
     expect(artifacts.list('physics-8').map((source) => source.id)).toEqual([uploaded.source.id]);
   });
 });
