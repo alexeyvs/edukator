@@ -5,7 +5,7 @@
 import type { Database } from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { TopicGraph } from '../curriculum.js';
-import { SUBJECTS, type Subject } from '../db.js';
+import type { Subject } from '../db.js';
 import { forecastFor } from '../forecast.js';
 import { readTopicStates } from '../mastery.js';
 import {
@@ -30,10 +30,11 @@ import {
   type TenantContextResolver,
 } from './tenant-context.js';
 import { integrityPublicJson } from './integrity.js';
+import { courseJson, operationGraph } from './course-json.js';
+import type { Tenant } from '../tenant-registry.js';
 
 export interface RunRoutesOptions {
   context: TenantContextResolver;
-  graph: TopicGraph;
   now?: () => Date;
 }
 
@@ -53,7 +54,7 @@ interface ActiveRunCard {
 
 function activeRunCards(
   db: Database,
-  graph: TopicGraph,
+  tenant: Tenant,
   triaged: ReadonlySet<Subject>,
 ): ActiveRunCard[] {
   return db.prepare<[], { id: number; subject: Subject; topic_id: string; started_at: string }>(
@@ -65,10 +66,12 @@ function activeRunCards(
         )
       ORDER BY started_at DESC, id DESC`,
   ).all().flatMap((row) => {
+    const graph = tenant.graphForRun(row.id);
     const topic = graph.byId.get(row.topic_id);
     if (topic === undefined || topic.subject !== row.subject) return [];
     return [{
       subject: row.subject,
+      ...courseJson(graph, row.subject),
       topic: { id: topic.id, title: topic.title },
       priority: 0,
       triagePassed: triaged.has(row.subject),
@@ -95,12 +98,12 @@ function fail(reply: FastifyReply, error: unknown): FastifyReply {
   return failAuth(reply, error);
 }
 
-function readStart(body: unknown): { subject: Subject; topicId?: string } {
+function readStart(body: unknown, graph: TopicGraph): { subject: Subject; topicId?: string } {
   const value = typeof body === 'object' && body !== null && !Array.isArray(body)
     ? (body as Record<string, unknown>)['subject']
     : undefined;
-  if (typeof value !== 'string' || !(SUBJECTS as readonly string[]).includes(value)) {
-    throw new BadRequest(`Поле subject должно быть одним из: ${SUBJECTS.join(', ')}`);
+  if (typeof value !== 'string' || !graph.bySubject.has(value)) {
+    throw new BadRequest('Поле subject должно указывать назначенный курс');
   }
   const topicId = (body as Record<string, unknown>)['topic_id'];
   if (topicId !== undefined && (typeof topicId !== 'string' || topicId.length === 0)) {
@@ -119,13 +122,15 @@ function readPathId(value: string): number {
 }
 
 /** Тело плана: активные забеги, рекомендации, прогнозы и состояние тем. */
-function planResponse(db: Database, graph: TopicGraph, at: Date): Record<string, unknown> {
+function planResponse(tenant: Tenant, at: Date): Record<string, unknown> {
+  const { db, curriculum } = tenant;
+  const { graph } = curriculum;
   const calibrations = readSubjectCalibrations(db, graph);
   const triaged = new Set<Subject>(
-    SUBJECTS.filter((subject) => calibrations.get(subject)?.triagePassed),
+    graph.subjects.filter((subject) => calibrations.get(subject)?.triagePassed),
   );
   const gate = readDailyGate(db, at);
-  const active = activeRunCards(db, graph, triaged);
+  const active = activeRunCards(db, tenant, triaged);
   const planned = planFromDatabase(
     db,
     graph,
@@ -133,18 +138,20 @@ function planResponse(db: Database, graph: TopicGraph, at: Date): Record<string,
     at,
   ).map((item) => ({
     subject: item.subject,
+    ...courseJson(graph, item.subject),
     topic: { id: item.topic.id, title: item.topic.title },
     priority: item.priority,
     triagePassed: triaged.has(item.subject),
   }));
   const plan = [...active, ...planned];
   const states = readTopicStates(db);
-  const forecasts = SUBJECTS.flatMap((subject) => {
+  const forecasts = graph.subjects.flatMap((subject) => {
     const forecast = forecastFor(graph, states, subject, at);
-    return forecast === null ? [] : [forecast];
+    return forecast === null ? [] : [{ ...forecast, ...courseJson(graph, subject) }];
   });
-  const triage = SUBJECTS.map((subject) => ({
+  const triage = graph.subjects.map((subject) => ({
     subject,
+    ...courseJson(graph, subject),
     passed: triaged.has(subject),
     needed: calibrations.get(subject)?.calibrated !== true,
   }));
@@ -158,24 +165,24 @@ function planResponse(db: Database, graph: TopicGraph, at: Date): Record<string,
       id: topic.id,
       title: topic.title,
       subject: topic.subject,
+      ...courseJson(graph, topic.subject),
       bossProgress: bossProgress(state.mastery),
       readiness: bossTopicState(db, topic.id),
     };
   });
 
-  const learning = learningMaterialCards(db).map((material) => {
+  const learning = learningMaterialCards(db).flatMap((material) => {
     const topic = graph.byId.get(material.topicId);
-    if (topic === undefined || topic.subject !== material.subject) {
-      throw new Error(`План: тема материала «${material.topicId}» не согласована с предметом`);
-    }
-    return {
+    if (topic === undefined || topic.subject !== material.subject) return [];
+    return [{
       id: material.id,
       subject: material.subject,
+      ...courseJson(graph, material.subject),
       topic: { id: topic.id, title: topic.title },
       recommendationReason: material.recommendationReason,
       estimatedMinutes: material.estimatedMinutes,
       status: material.status,
-    };
+    }];
   });
 
   return {
@@ -186,12 +193,16 @@ function planResponse(db: Database, graph: TopicGraph, at: Date): Record<string,
     streak: readStreak(db, at),
     topics,
     gate,
+    courses: curriculum.courses.map(({ revisionId, ...course }) => ({
+      ...course,
+      revision: revisionId,
+    })),
+    empty: curriculum.courses.length === 0,
   };
 }
 
 /** Регистрирует план, старт и финиш обычного забега. */
 export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOptions): void {
-  const { graph } = options;
   const now = options.now ?? ((): Date => new Date());
 
   app.get('/api/run/plan', (request, reply) => {
@@ -199,7 +210,7 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
       const context = options.context(request, { allow: ROUTE_ACCESS.child });
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
-      return reply.send(planResponse(context.tenant.db, graph, now()));
+      return reply.send(planResponse(context.tenant, now()));
     } catch (error) {
       return failAuth(reply, error);
     }
@@ -211,7 +222,8 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
       const db = context.tenant.db;
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
-      const start = readStart(request.body);
+      const graph = context.tenant.curriculum.graph;
+      const start = readStart(request.body, graph);
       return reply.send(startRun(db, graph, start.subject, {
         now: now(),
         ...(start.topicId === undefined ? {} : { topicId: start.topicId }),
@@ -229,6 +241,7 @@ export function registerRunRoutes(app: FastifyInstance, options: RunRoutesOption
       if (stopped !== undefined) return stopped;
       const db = context.tenant.db;
       const runId = readPathId(request.params.id);
+      const graph = operationGraph(context.tenant, runId);
       const row = db.prepare<[number], { kind: string; finished_at: string | null }>(
         'SELECT kind, finished_at FROM runs WHERE id = ?',
       ).get(runId);

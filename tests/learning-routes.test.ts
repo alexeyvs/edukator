@@ -162,7 +162,7 @@ describe('Learning API', () => {
     const { materialId } = readyMaterial();
 
     const plan = await app.inject({ method: 'GET', url: '/api/run/plan' });
-    expect((plan.json() as { learning: unknown[] }).learning).toEqual([{
+    expect((plan.json() as { learning: unknown[] }).learning).toMatchObject([{
       id: materialId, subject: 'math', topic: { id: 'math.a', title: 'Тема math' },
       recommendationReason: 'Ошибки со знаменателями', estimatedMinutes: 12, status: 'ready',
     }]);
@@ -694,9 +694,8 @@ describe('Learning API', () => {
   });
 
   it('отдаёт 503 на всех learning URL при отвязанной или неподнятой базе', async () => {
-    const graph = loadCurriculum(curriculumDir);
     const detached = Fastify();
-    registerLearningRoutes(detached, { context: fakeContext(db, { available: () => false }), graph });
+    registerLearningRoutes(detached, { context: fakeContext(db, { available: () => false }) });
     await detached.ready();
     const unavailable = Fastify();
     registerUnavailableLearning(unavailable, 'база недоступна');

@@ -2,7 +2,7 @@
 import type { Database } from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { TopicGraph } from '../curriculum.js';
-import { SUBJECTS, type Subject } from '../db.js';
+import type { Subject } from '../db.js';
 import { runProgress, startRun } from '../run.js';
 import { SessionError } from '../session-error.js';
 import { nextTriageTask } from '../triage.js';
@@ -13,10 +13,10 @@ import {
   type TenantContext,
   type TenantContextResolver,
 } from './tenant-context.js';
+import { courseJson, operationGraph } from './course-json.js';
 
 export interface TriageRoutesOptions {
   context: TenantContextResolver;
-  graph: TopicGraph;
   now?: () => Date;
 }
 
@@ -33,12 +33,12 @@ function unavailable(context: TenantContext, reply: FastifyReply): FastifyReply 
   return reply.code(503).send({ error: 'Триаж недоступен: файл базы заменён, нужен перезапуск' });
 }
 
-function readSubject(body: unknown): Subject {
+function readSubject(body: unknown, graph: TopicGraph): Subject {
   const value = typeof body === 'object' && body !== null && !Array.isArray(body)
     ? (body as Record<string, unknown>)['subject']
     : undefined;
-  if (typeof value !== 'string' || !(SUBJECTS as readonly string[]).includes(value)) {
-    throw new BadRequest(`Поле subject должно быть одним из: ${SUBJECTS.join(', ')}`);
+  if (typeof value !== 'string' || !graph.bySubject.has(value)) {
+    throw new BadRequest('Поле subject должно указывать назначенный курс');
   }
   return value as Subject;
 }
@@ -75,7 +75,6 @@ function readTriageRun(db: Database, id: number): TriageRun {
 
 /** Регистрирует запуск триажа и выдачу диагностического задания. */
 export function registerTriageRoutes(app: FastifyInstance, options: TriageRoutesOptions): void {
-  const { graph } = options;
   const now = options.now ?? ((): Date => new Date());
 
   app.post('/api/triage/start', (request, reply) => {
@@ -83,10 +82,12 @@ export function registerTriageRoutes(app: FastifyInstance, options: TriageRoutes
       const context = options.context(request, { allow: ROUTE_ACCESS.child });
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
-      return reply.send(startRun(context.tenant.db, graph, readSubject(request.body), {
+      const graph = context.tenant.curriculum.graph;
+      const subject = readSubject(request.body, graph);
+      return reply.send(startRun(context.tenant.db, graph, subject, {
         kind: 'triage',
         now: now(),
-        courseRevisionId: context.tenant.curriculum.revisionIds.get(readSubject(request.body)) ?? null,
+        courseRevisionId: context.tenant.curriculum.revisionIds.get(subject) ?? null,
       }));
     } catch (error) {
       return fail(reply, error);
@@ -103,6 +104,7 @@ export function registerTriageRoutes(app: FastifyInstance, options: TriageRoutes
       if (stopped !== undefined) return stopped;
       const id = readPathId(request.params.id);
       const run = readTriageRun(db, id);
+      const graph = operationGraph(context.tenant, id);
       const result = nextTriageTask(db, graph, id, { subject: run.subject });
       if (result.status === 'done') return reply.send(result);
 
@@ -111,7 +113,10 @@ export function registerTriageRoutes(app: FastifyInstance, options: TriageRoutes
       return reply.send({
         status: 'ok',
         progress: runProgress(db, id),
-        task: issuedTaskJson(result.task, false),
+        task: {
+          ...issuedTaskJson(result.task, false),
+          ...courseJson(graph, result.task.subject),
+        },
       });
     } catch (error) {
       return fail(reply, error);

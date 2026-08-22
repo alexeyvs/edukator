@@ -137,17 +137,16 @@ describe('контекст арендатора', () => {
         registered.push({ method, url: route.url });
       }
     });
-    registerSessionRoutes(app, { context, graph: GRAPH, now: () => NOW, log: () => undefined });
-    registerRunRoutes(app, { context, graph: GRAPH, now: () => NOW });
-    registerTriageRoutes(app, { context, graph: GRAPH, now: () => NOW });
+    registerSessionRoutes(app, { context, now: () => NOW, log: () => undefined });
+    registerRunRoutes(app, { context, now: () => NOW });
+    registerTriageRoutes(app, { context, now: () => NOW });
     registerIntegrityRoutes(app, { context });
-    registerBossRoutes(app, { context, graph: GRAPH, now: () => NOW });
-    registerLearningRoutes(app, { context, graph: GRAPH, now: () => NOW });
+    registerBossRoutes(app, { context, now: () => NOW });
+    registerLearningRoutes(app, { context, now: () => NOW });
     registerProfileRoutes(app, { context });
     registerGateRoutes(app, { context, now: () => NOW });
     registerParentsRoutes(app, {
       context,
-      graph: GRAPH,
       control,
       failures: recordingFailureLog(),
       pinPepper: PEPPER,

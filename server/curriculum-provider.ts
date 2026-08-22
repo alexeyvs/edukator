@@ -118,7 +118,7 @@ export class CurriculumProvider {
            JOIN courses c ON c.id = cc.course_id
           WHERE cc.child_id = ? AND cc.unassigned_at IS NULL
             AND c.status = 'published' AND c.active_revision_id IS NOT NULL
-          ORDER BY cc.assigned_at, c.id`,
+          ORDER BY cc.assigned_at, cc.id`,
       )
       .all(childId);
     const allTopics: Topic[] = [];

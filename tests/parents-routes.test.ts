@@ -6,7 +6,6 @@ import type { Database } from 'better-sqlite3';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { hashParentPin } from '../server/parent-pin.js';
 import { openDatabase, SUBJECTS } from '../server/db.js';
-import { loadCurriculum } from '../server/curriculum.js';
 import { openControlDatabase, setParentPin } from '../server/control-db.js';
 import { controlDatabasePath, ensureDataDir } from '../server/data-dir.js';
 import { registerParentsRoutes, registerUnavailableParents } from '../server/routes/parents.js';
@@ -332,7 +331,6 @@ describe('маршрут родителей', () => {
     const control = openControlDatabase(controlDatabasePath(ensureDataDir(join(dir, 'без-pin'))));
     registerParentsRoutes(withoutPin, {
       context: fakeContext(db),
-      graph: loadCurriculum(curriculumDir),
       control,
       failures: recordingFailureLog(),
       pinPepper: PIN_PEPPER,
@@ -363,7 +361,6 @@ describe('маршрут родителей', () => {
     const control = openControlDatabase(controlDatabasePath(ensureDataDir(join(dir, 'отвязанная'))));
     registerParentsRoutes(detached, {
       context: fakeContext(db, { available: () => false }),
-      graph: loadCurriculum(curriculumDir),
       control,
       failures: recordingFailureLog(),
     });

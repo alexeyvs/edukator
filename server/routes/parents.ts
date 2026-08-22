@@ -15,7 +15,6 @@
  */
 import type { Database } from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import type { TopicGraph } from '../curriculum.js';
 import {
   clearComputerAccessOverride,
   setComputerAccessOverride,
@@ -45,12 +44,12 @@ import {
   type TenantContext,
   type TenantContextResolver,
 } from './tenant-context.js';
+import { operationGraph } from './course-json.js';
 
 type ComputerAccessMode = ComputerAccessOverrideMode | 'automatic';
 
 export interface ParentsRoutesOptions {
   context: TenantContextResolver;
-  graph: TopicGraph;
   /**
    * Управляющая база. В ней и эталон PIN семьи, и счётчик неудачных попыток:
    * PIN свой у каждой семьи, и один общий на процесс означал бы, что чужой
@@ -205,9 +204,17 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
       });
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
-      const dashboard = readParentsDashboard(context.tenant.db, options.graph, now());
+      const dashboard = readParentsDashboard(
+        context.tenant.db,
+        context.tenant.curriculum.graph,
+        now(),
+      );
       return reply.send({
         ...dashboard,
+        courses: context.tenant.curriculum.courses.map(({ revisionId, ...course }) => ({
+          ...course,
+          revision: revisionId,
+        })),
         computerAccess: {
           ...dashboard.computerAccess,
           configured: pinHash(context) !== undefined,
@@ -234,7 +241,12 @@ export function registerParentsRoutes(app: FastifyInstance, options: ParentsRout
             error: 'Идентификатор занятия должен быть положительным целым числом',
           });
         }
-        const detail = readParentsRunDetail(context.tenant.db, options.graph, runId, now());
+        const detail = readParentsRunDetail(
+          context.tenant.db,
+          operationGraph(context.tenant, runId),
+          runId,
+          now(),
+        );
         if (detail === null) {
           return reply.code(404).send({ error: 'Занятие не найдено в текущей недельной сводке' });
         }

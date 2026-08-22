@@ -166,17 +166,17 @@ Checkbox-пункты ниже описывают только автомати�
 
 ### Task 5: Перевести HTTP учебного ядра на персональный граф
 
-- [ ] убрать глобальный graph из route options и брать снимок из tenant context
+- [x] убрать глобальный graph из route options и брать снимок из tenant context
   в session/run/triage/boss/learning/parents/profile маршрутах
-- [ ] заменить циклы по `SUBJECTS` в плане, прогнозе, калибровке и learning prep
+- [x] заменить циклы по `SUBJECTS` в плане, прогнозе, калибровке и learning prep
   на курсы текущего `CurriculumSnapshot`
-- [ ] возвращать в API карточек метаданные курса: `courseId`, `title`, `grade`,
+- [x] возвращать в API карточек метаданные курса: `courseId`, `title`, `grade`,
   revision и тему; валидировать ID по снимку ребёнка, а не глобальному allow-list
-- [ ] добавить пустое состояние для ребёнка без назначений и запрет старта
+- [x] добавить пустое состояние для ребёнка без назначений и запрет старта
   неназначенного/исключённого курса с безопасным 4xx
-- [ ] обновить unit/route-тесты успеха, отсутствия назначения, исключения,
+- [x] обновить unit/route-тесты успеха, отсутствия назначения, исключения,
   публикации новой редакции и незаконченного старого run
-- [ ] запустить `npx vitest run tests/session-routes.test.ts tests/run-routes.test.ts tests/triage-routes.test.ts tests/boss-routes.test.ts tests/learning-routes.test.ts tests/parents-routes.test.ts tests/profile-routes.test.ts` и `npm run typecheck`
+- [x] запустить `npx vitest run tests/session-routes.test.ts tests/run-routes.test.ts tests/triage-routes.test.ts tests/boss-routes.test.ts tests/learning-routes.test.ts tests/parents-routes.test.ts tests/profile-routes.test.ts` и `npm run typecheck`
 
 ### Task 6: Перевести фоновые процессы, seed bank и админскую статистику
 

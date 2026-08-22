@@ -547,19 +547,16 @@ export function buildServer(
       });
       registerSessionRoutes(app, {
         context,
-        graph: loaded,
         log,
         ...(options.now === undefined ? {} : { now: options.now }),
         ...(options.seedDir === undefined ? {} : { seedDir: options.seedDir }),
       });
       registerRunRoutes(app, {
         context,
-        graph: loaded,
         ...(options.now === undefined ? {} : { now: options.now }),
       });
       registerTriageRoutes(app, {
         context,
-        graph: loaded,
         ...(options.now === undefined ? {} : { now: options.now }),
       });
       registerIntegrityRoutes(app, { context });
@@ -569,12 +566,10 @@ export function buildServer(
       });
       registerBossRoutes(app, {
         context,
-        graph: loaded,
         ...(options.now === undefined ? {} : { now: options.now }),
       });
       registerParentsRoutes(app, {
         context,
-        graph: loaded,
         control,
         failures,
         ...(pinPepper === undefined ? {} : { pinPepper }),
@@ -583,7 +578,6 @@ export function buildServer(
       });
       registerLearningRoutes(app, {
         context,
-        graph: loaded,
         ...(options.now === undefined ? {} : { now: options.now }),
       });
       registerGateRoutes(app, {

@@ -154,19 +154,32 @@ describe('маршруты занятия', () => {
       expect(Object.keys(issued).sort()).toEqual([
         'answer_format',
         'choices',
+        'course',
+        'courseId',
+        'courseTitle',
         'deep_hint',
         'difficulty',
+        'grade',
         'hint',
         'id',
         'instruction',
         'material',
         'material_format',
         'question',
+        'revision',
         'subject',
         'topic_id',
         'topic_title',
         'word_tiles',
       ]);
+      expect(issued).toMatchObject({
+        courseId: issued['subject'], courseTitle: expect.any(String), grade: '7 класс',
+        revision: expect.any(Number),
+        course: {
+          courseId: issued['subject'], title: expect.any(String), grade: '7 класс',
+          revision: expect.any(Number),
+        },
+      });
       // Ни эталона, ни разбора, ни реакции: всё это выдаёт ответ на задание.
       expect(JSON.stringify(issued)).not.toContain('45');
       expect(JSON.stringify(issued)).not.toContain('90 : 2');
@@ -786,10 +799,7 @@ describe('маршруты занятия', () => {
     ).toBe('rejected');
   });
 
-  // Тема, пропавшая из карты, — расхождение карты с базой, а не негодное
-  // задание: `syncTopicState` ровно поэтому ничего не удаляет, а `rejected`
-  // выкинул бы целые задания из выгружаемого посева навсегда.
-  it('не бракует задание темы, которой не стало в карте', async () => {
+  it('не подменяет опубликованный каталог файловой картой другого процесса', async () => {
     const otherDir = join(tempDir, 'curriculum-b');
     mkdirSync(otherDir);
     for (const subject of SUBJECTS) {
@@ -800,8 +810,6 @@ describe('маршруты занятия', () => {
       writeFileSync(join(otherDir, `${subject}.json`), JSON.stringify({ subject, topics }));
     }
 
-    // Задание темы, которой в карте этого сервера нет: `topicOf` бросает обычным
-    // Error, и Fastify по умолчанию положил бы его текст в тело ответа.
     const stale = db
       .prepare<[], { id: number }>(
         "UPDATE task_bank SET status = 'used' WHERE topic_id = 'math.a' RETURNING id",
@@ -824,9 +832,7 @@ describe('маршруты занятия', () => {
       payload: { task_id: stale?.id, answer: '45' },
     });
 
-    expect(response.statusCode).toBe(500);
-    expect((response.json() as { error: string }).error).toBe('Внутренняя ошибка сервера');
-    expect(response.body).not.toContain('math.a');
+    expect(response.statusCode).toBe(200);
     expect(
       db
         .prepare<[number], { status: string }>('SELECT status FROM task_bank WHERE id = ?')

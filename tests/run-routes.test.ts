@@ -7,10 +7,20 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { storeTasks } from '../server/codex/bank.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import { openDatabase, SUBJECTS } from '../server/db.js';
-import { loadCurriculum } from '../server/curriculum.js';
 import { startTenantServer, type TenantServer } from './server-harness.js';
 import { registerRunRoutes, registerUnavailableRun } from '../server/routes/run.js';
 import { fakeContext } from './tenant-context-helper.js';
+import {
+  assignCourse,
+  replaceTopicExclusions,
+  unassignCourse,
+} from '../server/course-assignments.js';
+import {
+  createCourse,
+  createDraft,
+  publishRevision,
+  replaceDraftTopics,
+} from '../server/course-catalog.js';
 
 const NOW = new Date('2026-08-08T12:00:00.000Z');
 
@@ -130,7 +140,7 @@ describe('маршруты забега', () => {
       id: expect.stringMatching(/\.a$/),
       title: expect.stringContaining('Тема'),
     });
-    expect(plan.forecasts.map((item) => item.subject)).toEqual(SUBJECTS);
+    expect(new Set(plan.forecasts.map((item) => item.subject))).toEqual(new Set(SUBJECTS));
     expect(plan.forecasts.every((item) => item.score === 2)).toBe(true);
     expect(plan.streak).toEqual({ current: 0, best: 0, completedToday: false });
     expect(plan.gate).toEqual({
@@ -590,11 +600,107 @@ describe('маршруты забега', () => {
     expect(db.prepare('SELECT COUNT(*) AS count FROM runs').get()).toEqual({ count: 0 });
   });
 
+  it('возвращает пустое состояние и не запускает снятый курс без назначений', async () => {
+    const changedAt = new Date('2030-08-08T12:00:00.000Z');
+    for (const subject of SUBJECTS) {
+      unassignCourse(server.control, server.childId, subject, changedAt);
+    }
+
+    const response = await app.inject({ method: 'GET', url: '/api/run/plan' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ empty: true, courses: [], plan: [], topics: [] });
+    const startResponse = await app.inject({
+      method: 'POST', url: '/api/run/start', payload: { subject: 'math' },
+    });
+    expect(startResponse.statusCode).toBe(400);
+  });
+
+  it('принимает произвольный назначенный course ID и отдаёт метаданные курса', async () => {
+    const created = createCourse(server.control, {
+      id: 'science-8', title: 'Естествознание', grade: '8 класс',
+    }, { now: NOW });
+    const changed = replaceDraftTopics(
+      server.control,
+      'science-8',
+      created.draft.id,
+      created.draft.editVersion,
+      [{
+        id: 'science-8.intro', title: 'Научный метод', examWeight: 3, difficulty: 1,
+        prereqs: [], answerFormat: 'text', promptSeed: 'Проверяй научный метод.',
+      }],
+      { now: NOW },
+    );
+    publishRevision(
+      server.control,
+      'science-8',
+      created.draft.id,
+      changed.revision.editVersion,
+      { now: NOW },
+    );
+    assignCourse(server.control, server.childId, 'science-8', NOW);
+
+    const response = await app.inject({ method: 'GET', url: '/api/run/plan' });
+    expect(response.statusCode).toBe(200);
+    expect((response.json() as { courses: unknown[] }).courses).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        courseId: 'science-8', title: 'Естествознание', grade: '8 класс',
+        revision: expect.any(Number),
+      }),
+    ]));
+    const started = await app.inject({
+      method: 'POST', url: '/api/run/start', payload: { subject: 'science-8' },
+    });
+    expect(started.statusCode).toBe(200);
+  });
+
+  it('не запускает явно исключённую тему', async () => {
+    replaceTopicExclusions(server.control, server.childId, 'math', ['math.a'], NOW);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/run/start',
+      payload: { subject: 'math', topic_id: 'math.a' },
+    });
+    expect(response.statusCode).toBeGreaterThanOrEqual(400);
+    expect(response.statusCode).toBeLessThan(500);
+  });
+
+  it('применяет новую публикацию к плану, но продолжает run на старой редакции', async () => {
+    const runId = await start('math');
+    const revisionId = db.prepare<[number], { course_revision_id: number }>(
+      'SELECT course_revision_id FROM runs WHERE id = ?',
+    ).get(runId)?.course_revision_id as number;
+    const draft = createDraft(server.control, 'math', revisionId, NOW);
+    const changed = replaceDraftTopics(
+      server.control,
+      'math',
+      draft.id,
+      draft.editVersion,
+      [{
+        id: 'math.a', title: 'Новая версия темы', examWeight: 3, difficulty: 2,
+        prereqs: [], answerFormat: 'number', promptSeed: 'Новая версия.',
+      }],
+      { now: NOW },
+    );
+    publishRevision(server.control, 'math', draft.id, changed.revision.editVersion, { now: NOW });
+
+    const plan = await app.inject({ method: 'GET', url: '/api/run/plan' });
+    expect(plan.statusCode).toBe(200);
+    expect((plan.json() as { topics: Array<{ id: string; title: string }> }).topics)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'math.a', title: 'Новая версия темы' }),
+      ]));
+
+    const next = await app.inject({ method: 'GET', url: `/api/session/next?runId=${runId}` });
+    expect(next.statusCode).toBe(200);
+    expect(next.json()).toMatchObject({
+      task: { topic_id: 'math.a', topic_title: 'Тема math' },
+    });
+  });
+
   it('отдаёт 503 на всех URL, когда соединение отвязано или занятие не поднялось', async () => {
     const detached = Fastify();
     registerRunRoutes(detached, {
       context: fakeContext(db, { available: () => false }),
-      graph: loadCurriculum(curriculumDir),
     });
     await detached.ready();
 

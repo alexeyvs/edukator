@@ -66,10 +66,18 @@ function readPatch(body: unknown): Partial<Profile> {
   return body;
 }
 
-function response(profile: Profile, options: ProfileRoutesOptions): Profile & { introduction: string } {
+function response(
+  profile: Profile,
+  options: ProfileRoutesOptions,
+  context: TenantContext,
+): Profile & { introduction: string; courses: unknown[] } {
   return {
     ...profile,
     introduction: readPersonaIntroduction(options.personaPath),
+    courses: context.tenant.curriculum.courses.map(({ revisionId, ...course }) => ({
+      ...course,
+      revision: revisionId,
+    })),
   };
 }
 
@@ -80,7 +88,7 @@ export function registerProfileRoutes(app: FastifyInstance, options: ProfileRout
       const context = options.context(request, { allow: ROUTE_ACCESS.child });
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
-      return reply.send(response(readProfile(context.tenant.db), options));
+      return reply.send(response(readProfile(context.tenant.db), options, context));
     } catch (error) {
       return failAuth(reply, error);
     }
@@ -92,7 +100,7 @@ export function registerProfileRoutes(app: FastifyInstance, options: ProfileRout
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
       return reply.send(
-        response(writeProfile(context.tenant.db, readPatch(request.body)), options),
+        response(writeProfile(context.tenant.db, readPatch(request.body)), options, context),
       );
     } catch (error) {
       if (

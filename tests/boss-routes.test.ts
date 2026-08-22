@@ -9,7 +9,6 @@ import { openDatabase, SUBJECTS } from '../server/db.js';
 import { reserveBossTasks } from '../server/codex/bank.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
 import { registerBossRoutes, registerUnavailableBoss } from '../server/routes/boss.js';
-import { loadCurriculum } from '../server/curriculum.js';
 import { fakeContext } from './tenant-context-helper.js';
 
 const NOW = new Date('2026-08-08T12:00:00.000Z');
@@ -87,9 +86,12 @@ describe('маршруты босса', () => {
   it('отдаёт карту состояний и проводит победный бой общим безопасным JSON задания', async () => {
     const initial = await app.inject({ method: 'GET', url: '/api/boss/topics' });
     expect(initial.statusCode).toBe(200);
-    expect(initial.json()).toMatchObject({ topics: expect.arrayContaining([
-      { id: TOPIC, title: 'Тема math', subject: 'math', readiness: { status: 'working', eligible: false } },
-    ]) });
+    expect((initial.json() as { topics: unknown[] }).topics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: TOPIC, title: 'Тема math', subject: 'math',
+        readiness: { status: 'working', eligible: false },
+      }),
+    ]));
 
     const runId = await start();
     expect((await app.inject({ method: 'GET', url: `/api/boss/${runId}/state` })).json())
@@ -210,7 +212,6 @@ describe('маршруты босса', () => {
     const detached = Fastify();
     registerBossRoutes(detached, {
       context: fakeContext(db, { available: () => false }),
-      graph: loadCurriculum(curriculumDir),
     });
     const unavailable = Fastify();
     registerUnavailableBoss(unavailable, 'база недоступна');

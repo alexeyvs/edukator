@@ -1,6 +1,5 @@
 /** HTTP-граница боя с боссом; правила переходов живут в `boss.ts`. */
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import type { TopicGraph } from '../curriculum.js';
 import {
   BossError,
   bossTopicState,
@@ -19,10 +18,10 @@ import {
   type TenantContext,
   type TenantContextResolver,
 } from './tenant-context.js';
+import { courseJson, operationGraph } from './course-json.js';
 
 export interface BossRoutesOptions {
   context: TenantContextResolver;
-  graph: TopicGraph;
   now?: () => Date;
 }
 
@@ -80,7 +79,6 @@ function unavailable(context: TenantContext, reply: FastifyReply): FastifyReply 
 }
 
 export function registerBossRoutes(app: FastifyInstance, options: BossRoutesOptions): void {
-  const { graph } = options;
   const now = options.now ?? ((): Date => new Date());
 
   app.get('/api/boss/topics', (request, reply) => {
@@ -88,11 +86,13 @@ export function registerBossRoutes(app: FastifyInstance, options: BossRoutesOpti
       const context = options.context(request, { allow: ROUTE_ACCESS.child });
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
+      const graph = context.tenant.curriculum.graph;
       return reply.send({
         topics: graph.order.map((topic) => ({
           id: topic.id,
           title: topic.title,
           subject: topic.subject,
+          ...courseJson(graph, topic.subject),
           readiness: bossTopicState(context.tenant.db, topic.id),
         })),
       });
@@ -106,6 +106,7 @@ export function registerBossRoutes(app: FastifyInstance, options: BossRoutesOpti
       const context = options.context(request, { allow: ROUTE_ACCESS.child });
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
+      const graph = context.tenant.curriculum.graph;
       return reply.send(
         startBoss(context.tenant.db, graph, readTopicId(request.body), {
           now: now(),
@@ -124,8 +125,15 @@ export function registerBossRoutes(app: FastifyInstance, options: BossRoutesOpti
       const context = options.context(request, { allow: ROUTE_ACCESS.child });
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
+      const graph = operationGraph(context.tenant, readPathId(request.params.id));
       const result = nextBossTask(context.tenant.db, graph, readPathId(request.params.id));
-      return reply.send({ ...result, task: issuedTaskJson(result.task, false) });
+      return reply.send({
+        ...result,
+        task: {
+          ...issuedTaskJson(result.task, false),
+          ...courseJson(graph, result.task.subject),
+        },
+      });
     } catch (error) {
       return fail(reply, error);
     }
@@ -136,6 +144,7 @@ export function registerBossRoutes(app: FastifyInstance, options: BossRoutesOpti
       const context = options.context(request, { allow: ROUTE_ACCESS.child });
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
+      const graph = operationGraph(context.tenant, readPathId(request.params.id));
       return reply.send(
         bossFightState(context.tenant.db, graph, readPathId(request.params.id)),
       );
@@ -149,6 +158,7 @@ export function registerBossRoutes(app: FastifyInstance, options: BossRoutesOpti
       const context = options.context(request, { allow: ROUTE_ACCESS.child });
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
+      const graph = operationGraph(context.tenant, readPathId(request.params.id));
       const body = request.body;
       if (!isObject(body)) throw new BadRequest('Тело ответа должно быть объектом');
       const answer = body['answer'];

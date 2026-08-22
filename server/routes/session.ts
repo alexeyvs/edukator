@@ -7,7 +7,6 @@
  * выглядела бы как «ученик что-то не так нажал».
  */
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import type { TopicGraph } from '../curriculum.js';
 import { MAX_ANSWER_LENGTH } from '../codex/prompt.js';
 import {
   nextTask,
@@ -25,6 +24,7 @@ import {
   type TenantContext,
   type TenantContextResolver,
 } from './tenant-context.js';
+import { courseJson, operationGraph } from './course-json.js';
 
 /** Код ответа на отказ по состоянию занятия. */
 const STATUS_BY_CODE: Record<SessionErrorCode, number> = {
@@ -64,7 +64,6 @@ export interface SessionRoutesOptions {
    * (см. `server/dispute-coordinator.ts`).
    */
   context: TenantContextResolver;
-  graph: TopicGraph;
   now?: () => Date;
   log?: (message: string) => void;
   /** Каталог посевного банка; по умолчанию репозиторный. */
@@ -115,7 +114,6 @@ export function registerSessionRoutes(
   app: FastifyInstance,
   options: SessionRoutesOptions,
 ): void {
-  const { graph } = options;
   const log = options.log ?? defaultLog;
   const now = options.now ?? ((): Date => new Date());
 
@@ -134,6 +132,9 @@ export function registerSessionRoutes(
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
       const runId = readQueryId(request.query, 'runId');
+      const graph = runId === undefined
+        ? context.tenant.curriculum.graph
+        : operationGraph(context.tenant, runId);
       const excludeTaskId = readQueryId(request.query, 'excludeTaskId');
       const result = nextTask(db, graph, {
         now: now(),
@@ -167,7 +168,10 @@ export function registerSessionRoutes(
       }
 
       return reply.send({
-        task: issuedTaskJson(result.task),
+        task: {
+          ...issuedTaskJson(result.task),
+          ...courseJson(graph, result.task.subject),
+        },
         ...(result.retry === undefined ? {} : {
           retry: {
             attempt_id: result.retry.attemptId,
@@ -199,6 +203,20 @@ export function registerSessionRoutes(
       const retryAttemptId = isObject(body) && body['retry_attempt_id'] !== undefined
         ? readId(body, 'retry_attempt_id')
         : undefined;
+      if (runId !== undefined) {
+        const issued = db.prepare<[number], { issued_run_id: number | null }>(
+          'SELECT issued_run_id FROM task_bank WHERE id = ?',
+        ).get(taskId);
+        if (issued !== undefined && issued.issued_run_id !== runId) {
+          throw new SessionError(
+            'task-not-in-run',
+            `Задание ${String(taskId)} не принадлежит забегу ${String(runId)}`,
+          );
+        }
+      }
+      const graph = runId === undefined
+        ? context.tenant.curriculum.graph
+        : operationGraph(context.tenant, runId);
       const answer = isObject(body) ? body['answer'] : undefined;
       if (typeof answer !== 'string') {
         throw new BadRequest('Поле answer должно быть строкой');

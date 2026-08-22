@@ -38,6 +38,7 @@ import { hashParentPin } from '../server/parent-pin.js';
 import { loadCurriculum, syncTopicState, type TopicGraph } from '../server/curriculum.js';
 import { startRun } from '../server/run.js';
 import { submitAnswer } from '../server/session.js';
+import { bootstrapLegacyCourses } from '../server/course-catalog.js';
 
 const NOW = new Date('2026-08-08T12:00:00.000Z');
 const TOPICS_PER_SUBJECT = 12;
@@ -525,6 +526,9 @@ export async function startE2eHarness(
         } finally {
           childDb.close();
         }
+        // Этот legacy-сценарий имитирует ребёнка, появившегося после startup:
+        // повторный bootstrap назначает ему исходные курсы, не возвращая ранее снятые.
+        bootstrapLegacyCourses(control, curriculumDir);
       },
       assertCodexNotCalled,
       async waitForLearningMaterial(topicId: string): Promise<number> {

@@ -94,13 +94,16 @@ describe('маршруты профиля', () => {
       },
     });
     expect(saved.statusCode).toBe(200);
-    expect(saved.json()).toEqual({
+    expect(saved.json()).toMatchObject({
       name: 'Тимофей',
       interests: ['скейт', 'кот «Пират»'],
       examDate: '2027-05-20',
       partnerName: 'Кекс',
       introduction: 'Я напарник. Меня можно переименовать.',
     });
+    expect((saved.json() as { courses: unknown[] }).courses).toEqual(expect.arrayContaining([
+      { courseId: 'math', title: 'математика', grade: '7 класс', revision: expect.any(Number) },
+    ]));
 
     const read = await app.inject({ method: 'GET', url: '/api/profile' });
     expect(read.statusCode).toBe(200);

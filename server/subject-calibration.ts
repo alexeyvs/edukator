@@ -1,6 +1,6 @@
 import type { Database } from 'better-sqlite3';
 import type { TopicGraph } from './curriculum.js';
-import { SUBJECTS, type Subject } from './db.js';
+import type { Subject } from './db.js';
 import { MIN_FORECAST_WEIGHT } from './forecast.js';
 import { TRIAGE_TARGET } from './triage.js';
 
@@ -29,7 +29,7 @@ export function readSubjectCalibrations(
     `SELECT DISTINCT subject FROM runs
       WHERE kind = 'triage' AND finished_at IS NOT NULL AND summary IS NOT NULL`,
   ).all().map(({ subject }) => subject));
-  const covered = new Map<Subject, Set<string>>(SUBJECTS.map((subject) => [subject, new Set()]));
+  const covered = new Map<Subject, Set<string>>(graph.subjects.map((subject) => [subject, new Set()]));
   const rows = db.prepare<[], CoveredTopicRow>(
     `SELECT DISTINCT runs.subject, attempts.topic_id
        FROM runs JOIN attempts ON attempts.run_id = runs.id
@@ -43,7 +43,7 @@ export function readSubjectCalibrations(
     covered.get(row.subject)?.add(topic.id);
   }
 
-  return new Map(SUBJECTS.map((subject) => {
+  return new Map(graph.subjects.map((subject) => {
     const targetTopics = Math.min(
       TRIAGE_TARGET,
       (graph.bySubject.get(subject) ?? []).filter(

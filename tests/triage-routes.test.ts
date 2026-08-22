@@ -6,7 +6,6 @@ import type { Database } from 'better-sqlite3';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { storeTasks } from '../server/codex/bank.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
-import { loadCurriculum } from '../server/curriculum.js';
 import { openDatabase, SUBJECTS, type Subject } from '../server/db.js';
 import { startTenantServer, type TenantServer } from './server-harness.js';
 import {
@@ -254,7 +253,6 @@ describe('маршруты триажа', () => {
     const detached = Fastify();
     registerTriageRoutes(detached, {
       context: fakeContext(db, { available: () => false }),
-      graph: loadCurriculum(curriculumDir),
     });
     await detached.ready();
     const unavailable = Fastify();

@@ -19,10 +19,10 @@ import {
   type TenantContextResolver,
 } from './tenant-context.js';
 import { integrityPublicJson } from './integrity.js';
+import { courseJson } from './course-json.js';
 
 export interface LearningRoutesOptions {
   context: TenantContextResolver;
-  graph: TopicGraph;
   now?: () => Date;
 }
 
@@ -65,6 +65,7 @@ function materialJson(db: Database, graph: TopicGraph, materialId: number): Reco
   return {
     id: material.id,
     subject: material.subject,
+    ...courseJson(graph, material.subject),
     topic: { id: topic.id, title: topic.title },
     recommendationReason: material.recommendationReason,
     estimatedMinutes: material.estimatedMinutes,
@@ -76,7 +77,6 @@ function materialJson(db: Database, graph: TopicGraph, materialId: number): Reco
 }
 
 export function registerLearningRoutes(app: FastifyInstance, options: LearningRoutesOptions): void {
-  const { graph } = options;
   const now = options.now ?? ((): Date => new Date());
 
   app.get<{ Params: { id: string } }>('/api/learning/:id', (request, reply) => {
@@ -84,6 +84,7 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
       const context = options.context(request, { allow: ROUTE_ACCESS.child });
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
+      const graph = context.tenant.curriculum.graph;
       return reply.send(materialJson(
         context.tenant.db,
         graph,
@@ -100,6 +101,7 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
       const db = context.tenant.db;
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
+      const graph = context.tenant.curriculum.graph;
       const materialId = readPathId(request.params.id, 'Идентификатор материала');
       const opened = openLearningMaterial(db, materialId, { now: now() });
       return reply.send({ ...opened, material: materialJson(db, graph, materialId) });
@@ -114,9 +116,11 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
       const db = context.tenant.db;
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
+      const materialId = readPathId(request.params.id, 'Идентификатор материала');
+      materialJson(db, context.tenant.curriculum.graph, materialId);
       const started = startLearningRun(
         db,
-        readPathId(request.params.id, 'Идентификатор материала'),
+        materialId,
         { now: now() },
       );
       return reply.send({ ...started, progress: runProgress(db, started.runId) });

@@ -1,6 +1,6 @@
 import type { Database } from 'better-sqlite3';
 import type { Topic, TopicGraph } from './curriculum.js';
-import { readProfile, SUBJECTS, type Profile, type Subject } from './db.js';
+import { readProfile, type Profile, type Subject } from './db.js';
 import {
   claimLearningMaterial,
   expireStaleLearningClaims,
@@ -92,7 +92,7 @@ export function selectLearningTopics(
   const profile = readProfile(db);
   const candidates: LearningTopicCandidate[] = [];
 
-  for (const subject of SUBJECTS) {
+  for (const subject of graph.subjects) {
     if (!calibrated.has(subject)) continue;
     const ranked = rankTopics(graph, states, { now, examDate: profile.examDate }, subject).find(({ topic, state }) =>
       !closed.has(topic.id) && isGap(topic, state, now));
