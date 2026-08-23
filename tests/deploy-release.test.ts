@@ -44,6 +44,8 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
     mkdirSync(fakeBin, { recursive: true });
     mkdirSync(join(root, 'data', 'children'), { recursive: true });
     mkdirSync(join(root, 'data', 'catalog', 'artifacts'), { recursive: true });
+    mkdirSync(join(root, 'cgroup', 'edukator-test'), { recursive: true });
+    writeFileSync(join(root, 'cgroup', 'edukator-test', 'cgroup.procs'), '');
     writeFileSync(join(root, 'data', 'control.db'), 'control-before\n');
     writeFileSync(join(root, 'data', 'children', 'child.db'), 'child-before\n');
     writeFileSync(join(root, 'data', 'catalog', 'artifacts', 'book.pdf'), 'pdf-before\n');
@@ -69,6 +71,7 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
         'marker=normal',
         '[[ -e "$EDUKATOR_DATA_DIR/.maintenance" ]] && marker=maintenance',
         'printf \'systemctl %s %s\\n\' "$*" "$marker" >> "$EDUKATOR_DEPLOY_TEST_LOG"',
+        'if [[ "${1:-}" == "show" ]]; then printf \'/edukator-test\\n\'; exit 0; fi',
         'if [[ "${EDUKATOR_DEPLOY_TEST_HEALTH:-ok}" == "unexpected-stop" ]] &&',
         '   [[ "${1:-}" == "stop" ]] &&',
         '   [[ "$(cat "$EDUKATOR_DEPLOY_APP_ROOT/app/version" 2>/dev/null)" == "new" ]]; then exit 9; fi',
@@ -154,6 +157,36 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
     expect(readFileSync(commandLog, 'utf8')).toContain('start edukator-test normal');
     expect(existsSync(join(root, 'data', '.maintenance'))).toBe(false);
     expect(`${result.stdout}${result.stderr}`).not.toContain('deploy-secret');
+  });
+
+  it('после stop удаляет оставшийся замок остановленного процесса', () => {
+    const stalePid = 2_000_000_001;
+    writeFileSync(
+      join(root, 'data', 'edukator.lock'),
+      `${JSON.stringify({ pid: stalePid, owner: 'сервер', since: new Date(0), nonce: 'old' })}\n`,
+    );
+    writeFileSync(join(root, 'cgroup', 'edukator-test', 'cgroup.procs'), `${stalePid}\n`);
+
+    const result = deploy('ok');
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(join(root, 'data', 'edukator.lock'))).toBe(false);
+  });
+
+  it('не удаляет замок процесса вне cgroup сервиса', () => {
+    const foreignPid = 2_000_000_002;
+    writeFileSync(
+      join(root, 'data', 'edukator.lock'),
+      `${JSON.stringify({ pid: foreignPid, owner: 'ручной прогрев', since: new Date(0), nonce: 'foreign' })}\n`,
+    );
+    writeFileSync(join(root, 'cgroup', 'edukator-test', 'cgroup.procs'), '12345\n');
+
+    const result = deploy('ok');
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('вне cgroup');
+    expect(existsSync(join(root, 'data', 'edukator.lock'))).toBe(true);
+    expect(readFileSync(join(appRoot, 'app', 'version'), 'utf8')).toBe('old\n');
   });
 
   it('возвращает предыдущий релиз, когда health-check новой версии не проходит', () => {
@@ -282,6 +315,7 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
       EDUKATOR_DEPLOY_RUNUSER_BIN: join(fakeBin, 'runuser'),
       EDUKATOR_DEPLOY_NPM_BIN: join(fakeBin, 'npm'),
       EDUKATOR_DEPLOY_NODE_BIN: process.execPath,
+      EDUKATOR_DEPLOY_CGROUP_ROOT: join(root, 'cgroup'),
       EDUKATOR_DEPLOY_TEST_LOG: commandLog,
       EDUKATOR_DEPLOY_TEST_HEALTH: health,
     };

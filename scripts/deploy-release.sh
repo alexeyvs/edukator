@@ -22,6 +22,7 @@ chown_bin="${EDUKATOR_DEPLOY_CHOWN_BIN:-chown}"
 runuser_bin="${EDUKATOR_DEPLOY_RUNUSER_BIN:-runuser}"
 npm_bin="${EDUKATOR_DEPLOY_NPM_BIN:-/opt/node/bin/npm}"
 node_bin="${EDUKATOR_DEPLOY_NODE_BIN:-${npm_bin%/npm}/node}"
+cgroup_root="${EDUKATOR_DEPLOY_CGROUP_ROOT:-/sys/fs/cgroup}"
 maintenance_name='.maintenance'
 
 die() {
@@ -40,6 +41,7 @@ app_root="${app_root%/}"
 [[ "$keep_releases" =~ ^[1-9][0-9]*$ ]] || die 'число хранимых релизов должно быть положительным'
 [[ "$health_attempts" =~ ^[1-9][0-9]*$ ]] || die 'число health-попыток должно быть положительным'
 [[ "$health_delay" =~ ^[0-9]+$ ]] || die 'пауза health-check должна быть целым числом секунд'
+[[ "$cgroup_root" == /* ]] || die 'корень cgroup должен быть абсолютным путём'
 if [[ "$require_root" == 1 && "$(id -u)" != 0 ]]; then
   die 'remote-helper должен работать от root'
 fi
@@ -64,6 +66,72 @@ previous_saved=0
 new_installed=0
 data_may_be_modified=0
 deploy_succeeded=0
+stopped_lock_pid=''
+stopped_lock_nonce=''
+
+# Запоминает замок именно того процесса, который сейчас входит в cgroup
+# сервиса. После успешного systemctl stop этот замок уже некому снять: SIGTERM
+# может завершить tsx раньше дочернего node и его обработчика shutdown. Просто
+# удалять любой мёртвый PID нельзя — это мог быть замок другого запуска.
+capture_service_data_lock() {
+  local lock_path="$EDUKATOR_DATA_DIR/edukator.lock"
+  local parsed control_group cgroup_file member_pid
+  stopped_lock_pid=''
+  stopped_lock_nonce=''
+  [[ -e "$lock_path" ]] || return 0
+  [[ -f "$lock_path" ]] || die "замок данных $lock_path не является обычным файлом"
+
+  if ! parsed="$("$node_bin" -e '
+    const fs = require("fs");
+    const record = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (!Number.isSafeInteger(record.pid) || record.pid <= 0 ||
+        typeof record.nonce !== "string" || record.nonce.length === 0) process.exit(2);
+    process.stdout.write(`${record.pid}\t${record.nonce}`);
+  ' "$lock_path")"; then
+    die "замок данных $lock_path повреждён; автоматическое удаление небезопасно"
+  fi
+  IFS=$'\t' read -r stopped_lock_pid stopped_lock_nonce <<< "$parsed"
+
+  control_group="$("$systemctl_bin" show "$service" --property=ControlGroup --value)"
+  [[ "$control_group" == /* && "$control_group" != *'/../'* && "$control_group" != */.. ]] \
+    || die "systemd не вернул безопасный cgroup для $service"
+  cgroup_file="${cgroup_root%/}$control_group/cgroup.procs"
+  [[ -r "$cgroup_file" ]] || die "не удалось прочитать процессы cgroup $service"
+  while IFS= read -r member_pid; do
+    [[ "$member_pid" == "$stopped_lock_pid" ]] && return 0
+  done < "$cgroup_file"
+  die "замок данных держит pid $stopped_lock_pid вне cgroup $service; автоматическое удаление небезопасно"
+}
+
+remove_stopped_service_data_lock() {
+  local lock_path="$EDUKATOR_DATA_DIR/edukator.lock" parsed current_pid current_nonce
+  [[ -n "$stopped_lock_pid" ]] || return 0
+  [[ -e "$lock_path" ]] || return 0
+  if ! parsed="$("$node_bin" -e '
+    const fs = require("fs");
+    const record = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (!Number.isSafeInteger(record.pid) || typeof record.nonce !== "string") process.exit(2);
+    process.stdout.write(`${record.pid}\t${record.nonce}`);
+  ' "$lock_path")"; then
+    die "замок данных изменился после остановки $service; автоматическое удаление небезопасно"
+  fi
+  IFS=$'\t' read -r current_pid current_nonce <<< "$parsed"
+  [[ "$current_pid" == "$stopped_lock_pid" && "$current_nonce" == "$stopped_lock_nonce" ]] \
+    || die "замок данных сменил владельца после остановки $service; автоматическое удаление небезопасно"
+  if kill -0 "$current_pid" 2>/dev/null; then
+    die "процесс $current_pid из замка данных ещё жив после остановки $service"
+  fi
+  rm -f -- "$lock_path"
+  stopped_lock_pid=''
+  stopped_lock_nonce=''
+}
+
+stop_service() {
+  capture_service_data_lock
+  "$systemctl_bin" stop "$service"
+  service_stopped=1
+  remove_stopped_service_data_lock
+}
 
 on_exit() {
   local status=$?
@@ -225,8 +293,7 @@ show_failure() {
 }
 
 rollback() {
-  "$systemctl_bin" stop "$service" || true
-  service_stopped=1
+  stop_service || true
   if [[ -d "$app_dir" ]]; then
     mv "$app_dir" "$failed_dir"
     new_installed=0
@@ -245,8 +312,7 @@ rollback() {
   die "health-check новой версии не прошёл; предыдущая версия восстановлена, сбойный релиз оставлен в $failed_dir, снимок данных — в $backup_dir"
 }
 
-"$systemctl_bin" stop "$service"
-service_stopped=1
+stop_service
 touch "$EDUKATOR_DATA_DIR/$maintenance_name"
 "$chown_bin" "$owner" "$EDUKATOR_DATA_DIR/$maintenance_name"
 if ! mv "$app_dir" "$previous_dir"; then
@@ -279,8 +345,7 @@ if ! wait_for_health; then
   show_failure
   rollback
 fi
-"$systemctl_bin" stop "$service"
-service_stopped=1
+stop_service
 rm -f -- "$EDUKATOR_DATA_DIR/$maintenance_name"
 if ! "$systemctl_bin" start "$service"; then
   show_failure
