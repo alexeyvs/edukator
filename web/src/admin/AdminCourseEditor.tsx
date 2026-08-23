@@ -101,6 +101,7 @@ export function AdminCourseEditor({
   const [sources, setSources] = useState<AdminCourseSource[]>([]);
   const [sourceStatus, setSourceStatus] = useState<Record<number, AdminSourceProcessingStatus>>({});
   const [buildStatus, setBuildStatus] = useState<string>('загрузка');
+  const [buildError, setBuildError] = useState<string | null>(null);
   const [topics, setTopics] = useState<EditableTopic[]>([]);
   const [title, setTitle] = useState('');
   const [grade, setGrade] = useState('');
@@ -129,15 +130,22 @@ export function AdminCourseEditor({
         setDraft(null);
         setTopics([]);
         setBuildStatus('нет черновика');
+        setBuildError(null);
       } else {
         setBuildStatus('загрузка');
+        setBuildError(null);
         const loadedDraft = { revision: foundDraft, topics: foundDraft.topics };
         setTitle(foundDraft.title);
         setGrade(foundDraft.grade);
         setDraft(loadedDraft);
         setTopics(editableTopics(loadedDraft));
-        void api.courseBuild(courseId).then(({ job }) => setBuildStatus(job?.status ?? 'не запускалась'))
-          .catch(() => setBuildStatus('состояние недоступно'));
+        void api.courseBuild(courseId).then(({ job }) => {
+          setBuildStatus(job?.status ?? 'не запускалась');
+          setBuildError(job?.error ?? null);
+        }).catch(() => {
+          setBuildStatus('состояние недоступно');
+          setBuildError(null);
+        });
       }
       const statuses = await Promise.all(loadedSources.sources.map(async (source) => {
         try { return [source.id, await api.courseSourceStatus(courseId, source.id)] as const; }
@@ -168,7 +176,10 @@ export function AdminCourseEditor({
         void api.courseBuild(courseId).then(async ({ job }) => {
           const status = job?.status ?? 'не запускалась';
           if (status === 'succeeded') await load();
-          else setBuildStatus(status);
+          else {
+            setBuildStatus(status);
+            setBuildError(job?.error ?? null);
+          }
         })
           .catch(() => undefined);
       }
@@ -309,7 +320,7 @@ export function AdminCourseEditor({
 
   async function build(): Promise<void> {
     if (draft === null) return;
-    setBusy('build'); setProblem(null);
+    setBusy('build'); setProblem(null); setBuildError(null);
     try {
       await api.buildCourseDraft(courseId, {
         revisionId: draft.revision.id, editVersion: draft.revision.editVersion,
@@ -413,6 +424,7 @@ export function AdminCourseEditor({
               </article>
             ))}
             <div className="admin-build-row"><span>Сборка программы: <strong>{buildStatus}</strong></span><button disabled={busy !== null || !sourceReady || sources.length === 0} onClick={() => { void build(); }}>{busy === 'build' ? 'Запускаю…' : 'Собрать по источникам'}</button></div>
+            {buildError !== null && <p role="alert">Ошибка сборки: {buildError}</p>}
           </section>
 
           <section className="admin-panel">

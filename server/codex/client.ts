@@ -274,6 +274,11 @@ export function codexArgs(request: CodexRequest): string[] {
     '-o',
     request.outPath,
     ...imageArgs(request.images),
+    // `--image <FILE>...` accepts more than one value. Without the option
+    // terminator it also consumes the positional prompt that follows the last
+    // image, so codex falls back to stdin and immediately reports that no
+    // prompt was provided (runChild deliberately keeps stdin closed).
+    '--',
     request.prompt,
   ];
 }

@@ -135,6 +135,22 @@ describe('редактор курса', () => {
     expect(await screen.findByText('Такой PDF уже загружен')).toBeInTheDocument();
   });
 
+  it('показывает сохранённую причину отказа сборки', async () => {
+    const api = baseApi({
+      courseBuild: vi.fn().mockResolvedValue({
+        revisionId: 11,
+        job: {
+          id: 8, status: 'failed', attempts: 1,
+          error: 'codex не получил промпт', updatedAt: '2026-08-23T12:08:50.992Z',
+        },
+      }),
+    });
+    render(<AdminCourseEditor api={api} courseId="history-6" onBack={vi.fn()} onSignedOut={vi.fn()} />);
+
+    expect(await screen.findByText('failed', { selector: 'strong' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Ошибка сборки: codex не получил промпт');
+  });
+
   it('объясняет optimistic conflict и позволяет обновить данные', async () => {
     const course = vi.fn().mockResolvedValue(card);
     const api = baseApi({

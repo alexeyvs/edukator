@@ -200,6 +200,7 @@ describe('codexArgs', () => {
       '/s.json',
       '-o',
       '/o.json',
+      '--',
       'промпт',
     ]);
   });
@@ -225,7 +226,7 @@ describe('codexArgs', () => {
     writeFileSync(first, Buffer.from([0xff, 0xd8, 0xff, 0x00]));
     writeFileSync(second, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
     const args = codexArgs({ prompt: 'p', schemaPath: '/s.json', outPath: '/o.json', images: [first, second] });
-    expect(args.slice(-5)).toEqual(['--image', first, '--image', second, 'p']);
+    expect(args.slice(-6)).toEqual(['--image', first, '--image', second, '--', 'p']);
     expect(() => codexArgs({ prompt: 'p', schemaPath: '/s', outPath: '/o', images: Array(7).fill(first) as string[] }))
       .toThrow(/изображений больше 6/u);
     expect(() => codexArgs({ prompt: 'p', schemaPath: '/s', outPath: '/o', images: ['relative.jpg'] }))
