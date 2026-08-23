@@ -452,6 +452,17 @@ export interface AdminSourceProcessingStatus {
   pages: Array<{ pageNumber: number; status: string; error: string | null }>;
 }
 
+export interface AdminUploadProgress {
+  loaded: number;
+  total: number;
+}
+
+export interface AdminUploadOptions {
+  onProgress?: (progress: AdminUploadProgress) => void;
+  onUploaded?: () => void;
+  signal?: AbortSignal;
+}
+
 export interface AdminCourseBuildStatus {
   revisionId: number;
   job: {
@@ -500,7 +511,7 @@ export interface AdminApi {
   }): Promise<{ revision: AdminCourseRevision; idempotent: boolean }>;
   archiveCourse(courseId: string): Promise<{ course: AdminCourse; idempotent: boolean }>;
   courseSources(courseId: string): Promise<{ sources: AdminCourseSource[] }>;
-  uploadCourseSource(courseId: string, file: File): Promise<{
+  uploadCourseSource(courseId: string, file: File, options?: AdminUploadOptions): Promise<{
     source: AdminCourseSource; duplicate: boolean;
   }>;
   deleteCourseSource(courseId: string, sourceId: number): Promise<{ source: AdminCourseSource }>;
@@ -571,6 +582,67 @@ function adminJson<T>(
   fallback: string,
 ): Promise<T> {
   return requestJson<T>(url, init, fallback, adminError, ADMIN_POLICY);
+}
+
+/**
+ * Multipart идёт через XHR: Fetch API не сообщает браузеру прогресс отправки.
+ * Ответ и отказ при этом разбираются так же, как у остальных запросов админки.
+ */
+function adminUploadJson<T>(
+  url: string,
+  file: File,
+  fallback: string,
+  options: AdminUploadOptions = {},
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const abort = () => xhr.abort();
+    const cleanup = () => options.signal?.removeEventListener('abort', abort);
+    const parsedBody = (): unknown => {
+      try { return JSON.parse(xhr.responseText) as unknown; }
+      catch { return undefined; }
+    };
+
+    xhr.open('POST', url);
+    xhr.upload.addEventListener('progress', (event) => {
+      options.onProgress?.({
+        loaded: event.loaded,
+        total: event.lengthComputable ? event.total : file.size,
+      });
+    });
+    xhr.upload.addEventListener('load', () => options.onUploaded?.());
+    xhr.addEventListener('load', () => {
+      cleanup();
+      const body = parsedBody();
+      if (xhr.status >= 200 && xhr.status < 300) {
+        if (body === undefined) reject(adminError({ status: xhr.status, message: fallback }));
+        else resolve(body as T);
+        return;
+      }
+      const record = typeof body === 'object' && body !== null ? body as Record<string, unknown> : {};
+      const serverMessage = typeof record['error'] === 'string' ? record['error'] : fallback;
+      const code = typeof record['code'] === 'string' ? record['code'] : undefined;
+      reject(adminError({
+        status: xhr.status,
+        message: serverMessage,
+        ...(code === undefined ? {} : { code }),
+      }));
+    });
+    xhr.addEventListener('error', () => { cleanup(); reject(new Error(fallback)); });
+    xhr.addEventListener('abort', () => {
+      cleanup();
+      reject(new DOMException('Загрузка отменена', 'AbortError'));
+    });
+
+    if (options.signal?.aborted === true) {
+      reject(new DOMException('Загрузка отменена', 'AbortError'));
+      return;
+    }
+    options.signal?.addEventListener('abort', abort, { once: true });
+    const body = new FormData();
+    body.append('file', file);
+    xhr.send(body);
+  });
 }
 
 export const browserAdminApi: AdminApi = {
@@ -687,13 +759,9 @@ export const browserAdminApi: AdminApi = {
   courseSources: (courseId) => adminJson(
     adminCourseUrl(courseId, '/sources'), undefined, 'Не получилось загрузить источники',
   ),
-  uploadCourseSource: (courseId, file) => {
-    const body = new FormData();
-    body.append('file', file);
-    return adminJson(
-      adminCourseUrl(courseId, '/sources'), { method: 'POST', body }, 'Не получилось загрузить PDF',
-    );
-  },
+  uploadCourseSource: (courseId, file, options) => adminUploadJson(
+    adminCourseUrl(courseId, '/sources'), file, 'Не получилось загрузить PDF', options,
+  ),
   deleteCourseSource: (courseId, sourceId) => adminJson(
     adminCourseUrl(courseId, `/sources/${String(sourceId)}`), { method: 'DELETE' },
     'Не получилось удалить источник',

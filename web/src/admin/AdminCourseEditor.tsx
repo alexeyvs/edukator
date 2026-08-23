@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import {
   browserAdminApi,
   type AdminApi,
@@ -12,6 +12,26 @@ import { HttpError } from '../http';
 import type { AdminSignOutReason } from './AdminHomeScreen';
 
 type EditableTopic = AdminDraftTopicInput & { key: string };
+
+type UploadProgress = {
+  fileName: string;
+  phase: 'uploading' | 'checking';
+  loaded: number;
+  total: number;
+  stalled: boolean;
+};
+
+const UPLOAD_STALL_MS = 15_000;
+
+function uploadPercent(progress: UploadProgress): number {
+  if (progress.phase === 'checking') return 100;
+  if (progress.total <= 0) return 0;
+  return Math.min(100, Math.round(progress.loaded / progress.total * 100));
+}
+
+function megabytes(bytes: number): string {
+  return (bytes / 1024 / 1024).toLocaleString('ru-RU', { maximumFractionDigits: 1 });
+}
 
 function message(error: unknown, fallback: string): string {
   if (error instanceof HttpError && error.status === 409) {
@@ -30,13 +50,28 @@ function topicReference(topic: EditableTopic): string {
 
 function StatusPages({ status }: { status: AdminSourceProcessingStatus | undefined }) {
   if (status === undefined) return <p className="admin-empty">Диагностика страниц ещё не загружена</p>;
+  const completed = status.pages.filter((page) =>
+    page.status === 'ready' || page.status === 'suspicious' || page.status === 'failed').length;
+  const total = status.pages.length;
+  const percent = total === 0 ? 0 : Math.round(completed / total * 100);
   return (
     <div className="admin-source-preview">
       <p>
         OCR: {status.job?.status ?? status.sourceStatus}
         {status.job?.currentPage === null || status.job?.currentPage === undefined
           ? '' : ` · страница ${String(status.job.currentPage)}`}
+        {total === 0 ? '' : ` · ${String(completed)} из ${String(total)} (${String(percent)}%)`}
       </p>
+      {total > 0 && (
+        <div
+          aria-label="Прогресс OCR"
+          aria-valuemax={total}
+          aria-valuemin={0}
+          aria-valuenow={completed}
+          className="admin-progress-track"
+          role="progressbar"
+        ><span style={{ width: `${String(percent)}%` }} /></div>
+      )}
       {status.job?.error !== null && status.job?.error !== undefined && <p role="alert">{status.job.error}</p>}
       <ol aria-label="Страницы-основания">
         {status.pages.map((page) => (
@@ -73,6 +108,10 @@ export function AdminCourseEditor({
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
+  const uploadController = useRef<AbortController | null>(null);
+
+  useEffect(() => () => uploadController.current?.abort(), []);
 
   const fail = useCallback((error: unknown, fallback: string) => {
     if (error instanceof HttpError && error.status === 401) onSignedOut('expired');
@@ -204,13 +243,49 @@ export function AdminCourseEditor({
   async function upload(event: ChangeEvent<HTMLInputElement>): Promise<void> {
     const file = event.target.files?.[0];
     if (file === undefined) return;
+    const input = event.target;
+    const controller = new AbortController();
+    let lastLoaded = 0;
+    let lastProgressAt = Date.now();
+    uploadController.current = controller;
+    setUploadProgress({
+      fileName: file.name, phase: 'uploading', loaded: 0, total: file.size, stalled: false,
+    });
     setBusy('upload'); setProblem(null); setNotice(null);
+    const stallTimer = window.setInterval(() => {
+      if (Date.now() - lastProgressAt < UPLOAD_STALL_MS) return;
+      setUploadProgress((current) => current?.phase === 'uploading'
+        ? { ...current, stalled: true } : current);
+    }, 1_000);
     try {
-      const result = await api.uploadCourseSource(courseId, file);
+      const result = await api.uploadCourseSource(courseId, file, {
+        signal: controller.signal,
+        onProgress: ({ loaded, total }) => {
+          if (loaded > lastLoaded) {
+            lastLoaded = loaded;
+            lastProgressAt = Date.now();
+          }
+          setUploadProgress({
+            fileName: file.name, phase: 'uploading', loaded, total, stalled: false,
+          });
+        },
+        onUploaded: () => {
+          window.clearInterval(stallTimer);
+          setUploadProgress((current) => current === null ? current : {
+            ...current, phase: 'checking', loaded: current.total, stalled: false,
+          });
+        },
+      });
       setNotice(result.duplicate ? 'Такой PDF уже загружен' : 'PDF загружен, OCR поставлен в очередь');
       await load();
-    } catch (error: unknown) { fail(error, 'Не получилось загрузить PDF'); }
-    event.target.value = '';
+    } catch (error: unknown) {
+      if (error instanceof DOMException && error.name === 'AbortError') setNotice('Загрузка PDF отменена');
+      else fail(error, 'Не получилось загрузить PDF');
+    }
+    window.clearInterval(stallTimer);
+    input.value = '';
+    if (uploadController.current === controller) uploadController.current = null;
+    setUploadProgress(null);
     setBusy(null);
   }
 
@@ -309,6 +384,27 @@ export function AdminCourseEditor({
           <section className="admin-panel">
             <div className="section-heading"><p>PDF → OCR → программа</p><h2>Источники</h2></div>
             <label className="admin-upload"><span>{busy === 'upload' ? 'Загружаю PDF…' : 'Добавить PDF'}</span><input accept="application/pdf,.pdf" disabled={busy !== null} type="file" onChange={(event) => { void upload(event); }} /></label>
+            {uploadProgress !== null && (() => {
+              const percent = uploadPercent(uploadProgress);
+              return (
+                <div className="admin-upload-progress" aria-live="polite">
+                  <header><strong>{uploadProgress.fileName}</strong><span>{uploadProgress.phase === 'uploading' ? 'Передаю файл' : 'Проверяю PDF'}</span></header>
+                  <div
+                    aria-label="Загрузка PDF"
+                    aria-valuemax={100}
+                    aria-valuemin={0}
+                    aria-valuenow={percent}
+                    className="admin-progress-track"
+                    role="progressbar"
+                  ><span style={{ width: `${String(percent)}%` }} /></div>
+                  <p>{uploadProgress.phase === 'uploading'
+                    ? `${String(percent)}% · ${megabytes(uploadProgress.loaded)} из ${megabytes(uploadProgress.total)} МБ`
+                    : 'Файл передан · проверяю структуру и число страниц'}</p>
+                  {uploadProgress.stalled && <p className="admin-upload-stalled" role="alert">Передача не движется уже 15 секунд. Проверьте соединение или отмените и попробуйте снова.</p>}
+                  {uploadProgress.phase === 'uploading' && <button className="quiet" type="button" onClick={() => uploadController.current?.abort()}>Отменить загрузку</button>}
+                </div>
+              );
+            })()}
             {sources.length === 0 ? <p className="admin-empty">Источников нет — ручной курс можно публиковать без PDF</p> : sources.map((source) => (
               <article className={`admin-source is-${source.status}`} key={source.id}>
                 <header><div><strong>{source.uploadName}</strong><span>{source.status} · {source.pageCount === null ? 'страницы считаются' : `${String(source.pageCount)} стр.`}</span></div><div><button disabled={busy !== null} onClick={() => { void retrySource(source.id); }}>Повторить OCR</button><button className="quiet" disabled={busy !== null} onClick={() => { void removeSource(source.id); }}>Удалить</button></div></header>

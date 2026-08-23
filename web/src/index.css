@@ -3954,6 +3954,42 @@ button.parents-home {
   font-weight: 800;
 }
 
+.admin-upload-progress {
+  display: grid;
+  gap: .6rem;
+  padding: 1rem;
+  border: 1px solid #c9d9d0;
+  border-radius: .9rem;
+  background: #f5faf7;
+}
+
+.admin-upload-progress header {
+  display: flex;
+  justify-content: space-between;
+  gap: .8rem;
+  overflow-wrap: anywhere;
+}
+
+.admin-upload-progress header span,
+.admin-upload-progress p { margin: 0; color: #52625c; font-size: .82rem; }
+.admin-upload-progress button { justify-self: start; }
+.admin-upload-progress .admin-upload-stalled { color: #87351f; }
+
+.admin-progress-track {
+  height: .55rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dfe9e3;
+}
+
+.admin-progress-track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--evergreen);
+  transition: width .2s ease;
+}
+
 .admin-source {
   display: grid;
   gap: .8rem;
@@ -3989,6 +4025,7 @@ button.parents-home {
 }
 
 .admin-source-preview > p { margin: 0 0 .6rem; color: #52625c; font-size: .82rem; }
+.admin-source-preview > .admin-progress-track { margin-bottom: .8rem; }
 .admin-source-preview ol { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0; padding: 0; list-style: none; }
 .admin-source-preview li { display: grid; min-width: 2.6rem; padding: .35rem .45rem; border-radius: .5rem; background: white; text-align: center; }
 .admin-source-preview li.is-ready { color: var(--evergreen); background: #e3f1eb; }

@@ -4,6 +4,47 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { browserAdminApi } from './admin-api';
 import { HttpError, onSignedOut, SignedOutError } from './http';
 
+type FakeListener = (event: ProgressEvent) => void;
+
+class FakeEventTarget {
+  private readonly listeners = new Map<string, FakeListener[]>();
+
+  addEventListener(type: string, listener: FakeListener): void {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+
+  emit(type: string, event: Partial<ProgressEvent> = {}): void {
+    for (const listener of this.listeners.get(type) ?? []) listener(event as ProgressEvent);
+  }
+}
+
+class FakeXMLHttpRequest extends FakeEventTarget {
+  static instances: FakeXMLHttpRequest[] = [];
+
+  readonly upload = new FakeEventTarget();
+
+  readonly open = vi.fn();
+
+  readonly send = vi.fn();
+
+  readonly abort = vi.fn(() => this.emit('abort'));
+
+  status = 0;
+
+  responseText = '';
+
+  constructor() {
+    super();
+    FakeXMLHttpRequest.instances.push(this);
+  }
+
+  respond(status: number, body: unknown): void {
+    this.status = status;
+    this.responseText = typeof body === 'string' ? body : JSON.stringify(body);
+    this.emit('load');
+  }
+}
+
 function response(body: unknown, options: { ok?: boolean; status?: number } = {}) {
   return {
     ok: options.ok ?? true,
@@ -12,7 +53,10 @@ function response(body: unknown, options: { ok?: boolean; status?: number } = {}
   };
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  FakeXMLHttpRequest.instances = [];
+  vi.unstubAllGlobals();
+});
 
 describe('адаптер админского API', () => {
   it('собирает адреса входа, выхода и сводки', async () => {
@@ -133,10 +177,9 @@ describe('адаптер админского API', () => {
     });
   });
 
-  it('собирает JSON, multipart и status-запросы каталога курсов', async () => {
+  it('собирает JSON и status-запросы каталога курсов', async () => {
     const fetch = vi.fn().mockResolvedValue(response({}));
     vi.stubGlobal('fetch', fetch);
-    const file = new File(['%PDF-1.7'], 'учебник.pdf', { type: 'application/pdf' });
 
     await browserAdminApi.createCourse({ id: 'history-6', title: 'История', grade: '6 класс' });
     await browserAdminApi.courses();
@@ -150,7 +193,6 @@ describe('адаптер админского API', () => {
     await browserAdminApi.publishCourse('history/6', { revisionId: 3, editVersion: 2, idempotencyKey: 'publish-3' });
     await browserAdminApi.archiveCourse('history/6');
     await browserAdminApi.courseSources('history/6');
-    await browserAdminApi.uploadCourseSource('history/6', file);
     await browserAdminApi.courseSourceStatus('history/6', 9);
     await browserAdminApi.retryCourseSource('history/6', 9, { fromPage: 2, toPage: 4 });
     await browserAdminApi.deleteCourseSource('history/6', 9);
@@ -165,19 +207,57 @@ describe('адаптер админского API', () => {
       '/api/admin/courses/history%2F6', '/api/admin/courses/history%2F6/draft',
       '/api/admin/courses/history%2F6/draft', '/api/admin/courses/history%2F6/draft/topics',
       '/api/admin/courses/history%2F6/publish', '/api/admin/courses/history%2F6/archive',
-      '/api/admin/courses/history%2F6/sources', '/api/admin/courses/history%2F6/sources',
+      '/api/admin/courses/history%2F6/sources',
       '/api/admin/courses/history%2F6/sources/9/status',
       '/api/admin/courses/history%2F6/sources/9/retry',
       '/api/admin/courses/history%2F6/sources/9',
       '/api/admin/courses/history%2F6/draft/build', '/api/admin/courses/history%2F6/draft/build',
     ]);
-    expect((fetch.mock.calls[10]?.[1] as RequestInit).body).toBeInstanceOf(FormData);
-    expect(fetch.mock.calls.slice(11, 14)).toEqual([
+    expect(fetch.mock.calls.slice(10, 13)).toEqual([
       ['/api/admin/courses/history%2F6/sources/9/status'],
       ['/api/admin/courses/history%2F6/sources/9/retry', expect.objectContaining({
         method: 'POST', body: '{"fromPage":2,"toPage":4}',
       })],
       ['/api/admin/courses/history%2F6/sources/9', { method: 'DELETE' }],
     ]);
+  });
+
+  it('передаёт PDF с прогрессом и сообщает, когда файл целиком ушёл', async () => {
+    vi.stubGlobal('XMLHttpRequest', FakeXMLHttpRequest);
+    const onProgress = vi.fn();
+    const onUploaded = vi.fn();
+    const file = new File(['%PDF-1.7'], 'учебник.pdf', { type: 'application/pdf' });
+
+    const pending = browserAdminApi.uploadCourseSource('history/6', file, { onProgress, onUploaded });
+    const xhr = FakeXMLHttpRequest.instances[0] as FakeXMLHttpRequest;
+    expect(xhr.open).toHaveBeenCalledWith('POST', '/api/admin/courses/history%2F6/sources');
+    expect(xhr.send.mock.calls[0]?.[0]).toBeInstanceOf(FormData);
+
+    xhr.upload.emit('progress', { loaded: 4, total: 8, lengthComputable: true });
+    xhr.upload.emit('load');
+    expect(onProgress).toHaveBeenCalledWith({ loaded: 4, total: 8 });
+    expect(onUploaded).toHaveBeenCalledOnce();
+    xhr.respond(200, { source: { id: 7 }, duplicate: false });
+
+    await expect(pending).resolves.toMatchObject({ duplicate: false });
+  });
+
+  it('сохраняет серверный отказ загрузки и позволяет отменить запрос', async () => {
+    vi.stubGlobal('XMLHttpRequest', FakeXMLHttpRequest);
+    const file = new File(['%PDF-1.7'], 'учебник.pdf', { type: 'application/pdf' });
+
+    const failed = browserAdminApi.uploadCourseSource('history-6', file);
+    const failedXhr = FakeXMLHttpRequest.instances[0] as FakeXMLHttpRequest;
+    failedXhr.respond(413, { error: 'PDF слишком большой', code: 'file-too-large' });
+    await expect(failed).rejects.toMatchObject({
+      status: 413, message: 'PDF слишком большой', code: 'file-too-large',
+    });
+
+    const controller = new AbortController();
+    const cancelled = browserAdminApi.uploadCourseSource('history-6', file, { signal: controller.signal });
+    const cancelledXhr = FakeXMLHttpRequest.instances[1] as FakeXMLHttpRequest;
+    controller.abort();
+    expect(cancelledXhr.abort).toHaveBeenCalledOnce();
+    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
   });
 });

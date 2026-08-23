@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AdminCourseCard, AdminCourseDraft } from '../admin-api';
+import type { AdminCourseCard, AdminCourseDraft, AdminUploadOptions } from '../admin-api';
 import { HttpError } from '../http';
 import { AdminCourseEditor } from './AdminCourseEditor';
 import { testAdminApi } from './test-admin-api';
 import '../test-setup';
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 beforeEach(() => vi.spyOn(window, 'confirm').mockReturnValue(true));
 
 const revision = {
@@ -100,6 +100,8 @@ describe('редактор курса', () => {
 
     expect((await screen.findAllByText('учебник.pdf')).length).toBeGreaterThan(0);
     expect(await screen.findByLabelText('Страницы-основания')).toHaveTextContent('Слишком мало текста');
+    expect(screen.getByRole('progressbar', { name: 'Прогресс OCR' })).toHaveAttribute('aria-valuenow', '2');
+    expect(screen.getByText(/2 из 2 \(100%\)/u)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Опубликовать редакцию' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Повторить OCR' }));
     await waitFor(() => expect(retryCourseSource).toHaveBeenCalledWith('history-6', 5));
@@ -127,7 +129,9 @@ describe('редактор курса', () => {
 
     const file = new File(['%PDF-1.7'], 'повтор.pdf', { type: 'application/pdf' });
     fireEvent.change(document.querySelector('input[type=file]') as HTMLInputElement, { target: { files: [file] } });
-    await waitFor(() => expect(uploadCourseSource).toHaveBeenCalledWith('history-6', file));
+    await waitFor(() => expect(uploadCourseSource).toHaveBeenCalledWith(
+      'history-6', file, expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
     expect(await screen.findByText('Такой PDF уже загружен')).toBeInTheDocument();
   });
 
@@ -173,13 +177,42 @@ describe('редактор курса', () => {
 
     const file = new File(['%PDF-1.7'], 'новый.pdf', { type: 'application/pdf' });
     fireEvent.change(document.querySelector('input[type=file]') as HTMLInputElement, { target: { files: [file] } });
-    await waitFor(() => expect(uploadCourseSource).toHaveBeenCalledWith('history-6', file));
+    await waitFor(() => expect(uploadCourseSource).toHaveBeenCalledWith(
+      'history-6', file, expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
     fireEvent.click(screen.getByRole('button', { name: 'Собрать по источникам' }));
     await waitFor(() => expect(buildCourseDraft).toHaveBeenCalled());
     fireEvent.click(screen.getByRole('button', { name: 'Удалить' }));
     await waitFor(() => expect(deleteCourseSource).toHaveBeenCalledWith('history-6', 5));
     fireEvent.click(screen.getByRole('button', { name: 'В архив' }));
     await waitFor(() => expect(archiveCourse).toHaveBeenCalledWith('history-6'));
+  });
+
+  it('показывает передачу PDF, замечает остановку и позволяет отменить её', async () => {
+    let uploadOptions: AdminUploadOptions | undefined;
+    const uploadCourseSource = vi.fn((_courseId: string, _file: File, options?: AdminUploadOptions) => {
+      uploadOptions = options;
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => reject(new DOMException('Загрузка отменена', 'AbortError')));
+      });
+    });
+    const api = baseApi({ uploadCourseSource });
+    render(<AdminCourseEditor api={api} courseId="history-6" onBack={vi.fn()} onSignedOut={vi.fn()} />);
+    await screen.findByDisplayValue('История');
+
+    const file = new File(['12345678'], 'большой учебник.pdf', { type: 'application/pdf' });
+    vi.useFakeTimers();
+    fireEvent.change(document.querySelector('input[type=file]') as HTMLInputElement, { target: { files: [file] } });
+    expect(uploadCourseSource).toHaveBeenCalled();
+    act(() => uploadOptions?.onProgress?.({ loaded: 4, total: 8 }));
+
+    expect(screen.getByRole('progressbar', { name: 'Загрузка PDF' })).toHaveAttribute('aria-valuenow', '50');
+    expect(screen.getByText(/50%/u)).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    expect(screen.getByRole('alert')).toHaveTextContent('Передача не движется уже 15 секунд');
+    fireEvent.click(screen.getByRole('button', { name: 'Отменить загрузку' }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByRole('status')).toHaveTextContent('Загрузка PDF отменена');
   });
 
   it('после успешной сборки перечитывает темы, editVersion и страницы-основания', async () => {
