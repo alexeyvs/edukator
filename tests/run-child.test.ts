@@ -60,6 +60,16 @@ async function waitUntilDead(pid: number): Promise<boolean> {
 }
 
 describe('runChild', () => {
+  it('передаёт большой ввод и закрывает stdin после него', async () => {
+    const input = 'биология\n'.repeat(20_000);
+
+    const result = await runChild({
+      bin: '/bin/sh', args: ['-c', 'cat'], label: 'ввод', timeoutMs: 5_000, input,
+    });
+
+    expect(result).toMatchObject({ code: 0, stdout: input, stderr: '' });
+  });
+
   it.skipIf(process.platform === 'win32')('снимает группу по отмене владельца', async () => {
     const controller = new AbortController();
     const pending = runChild({

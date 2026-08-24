@@ -13,12 +13,24 @@
         "additionalProperties": false,
         "required": ["client_id", "existing_id", "title", "exam_weight", "difficulty", "prereqs", "answer_format", "prompt_seed", "source_refs"],
         "properties": {
-          "client_id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+          "client_id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,63}$",
+            "description": "От 1 до 64 знаков: сначала строчная латинская буква a-z, затем только a-z, цифры 0-9 или дефис"
+          },
           "existing_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 200 },
           "title": { "type": "string", "minLength": 1, "maxLength": 240 },
-          "exam_weight": { "type": "integer", "minimum": 0, "maximum": 3 },
-          "difficulty": { "type": "integer", "minimum": 1, "maximum": 3 },
-          "prereqs": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" } },
+          "exam_weight": { "type": "integer", "enum": [0, 1, 2, 3], "minimum": 0, "maximum": 3 },
+          "difficulty": { "type": "integer", "enum": [1, 2, 3], "minimum": 1, "maximum": 3 },
+          "prereqs": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]{0,63}$",
+              "description": "Точный client_id другой темы из этого же ответа"
+            }
+          },
           "answer_format": { "enum": ["number", "text", "choice"] },
           "prompt_seed": { "type": "string", "minLength": 1, "maxLength": 4000 },
           "source_refs": {

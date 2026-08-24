@@ -275,20 +275,20 @@ export function codexArgs(request: CodexRequest): string[] {
     request.outPath,
     ...imageArgs(request.images),
     // `--image <FILE>...` accepts more than one value. Without the option
-    // terminator it also consumes the positional prompt that follows the last
-    // image, so codex falls back to stdin and immediately reports that no
-    // prompt was provided (runChild deliberately keeps stdin closed).
+    // terminator it also consumes `-` as another image. The prompt itself goes
+    // through stdin: Linux limits one argv item to roughly 128 KiB, while a
+    // whole OCR textbook legitimately produces a larger final prompt.
     '--',
-    request.prompt,
+    '-',
   ];
 }
 
 /**
  * Запускает codex и возвращает последнее сообщение агента.
  *
- * stdin закрыт (`stdio[0] = 'ignore'` — то же самое, что `< /dev/null` в
- * командной строке). Без этого codex считает, что промпт придёт из потока, и
- * висит бесконечно, ничего не сообщая.
+ * Prompt передаётся через stdin, после записи поток обязательно закрывается.
+ * Это сохраняет EOF-гарантию (codex не ждёт ввод бесконечно), но не упирается
+ * в системный предел длины одного аргумента командной строки.
  */
 export async function runCodexCli(request: CodexRequest): Promise<string> {
   // Validate attachments before entering spawn-error translation: a missing
@@ -301,6 +301,7 @@ export async function runCodexCli(request: CodexRequest): Promise<string> {
       args,
       label: 'codex',
       timeoutMs: request.timeoutMs ?? CODEX_TIMEOUT_MS,
+      input: request.prompt,
       ...(request.maxOutputBytes === undefined ? {} : { maxOutputBytes: request.maxOutputBytes }),
       ...(request.signal === undefined ? {} : { signal: request.signal }),
     });

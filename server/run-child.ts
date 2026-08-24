@@ -16,6 +16,8 @@ export interface RunChildOptions {
   args: string[];
   label: string;
   timeoutMs: number;
+  /** Текст для stdin; поток закрывается сразу после записи. Без текста stdin остаётся закрытым. */
+  input?: string;
   maxOutputBytes?: number;
   signal?: AbortSignal;
 }
@@ -118,7 +120,7 @@ function forgetGroup(pid: number | undefined): void {
   if (liveGroups.size === 0) releaseSignalHandlers();
 }
 
-/** Запускает внешний инструмент с закрытым stdin, сроком и ограниченным выводом. */
+/** Запускает внешний инструмент с конечным stdin, сроком и ограниченным выводом. */
 export function runChild(options: RunChildOptions): Promise<ChildOutput> {
   if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
     return Promise.reject(new Error(`${options.label}: срок должен быть положительным числом`));
@@ -130,7 +132,7 @@ export function runChild(options: RunChildOptions): Promise<ChildOutput> {
     }
     const grouped = process.platform !== 'win32';
     const child = spawn(options.bin, options.args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
       detached: grouped,
     });
     // Только своя группа: без `detached` снимать `-pid` нельзя, а потомок и так
@@ -215,6 +217,12 @@ export function runChild(options: RunChildOptions): Promise<ChildOutput> {
     // или срок, так что глотать нечего — читать всё равно больше нечего.
     child.stdout.on('error', () => undefined);
     child.stderr.on('error', () => undefined);
+    // `end`, а не оставленная открытой труба: инструмент получает весь ввод и
+    // EOF. Без `input` это эквивалент закрытого stdin. Ранний выход потомка
+    // может дать EPIPE — его код/сигнал всё равно приходит через `close`, а
+    // необработанная ошибка Writable свалила бы весь сервер раньше результата.
+    child.stdin.on('error', () => undefined);
+    child.stdin.end(options.input ?? '');
 
     const timeout = setTimeout(
       () => stop(new ChildTimeoutError(`${options.label}: превышен срок ${options.timeoutMs} мс`)),

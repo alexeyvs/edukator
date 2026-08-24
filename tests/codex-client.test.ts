@@ -1,6 +1,6 @@
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   CODEX_FALLBACK_MODEL,
@@ -22,6 +22,7 @@ import {
 import { CURRICULUM_SCHEMA_PATH } from '../server/curriculum.js';
 
 let dir: string;
+const COURSE_DRAFT_SCHEMA_PATH = resolve('schemas/course-draft.json');
 
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), 'edukator-codex-client-'));
@@ -120,6 +121,18 @@ describe('codexOutputSchema', () => {
     });
   });
 
+  it('сохраняет enum и descriptions ограничений карты курса', () => {
+    const source = JSON.parse(readFileSync(COURSE_DRAFT_SCHEMA_PATH, 'utf8')) as unknown;
+    const stripped = JSON.stringify(codexOutputSchema(source));
+
+    expect(stripped).toContain('"enum":[0,1,2,3]');
+    expect(stripped).toContain('"enum":[1,2,3]');
+    expect(stripped).toContain('строчная латинская буква');
+    expect(stripped).toContain('Точный client_id другой темы');
+    expect(stripped).not.toContain('"pattern"');
+    expect(stripped).not.toContain('"maximum"');
+  });
+
   // Ключи под `properties` — имена полей данных, а не ключевые слова. Вырезав
   // такое поле, чистка оставила бы его в `required`, и схема стала бы
   // невыполнимой: модель не смогла бы вернуть ничего.
@@ -201,7 +214,7 @@ describe('codexArgs', () => {
       '-o',
       '/o.json',
       '--',
-      'промпт',
+      '-',
     ]);
   });
 
@@ -226,7 +239,7 @@ describe('codexArgs', () => {
     writeFileSync(first, Buffer.from([0xff, 0xd8, 0xff, 0x00]));
     writeFileSync(second, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
     const args = codexArgs({ prompt: 'p', schemaPath: '/s.json', outPath: '/o.json', images: [first, second] });
-    expect(args.slice(-6)).toEqual(['--image', first, '--image', second, '--', 'p']);
+    expect(args.slice(-6)).toEqual(['--image', first, '--image', second, '--', '-']);
     expect(() => codexArgs({ prompt: 'p', schemaPath: '/s', outPath: '/o', images: Array(7).fill(first) as string[] }))
       .toThrow(/изображений больше 6/u);
     expect(() => codexArgs({ prompt: 'p', schemaPath: '/s', outPath: '/o', images: ['relative.jpg'] }))
@@ -255,12 +268,12 @@ describe('parseCodexAnswer', () => {
 });
 
 describe('runCodexCli', () => {
-  it('возвращает записанный моделью ответ и не ждёт stdin', async () => {
-    // `cat` прочитал бы стандартный ввод до конца: если stdin не закрыт,
-    // заглушка повиснет и тест упадёт по таймауту.
+  it('передаёт prompt и EOF через stdin', async () => {
+    // `cat` дочитывает prompt до EOF: если поток не закрыт, заглушка повиснет
+    // и тест упадёт по таймауту.
     const bin = fakeCodexBin(
       'codex-ok',
-      'cat > /dev/null\nwhile [ "$#" -gt 0 ]; do\n' +
+      '[ "$(cat)" = "p" ] || exit 7\nwhile [ "$#" -gt 0 ]; do\n' +
         '  if [ "$1" = "-o" ]; then echo "{\\"ok\\":true}" > "$2"; exit; fi\n' +
         '  shift\n' +
         'done\nexit 2',
@@ -398,25 +411,25 @@ describe('runCodexCli', () => {
     ).rejects.toBeInstanceOf(CodexUnavailableError);
   });
 
-  // Слишком длинный промпт даёт `E2BIG` — беду одного вызова, а не всего codex.
-  // Записанная в недоступность, она уводила бы воркер в получасовой отступ, а
-  // `npm run prefetch` — в ненулевой код возврата на исправной модели.
-  it('не считает недоступностью сорванный запуск, который следующий вызов переживёт', async () => {
-    const bin = fakeCodexBin('codex-e2big', 'exit 0');
-    // Аргументы длиннее ARG_MAX: `spawn` отказывает с `E2BIG` ещё до процесса.
+  it('передаёт prompt длиннее системного лимита argv без E2BIG', async () => {
+    const outPath = join(dir, 'answer-large-prompt.json');
+    const bin = fakeCodexBin(
+      'codex-large-prompt',
+      '[ "$(wc -c)" -ge 4000000 ] || exit 8\nwhile [ "$#" -gt 0 ]; do\n' +
+        `  if [ "$1" = "-o" ]; then echo '{"ok":true}' > "$2"; exit; fi\n` +
+        '  shift\n' +
+        'done\nexit 9',
+    );
+
     const call = runCodexCli({
       prompt: 'п'.repeat(4 * 1024 * 1024),
       schemaPath: '/s.json',
-      outPath: join(dir, 'answer-e2big.json'),
+      outPath,
       model: 'm',
       bin,
     });
 
-    await expect(call).rejects.toBeInstanceOf(CodexRunError);
-    await expect(call).rejects.not.toBeInstanceOf(CodexUnavailableError);
-    // Именно несостоявшийся запуск, а не «codex вышел с нулём и ничего не создал»:
-    // без кода ошибки тест проходил бы и на успешно запустившейся заглушке.
-    await expect(call).rejects.toThrow(/не запустился.*E2BIG/);
+    await expect(call).resolves.toContain('"ok":true');
   });
 
   // Ответ идёт не через stdout, а через `--output-last-message`, то есть предел
