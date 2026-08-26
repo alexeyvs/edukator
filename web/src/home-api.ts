@@ -1,4 +1,4 @@
-import type { FinishRunResponse, RunProgress } from './run-api';
+import type { FinishRunApiResponse, RunProgress } from './run-api';
 import { jsonRequest, requestJson } from './http';
 
 export type CourseId = string;
@@ -126,7 +126,17 @@ export interface HomeApi {
   start(subject: Subject, topicId: string): Promise<StartRunResponse>;
   startBoss(topicId: string): Promise<StartBossResponse>;
   startTriage(subject: Subject): Promise<StartRunResponse>;
-  finish(runId: number): Promise<FinishRunResponse>;
+  /**
+   * Тот же `POST /api/run/:id/finish`, что и у `RunApi`, и тип обязан быть тем
+   * же самым — `FinishRunApiResponse`, а не одна лишь сводка. Маршрут на
+   * отвеченном забеге сперва запускает проверку осмысленности и отвечает
+   * `checking` либо `retry_required`; своя, укороченная копия контракта эти
+   * ветки от компилятора прятала, и главный экран отдавал их `FinishScreen`
+   * как сводку — то есть падал в пустой экран ровно на забеге, который просят
+   * завершить. Тип здесь один на оба контракта намеренно: вторая копия
+   * разъезжается с первой молча.
+   */
+  finish(runId: number): Promise<FinishRunApiResponse>;
 }
 
 const request = <T>(url: string, init?: RequestInit): Promise<T> =>
@@ -150,5 +160,5 @@ export const browserHomeApi: HomeApi = {
   start: (subject, topicId) => postPlannedRun<StartRunResponse>(subject, topicId),
   startBoss: (topicId) => postTopic<StartBossResponse>('/api/boss/start', topicId),
   startTriage: (subject) => postSubject<StartRunResponse>('/api/triage/start', subject),
-  finish: (runId) => request<FinishRunResponse>(`/api/run/${runId}/finish`, jsonRequest('POST')),
+  finish: (runId) => request<FinishRunApiResponse>(`/api/run/${runId}/finish`, jsonRequest('POST')),
 };

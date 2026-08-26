@@ -41,6 +41,11 @@ export function TriageScreen({ runId, api = browserRunApi, wait = defaultWait }:
     setBusy(true);
     try {
       const summary = await api.finish(runId);
+      // Каст держится на маршруте, а не на типе: проверку осмысленности
+      // `POST /api/run/:id/finish` запускает только для `kind = 'run'`, а триажу
+      // отвечает сводкой сразу. Копировать это глушение в новый экран нельзя —
+      // на обычном забеге тот же каст отдаёт `FinishScreen` состояние проверки
+      // вместо сводки, и экран падает в пустоту (см. `HomeScreen.continueRun`).
       if (generation.current === token) setFinish(summary as FinishRunResponse);
     } catch {
       if (generation.current === token) setProblem('Не получилось собрать итог триажа. Попробуй ещё раз.');

@@ -375,6 +375,69 @@ describe('главный экран', () => {
     expect(navigate).not.toHaveBeenCalled();
   });
 
+  // Прод 26 августа: последний ответ забега 60 («You okay hey») проверяющий
+  // пометил как junk, `finish` вернул `retry_required`, а главный экран отдал
+  // его `FinishScreen` как сводку. `closedTopics` там нет вовсе, `TopicList`
+  // читает `.length` у `undefined` — экран падал в пустоту, и завершить
+  // отвеченный забег было нечем: ни сводки, ни повтора.
+  it('на непройденной проверке уводит в забег, а не показывает сводку', async () => {
+    const api = apiWith({
+      ...PLAN,
+      plan: [{
+        ...PLAN.plan[0]!,
+        active: {
+          runId: 60,
+          startedAt: '2026-08-06T12:00:00.000Z',
+          progress: {
+            total: 12,
+            correct: 8,
+            target: 12,
+            done: true,
+            lives: { total: 3, remaining: 0, retryAvailable: false },
+          },
+        },
+      }],
+    });
+    vi.mocked(api.finish).mockResolvedValue({
+      status: 'retry_required',
+      flagged: 12,
+      remaining: 1,
+      retry: { item_id: 299, task: { id: 1214 } as never },
+    });
+    const navigate = vi.fn();
+    render(<HomeScreen
+      api={api}
+      navigate={navigate}
+      now={() => new Date('2026-08-08T12:00:00.000Z')}
+    />);
+
+    expect(await screen.findByText('Математика · 12 из 12 · начат 6 августа')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Завершить' }));
+
+    await waitFor(() => { expect(navigate).toHaveBeenCalledWith('/?runId=60'); });
+    expect(screen.queryByText('Забег завершён')).not.toBeInTheDocument();
+  });
+
+  // Та же развилка на старте: возобновлённый забег может оказаться уже
+  // отвеченным, и `start` зовёт тот же `finish`.
+  it('на старте уже отвеченного забега тоже уводит в забег', async () => {
+    const api = apiWith(PLAN);
+    vi.mocked(api.start).mockResolvedValue({
+      runId: 77,
+      progress: { total: 12, correct: 9, target: 12, done: true,
+        lives: { total: 3, remaining: 1, retryAvailable: false } },
+    } as never);
+    vi.mocked(api.finish).mockResolvedValue({ status: 'checking', flagged: 12 });
+    const navigate = vi.fn();
+    render(<HomeScreen api={api} navigate={navigate} />);
+
+    const buttons = await screen.findAllByRole('button', { name: 'Начать' });
+    fireEvent.click(buttons[0]!);
+
+    await waitFor(() => { expect(navigate).toHaveBeenCalledWith('/?runId=77'); });
+    expect(screen.queryByText('Забег завершён')).not.toBeInTheDocument();
+  });
+
   it('не показывает двойку, пока данных по предмету слишком мало', async () => {
     render(<HomeScreen api={apiWith({
       ...PLAN,

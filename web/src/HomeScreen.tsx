@@ -225,11 +225,14 @@ export function HomeScreen({
         if (topicId === undefined) throw new Error('Не выбрана тема занятия');
         started = await api.start(subject, topicId);
       }
+      const target = `/?runId=${started.runId}${kind === 'triage' ? '&kind=triage' : ''}`;
       if (started.progress.done) {
-        setFinish({ result: await api.finish(started.runId), kind });
+        const summary = await api.finish(started.runId);
+        if ('status' in summary) navigate(target);
+        else setFinish({ result: summary, kind });
         return;
       }
-      navigate(`/?runId=${started.runId}${kind === 'triage' ? '&kind=triage' : ''}`);
+      navigate(target);
     } catch (error) {
       setProblem(error instanceof Error ? error.message : 'Не получилось начать занятие');
     } finally {
@@ -258,7 +261,14 @@ export function HomeScreen({
     setFinishingRunId(active.runId);
     setProblem(null);
     try {
-      setFinish({ result: await api.finish(active.runId), kind: 'run' });
+      const summary = await api.finish(active.runId);
+      // Отвеченный забег закрывается не здесь: маршрут сперва запускает проверку
+      // осмысленности и отвечает `checking` или `retry_required`. Экран повтора и
+      // ожидание проверки живут в `RunScreen`, и он сам входит в них при заходе
+      // на уже отвеченный забег (`next` отвечает `run-complete`, дальше тот же
+      // `finish`). Поэтому здесь — переход, а не вторая копия этих экранов.
+      if ('status' in summary) navigate(`/?runId=${active.runId}`);
+      else setFinish({ result: summary, kind: 'run' });
     } catch (error) {
       setProblem(error instanceof Error ? error.message : 'Не получилось завершить забег');
     } finally {
