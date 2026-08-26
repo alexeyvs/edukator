@@ -413,8 +413,21 @@ function taskProblems(task: SchemaTask, format: AnswerFormat): string[] {
     problems.push(`подсказка содержит ответ «${task.answer}»`);
   }
 
-  if (deepHintStrings(task.deep_hint).some((value) => revealsAnswer(value, task.answer))) {
-    problems.push(`расширенная подсказка содержит ответ «${task.answer}»`);
+  // Второй уровень — теория, а не вторая короткая подсказка, и запрет называть
+  // ответ действует в нём ровно на чек-листе. Остальные секции его называть
+  // обязаны: у темы-классификации ответ и есть термин («обстоятельство»,
+  // «Where»), правило перечисляет разряды вместе с нужным, а разбор на другом
+  // материале при закрытом наборе разрядов в него же и приходит. Механический
+  // запрет на весь `deep_hint` такие темы закрывал наглухо — на проде 199 из
+  // 236 отбраковок за трое суток пришлись на него, и суточная квота ребёнка
+  // сгорала за час, не положив в банк ни одного задания. Смысловую часть
+  // («подсказка пересказывает текущее задание») держит проверяющий
+  // (`deep_hint_safe`), а структурную — запрет примеру повторять условие ниже.
+  //
+  // Чек-лист оставлен потому, что он единственный говорит о **текущем** задании
+  // во втором лице: «убедись, что вышло 45» — это выданный ответ, а не теория.
+  if (task.deep_hint.checklist.some((value) => revealsAnswer(value, task.answer))) {
+    problems.push(`чек-лист расширенной подсказки содержит ответ «${task.answer}»`);
   }
 
   if (task.deep_hint.examples.length !== 2) {
@@ -426,9 +439,6 @@ function taskProblems(task: SchemaTask, format: AnswerFormat): string[] {
   task.deep_hint.examples.forEach((example, index) => {
     for (const [field, value] of Object.entries(example)) {
       if (value.trim() === '') problems.push(`поле deep_hint.examples[${index}].${field} пусто`);
-    }
-    if (normalizeText(example.answer) === normalizeText(task.answer)) {
-      problems.push(`пример ${index + 1} расширенной подсказки повторяет ответ задания`);
     }
     if (
       normalizeText(example.prompt) === normalizeText(task.instruction) ||

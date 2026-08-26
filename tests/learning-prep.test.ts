@@ -149,6 +149,35 @@ describe('отбор и подготовка учебных материалов
     expect(selectLearningTopics(db, graph, NOW)).toEqual([]);
   });
 
+  // Третий потребитель суточной квоты, и он берёт темы из того же списка
+  // пробелов, что бракуются в обычном прогреве: теория, методист и пять
+  // вопросов на тему, которую генератор не вытягивает, — это самый дорогой из
+  // трёх заходов на неё за обход.
+  it('не берётся за тему, отложенную отступом', async () => {
+    triage(db, 'math', 'math.best');
+    triage(db, 'russian', 'russian.best');
+    const requests: string[] = [];
+
+    const report = await prepareLearningMaterials({
+      db,
+      graph,
+      now: () => NOW,
+      blocked: (topicId) => topicId === 'math.best',
+      produce: (request) => {
+        requests.push(request.topic.id);
+        return Promise.resolve(learningPackage(request.topic.id));
+      },
+    });
+
+    expect(requests).toEqual(['russian.best']);
+    expect(report.prepared.map((item) => item.topicId)).toEqual(['russian.best']);
+    // Claim не заводится: строка «preparing» держит предмет занятым и после
+    // снятия отступа.
+    expect(db.prepare(
+      "SELECT COUNT(*) AS n FROM learning_materials WHERE topic_id = 'math.best'",
+    ).get()).toEqual({ n: 0 });
+  });
+
   it('публикует по одному полному материалу на предмет через общий бюджет', async () => {
     triage(db, 'math', 'math.best');
     triage(db, 'russian', 'russian.best');

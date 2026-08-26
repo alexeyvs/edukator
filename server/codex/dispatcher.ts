@@ -29,6 +29,7 @@ import type { TopicGraph } from '../curriculum.js';
 import type { FailureLog } from '../log.js';
 import type { CodexRunner } from './client.js';
 import type { CodexConcurrency } from './concurrency.js';
+import { TopicBackoff } from './topic-backoff.js';
 import {
   cycleAttempts,
   MAX_BATCHES_PER_TOPIC,
@@ -313,6 +314,18 @@ export class WarmupDispatcher {
    * проглатывается — а ждать ему при этом полный получасовой отступ.
    */
   #served = new Set<string>();
+  /**
+   * Отступы тем на ребёнка. Живут у диспетчера, а не у цикла: провал темы имеет
+   * смысл только по отношению к следующему обходу, а цикл собирается заново на
+   * каждой фазе каждого обхода. Экземпляр на ребёнка, не на процесс: имена тем
+   * глобальны, и общий счётчик снимал бы тему с прогрева всей семье из-за
+   * неудач одного ученика.
+   *
+   * Выведенный ребёнок отсюда не убирается: карта растёт по одной пустой записи
+   * на ребёнка за всю жизнь процесса, а уборка по составу семьи означала бы
+   * второй список детей рядом с `listServiceableChildren`.
+   */
+  #backoffs = new Map<string, TopicBackoff>();
   #stopped = false;
   #running: Promise<void> | undefined;
   /** Будильник текущей паузы; `null` — паузы сейчас нет (или идёт неснимаемая часть). */
@@ -553,6 +566,15 @@ export class WarmupDispatcher {
   }
 
   /** Один заход по одному ребёнку. Отказ его базы обход не останавливает. */
+  /** Отступы тем этого ребёнка; заводятся при первом обходе. */
+  #backoffFor(childId: string): TopicBackoff {
+    const existing = this.#backoffs.get(childId);
+    if (existing !== undefined) return existing;
+    const created = new TopicBackoff();
+    this.#backoffs.set(childId, created);
+    return created;
+  }
+
   async #runChild(
     childId: string,
     report: ChildSweepReport,
@@ -597,6 +619,7 @@ export class WarmupDispatcher {
         ...(this.#options.budget === undefined ? {} : { budget: this.#options.budget }),
         ...(this.#options.now === undefined ? {} : { now: this.#options.now }),
         ...(run === undefined ? {} : { run }),
+        backoff: this.#backoffFor(childId),
       });
       report.cycles.push(cycle);
       if (!cycle.codexUnavailable) return;

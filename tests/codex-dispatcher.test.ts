@@ -45,6 +45,7 @@ import {
   type ProduceRequest,
   type WorkerOptions,
 } from '../server/codex/worker.js';
+import type { TopicBackoff } from '../server/codex/topic-backoff.js';
 
 const NOW = new Date('2026-08-19T10:00:00.000Z');
 
@@ -248,6 +249,32 @@ describe('диспетчер прогрева', () => {
       expect(served[0]).toBe('Ученик');
       expect(new Set(served)).toEqual(new Set(['Ученик', 'Соня']));
       expect(sleeping.id).not.toBe(active.id);
+    });
+
+    // Отступ живёт у ребёнка, а не у процесса: идентификаторы тем глобальны, и
+    // общий счётчик снимал бы тему с прогрева всей семье из-за неудач одного
+    // ученика — у которого и профиль, и прошлые формулировки, и сложность свои.
+    it('даёт каждому ребёнку свой отступ по темам и хранит его между обходами', async () => {
+      addKid('Первый');
+      addKid('Второй');
+      const seen: (TopicBackoff | undefined)[] = [];
+      const worker = dispatcher({
+        cycle: (options: WorkerOptions) => {
+          seen.push(options.backoff);
+          return Promise.resolve({ topics: [], refilled: [], codexUnavailable: false });
+        },
+      });
+
+      await worker.sweep();
+      const first = [...seen];
+      seen.length = 0;
+      await worker.sweep();
+
+      expect(first.every((backoff) => backoff !== undefined)).toBe(true);
+      expect(new Set(first).size).toBe(2);
+      // Тот же экземпляр во втором обходе: провал первого обхода обязан быть
+      // виден второму, иначе отступа нет вовсе.
+      expect(new Set([...first, ...seen]).size).toBe(2);
     });
 
     it('не даёт указателю уморить последнего в очереди', async () => {

@@ -12,7 +12,7 @@ import {
 } from '../server/codex/client.js';
 import { readPersona, TASK_BATCH_SIZE } from '../server/codex/prompt.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
-import { generateTaskBatch } from '../server/codex/generate.js';
+import { generateTaskBatch, TaskBatchRejectedError } from '../server/codex/generate.js';
 import { TEST_DEEP_HINT } from './generated-task-fixture.js';
 
 const PERSONA = 'Ты напарник, а не учитель.';
@@ -290,6 +290,27 @@ describe('generateTaskBatch: ошибочные сценарии', () => {
       generateTaskBatch({ topic: topic(), difficulty: 2, persona: PERSONA, run }),
     ).rejects.toThrow(/math\.fractions.*не сгенерированы за 3 попыт/su);
     expect(requests).toHaveLength(3);
+  });
+
+  // Различие важно на уровень выше: ответ модели, не прошедший проверку, —
+  // повод отложить **тему**, а сорванный запуск codex — повод отложить весь
+  // обход. Сведённые в один тип, они дают либо тему, отложенную за чужой
+  // простой, либо просроченную авторизацию, спрятанную под отступом по темам.
+  it('отличает забракованный ответ модели от сорванного запуска', async () => {
+    const bad = batch(1, { difficulty: 7 });
+    const rejected = await generateTaskBatch({
+      topic: topic(), difficulty: 2, persona: PERSONA, run: recorder([bad, bad, bad]).run,
+    }).catch((error: unknown) => error);
+    expect(rejected).toBeInstanceOf(TaskBatchRejectedError);
+
+    const broken = await generateTaskBatch({
+      topic: topic(),
+      difficulty: 2,
+      persona: PERSONA,
+      run: () => Promise.reject(new CodexRunError('codex завершился с кодом 1: not logged in')),
+    }).catch((error: unknown) => error);
+    expect(broken).toBeInstanceOf(Error);
+    expect(broken).not.toBeInstanceOf(TaskBatchRejectedError);
   });
 
   it('уважает заданное число попыток', async () => {

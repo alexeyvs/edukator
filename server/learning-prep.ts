@@ -13,6 +13,7 @@ import { questionFingerprint } from './normalize.js';
 import { rankTopics } from './scheduler.js';
 import { recentQuestions, reserveLearningTasks } from './codex/bank.js';
 import {
+  CodexRunError,
   CodexUnavailableError,
   type CodexRunner,
 } from './codex/client.js';
@@ -64,6 +65,8 @@ export interface LearningPreparationItem {
   recovered: boolean;
   stored: number;
   error?: string;
+  /** Ответы модели забракованы — виновата тема, а не модель; см. `RefillReport`. */
+  rejected?: boolean;
 }
 
 export interface LearningPreparationReport {
@@ -241,6 +244,12 @@ export interface PrepareLearningOptions {
   run?: CodexRunner;
   model?: string;
   log?: LearningLog;
+  /**
+   * Отложена ли тема отступом. Спрашивается до claim: строка `preparing` на
+   * теме, за которую никто не берётся, держит предмет занятым и после снятия
+   * отступа — до уборки просроченных заявок.
+   */
+  blocked?: (topicId: string) => boolean;
 }
 
 /** Поддерживает до трёх материалов, но не более одного живого на предмет. */
@@ -269,6 +278,7 @@ export async function prepareLearningMaterials(
       codexUnavailable ||
       (current !== undefined && (current.status !== 'preparing' || current.topicId !== candidate.topic.id))
     ) continue;
+    if (options.blocked?.(candidate.topic.id) === true) continue;
     const claim = claimLearningMaterial(options.db, {
       subject: candidate.topic.subject,
       topicId: candidate.topic.id,
@@ -309,7 +319,8 @@ export async function prepareLearningMaterials(
       if (!published.ready) {
         const error = 'полный тест столкнулся с уже сохранённым отпечатком';
         prepared.push({ topicId: candidate.topic.id, materialId: claim.materialId, ready: false,
-          recovered: claim.recovered || recoveredTopics.has(candidate.topic.id), stored: 0, error });
+          recovered: claim.recovered || recoveredTopics.has(candidate.topic.id), stored: 0, error,
+          rejected: true });
         log(`воркер: материал темы «${candidate.topic.id}» отклонён: ${error}`);
         continue;
       }
@@ -324,7 +335,11 @@ export async function prepareLearningMaterials(
       }
       const message = (error as Error).message;
       prepared.push({ topicId: candidate.topic.id, materialId: claim.materialId, ready: false,
-        recovered: claim.recovered || recoveredTopics.has(candidate.topic.id), stored: 0, error: message });
+        recovered: claim.recovered || recoveredTopics.has(candidate.topic.id), stored: 0, error: message,
+        // Признак берётся от обратного: отказ методиста и недобранный тест
+        // приезжают обычной ошибкой, а из «не вина темы» здесь остаётся ровно
+        // сорванный запуск — `CodexUnavailableError` снят веткой выше.
+        rejected: !(error instanceof CodexRunError) });
       log(`воркер: материал темы «${candidate.topic.id}» отложен: ${message}`);
     }
   }

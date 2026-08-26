@@ -32,6 +32,7 @@ import {
   type RefillReport,
   type TaskProducer,
 } from '../server/codex/worker.js';
+import { TOPIC_BACKOFF_BASE_MS, TopicBackoff } from '../server/codex/topic-backoff.js';
 
 function topic(id: string, patch: Partial<Topic> = {}): Topic {
   return {
@@ -117,6 +118,107 @@ describe('воркер тёплой очереди', () => {
   afterEach(() => {
     db.close();
     rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  // Прод 25 августа: две темы («russian.slovosochetanie-i-predlozhenie» и
+  // «english.question-words») бракуются целиком по одной и той же причине, обход
+  // идёт раз в минуту, и вся суточная квота ребёнка в 60 вызовов сгорает за
+  // первый час после московской полуночи. Остальные двадцать тем за сутки не
+  // получают ни одного вызова.
+  describe('отступ по провалившейся теме', () => {
+    /** Производитель, отдающий пустой батч: проверяющий забраковал всё. */
+    const empty: TaskProducer = () => Promise.resolve([]);
+
+    /** Опустошает тему до голода: иначе следующий цикл её просто не берёт. */
+    function drainBelowThreshold(target: Database, topicId: string): void {
+      while (countAvailable(target, topicId) >= REFILL_BELOW) takeTask(target, topicId);
+    }
+
+    it('после провала не трогает тему до конца паузы', async () => {
+      const graph = graphOf([topic('math.a')]);
+      const backoff = new TopicBackoff();
+      const start = new Date('2026-08-26T00:00:00.000Z');
+
+      const first = await runWarmupCycle({
+        db, graph, produce: empty, log, backoff, now: () => start,
+      });
+      expect(first.refilled[0]?.stored).toBe(0);
+      expect(first.refilled[0]?.error).toBeDefined();
+
+      const { requests, produce } = producer(5);
+      const held = await runWarmupCycle({
+        db, graph, produce, log, backoff,
+        now: () => new Date(start.getTime() + TOPIC_BACKOFF_BASE_MS - 1),
+      });
+
+      expect(requests).toEqual([]);
+      expect(held.refilled).toEqual([]);
+      // Тема остаётся активной: отложен прогрев, а не занятие по ней.
+      expect(held.topics).toEqual(['math.a']);
+    });
+
+    it('по истечении паузы берётся за тему снова', async () => {
+      const graph = graphOf([topic('math.a')]);
+      const backoff = new TopicBackoff();
+      const start = new Date('2026-08-26T00:00:00.000Z');
+      await runWarmupCycle({ db, graph, produce: empty, log, backoff, now: () => start });
+
+      const { requests, produce } = producer(5);
+      await runWarmupCycle({
+        db, graph, produce, log, backoff,
+        now: () => new Date(start.getTime() + TOPIC_BACKOFF_BASE_MS),
+      });
+
+      expect(requests.map((request) => request.topic.id)).toContain('math.a');
+    });
+
+    it('удачный долив снимает отступ', async () => {
+      const graph = graphOf([topic('math.a')]);
+      const backoff = new TopicBackoff();
+      const start = new Date('2026-08-26T00:00:00.000Z');
+      await runWarmupCycle({ db, graph, produce: empty, log, backoff, now: () => start });
+
+      const after = new Date(start.getTime() + TOPIC_BACKOFF_BASE_MS);
+      await runWarmupCycle({ db, graph, produce: producer(5).produce, log, backoff, now: () => after });
+      drainBelowThreshold(db, 'math.a');
+
+      const { requests, produce } = producer(5);
+      await runWarmupCycle({
+        db, graph, produce, log, backoff, now: () => new Date(after.getTime() + 1000),
+      });
+
+      expect(requests.map((request) => request.topic.id)).toContain('math.a');
+    });
+
+    it('держит только провалившуюся тему', async () => {
+      const graph = graphOf([topic('math.a'), topic('russian.a')]);
+      const backoff = new TopicBackoff();
+      const start = new Date('2026-08-26T00:00:00.000Z');
+      const failing: TaskProducer = (request) =>
+        Promise.resolve(request.topic.id === 'math.a' ? [] : batchOf(request.topic.id, 5));
+
+      await runWarmupCycle({ db, graph, produce: failing, log, backoff, now: () => start });
+      drainBelowThreshold(db, 'russian.a');
+
+      const { requests, produce } = producer(5);
+      await runWarmupCycle({
+        db, graph, produce, log, backoff, now: () => new Date(start.getTime() + 60 * 1000),
+      });
+
+      expect(new Set(requests.map((request) => request.topic.id))).toEqual(new Set(['russian.a']));
+    });
+
+    // Без отступа воркер вправе не получать его вовсе: `npm run prefetch` идёт
+    // одним проходом, и хранить между проходами ему нечего.
+    it('без отступа работает как раньше', async () => {
+      const graph = graphOf([topic('math.a')]);
+      await runWarmupCycle({ db, graph, produce: empty, log });
+
+      const { requests, produce } = producer(5);
+      await runWarmupCycle({ db, graph, produce, log });
+
+      expect(requests.map((request) => request.topic.id)).toContain('math.a');
+    });
   });
 
   describe('пороги пополнения', () => {

@@ -6,6 +6,7 @@ import type { Topic, TopicGraph } from './curriculum.js';
 import { readProfile } from './db.js';
 import { reserveBossTasks, recentQuestions } from './codex/bank.js';
 import { CodexUnavailableError } from './codex/client.js';
+import { TaskBatchRejectedError } from './codex/generate.js';
 import {
   codexConcurrency,
   type CodexConcurrency,
@@ -41,6 +42,12 @@ export interface BossPreparationOptions {
   maxBatches?: number;
   now?: Date;
   log?: WorkerLog;
+  /**
+   * Отложена ли тема отступом. Спрашивается **до** claim, а не после: строка
+   * `preparing` на теме, за которую никто не берётся, закрывает её от
+   * подготовки и после снятия отступа — до получасовой уборки просроченных.
+   */
+  blocked?: (topicId: string) => boolean;
 }
 
 export interface BossPreparationReport {
@@ -52,6 +59,8 @@ export interface BossPreparationReport {
   recovered: boolean;
   codexUnavailable: boolean;
   error?: string;
+  /** Ответы модели забракованы — виновата тема, а не модель; см. `RefillReport`. */
+  rejected?: boolean;
 }
 
 function defaultLog(message: string): void {
@@ -70,7 +79,12 @@ function validNow(now: Date): Date {
  * Проверка состояния и вставка идут одной immediate-транзакцией: два воркера
  * не смогут одновременно начать разные наборы одной темы.
  */
-function claimBoss(db: Database, graph: TopicGraph, now: Date): BatchClaim | undefined {
+function claimBoss(
+  db: Database,
+  graph: TopicGraph,
+  now: Date,
+  blocked: (topicId: string) => boolean,
+): BatchClaim | undefined {
   return db.transaction((): BatchClaim | undefined => {
     const revisions = new Map(graph.courses.entries());
     const cutoff = new Date(now.getTime() - PREPARING_STALE_MS).toISOString();
@@ -91,7 +105,8 @@ function claimBoss(db: Database, graph: TopicGraph, now: Date): BatchClaim | und
         WHERE status = 'preparing' ORDER BY created_at, id`,
     ).all().find((row) => {
       const topic = graph.byId.get(row.topic_id);
-      return topic !== undefined && row.course_revision_id === (revisions.get(topic.subject)?.revisionId ?? null);
+      if (topic === undefined || blocked(row.topic_id)) return false;
+      return row.course_revision_id === (revisions.get(topic.subject)?.revisionId ?? null);
     });
     if (preparing !== undefined) {
       const topic = graph.byId.get(preparing.topic_id);
@@ -102,6 +117,7 @@ function claimBoss(db: Database, graph: TopicGraph, now: Date): BatchClaim | und
     }
 
     const eligible = graph.order.find((topic) => {
+      if (blocked(topic.id)) return false;
       const state = db.prepare<[string], { mastery: number; closed_at: string | null }>(
         'SELECT mastery, closed_at FROM topic_state WHERE topic_id = ?',
       ).get(topic.id);
@@ -145,7 +161,7 @@ export async function prepareNextBoss(
   options: BossPreparationOptions,
 ): Promise<BossPreparationReport> {
   const now = validNow(options.now ?? new Date());
-  const claim = claimBoss(options.db, options.graph, now);
+  const claim = claimBoss(options.db, options.graph, now, options.blocked ?? ((): boolean => false));
   if (claim === undefined) {
     return { batches: 0, stored: 0, ready: false, recovered: false, codexUnavailable: false };
   }
@@ -189,6 +205,7 @@ export async function prepareNextBoss(
       return {
         topicId: claim.topic.id, batchId: claim.batchId, batches, stored: 0,
         ready: false, recovered: claim.recovered, codexUnavailable: false, error: message,
+        rejected: true,
       };
     }
 
@@ -217,6 +234,7 @@ export async function prepareNextBoss(
     return {
       topicId: claim.topic.id, batchId: claim.batchId, batches, stored: 0,
       ready: false, recovered: claim.recovered, codexUnavailable: unavailable, error: message,
+      rejected: error instanceof TaskBatchRejectedError,
     };
   }
 }

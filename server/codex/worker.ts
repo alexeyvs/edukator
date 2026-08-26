@@ -26,7 +26,8 @@ import { activeTopics } from '../scheduler.js';
 import { countAvailable, recentQuestions, storeTasks } from './bank.js';
 import { CodexUnavailableError, type CodexRunner } from './client.js';
 import { CodexQuotaError } from './quota.js';
-import { generateTaskBatch } from './generate.js';
+import type { TopicBackoff } from './topic-backoff.js';
+import { generateTaskBatch, TaskBatchRejectedError } from './generate.js';
 import { taskPromptText, type GeneratedTask } from './task-schema.js';
 import { validateTaskBatch } from './validate.js';
 import {
@@ -115,6 +116,13 @@ export interface WorkerOptions {
   budget?: CodexConcurrency;
   /** Подменяемая подготовка полного материала и теста. */
   learningProduce?: LearningProducer;
+  /**
+   * Отступы тем этого ребёнка. Экземпляр приходит снаружи потому, что состояние
+   * обязано пережить цикл: провал темы имеет смысл только по отношению к
+   * следующему обходу. `undefined` — отступа нет вовсе (`npm run prefetch` идёт
+   * одним проходом, и хранить между проходами ему нечего).
+   */
+  backoff?: TopicBackoff;
 }
 
 export interface RefillReport {
@@ -127,6 +135,13 @@ export interface RefillReport {
   available: number;
   /** Причина, по которой долив прекратился раньше цели. */
   error?: string;
+  /**
+   * Модель отвечала, и её ответы забракованы — то есть виновата тема, а не
+   * модель. Отделено от `error` потому, что сорванный запуск codex выглядит
+   * здесь так же, а реакция на него противоположная: откладывать надо обход, а
+   * не тему.
+   */
+  rejected?: boolean;
 }
 
 export interface CycleReport {
@@ -267,7 +282,10 @@ async function refillTopic(topic: Topic, context: RefillContext): Promise<Refill
       if (error instanceof CodexUnavailableError) throw error;
       const message = (error as Error).message;
       log(`воркер: тема «${topic.id}» не пополнена: ${message}`);
-      return { topicId: topic.id, batches, stored, available, error: message };
+      return {
+        topicId: topic.id, batches, stored, available, error: message,
+        rejected: error instanceof TaskBatchRejectedError,
+      };
     }
 
     // Запись в банк — под тем же перехватом, что и генерация: без него отказ
@@ -310,10 +328,44 @@ async function refillTopic(topic: Topic, context: RefillContext): Promise<Refill
       stored,
       available,
       error: `ни одно задание не дошло до банка за ${batches} батч(ей)`,
+      // Проверяющий, забраковавший батч целиком, возвращает пустой список, а не
+      // бросает: модель отвечала, и виновата тема.
+      rejected: true,
     };
   }
 
   return { topicId: topic.id, batches, stored, available };
+}
+
+/**
+ * Записывает исход долива в отступ темы. Отдельной функцией потому, что «что
+ * считать провалом» обязано совпадать с `everyRefillFailed`: разъехавшись, они
+ * дали бы тему, которую диспетчер считает рабочей, а прогрев — безнадёжной.
+ */
+function noteTopicOutcome(
+  backoff: TopicBackoff | undefined,
+  topicId: string,
+  report: { stored: number; error?: string; rejected?: boolean },
+  now: Date,
+  log: WorkerLog,
+): void {
+  if (backoff === undefined) return;
+  if (report.error === undefined || report.stored > 0) {
+    backoff.noteSuccess(topicId);
+    return;
+  }
+  // Отступ назначается только за забракованный ответ модели. Сорванный запуск,
+  // отказ базы и прочее к теме отношения не имеют, и откладывать за них тему
+  // значило бы прятать общий отказ: просроченная авторизация codex за один
+  // обход разложила бы по отступам все темы всех детей, следующий обход не нашёл
+  // бы ни одной голодной, и растущая пауза диспетчера с записью
+  // `codex-unavailable` не наступила бы вовсе — в журнале осталась бы тишина.
+  if (report.rejected !== true) return;
+  const delay = backoff.noteFailure(topicId, now);
+  log(
+    `воркер: тема «${topicId}» отложена на ${String(Math.round(delay / 60000))} мин ` +
+      `после провала долива: ${report.error}`,
+  );
 }
 
 /**
@@ -346,6 +398,8 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
       ...(options.run === undefined ? {} : { run: options.run }),
     });
   const budget = options.budget ?? codexConcurrency;
+  const now = options.now?.() ?? new Date();
+  const backoff = options.backoff;
   // Пустой отчёт вместо вызова: подготовка босса — это генерация целого набора
   // заданий, и «пропустить фазу» обязано означать «не звать модель», а не
   // «позвать и выбросить».
@@ -357,9 +411,21 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
           graph,
           produce,
           budget,
-          ...(options.now === undefined ? {} : { now: options.now() }),
+          ...(options.now === undefined ? {} : { now }),
           log,
+          // Отступ у босса и у долива общий на тему: причина провала у них одна
+          // — модель не вытягивает эту тему, — и раздельные счётчики означали
+          // бы, что отложенную тему всё равно долбит второй конвейер, вчетверо
+          // дороже (полный набор босса — до четырёх батчей подряд).
+          ...(backoff === undefined
+            ? {}
+            : { blocked: (topicId: string): boolean => backoff.blocked(topicId, now) }),
         });
+  // Недоступная модель — не вина темы: отступ по ней означал бы, что вернувшийся
+  // codex застаёт полсемьи тем под запретом, назначенным за его же простой.
+  if (boss.topicId !== undefined && !boss.codexUnavailable) {
+    noteTopicOutcome(backoff, boss.topicId, boss, now, log);
+  }
   if (boss.codexUnavailable) {
     return { topics: [], refilled: [], codexUnavailable: true, bossPreparation: boss };
   }
@@ -372,8 +438,17 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
   // ушёл в получасовой отступ при полностью исправной модели. Ноль означает
   // «голодная»: причина назовётся в отчёте по теме, когда `refillTopic` упрётся
   // в тот же запрос.
-  const hungry = topics.filter((topic) =>
+  const starving = topics.filter((topic) =>
     countOrZero(db, topic.id, revisionFor(graph, topic)) < threshold);
+  // Тема под отступом выпадает из долива, но остаётся активной: отложен прогрев,
+  // а не занятие по ней — то, что уже лежит в банке, выдаётся как обычно.
+  //
+  // Пропуск не пишется в лог: обход идёт раз в минуту, и строка на каждый
+  // пропущенный обход за шесть часов отступа выдавила бы из видимого хвоста
+  // журнала ровно ту запись, которая причину отступа и называет. Причина
+  // пишется один раз — переходом, там же, где отступ назначается.
+  const hungry =
+    backoff === undefined ? starving : starving.filter((topic) => !backoff.blocked(topic.id, now));
 
   const refilled: RefillReport[] = [];
   let unavailable = false;
@@ -392,7 +467,13 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
   await pool(hungry, concurrency, async (topic) => {
     if (unavailable) return;
     try {
-      refilled.push(await refillTopic(topic, context));
+      const report = await refillTopic(topic, context);
+      refilled.push(report);
+      // Провалом считается ровно то же, что и у `everyRefillFailed`: ошибка при
+      // нулевом доливе. Тема, налившая первым батчем и споткнувшаяся на втором,
+      // работает — отправлять её в отступ значило бы остужать наполняющуюся
+      // очередь.
+      noteTopicOutcome(backoff, topic.id, report, now, log);
     } catch (error) {
       if (error instanceof CodexUnavailableError) {
         unavailable = true;
@@ -439,8 +520,16 @@ export async function runWarmupCycle(options: WorkerOptions): Promise<CycleRepor
       ...(options.learningProduce === undefined ? {} : { produce: options.learningProduce }),
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.run === undefined ? {} : { run: options.run }),
+      ...(backoff === undefined
+        ? {}
+        : { blocked: (topicId: string): boolean => backoff.blocked(topicId, now) }),
     });
     unavailable = learning.codexUnavailable;
+    // Тот же отступ и на третьем потребителе квоты: темы он берёт из того же
+    // списка пробелов, а стоит дороже обоих — теория, методист и пять вопросов.
+    if (!learning.codexUnavailable) {
+      for (const item of learning.prepared) noteTopicOutcome(backoff, item.topicId, item, now, log);
+    }
   }
 
   return {

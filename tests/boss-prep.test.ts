@@ -57,6 +57,54 @@ describe('подготовка боёв с боссом', () => {
     expect(PREPARING_STALE_MS).toBe(1_800_000);
   });
 
+  // Босс — это полный набор из пятнадцати заданий, то есть до четырёх батчей
+  // подряд. Тема, которую генератор не вытягивает, отдаёт эти вызовы впустую
+  // каждый обход: на проде подготовка одного босса легла 15 раз за трое суток,
+  // и это шло из той же суточной квоты, что и обычный прогрев.
+  it('не берётся за тему, отложенную отступом', async () => {
+    const requests: string[] = [];
+    const produce = (request: { topic: { id: string } }): Promise<GeneratedTask[]> => {
+      requests.push(request.topic.id);
+      return Promise.resolve(five('blocked'));
+    };
+    db.prepare('UPDATE topic_state SET mastery = ? WHERE topic_id = ?').run(0.9, TOPIC);
+
+    const report = await prepareNextBoss({
+      db, graph, produce, now: NOW, blocked: (topicId) => topicId === TOPIC,
+    });
+
+    expect(requests).toEqual([]);
+    expect(report).toMatchObject({ batches: 0, ready: false });
+    expect(report.topicId).toBeUndefined();
+    // Claim не заводится: строка «preparing» на теме, за которую никто не
+    // берётся, закрыла бы её от подготовки и после снятия отступа — до
+    // получасовой уборки просроченных.
+    expect(db.prepare('SELECT count(*) n FROM boss_batches').get()).toEqual({ n: 0 });
+  });
+
+  it('не возобновляет незакрытую подготовку темы под отступом', async () => {
+    db.prepare('UPDATE topic_state SET mastery = ? WHERE topic_id = ?').run(0.9, TOPIC);
+    const first = await prepareNextBoss({
+      db, graph, produce: () => Promise.resolve([]), now: NOW,
+    });
+    expect(first.topicId).toBe(TOPIC);
+
+    const requests: string[] = [];
+    const report = await prepareNextBoss({
+      db,
+      graph,
+      produce: (request) => {
+        requests.push(request.topic.id);
+        return Promise.resolve(five('resumed'));
+      },
+      now: NOW,
+      blocked: (topicId) => topicId === TOPIC,
+    });
+
+    expect(requests).toEqual([]);
+    expect(report.topicId).toBeUndefined();
+  });
+
   it('claim-ит тему только строго выше 0.75 и передаёт профиль со сложностью', async () => {
     const requests: Parameters<Parameters<typeof prepareNextBoss>[0]['produce']>[0][] = [];
     const produce = (request: (typeof requests)[number]): Promise<GeneratedTask[]> => {
