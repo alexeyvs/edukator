@@ -440,7 +440,9 @@ export function RunScreen({
   if (current === null || progress === null) {
     return <section className="run-card run-state" aria-label="Загрузка задания">Подбираю задание…</section>;
   }
-  const lives = kind === 'run' ? progress.lives : undefined;
+  // Разбор тоже даёт исправление, но одно: сервер присылает свой `total`, и
+  // экран рисует ровно столько сердец, сколько жизней у этого забега.
+  const lives = progress.lives;
 
   return (
     <main className="run-shell">
@@ -532,7 +534,7 @@ export function RunScreen({
                   type="button"
                   disabled={submitting}
                   onClick={() => void (
-                    kind === 'run' && result.progress.lives?.retryAvailable === true
+                    result.progress.lives?.retryAvailable === true
                       ? skipRetry()
                       : result.progress.done ? finishRun() : nextTask()
                   )}
@@ -559,7 +561,7 @@ export function RunScreen({
                   Я всё-таки прав
                 </button>
               )}
-              {kind === 'run' && !result.correct && result.progress.lives?.retryAvailable === true && (
+              {!result.correct && result.progress.lives?.retryAvailable === true && (
                 <button
                   className="secondary"
                   type="button"
@@ -574,12 +576,12 @@ export function RunScreen({
                 type="button"
                 disabled={submitting || disputing || disputeStatus === 'open'}
                 onClick={() => void (
-                  kind === 'run' && !result.correct && result.progress.lives?.retryAvailable === true
+                  !result.correct && result.progress.lives?.retryAvailable === true
                     ? skipRetry()
                     : result.progress.done ? finishRun() : nextTask()
                 )}
               >
-                {kind === 'run' && !result.correct && result.progress.lives?.retryAvailable === true
+                {!result.correct && result.progress.lives?.retryAvailable === true
                   ? 'Следующее задание'
                   : result.progress.done
                   ? kind === 'lesson' ? 'Завершить тест' : 'Завершить забег'

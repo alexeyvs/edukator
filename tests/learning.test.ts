@@ -6,8 +6,11 @@ import type { Database } from 'better-sqlite3';
 import { openDatabase } from '../server/db.js';
 import { buildTopicGraph } from '../server/curriculum.js';
 import {
+  assertLearningReadyForIntegrity,
   claimLearningMaterial,
   finishLearningMaterial,
+  LEARNING_TASK_COUNT,
+  LESSON_LIVES,
   openLearningMaterial,
   readLearningMaterial,
   rejectLearningMaterial,
@@ -93,6 +96,27 @@ describe('слой данных учебных материалов', () => {
   afterEach(() => {
     db.close();
     rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('держит калибровочные константы спеки', () => {
+    expect(LEARNING_TASK_COUNT).toBe(5);
+    expect(LESSON_LIVES).toBe(1);
+  });
+
+  it('даёт каждой попытке теста ровно одно исправление', () => {
+    const { materialId, taskIds, runId } = activeRun(db);
+    expect(db.prepare('SELECT lives_remaining FROM runs WHERE id = ?').get(runId))
+      .toEqual({ lives_remaining: 1 });
+
+    taskIds.forEach((taskId, index) => db.prepare(
+      `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct, duration_ms)
+       VALUES (?, ?, ?, '4', ?, 1000)`,
+    ).run(taskId, TOPIC, runId, index < 3 ? 1 : 0));
+    db.prepare('UPDATE runs SET total = 5, correct = 3 WHERE id = ?').run(runId);
+    finishLearningMaterial(db, GRAPH, runId, { now: START });
+    const second = startLearningRun(db, materialId, { now: new Date(START.getTime() + 1000) });
+    expect(db.prepare('SELECT lives_remaining FROM runs WHERE id = ?').get(second.runId))
+      .toEqual({ lives_remaining: 1 });
   });
 
   it('атомарно захватывает тему один раз и восстанавливает зависший claim', () => {
@@ -279,6 +303,26 @@ describe('слой данных учебных материалов', () => {
     ]);
     expect(finishLearningMaterial(db, GRAPH, firstRunId, { now: new Date(START.getTime() + 4000) }))
       .toEqual(firstResult);
+  });
+
+  it('не завершает разбор, пока доступно исправление ответа', () => {
+    const { taskIds, runId } = activeRun(db);
+    taskIds.forEach((taskId, index) => db.prepare(
+      `INSERT INTO attempts (task_id, topic_id, run_id, answer, is_correct, duration_ms)
+       VALUES (?, ?, ?, '4', ?, 1000)`,
+    ).run(taskId, TOPIC, runId, index < 4 ? 1 : 0));
+    db.prepare('UPDATE runs SET total = 5, correct = 4, retry_task_id = ? WHERE id = ?')
+      .run(taskIds[4], runId);
+
+    expect(() => assertLearningReadyForIntegrity(db, runId)).toThrow(/исправлени/);
+    expect(() => finishLearningMaterial(db, GRAPH, runId, { now: START }))
+      .toThrow(/исправлени/);
+    expect(db.prepare('SELECT finished_at FROM runs WHERE id = ?').get(runId))
+      .toEqual({ finished_at: null });
+
+    db.prepare('UPDATE runs SET retry_task_id = NULL WHERE id = ?').run(runId);
+    expect(finishLearningMaterial(db, GRAPH, runId, { now: START }))
+      .toMatchObject({ outcome: 'passed', correct: 4 });
   });
 
   it('не завершает неполный тест или тест с открытым спором', () => {

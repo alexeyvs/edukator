@@ -156,7 +156,20 @@ describe('Learning API', () => {
         },
       });
       expect(response.statusCode).toBe(200);
-      attempts.push((response.json() as { attempt_id: number }).attempt_id);
+      const result = response.json() as {
+        attempt_id: number;
+        progress: { lives?: { retryAvailable: boolean } };
+      };
+      attempts.push(result.attempt_id);
+      // Разбор, как и обычный забег, ждёт решения по неверному ответу: без
+      // явного пропуска следующая выдача упрётся в исправление.
+      if (result.progress.lives?.retryAvailable === true) {
+        const skipped = await app.inject({
+          method: 'POST', url: '/api/session/retry/skip',
+          payload: { runId, task_id: body.task.id },
+        });
+        expect(skipped.statusCode).toBe(200);
+      }
     }
     return attempts;
   }
@@ -640,6 +653,10 @@ describe('Learning API', () => {
       payload: { task_id: firstTask.task.id, runId, answer: '5', hint_used: false },
     });
     const wrongAttempt = (firstAnswer.json() as { attempt_id: number }).attempt_id;
+    expect((await app.inject({
+      method: 'POST', url: '/api/session/retry/skip',
+      payload: { runId, task_id: firstTask.task.id },
+    })).statusCode).toBe(200);
     const incomplete = await app.inject({
       method: 'POST', url: `/api/learning/run/${runId}/finish`,
     });

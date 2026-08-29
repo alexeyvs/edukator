@@ -408,6 +408,12 @@ sudo ./scripts/install-ocr-dependencies.sh       # Ubuntu 22.04+; отдельн
   claim/recovery, открытие, последовательные lesson-run до зачёта, завершение и
   retirement с возвратом неоткрытых заданий в обычный банк. Повтор использует
   те же пять вопросов, но его ответы не влияют на XP, mastery и учебную статистику.
+  Каждая попытка теста заводится с `LESSON_LIVES = 1`: исправление ответа —
+  та же механика `runs.lives_remaining`/`retry_task_id`, что и у обычного забега,
+  и живёт она целиком в `session.ts`, своей копии здесь нет. `NULL` в
+  `lives_remaining` означает «этому забегу исправление не полагается», а не
+  «жизней не осталось»: разбор, начатый прошлой версией, обязан дойти до конца
+  без исправлений, а не увидеть потраченную жизнь, которой у него не было.
 - `server/subject-calibration.ts` — единое правило калибровки предмета: завершённый
   триаж либо покрытие до 12 экзаменационных тем обычными завершёнными забегами.
 - `server/learning-prep.ts` — выбор приоритетных пробелов, фоновая генерация,
@@ -615,7 +621,8 @@ sudo ./scripts/install-ocr-dependencies.sh       # Ubuntu 22.04+; отдельн
 `PARENT_SESSION_IDLE_MS`/`_MAX_MS`, `SESSION_TOUCH_MS`, `DEVICE_INVITE_TTL_MS`,
 `CODEX_DAILY_QUOTA`, `LOGIN_*_FAILURE_LIMIT`, `LOGIN_LOCKOUT_MS`,
 `MAX_FORWARDED_HOPS`, `ACTIVE_WINDOW_MS`/`AT_SCREEN_MS`, `DISPUTE_RETRY_MS`,
-`MIN_PIN_PEPPER_LENGTH`, `MAX_CHILD_NAME_LENGTH`/`MAX_DEVICE_LABEL_LENGTH`, и на
+`MIN_PIN_PEPPER_LENGTH`, `MAX_CHILD_NAME_LENGTH`/`MAX_DEVICE_LABEL_LENGTH`,
+`LESSON_LIVES`, и на
 админку: `MIN_ADMIN_PASSWORD_LENGTH`, `ADMIN_SESSION_IDLE_MS`/`_MAX_MS`,
 `IMPERSONATION_TTL_MS`, `ADMIN_STATS_TTL_MS`, `LOG_MAX_BYTES`, `LOG_KEEP_FILES`,
 `LOG_TAIL_BYTES`, `LOG_FIELD_LIMIT`, `ROTATION_LOCK_STALE_MS`, `ADMIN_LOG_PAGE`,

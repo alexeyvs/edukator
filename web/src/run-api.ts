@@ -16,7 +16,8 @@ export interface RunProgress {
   target: number;
   done: boolean;
   lives?: {
-    total: 3;
+    /** Сколько исправлений полагается забегу: три обычному, одно разбору. */
+    total: number;
     remaining: number;
     retryAvailable: boolean;
   };

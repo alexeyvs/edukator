@@ -413,9 +413,20 @@ test('карточка ведёт через материал и пять отв
     for (let answered = 1; answered <= 5; answered += 1) {
       await expect(page.getByRole('heading', { name: /вычисли значение/ })).toBeVisible();
       await expect(page.getByRole('button', { name: /подсказ/i })).toHaveCount(0);
+      // Первый ответ портим опечаткой: у разбора, как и у обычного забега, есть
+      // одно исправление, и зачёт считается уже по исправленному ответу.
+      if (answered === 1) {
+        await expect(page.getByText('Жизни: 1 из 1')).toBeVisible();
+        await page.getByLabel('Число').fill('0');
+        await page.getByRole('button', { name: 'Проверить' }).click();
+        await expect(page.locator('.verdict')).toContainText('Пока не сошлось');
+        await page.getByRole('button', { name: 'Исправить ответ' }).click();
+        await expect(page.getByLabel('Число')).toHaveValue('');
+      }
       await page.getByLabel('Число').fill('45');
       await page.getByRole('button', { name: 'Проверить' }).click();
       await expect(page.locator('.verdict')).toContainText('Верно');
+      if (answered === 1) await expect(page.getByText('Жизни: 0 из 1')).toBeVisible();
       await page.getByRole('button', {
         name: answered === 5 ? 'Завершить тест' : 'Следующее задание',
       }).click();
@@ -483,9 +494,9 @@ test('после незачёта повтор ведёт к повторном�
       await page.getByLabel('Число').fill('0');
       await page.getByRole('button', { name: 'Проверить' }).click();
       await expect(page.locator('.verdict')).toContainText('Пока не сошлось');
-      await page.getByRole('button', {
-        name: answered === 5 ? 'Завершить тест' : 'Следующее задание',
-      }).click();
+      // Пятый неверный ответ закрывается тем же «Следующее задание»: пока
+      // исправление не погашено, забег к завершению не готов.
+      await page.getByRole('button', { name: 'Следующее задание' }).click();
     }
 
     await expect(page.getByRole('heading', { name: 'Тему стоит повторить' })).toBeVisible();

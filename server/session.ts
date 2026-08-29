@@ -30,14 +30,14 @@ import { issuedTask, learningTaskAtPosition, readBankTask, type BankTask } from 
 import { takeTaskOrSeed } from './codex/seed-bank.js';
 import { duplicateKey, fitsAccept } from './codex/task-schema.js';
 import type { DisputeContext, DisputeReviewer } from './codex/dispute.js';
-import { isRunKind, runProgress, type RunKind, type RunProgress } from './run.js';
+import { isRunKind, runProgress, RUN_LIVES, type RunKind, type RunProgress } from './run.js';
 import { SessionError, type SessionErrorCode } from './session-error.js';
 import { taskXp } from './xp.js';
 import { projectIssuedTask, type IssuedTask } from './issued-task.js';
 import { BOSS_TARGET } from './boss-rules.js';
 import { finishBossLoss } from './boss-loss.js';
 import { bossFightConsistent, finishBossWin, readBossFight } from './boss-fight.js';
-import { LEARNING_TASK_COUNT } from './learning-constants.js';
+import { LEARNING_TASK_COUNT, LESSON_LIVES } from './learning-constants.js';
 import { integritySignal } from './integrity.js';
 
 export type { IssuedTask } from './issued-task.js';
@@ -133,6 +133,7 @@ function retryResult(
   graph: TopicGraph,
   run: SessionRun,
   progress: RunProgress,
+  exposeHint = true,
 ): NextTaskOk {
   if (run.retry_task_id === null) throw new Error(`Забег ${run.id} не ожидает исправления`);
   const task = readBankTask(db, run.retry_task_id);
@@ -154,7 +155,7 @@ function retryResult(
   }
   return {
     status: 'ok',
-    task: projectIssuedTask(topicOf(graph, task.topicId), task),
+    task: projectIssuedTask(topicOf(graph, task.topicId), task, { exposeHint }),
     progress,
     retry: {
       attemptId: attempt.id,
@@ -199,6 +200,10 @@ function nextTaskFromSnapshot(
   const run = options.runId === undefined ? undefined : readActiveRun(db, options.runId);
   const progress = run === undefined ? undefined : runProgress(db, run.id);
   if (run?.kind === 'lesson') {
+    if (run.retry_task_id !== null) {
+      if (progress === undefined) throw new Error(`Разбор ${run.id} не хранит progress`);
+      return retryResult(db, graph, run, progress, false);
+    }
     if (run.total >= LEARNING_TASK_COUNT) {
       throw new SessionError('run-complete', `Lesson-run ${run.id} достиг цели и готов к завершению`);
     }
@@ -585,6 +590,10 @@ export function submitAnswer(
       );
     }
 
+    // Исправление живёт у обычного забега и у разбора; у триажа и босса жизней
+    // нет вовсе, и `lives_remaining` там `NULL`.
+    const retryable = run?.kind === 'run' || run?.kind === 'lesson' ? run : undefined;
+    const retrying = retryable !== undefined && retryable.retry_task_id === row.id;
     const lessonContext = run?.kind === 'lesson'
       ? db.prepare<[number, number], { position: number; attempt_number: number }>(
         `SELECT learning_tasks.position, learning_runs.attempt_number
@@ -596,7 +605,10 @@ export function submitAnswer(
       ).get(run.id, row.id)
       : undefined;
     if (run?.kind === 'lesson') {
-      if (lessonContext === undefined || lessonContext.position !== run.total + 1) {
+      if (
+        lessonContext === undefined ||
+        (retrying ? false : lessonContext.position !== run.total + 1)
+      ) {
         throw new SessionError(
           'task-not-in-run',
           `Учебный тест ${run.id} ожидает задание позиции ${run.total + 1}`,
@@ -620,16 +632,15 @@ export function submitAnswer(
           AND (? IS NULL OR run_id = ?)
         ORDER BY id DESC LIMIT 1`,
     ).get(request.taskId, run?.kind === 'lesson' ? run.id : null, run?.id ?? 0);
-    const retrying = run?.kind === 'run' && run.retry_task_id === row.id;
-    if (run?.kind === 'run' && run.retry_task_id !== null && !retrying) {
+    if (retryable !== undefined && retryable.retry_task_id !== null && !retrying) {
       throw new SessionError(
         'task-not-in-run',
-        `Забег ${run.id} ожидает исправления задания ${run.retry_task_id}`,
+        `Забег ${retryable.id} ожидает исправления задания ${retryable.retry_task_id}`,
       );
     }
-    if (retrying) {
-      if (currentAttempt === undefined || currentAttempt.run_id !== run.id) {
-        throw new Error(`Забег ${run.id} не хранит текущую версию ответа ${row.id}`);
+    if (retrying && retryable !== undefined) {
+      if (currentAttempt === undefined || currentAttempt.run_id !== retryable.id) {
+        throw new Error(`Забег ${retryable.id} не хранит текущую версию ответа ${row.id}`);
       }
       if (request.retryAttemptId !== currentAttempt.id) {
         throw new SessionError(
@@ -643,7 +654,7 @@ export function submitAnswer(
       if (open !== undefined) {
         throw new SessionError(
           'run-not-ready',
-          `Забег ${run.id}: исправление недоступно, пока разбирается спор`,
+          `Забег ${retryable.id}: исправление недоступно, пока разбирается спор`,
         );
       }
     } else if (currentAttempt !== undefined || request.retryAttemptId !== undefined) {
@@ -692,8 +703,7 @@ export function submitAnswer(
     if (retrying) {
       db.prepare('UPDATE attempts SET is_current = 0 WHERE id = ?').run(currentAttempt?.id);
     }
-    const lifeCharged =
-      run?.kind === 'run' && retrying && (run.lives_remaining ?? 0) > 0;
+    const lifeCharged = retrying && (retryable?.lives_remaining ?? 0) > 0;
     const info = db
       .prepare(
         `INSERT INTO attempts
@@ -736,12 +746,17 @@ export function submitAnswer(
           hintPenaltyApplied,
         })
       : 0;
-    if (run?.kind === 'run') {
-      if (run.lives_remaining === null) {
-        throw new Error(`Обычный забег ${run.id} не хранит число оставшихся жизней`);
+    if (retryable !== undefined) {
+      if (retryable.kind === 'run' && retryable.lives_remaining === null) {
+        throw new Error(`Обычный забег ${retryable.id} не хранит число оставшихся жизней`);
       }
-      const livesRemaining = run.lives_remaining - (lifeCharged ? 1 : 0);
-      const retryTaskId = !check.correct && livesRemaining > 0 ? row.id : null;
+      // `NULL` остаётся `NULL`: разбор, начатый прошлой версией, исправления не
+      // знает, и записанный ноль показал бы ученику потраченную жизнь, которой
+      // у забега не было.
+      const livesRemaining = retryable.lives_remaining === null
+        ? null
+        : retryable.lives_remaining - (lifeCharged ? 1 : 0);
+      const retryTaskId = !check.correct && (livesRemaining ?? 0) > 0 ? row.id : null;
       if (retrying) {
         db.prepare(
           `UPDATE runs
@@ -750,7 +765,7 @@ export function submitAnswer(
                   retry_task_id = @retryTaskId
             WHERE id = @runId`,
         ).run({
-          runId: run.id,
+          runId: retryable.id,
           correct: check.correct ? 1 : 0,
           previousCorrect: currentAttempt?.is_correct ?? 0,
           livesRemaining,
@@ -765,7 +780,7 @@ export function submitAnswer(
                   retry_task_id = @retryTaskId
             WHERE id = @runId`,
         ).run({
-          runId: run.id,
+          runId: retryable.id,
           correct: check.correct ? 1 : 0,
           livesRemaining,
           retryTaskId,
@@ -838,7 +853,7 @@ export function submitAnswer(
 export function skipRetry(db: Database, runId: number, taskId: number): RunProgress {
   return db.transaction((): RunProgress => {
     const run = readActiveRun(db, runId);
-    if (run.kind !== 'run' || run.retry_task_id !== taskId) {
+    if ((run.kind !== 'run' && run.kind !== 'lesson') || run.retry_task_id !== taskId) {
       throw new SessionError(
         'task-not-in-run',
         `Забег ${runId} не ожидает исправления задания ${taskId}`,
@@ -1143,12 +1158,16 @@ export async function resolveDispute(
     });
     db.prepare('UPDATE attempts SET is_correct = 1 WHERE id = ?').run(fresh.attempt_id);
     if (fresh.run_id !== null) {
-      if (fresh.run_kind === 'run') {
+      // Разбор считается наравне с обычным забегом: подтверждённый спор
+      // закрывает исправление (иначе тест не завершить, а выдача предлагала бы
+      // чинить уже верный ответ) и возвращает жизнь, удержанную оспоренной
+      // версией. Потолок — свой у каждого вида забега; `NULL` остаётся `NULL`.
+      if (fresh.run_kind === 'run' || fresh.run_kind === 'lesson') {
         db.prepare(
           `UPDATE runs
               SET correct = correct + 1,
                   lives_remaining = CASE
-                    WHEN @lifeCharged = 1 THEN MIN(3, lives_remaining + 1)
+                    WHEN @lifeCharged = 1 THEN MIN(@maxLives, lives_remaining + 1)
                     ELSE lives_remaining
                   END,
                   retry_task_id = CASE
@@ -1159,6 +1178,7 @@ export async function resolveDispute(
           runId: fresh.run_id,
           taskId: fresh.task_id,
           lifeCharged: fresh.life_charged,
+          maxLives: fresh.run_kind === 'lesson' ? LESSON_LIVES : RUN_LIVES,
         });
       } else {
         db.prepare('UPDATE runs SET correct = correct + 1 WHERE id = ?').run(fresh.run_id);

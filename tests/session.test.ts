@@ -19,6 +19,12 @@ import { planFromDatabase } from '../server/scheduler.js';
 import { checkAnswer } from '../server/normalize.js';
 import { finishRun } from '../server/run.js';
 import {
+  claimLearningMaterial,
+  openLearningMaterial,
+  startLearningRun,
+} from '../server/learning.js';
+import { reserveLearningTasks } from '../server/codex/bank.js';
+import {
   SessionError,
   nextTask,
   openDispute,
@@ -102,6 +108,31 @@ describe('занятие', () => {
     db.prepare("UPDATE task_bank SET status = 'used', issued_run_id = ? WHERE id = ?")
       .run(runId ?? null, id);
     return id;
+  }
+
+  /** Разбор с опубликованным тестом: пять заданий, открытый материал, lesson-run. */
+  function lessonRun(): { runId: number; taskIds: number[] } {
+    const claimed = claimLearningMaterial(db, {
+      subject: 'math',
+      topicId: 'math.a',
+      recommendationReason: 'Ошибки в теме math.a',
+      masteryBefore: 0.3,
+    });
+    if (claimed === undefined) throw new Error('материал не захвачен');
+    const reserved = reserveLearningTasks(db, claimed.materialId, {
+      introduction: 'Разберём тему.',
+      objectives: ['Считать половину'],
+      sections: [
+        { title: 'Идея', blocks: [{ type: 'paragraph', content: 'Половина — это делить на два.' }] },
+        { title: 'Правило', blocks: [{ type: 'formula', content: '\\frac{a}{2}' }] },
+        { title: 'Пример', blocks: [{ type: 'example', content: 'Половина от восьми — четыре.' }] },
+      ],
+      summary: ['Дели на два.', 'Проверяй остаток.'],
+    }, Array.from({ length: 5 }, () => task()));
+    if (!reserved.ready) throw new Error('тест разбора не опубликован');
+    openLearningMaterial(db, claimed.materialId);
+    const started = startLearningRun(db, claimed.materialId);
+    return { runId: started.runId, taskIds: reserved.stored.map(({ id }) => id) };
   }
 
   describe('выдача задания', () => {
@@ -391,6 +422,85 @@ describe('занятие', () => {
           .run('math', 'math.a', new Date().toISOString()).lastInsertRowid,
       );
     }
+
+    it('исправляет один ответ разбора без роста total и правит зачёт', () => {
+      const { runId, taskIds } = lessonRun();
+      const taskId = taskIds[0] ?? 0;
+      const wrong = submitAnswer(db, graph, { taskId, runId, answer: '0' });
+      expect(wrong.progress).toMatchObject({
+        total: 1, correct: 0, target: 5,
+        lives: { total: 1, remaining: 1, retryAvailable: true },
+      });
+
+      const fixed = submitAnswer(db, graph, {
+        taskId, runId, answer: '45', retryAttemptId: wrong.attemptId,
+      });
+      expect(fixed).toMatchObject({ correct: true });
+      expect(fixed.progress).toMatchObject({
+        total: 1, correct: 1, target: 5,
+        lives: { total: 1, remaining: 0, retryAvailable: false },
+      });
+      expect(db.prepare(
+        'SELECT total, correct, lives_remaining, retry_task_id FROM runs WHERE id = ?',
+      ).get(runId)).toEqual({
+        total: 1, correct: 1, lives_remaining: 0, retry_task_id: null,
+      });
+      expect(db.prepare(
+        'SELECT is_current, is_correct, life_charged FROM attempts ORDER BY id',
+      ).all()).toEqual([
+        { is_current: 0, is_correct: 0, life_charged: 0 },
+        { is_current: 1, is_correct: 1, life_charged: 1 },
+      ]);
+      expect(readTopicState(db, 'math.a').attempts).toBe(1);
+    });
+
+    it('вторая ошибка разбора исправления не даёт: жизнь одна', () => {
+      const { runId, taskIds } = lessonRun();
+      const first = submitAnswer(db, graph, { taskId: taskIds[0] ?? 0, runId, answer: '0' });
+      submitAnswer(db, graph, {
+        taskId: taskIds[0] ?? 0, runId, answer: '0', retryAttemptId: first.attemptId,
+      });
+      const second = submitAnswer(db, graph, { taskId: taskIds[1] ?? 0, runId, answer: '0' });
+      expect(second.progress).toMatchObject({
+        total: 2, correct: 0,
+        lives: { total: 1, remaining: 0, retryAvailable: false },
+      });
+    });
+
+    it('выдаёт разбору задание исправления без подсказки и даёт его пропустить', () => {
+      const { runId, taskIds } = lessonRun();
+      const taskId = taskIds[0] ?? 0;
+      const wrong = submitAnswer(db, graph, { taskId, runId, answer: '0' });
+
+      const again = nextTask(db, graph, { runId, seedDir });
+      expect(again.status).toBe('ok');
+      if (again.status !== 'ok') return;
+      expect(again.task.id).toBe(taskId);
+      expect(again.task).not.toHaveProperty('hint');
+      expect(again.retry).toMatchObject({ attemptId: wrong.attemptId, previousAnswer: '0' });
+
+      expect(skipRetry(db, runId, taskId)).toMatchObject({
+        total: 1, correct: 0,
+        lives: { total: 1, remaining: 1, retryAvailable: false },
+      });
+      const next = nextTask(db, graph, { runId, seedDir });
+      expect(next.status).toBe('ok');
+      if (next.status === 'ok') expect(next.task.id).toBe(taskIds[1]);
+    });
+
+    it('не предлагает исправления в разборе, начатом прошлой версией', () => {
+      const { runId, taskIds } = lessonRun();
+      db.prepare('UPDATE runs SET lives_remaining = NULL WHERE id = ?').run(runId);
+      const wrong = submitAnswer(db, graph, { taskId: taskIds[0] ?? 0, runId, answer: '0' });
+
+      expect(wrong.progress).toMatchObject({ total: 1, correct: 0, target: 5 });
+      expect(wrong.progress?.lives).toBeUndefined();
+      expect(db.prepare('SELECT retry_task_id FROM runs WHERE id = ?').get(runId))
+        .toEqual({ retry_task_id: null });
+      const next = nextTask(db, graph, { runId, seedDir });
+      expect(next.status).toBe('ok');
+      if (next.status === 'ok') expect(next.task.id).toBe(taskIds[1]);
+    });
 
     it('списывает жизнь только за отправленный ретрай и даёт три исправления', () => {
       const runId = ordinaryRun();
@@ -990,6 +1100,59 @@ describe('занятие', () => {
       expect(skipRetry(db, runId, taskId).lives).toMatchObject({
         remaining: 3, retryAvailable: false,
       });
+    });
+
+    it('подтверждённый спор в разборе гасит исправление и возвращает жизнь', async () => {
+      const { runId, taskIds } = lessonRun();
+      const taskId = taskIds[0] ?? 0;
+      const wrong = submitAnswer(db, graph, { taskId, runId, answer: 'сорок пять' });
+      expect(wrong.progress).toMatchObject({ lives: { remaining: 1, retryAvailable: true } });
+      const dispute = openDispute(db, wrong.attemptId);
+      const { review } = reviewer({ studentCorrect: true, note: 'то же число словами' });
+
+      const resolved = await resolveDispute(db, graph, dispute.id, review);
+
+      expect(resolved.progress).toMatchObject({
+        total: 1, correct: 1, target: 5,
+        lives: { total: 1, remaining: 1, retryAvailable: false },
+      });
+      expect(db.prepare('SELECT correct, retry_task_id FROM runs WHERE id = ?').get(runId))
+        .toEqual({ correct: 1, retry_task_id: null });
+      const next = nextTask(db, graph, { runId, seedDir });
+      expect(next.status).toBe('ok');
+      if (next.status === 'ok') expect(next.task.id).toBe(taskIds[1]);
+    });
+
+    it('подтверждённый спор исправления в разборе возвращает его жизнь', async () => {
+      const { runId, taskIds } = lessonRun();
+      const taskId = taskIds[0] ?? 0;
+      const first = submitAnswer(db, graph, { taskId, runId, answer: '0' });
+      const retry = submitAnswer(db, graph, {
+        taskId, runId, answer: 'сорок пять', retryAttemptId: first.attemptId,
+      });
+      expect(retry.progress).toMatchObject({ lives: { total: 1, remaining: 0 } });
+      const dispute = openDispute(db, retry.attemptId);
+      const { review } = reviewer({ studentCorrect: true, note: 'то же число словами' });
+
+      const resolved = await resolveDispute(db, graph, dispute.id, review);
+
+      expect(resolved.progress).toMatchObject({
+        total: 1, correct: 1, lives: { total: 1, remaining: 1, retryAvailable: false },
+      });
+    });
+
+    it('подтверждённый спор в разборе прошлой версии не заводит жизней', async () => {
+      const { runId, taskIds } = lessonRun();
+      db.prepare('UPDATE runs SET lives_remaining = NULL WHERE id = ?').run(runId);
+      const wrong = submitAnswer(db, graph, { taskId: taskIds[0] ?? 0, runId, answer: 'сорок пять' });
+      const dispute = openDispute(db, wrong.attemptId);
+      const { review } = reviewer({ studentCorrect: true, note: 'то же число словами' });
+
+      const resolved = await resolveDispute(db, graph, dispute.id, review);
+
+      expect(resolved.progress?.lives).toBeUndefined();
+      expect(db.prepare('SELECT lives_remaining, correct FROM runs WHERE id = ?').get(runId))
+        .toEqual({ lives_remaining: null, correct: 1 });
     });
 
     it('подтверждённый спор ретрая возвращает списанную за него жизнь', async () => {

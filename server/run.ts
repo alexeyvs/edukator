@@ -17,7 +17,7 @@ import { SessionError } from './session-error.js';
 import { taskXp } from './xp.js';
 import { TRIAGE_TARGET } from './triage.js';
 import { moscowDayBounds } from './moscow-time.js';
-import { LEARNING_TASK_COUNT } from './learning-constants.js';
+import { LEARNING_TASK_COUNT, LESSON_LIVES } from './learning-constants.js';
 
 /** Число ответов, после которого забег готов к финальному экрану. */
 export const RUN_TARGET = 12;
@@ -36,7 +36,8 @@ export interface RunProgress {
   target: number;
   done: boolean;
   lives?: {
-    total: 3;
+    /** Сколько исправлений полагается забегу: три обычному, одно разбору. */
+    total: number;
     remaining: number;
     retryAvailable: boolean;
   };
@@ -146,12 +147,14 @@ function progressFrom(row: RunCounters): RunProgress {
     target,
     done: row.total >= target && row.retry_task_id === null,
   };
-  if (row.kind === 'run') {
-    if (row.lives_remaining === null) {
-      throw new Error('Обычный забег не хранит число оставшихся жизней');
-    }
+  if (row.kind === 'run' && row.lives_remaining === null) {
+    throw new Error('Обычный забег не хранит число оставшихся жизней');
+  }
+  // Разбор, начатый прошлой версией, жизней не знает: `NULL` означает «этому
+  // забегу исправление не полагается», а не «жизней не осталось».
+  if (row.lives_remaining !== null) {
     progress.lives = {
-      total: RUN_LIVES,
+      total: row.kind === 'lesson' ? LESSON_LIVES : RUN_LIVES,
       remaining: row.lives_remaining,
       retryAvailable: row.retry_task_id !== null,
     };
@@ -411,7 +414,7 @@ export function finishRun(
         `Забег ${runId} нельзя завершить раньше ${RUN_TARGET} ответов`,
       );
     }
-    if (run.kind === 'run') {
+    if (run.kind === 'run' || run.kind === 'lesson') {
       const retry = db.prepare<[number], { retry_task_id: number | null }>(
         'SELECT retry_task_id FROM runs WHERE id = ?',
       ).get(runId);

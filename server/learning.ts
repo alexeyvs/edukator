@@ -3,10 +3,10 @@ import type { Database } from 'better-sqlite3';
 import type { TopicGraph } from './curriculum.js';
 import type { Subject } from './db.js';
 import { parseLearningMaterial, type LearningMaterialContent } from './codex/learning-material-schema.js';
-import { LEARNING_TASK_COUNT } from './learning-constants.js';
+import { LEARNING_TASK_COUNT, LESSON_LIVES } from './learning-constants.js';
 import { finishRun, runProgress, type FinishRunResult, type RunProgress } from './run.js';
 
-export { LEARNING_TASK_COUNT } from './learning-constants.js';
+export { LEARNING_TASK_COUNT, LESSON_LIVES } from './learning-constants.js';
 export const LEARNING_PASS_SCORE = 4;
 export const LEARNING_CLAIM_STALE_MS = 30 * 60 * 1000;
 
@@ -82,6 +82,7 @@ interface FinishLearningRow {
   total: number;
   correct: number;
   run_kind: string;
+  retry_task_id: number | null;
   attempt_number: number;
 }
 
@@ -466,8 +467,10 @@ export function startLearningRun(
     const runId = Number(db.prepare(
       `INSERT INTO runs
         (subject, course_revision_id, kind, topic_id, started_at, lives_remaining)
-       VALUES (?, ?, 'lesson', ?, ?, NULL)`,
-    ).run(material.subject, material.course_revision_id, material.topic_id, nowIso).lastInsertRowid);
+       VALUES (?, ?, 'lesson', ?, ?, ?)`,
+    ).run(
+      material.subject, material.course_revision_id, material.topic_id, nowIso, LESSON_LIVES,
+    ).lastInsertRowid);
     const linked = db.prepare(
       `UPDATE learning_materials
           SET mastery_before = CASE WHEN ? = 1 THEN (
@@ -506,10 +509,10 @@ export interface FinishLearningMaterialResult extends FinishRunResult {
 export function assertLearningReadyForIntegrity(db: Database, runId: number): void {
   const joined = db.prepare<[number], {
     id: number; status: LearningMaterialStatus; run_kind: string;
-    finished_at: string | null; total: number;
+    finished_at: string | null; total: number; retry_task_id: number | null;
   }>(
     `SELECT learning_materials.id, learning_materials.status, runs.kind AS run_kind,
-            runs.finished_at, runs.total
+            runs.finished_at, runs.total, runs.retry_task_id
        FROM learning_runs
        JOIN learning_materials ON learning_materials.id = learning_runs.material_id
        JOIN runs ON runs.id = learning_runs.run_id
@@ -527,6 +530,12 @@ export function assertLearningReadyForIntegrity(db: Database, runId: number): vo
     throw new LearningError(
       'learning-incomplete',
       `Lesson-run ${runId} содержит ${joined.total} из ${LEARNING_TASK_COUNT} ответов`,
+    );
+  }
+  if (joined.retry_task_id !== null) {
+    throw new LearningError(
+      'learning-not-ready',
+      `Lesson-run ${runId} нельзя завершить, пока доступно исправление ответа`,
     );
   }
   const openDispute = db.prepare<[number], { found: number }>(
@@ -553,7 +562,7 @@ export function finishLearningMaterial(
               learning_materials.status,
               learning_materials.mastery_before,
               runs.finished_at, runs.summary, runs.total, runs.correct, runs.kind AS run_kind,
-              learning_runs.attempt_number
+              runs.retry_task_id, learning_runs.attempt_number
          FROM learning_runs
          JOIN learning_materials ON learning_materials.id = learning_runs.material_id
          JOIN runs ON runs.id = learning_runs.run_id
@@ -584,6 +593,12 @@ export function finishLearningMaterial(
       throw new LearningError(
         'learning-incomplete',
         `Lesson-run ${runId} содержит ${joined.total} из ${LEARNING_TASK_COUNT} ответов`,
+      );
+    }
+    if (joined.retry_task_id !== null) {
+      throw new LearningError(
+        'learning-not-ready',
+        `Lesson-run ${runId} нельзя завершить, пока доступно исправление ответа`,
       );
     }
     const openDispute = db.prepare<[number], { found: number }>(

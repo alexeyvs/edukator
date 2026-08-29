@@ -247,6 +247,46 @@ describe('экран забега', () => {
     expect(view.container.querySelectorAll('.life-empty')).toHaveLength(0);
   });
 
+  it('даёт разбору одно исправление и показывает его в жизнях', async () => {
+    const first = task(1, 'Сколько будет одна вторая плюс одна вторая?');
+    first.progress = {
+      total: 0, correct: 0, target: 5, done: false, lives: { total: 1, remaining: 1, retryAvailable: false },
+    };
+    delete first.task.hint;
+    const wrong = answer(false);
+    wrong.progress = {
+      total: 1, correct: 0, target: 5, done: false, lives: { total: 1, remaining: 1, retryAvailable: true },
+    };
+    const corrected = answer(true);
+    corrected.progress = {
+      total: 1, correct: 1, target: 5, done: false, lives: { total: 1, remaining: 0, retryAvailable: false },
+    };
+    const submitAnswer = vi.fn().mockResolvedValueOnce(wrong).mockResolvedValueOnce(corrected);
+    const api = apiWith({
+      next: vi.fn().mockResolvedValueOnce(first).mockReturnValue(deferred<NextTaskResponse>()),
+      answer: submitAnswer,
+    });
+    render(<RunScreen runId={31} kind="lesson" api={api} />);
+
+    await screen.findByRole('heading', { name: 'Сколько будет одна вторая плюс одна вторая?' });
+    expect(screen.getByText('Жизни: 1 из 1')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Число'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Исправить ответ' }));
+    const input = screen.getByLabelText('Число');
+    expect(input).toHaveValue('');
+    fireEvent.change(input, { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить' }));
+
+    expect(await screen.findByText('Верно')).toBeInTheDocument();
+    expect(submitAnswer).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      taskId: 1, answer: '2', retryAttemptId: 41,
+    }));
+    expect(screen.getByText('Жизни: 0 из 1')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Исправить ответ' })).not.toBeInTheDocument();
+  });
+
   it('исправляет ответ с очищенным вводом, сохранённой подсказкой и ссылкой на попытку', async () => {
     const first = task(1);
     first.progress.lives = lives(3, false);
