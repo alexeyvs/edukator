@@ -32,6 +32,8 @@ import {
 import { controlDatabasePath, ensureDataDir, provisionChildDatabase } from '../server/data-dir.js';
 import { acquireDataLock, dataLockPath, SERVER_LOCK_OWNER } from '../server/data-lock.js';
 import { buildTopicGraph } from '../server/curriculum.js';
+import { bootstrapLegacyCourses, listCourses } from '../server/course-catalog.js';
+import { assignCourseWithExclusions } from '../server/course-assignments.js';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const tsxCli = join(projectRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
@@ -629,6 +631,13 @@ describe('prefetch', () => {
         const parentId = createParent(control, `${name}@example.com`);
         const childId = createChild(control, parentId, name);
         if (provision) provisionChildDatabase(control, childId, dataDir);
+        // Курсы назначаются явно: заведение курсов их больше не назначает, и
+        // побочный эффект bootstrap внутри `prefetchChildren`, на который тест
+        // опирался раньше, исчез.
+        bootstrapLegacyCourses(control, curriculumDir);
+        for (const course of listCourses(control)) {
+          assignCourseWithExclusions(control, childId, course.id, [], new Date());
+        }
         return childId;
       } finally {
         control.close();
@@ -926,6 +935,13 @@ describe('prefetch', () => {
         const parentId = createParent(control, 'cli@example.com');
         cliChildId = createChild(control, parentId, 'Ученик');
         provisionChildDatabase(control, cliChildId, cliDataDir);
+        // Курсы назначаются явно: заведение курсов их больше не назначает, и
+        // побочный эффект bootstrap внутри CLI, на который тест опирался
+        // раньше, исчез.
+        bootstrapLegacyCourses(control, curriculumDir);
+        for (const course of listCourses(control)) {
+          assignCourseWithExclusions(control, cliChildId, course.id, [], new Date());
+        }
       } finally {
         control.close();
       }

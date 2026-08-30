@@ -21,7 +21,8 @@ import {
   type DraftTopicInput,
 } from '../server/course-catalog.js';
 import { CURRICULUM_DIR } from '../server/curriculum.js';
-import { openControlDatabase } from '../server/control-db.js';
+import { createChild, createParent, openControlDatabase } from '../server/control-db.js';
+import { assignCourseWithExclusions, unassignCourse } from '../server/course-assignments.js';
 import { readCurriculumGeneration } from '../server/curriculum-generation.js';
 
 let dir: string;
@@ -288,5 +289,36 @@ describe('legacy bootstrap', () => {
     const second = bootstrapLegacyCourses(db, CURRICULUM_DIR);
     expect(second).toEqual({ created: [], skipped: ['math', 'russian', 'english'] });
     expect(db.prepare('SELECT COUNT(*) AS count FROM course_revisions').get()).toEqual({ count: 3 });
+  });
+
+  it('заведение legacy-курсов не назначает их ребёнку', () => {
+    const parentId = createParent(db, 'мама@пример.рф');
+    const childId = createChild(db, parentId, 'Ребёнок');
+
+    bootstrapLegacyCourses(db, CURRICULUM_DIR);
+
+    const assigned = db
+      .prepare<[string], { course_id: string }>(
+        'SELECT course_id FROM child_courses WHERE child_id = ? AND unassigned_at IS NULL',
+      )
+      .all(childId);
+    expect(assigned).toEqual([]);
+  });
+
+  it('повторное заведение не возвращает снятый родителем курс', () => {
+    const parentId = createParent(db, 'мама@пример.рф');
+    const childId = createChild(db, parentId, 'Ребёнок');
+    bootstrapLegacyCourses(db, CURRICULUM_DIR);
+    assignCourseWithExclusions(db, childId, 'math', [], new Date());
+    unassignCourse(db, childId, 'math', new Date());
+
+    bootstrapLegacyCourses(db, CURRICULUM_DIR);
+
+    const active = db
+      .prepare<[string], { course_id: string }>(
+        "SELECT course_id FROM child_courses WHERE child_id = ? AND course_id = 'math' AND unassigned_at IS NULL",
+      )
+      .all(childId);
+    expect(active).toEqual([]);
   });
 });

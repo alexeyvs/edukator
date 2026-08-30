@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Database } from 'better-sqlite3';
 import { buildTopicGraph, loadCurriculum, type AnswerFormat, type Topic, type TopicGraph } from './curriculum.js';
-import { invalidateCatalogCurricula, invalidateChildCurriculum } from './curriculum-generation.js';
+import { invalidateCatalogCurricula } from './curriculum-generation.js';
 import { CURRICULUM_DIR } from './curriculum.js';
 import { requireCourseId, type CourseId } from './db.js';
 import { retrieveCourseSources } from './course-retrieval.js';
@@ -672,7 +672,6 @@ export function bootstrapLegacyCourses(
   const graph = loadCurriculum(curriculumDir);
   const created: CourseId[] = [];
   const skipped: CourseId[] = [];
-  const assignedChildren = new Set<string>();
   db.transaction(() => {
     for (const courseId of graph.subjects) {
       if (selectCourse(db, courseId) !== undefined) {
@@ -705,20 +704,11 @@ export function bootstrapLegacyCourses(
       publishRevision(db, courseId, draft.id, replaced.revision.editVersion);
       created.push(courseId);
     }
-    const children = db.prepare<[], { id: string }>('SELECT id FROM children').all();
-    const assign = db.prepare(
-      `INSERT INTO child_courses (child_id, course_id)
-       SELECT ?, ?
-        WHERE NOT EXISTS (
-          SELECT 1 FROM child_courses WHERE child_id = ? AND course_id = ?
-        )`,
-    );
-    for (const child of children) {
-      for (const courseId of graph.subjects) {
-        if (assign.run(child.id, courseId, child.id, courseId).changes > 0) assignedChildren.add(child.id);
-      }
-    }
+    // Курсы здесь только заводятся. Назначать их ребёнку при старте нельзя:
+    // класса у `children` нет вовсе, а курсов теперь шестьдесят — пятикласснику
+    // доставалась бы математика 7 класса. Хуже того, назначение переигрывалось
+    // каждым стартом, то есть снять курс с ребёнка было невозможно в принципе.
+    // Назначение — родительское действие, `assignCourseWithExclusions`.
   }).immediate();
-  for (const childId of assignedChildren) invalidateChildCurriculum(db, childId);
   return { created, skipped };
 }

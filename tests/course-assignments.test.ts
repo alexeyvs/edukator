@@ -91,8 +91,12 @@ describe('course assignments', () => {
     expect(readCourseAssignment(db, 'abcdef01', 'science-7')).toBeUndefined();
   });
 
-  it('legacy-bootstrap назначает исходные курсы, но не восстанавливает снятые', () => {
+  it('повторное заведение legacy-курсов не восстанавливает снятый родителем', () => {
     bootstrapLegacyCourses(db, CURRICULUM_DIR);
+    // Заведение курсов больше не назначает их — назначает родитель, явно.
+    for (const courseId of ['english', 'math', 'russian'] as const) {
+      assignCourseWithExclusions(db, 'abcdef01', courseId, [], new Date('2030-01-01T00:00:00.000Z'));
+    }
     expect(listCourseAssignments(db, 'abcdef01').map((item) => item.courseId).sort())
       .toEqual(['english', 'math', 'russian']);
     unassignCourse(db, 'abcdef01', 'math', new Date('2030-01-01T00:00:00.000Z'));

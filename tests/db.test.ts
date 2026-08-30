@@ -19,6 +19,7 @@ import {
 import { readDailyGate } from '../server/daily-gate.js';
 import { createChild, createParent, openControlDatabase } from '../server/control-db.js';
 import { bootstrapLegacyCourses } from '../server/course-catalog.js';
+import { assignCourseWithExclusions } from '../server/course-assignments.js';
 import { CURRICULUM_DIR } from '../server/curriculum.js';
 
 /** Формат, в котором отметки времени пишет код: сравнение по колонке — строковое. */
@@ -1314,6 +1315,10 @@ describe('база данных', () => {
           const childId = createChild(control, parentId, 'Существующий ребёнок');
           bootstrapLegacyCourses(control, CURRICULUM_DIR);
           bootstrapLegacyCourses(control, CURRICULUM_DIR);
+          // Заведение курсов больше не назначает их — назначает родитель, явно.
+          for (const courseId of ['english', 'math', 'russian'] as const) {
+            assignCourseWithExclusions(control, childId, courseId, [], new Date());
+          }
           expect(control.prepare<[string], { course_id: string }>(
             `SELECT course_id FROM child_courses
               WHERE child_id = ? AND unassigned_at IS NULL ORDER BY course_id`,

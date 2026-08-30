@@ -38,7 +38,8 @@ import { hashParentPin } from '../server/parent-pin.js';
 import { loadCurriculum, syncTopicState, type TopicGraph } from '../server/curriculum.js';
 import { startRun } from '../server/run.js';
 import { submitAnswer } from '../server/session.js';
-import { bootstrapLegacyCourses } from '../server/course-catalog.js';
+import { listCourses } from '../server/course-catalog.js';
+import { assignCourseWithExclusions } from '../server/course-assignments.js';
 import { CourseArtifactStore } from '../server/course-artifacts.js';
 import { buildCourseDraft } from '../server/course-drafting.js';
 import type { OcrRunner } from '../server/ocr-runner.js';
@@ -546,6 +547,11 @@ export async function startE2eHarness(
       }),
     } : {}),
   });
+  // `buildServer` уже завёл legacy-курсы (заведение курсов их больше не
+  // назначает): сценарий назначает их ребёнку явно, как это сделал бы родитель.
+  for (const course of listCourses(control)) {
+    assignCourseWithExclusions(control, childId, course.id, [], NOW);
+  }
   const db = openDatabase(dbPath);
 
   try {
@@ -598,9 +604,11 @@ export async function startE2eHarness(
         } finally {
           childDb.close();
         }
-        // Этот legacy-сценарий имитирует ребёнка, появившегося после startup:
-        // повторный bootstrap назначает ему исходные курсы, не возвращая ранее снятые.
-        bootstrapLegacyCourses(control, curriculumDir);
+        // Курсы назначаются явно: заведение курсов их больше не назначает, и
+        // побочный эффект bootstrap, на который харнесс опирался раньше, исчез.
+        for (const course of listCourses(control)) {
+          assignCourseWithExclusions(control, id, course.id, [], NOW);
+        }
       },
       seedCourseTasks(courseId: string): void {
         const rows = control.prepare<[string], { topic_id: string; revision_id: number }>(
