@@ -33,6 +33,13 @@ import { buildCourseDraft } from '../server/course-drafting.js';
 import type { OcrRunner } from '../server/ocr-runner.js';
 import { createAdminAccount, recordingFailureLog, type HarnessAdmin } from './server-harness.js';
 
+/**
+ * Часы прогона одни на всё: и на заведение оператора, и на сервер. Разойдясь,
+ * они убили бы сессию с первого же запроса — `setAdminPassword` двигает
+ * `credentials_changed_at`, и сессия, выданная часами позади него, мертва.
+ */
+const NOW = new Date('2026-08-30T10:00:00.000Z');
+
 const PDF = Buffer.from('%PDF-1.7\nкусок программы\n%%EOF\n');
 const COURSE = 'frp-geografiya-5';
 
@@ -72,7 +79,7 @@ describe('admin-client против настоящего сервера', () => 
     writeFileSync(pdfPath, PDF);
 
     control = openControlDatabase(controlDatabasePath(dir));
-    admin = createAdminAccount(control);
+    admin = createAdminAccount(control, { now: NOW });
 
     const runner: OcrRunner = {
       checkDependencies: async () => undefined,
@@ -86,10 +93,12 @@ describe('admin-client против настоящего сервера', () => 
     app = buildServer(undefined, {
       dataDir: dir,
       worker: false,
+      now: () => NOW,
       webDist,
       failures: recordingFailureLog(),
-      catalogWorker: { runner, autoPollMs: 5 },
+      catalogWorker: { runner, autoPollMs: 5, now: () => NOW },
       courseArtifacts: new CourseArtifactStore(control, dir, {
+        now: () => NOW,
         // Настоящая проверка зовёт qpdf; на машине разработчика его может не
         // быть вовсе, а проверяется здесь не она.
         inspector: { inspect: async () => ({ pageCount: TOPICS.length }) },

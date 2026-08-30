@@ -144,6 +144,32 @@ describe('маршрут карточки ребёнка', () => {
     expect(anonymous.statusCode).toBe(401);
   });
 
+  it('без подменённых часов и общего графа берёт своё время и граф ребёнка', async () => {
+    // Так маршрут и собран в `buildServer`: `graph` он не получает вовсе, а
+    // `now` — только когда его подменяет тест. Умолчания обязаны работать,
+    // иначе карточка красит пятисоткой ровно рабочий запуск.
+    const own = Fastify();
+    registerAdminChildrenRoutes(own, {
+      context: createAdminContext({ control, now: () => NOW }),
+      control,
+      dataDir: dir,
+      graphForChild: () => GRAPH,
+    });
+    await own.ready();
+    const before = new Date().toISOString();
+    const response = await own.inject({
+      method: 'GET',
+      url: `/api/admin/children/${childId}`,
+      headers: { ...SAME_ORIGIN, cookie: adminCookie },
+    }) as Injected;
+    expect(response.statusCode).toBe(200);
+    const card = response.json() as { childId: string; generatedAt: string };
+    expect(card.childId).toBe(childId);
+    // Отметка взята часами процесса, а не константой теста.
+    expect(card.generatedAt >= before).toBe(true);
+    await own.close();
+  });
+
   it('заглушка отвечает 503, а не 404', async () => {
     const own = Fastify();
     registerUnavailableAdminChildren(own, 'управляющая база недоступна');
