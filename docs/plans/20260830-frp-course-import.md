@@ -366,7 +366,7 @@ export function sliceFrp(pages: readonly FrpPage[]): FrpSlice[] {
     const onPage = new Map<string, { courseTitle: string; grade: number }>();
     const remember = (): void => {
       if (courseTitle === undefined || !inContent || grade === undefined) return;
-      onPage.set(`${courseTitle} ${String(grade)}`, { courseTitle, grade });
+      onPage.set(`${courseTitle}${String(grade)}`, { courseTitle, grade });
     };
     remember();
     for (const marker of markers(page.text)) {
