@@ -23,6 +23,21 @@ export const FRP_MANIFEST_PATH = resolve(projectRoot, 'content', 'frp', 'sources
 const MIN_GRADE = 5;
 const MAX_GRADE = 11;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
+/**
+ * `subject` — не подпись под записью, а половина идентификатора курса
+ * (`frp-<subject>-<класс>`, см. `frpCourseId`), и идентификатор, розданный
+ * первым прогоном, вечен: переименовать курс потом нечем. Поэтому форма
+ * проверяется здесь, а не на первом отказе сервера, — она обязана уложиться в
+ * `COURSE_ID_PATTERN` (`server/db.ts`): отрезки строчной латиницы и цифр через
+ * одиночный дефис.
+ */
+const SUBJECT_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u;
+/**
+ * Предмет не длиннее сорока знаков: вместе с приставкой и классом
+ * идентификатор обязан уместиться в `COURSE_ID_MAX_LENGTH = 80` маршрута
+ * `POST /api/admin/courses` — иначе курс отказывал бы уже на заведении.
+ */
+const MAX_SUBJECT_LENGTH = 40;
 
 export type FrpLevel = 'ooo' | 'soo';
 
@@ -117,6 +132,13 @@ export function parseFrpManifest(raw: unknown): FrpSource[] {
     const record = asRecord(item, description);
     const subject = asNonEmptyString(record.subject, 'subject', description);
     const withSubject = `${description} (${subject})`;
+    if (!SUBJECT_PATTERN.test(subject) || subject.length > MAX_SUBJECT_LENGTH) {
+      fail(
+        `${withSubject}: поле "subject" обязано быть строчной латиницей с цифрами и ` +
+          `дефисами длиной до ${String(MAX_SUBJECT_LENGTH)} знаков — из него собирается ` +
+          'идентификатор курса',
+      );
+    }
     const title = asNonEmptyString(record.title, 'title', withSubject);
     const level = asLevel(record.level, withSubject);
     const url = asNonEmptyString(record.url, 'url', withSubject);

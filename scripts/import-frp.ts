@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAdminClient, type AdminClient } from './admin-client.js';
+import { isCourseId } from '../server/db.js';
 import type { CourseSource } from '../server/course-artifacts.js';
 import { readFrpManifest, type FrpSource } from './frp-manifest.js';
 import { rangesForGrade, sliceFrp, type FrpSlice, type PageRange } from './frp-outline.js';
@@ -90,9 +91,37 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Имя курса до того, как сервер назначил идентификатор: им называют отказ. */
-function courseLabel(source: FrpSource, grade: number): string {
-  return source.courseId?.[String(grade)] ?? `${source.title}, ${String(grade)} класс`;
+/**
+ * Приставка детерминированного идентификатора курса. Отделяет курсы импорта от
+ * заведённых руками и от трёх legacy-имён (`math`, `russian`, `english`).
+ */
+export const FRP_COURSE_ID_PREFIX = 'frp';
+
+/**
+ * Идентификатор курса «предмет + класс».
+ *
+ * Считается из манифеста, а не ищется по названию: display `title` и `grade`
+ * ключом не являются нигде (`CLAUDE.md`), оператор вправе переименовать курс в
+ * админке — и следующий прогон, ищущий по названию, завёл бы **второй**
+ * «География, 5 класс», собрал и опубликовал бы его. У родителя два одинаковых
+ * курса, различить нечем, а прогресс детей остался бы на первом. Починить это
+ * потом нечем: идентификаторы, розданные первым прогоном, вечны.
+ *
+ * `courseId` манифеста — исключение ровно для трёх legacy-курсов: они уже
+ * существуют под своими именами, и приставка завела бы им дубль.
+ */
+export function frpCourseId(source: FrpSource, grade: number): string {
+  const named = source.courseId?.[String(grade)];
+  const id = named ?? `${FRP_COURSE_ID_PREFIX}-${source.subject}-${String(grade)}`;
+  // Проверяется и собранный, и названный руками: манифест ведётся человеком, а
+  // отказ сервера на заведении назвал бы виноватым запрос, а не строку файла.
+  if (!isCourseId(id)) {
+    throw new Error(
+      `«${id}» не годится в идентификатор курса: ожидаются строчная латиница, цифры и ` +
+        'одиночные разделители — поправьте subject или courseId в манифесте',
+    );
+  }
+  return id;
 }
 
 /** Отображаемый класс курса. Ключом он не служит нигде — только сопоставлением. */
@@ -262,8 +291,12 @@ async function importCourse(
   grade: number,
   documents: Map<string, Promise<Document>>,
 ): Promise<CourseOutcome> {
-  let course = courseLabel(source, grade);
+  // Идентификатор известен до первого запроса и служит именем курса в отчёте.
+  // До его вычисления курс называть нечем: манифест мог назвать негодный.
+  let course = `${source.subject}, ${String(grade)} класс`;
   try {
+    course = frpCourseId(source, grade);
+
     // Шаг 1: скачать документ уровня и сверить отпечаток.
     const document = await documentFor(run, source, documents);
 
@@ -280,15 +313,10 @@ async function importCourse(
     await cutPdf(document.path, cutPath, ranges, run.tools);
     const cutSha = await sha256Of(cutPath);
 
-    // Шаг 3: взять курс из манифеста или создать. Идентификатор из манифеста
-    // назван только там, где курс уже есть (`math`, `russian`, `english`);
-    // остальные назначает сервер, и найти свой курс можно лишь по паре
-    // «название + класс», которую этот же прогон и записал.
-    const wantedId = source.courseId?.[String(grade)];
+    // Шаг 3: взять курс по его идентификатору или создать. Ищется только по
+    // нему: название оператор вправе поменять, идентификатор — нет.
     const courses = await run.client.listCourses();
-    const existing = wantedId === undefined
-      ? courses.find((item) => item.title === source.title && item.grade === gradeLabel(grade))
-      : courses.find((item) => item.id === wantedId);
+    const existing = courses.find((item) => item.id === course);
     let catalogSources: CourseSource[] = [];
     if (existing !== undefined) {
       course = existing.id;
@@ -313,11 +341,10 @@ async function importCourse(
     let previousTopicIds: string[] | undefined;
     if (existing === undefined) {
       const created = await run.client.createCourse({
-        ...(wantedId === undefined ? {} : { id: wantedId }),
+        id: course,
         title: source.title,
         grade: gradeLabel(grade),
       });
-      course = created.course.id;
       draft = created.draft;
     } else {
       previousTopicIds = await publishedTopicIds(run, course, existing.activeRevisionId);

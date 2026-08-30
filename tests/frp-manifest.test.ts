@@ -24,6 +24,12 @@ describe('parseFrpManifest', () => {
     expect(() => parseFrpManifest([{ ...entry, courseId: { 4: 'math' } }])).toThrow(/4/u);
   });
 
+  it('отвергает предмет, не годящийся в идентификатор курса', () => {
+    // `subject` — половина идентификатора курса (`frp-<subject>-<класс>`), а
+    // идентификатор вечен: переименовать курс потом нечем.
+    expect(() => parseFrpManifest([{ ...entry, subject: 'Математика' }])).toThrow(/subject/u);
+  });
+
   it('отвергает повтор предмета и уровня', () => {
     expect(() => parseFrpManifest([entry, entry])).toThrow(/matematika/u);
   });

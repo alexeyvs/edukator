@@ -4,8 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
-  IMPORT_POLL_MS, IMPORT_WAIT_TIMEOUT_MS, importCourses, parseImportArgs, type ImportOptions,
+  frpCourseId, IMPORT_POLL_MS, IMPORT_WAIT_TIMEOUT_MS, importCourses, parseImportArgs,
+  type ImportOptions,
 } from '../scripts/import-frp.js';
+import { readFrpManifest } from '../scripts/frp-manifest.js';
+import { isCourseId } from '../server/db.js';
+import { COURSE_ID_MAX_LENGTH } from '../server/routes/admin/courses.js';
 import type { AdminClient } from '../scripts/admin-client.js';
 import type { FrpSource } from '../scripts/frp-manifest.js';
 import type { PdfTools } from '../scripts/frp-pdf.js';
@@ -40,9 +44,6 @@ const source: FrpSource = {
 };
 
 const history: FrpSource = { ...source, subject: 'istoriya', title: 'История' };
-
-/** Идентификаторы, которые сервер назначает новым курсам этих названий. */
-const ASSIGNED_IDS: Record<string, string> = { 'География': 'geo-5', 'История': 'ist-5' };
 
 interface Calls {
   createCourse: unknown[];
@@ -97,7 +98,7 @@ function stub(name: string, body: string): string {
 function courseSource(overrides: Partial<CourseSource> = {}): CourseSource {
   return {
     id: 1,
-    courseId: 'geo-5',
+    courseId: 'frp-geografiya-5',
     revisionId: 7,
     uploadName: `${SHA}-5.pdf`,
     sha256: SHA,
@@ -169,10 +170,10 @@ function fakeClient(state: FakeState = {}): AdminClient {
     createCourse: async (input) => {
       calls.createCourse.push(input);
       hasDraft = true;
-      return {
-        course: { id: input.id ?? ASSIGNED_IDS[input.title] ?? 'неизвестный-курс' },
-        draft: { id: 1, editVersion: 1 },
-      };
+      // Идентификатор курса называет запрос, а не сервер: маршрут
+      // `POST /api/admin/courses` принимает `id` и заводит курс под ним.
+      if (input.id === undefined) throw new Error('курс заведён без идентификатора');
+      return { course: { id: input.id }, draft: { id: 1, editVersion: 1 } };
     },
     createDraft: async (courseId, activeRevisionId) => {
       calls.createDraft.push({ courseId, activeRevisionId });
@@ -260,32 +261,32 @@ beforeEach(() => {
 describe('importCourses', () => {
   it('публикует курс класса из документа уровня', async () => {
     const report = await importCourses(options());
-    expect(report.published).toEqual(['geo-5']);
+    expect(report.published).toEqual(['frp-geografiya-5']);
     expect(report.failed).toEqual([]);
     expect(calls.publish).toHaveLength(1);
     // Публикуется та редакция и та версия, которые вернул черновик после
     // сборки: сборка меняет `edit_version`, и сохранённая до неё дала бы 409.
-    expect(calls.publish[0]).toMatchObject({ courseId: 'geo-5', revisionId: 2, editVersion: 3 });
+    expect(calls.publish[0]).toMatchObject({ courseId: 'frp-geografiya-5', revisionId: 2, editVersion: 3 });
   });
 
   it('отказ одного курса не отменяет остальные', async () => {
-    const report = await importCourses(options({ buildFails: ['ist-5'] }, {
+    const report = await importCourses(options({ buildFails: ['frp-istoriya-5'] }, {
       sources: [source, history],
     }));
     expect(report.failed).toHaveLength(1);
-    expect(report.failed[0]?.course).toBe('ist-5');
+    expect(report.failed[0]?.course).toBe('frp-istoriya-5');
     expect(report.failed[0]?.reason).toMatch(/модель не ответила/u);
     // Свойство, ради которого тест написан: сосед по прогону доведён до
     // публикации, а не брошен вместе с отказавшим.
-    expect(report.published).toEqual(['geo-5']);
+    expect(report.published).toEqual(['frp-geografiya-5']);
   });
 
   it('повторный прогон на опубликованном курсе не создаёт ни черновика, ни источника', async () => {
     const report = await importCourses(options({
-      courses: [{ id: 'geo-5', title: 'География', grade: '5 класс', activeRevisionId: 7 }],
-      sources: { 'geo-5': [courseSource({ revisionId: 7 })] },
+      courses: [{ id: 'frp-geografiya-5', title: 'География', grade: '5 класс', activeRevisionId: 7 }],
+      sources: { 'frp-geografiya-5': [courseSource({ revisionId: 7 })] },
     }));
-    expect(report.skipped).toContain('geo-5');
+    expect(report.skipped).toContain('frp-geografiya-5');
     expect(calls.createDraft).toHaveLength(0);
     expect(calls.uploadSource).toHaveLength(0);
     expect(calls.publish).toHaveLength(0);
@@ -298,11 +299,11 @@ describe('importCourses', () => {
     // навсегда.
     const report = await importCourses(options({
       draft: true,
-      courses: [{ id: 'geo-5', title: 'География', grade: '5 класс', activeRevisionId: 7 }],
-      sources: { 'geo-5': [courseSource({ revisionId: 8 })] },
+      courses: [{ id: 'frp-geografiya-5', title: 'География', grade: '5 класс', activeRevisionId: 7 }],
+      sources: { 'frp-geografiya-5': [courseSource({ revisionId: 8 })] },
     }));
     expect(report.skipped).toEqual([]);
-    expect(report.published).toEqual(['geo-5']);
+    expect(report.published).toEqual(['frp-geografiya-5']);
   });
 
   it('legacy-курс без источников получает новую редакцию, а не пропуск', async () => {
@@ -402,7 +403,7 @@ describe('importCourses', () => {
       staleJob: { status: 'failed', error: 'модель не ответила вчера' },
     }));
     expect(calls.startBuild).toHaveLength(1);
-    expect(report.published).toEqual(['geo-5']);
+    expect(report.published).toEqual(['frp-geografiya-5']);
   });
 
   it('отказавший OCR прошлого прогона ставится в очередь повторно', async () => {
@@ -414,8 +415,8 @@ describe('importCourses', () => {
       ocrError: 'скан страницы 3 нечитаем',
       ocrRetryFixes: true,
     }));
-    expect(calls.retrySource).toEqual([{ courseId: 'geo-5', sourceId: 1 }]);
-    expect(report.published).toEqual(['geo-5']);
+    expect(calls.retrySource).toEqual([{ courseId: 'frp-geografiya-5', sourceId: 1 }]);
+    expect(report.published).toEqual(['frp-geografiya-5']);
   });
 
   it('чужой черновик оператора не переписывается', async () => {
@@ -423,11 +424,36 @@ describe('importCourses', () => {
     // все его темы, а публикация выложила бы результат без него.
     const report = await importCourses(options({
       draft: true,
-      courses: [{ id: 'geo-5', title: 'География', grade: '5 класс', activeRevisionId: 7 }],
-      sources: { 'geo-5': [] },
+      courses: [{ id: 'frp-geografiya-5', title: 'География', grade: '5 класс', activeRevisionId: 7 }],
+      sources: { 'frp-geografiya-5': [] },
     }));
     expect(calls.uploadSource).toHaveLength(0);
     expect(report.failed[0]?.reason).toMatch(/черновик/u);
+  });
+
+  it('переименованный оператором курс опознаётся по идентификатору, а не по названию', async () => {
+    // Оператор переименовал курс в админке (`PATCH /api/admin/courses/:id`).
+    // Поиск по паре «название + класс» его не нашёл бы и завёл второй курс:
+    // у родителя два одинаковых, различить нечем, а прогресс детей остался бы
+    // на первом. Идентификаторы вечны — переименовать курс потом нечем.
+    const report = await importCourses(options({
+      courses: [{
+        id: 'frp-geografiya-5',
+        title: 'География (углублённо)',
+        grade: '5 класс, второй поток',
+        activeRevisionId: 7,
+      }],
+      sources: { 'frp-geografiya-5': [courseSource({ revisionId: 7 })] },
+    }));
+    expect(calls.createCourse).toEqual([]);
+    expect(report.skipped).toEqual(['frp-geografiya-5']);
+  });
+
+  it('новый курс заводится под детерминированным идентификатором', async () => {
+    await importCourses(options());
+    expect(calls.createCourse).toEqual([
+      { id: 'frp-geografiya-5', title: 'География', grade: '5 класс' },
+    ]);
   });
 
   it('документ качается один раз на все классы уровня', async () => {
@@ -437,6 +463,36 @@ describe('importCourses', () => {
       download: async (_url, target) => { downloads += 1; writeFileSync(target, DOCUMENT); },
     }));
     expect(downloads).toBe(1);
+  });
+});
+
+describe('frpCourseId', () => {
+  it('собирает идентификатор из предмета и класса', () => {
+    // Число вписано руками: собранное из той же функции ожидание пережило бы
+    // подмену правила, а идентификатор, розданный первым прогоном, вечен.
+    expect(frpCourseId(source, 5)).toBe('frp-geografiya-5');
+  });
+
+  it('legacy-курс называется именем манифеста, а не приставкой', () => {
+    expect(frpCourseId({ ...source, courseId: { '5': 'math' } }, 5)).toBe('math');
+  });
+
+  it('идентификаторы всех курсов манифеста годятся серверу', () => {
+    // Предметы с длинными именами (`russkij-yazyk`, `obshhestvoznanie`) —
+    // ровно тот случай, ради которого проверка стоит: `COURSE_ID_PATTERN`
+    // разрешает дефис только между непустыми отрезками, а маршрут вдобавок
+    // режет по длине.
+    for (const item of readFrpManifest()) {
+      for (const grade of item.grades) {
+        const id = frpCourseId(item, grade);
+        expect(isCourseId(id)).toBe(true);
+        expect(id.length).toBeLessThanOrEqual(COURSE_ID_MAX_LENGTH);
+      }
+    }
+  });
+
+  it('предмет, не годящийся в идентификатор, отказывает курсу', () => {
+    expect(() => frpCourseId({ ...source, subject: 'ГЕО' }, 5)).toThrow(/идентификатор/u);
   });
 });
 
