@@ -14,6 +14,7 @@ import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import type { CatalogRevisionTopic } from '../server/course-catalog.js';
 import type { SourceProcessingStatus } from '../server/catalog-worker.js';
+import type { CourseSource } from '../server/course-artifacts.js';
 
 /** Имя cookie сессии оператора — то же, что `ADMIN_COOKIE` в `server/auth.ts`. */
 const ADMIN_COOKIE_NAME = '__Host-edu_admin';
@@ -24,6 +25,14 @@ export interface AdminClient {
   createCourse(input: { id?: string; title: string; grade: string }): Promise<{ course: { id: string }; draft: { id: number; editVersion: number } }>;
   readDraft(courseId: string): Promise<{ revision: { id: number; editVersion: number }; topics: CatalogRevisionTopic[] } | undefined>;
   createDraft(courseId: string, activeRevisionId: number): Promise<{ revision: { id: number; editVersion: number } }>;
+  /**
+   * Источники курса: у черновика, а если черновика нет — у активной редакции
+   * (`CourseArtifactStore.list`). Единственный способ узнать, что активная
+   * редакция собрана **из этого** куска программы: отпечаток и номер редакции
+   * лежат в одной строке. Тип — настоящий `CourseSource`, без перевода полей:
+   * то же основание, что у `sourceStatus`.
+   */
+  listSources(courseId: string): Promise<CourseSource[]>;
   uploadSource(courseId: string, filePath: string): Promise<{ source: { id: number; revisionId: number }; duplicate: boolean }>;
   /**
    * Настоящая форма ответа маршрута (`server/catalog-worker.ts`), без
@@ -137,6 +146,11 @@ export function createAdminClient(baseUrl: string, fetchImpl: typeof fetch = fet
     async createDraft(courseId, activeRevisionId) {
       const data = await call('POST', `/api/admin/courses/${encodeURIComponent(courseId)}/draft`, { activeRevisionId });
       return data as unknown as { revision: { id: number; editVersion: number } };
+    },
+
+    async listSources(courseId) {
+      const data = await call('GET', `/api/admin/courses/${encodeURIComponent(courseId)}/sources`);
+      return data['sources'] as CourseSource[];
     },
 
     async uploadSource(courseId, filePath) {

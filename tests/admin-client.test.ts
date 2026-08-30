@@ -66,6 +66,45 @@ describe('createAdminClient', () => {
     expect(await client.readDraft('math')).toBeUndefined();
   });
 
+  it('createCourse и createDraft называют сервером назначенные номера редакций', async () => {
+    const client = createAdminClient('https://edukator.ru', fakeFetch((url, init) => {
+      if (url.endsWith('/login')) return loggedIn.clone();
+      if (url.endsWith('/api/admin/courses')) {
+        return new Response(JSON.stringify({
+          course: { id: 'geo-5' }, draft: { id: 1, editVersion: 1 },
+        }), { status: 201 });
+      }
+      // Черновик заводится от **названной** активной редакции: сервер сверяет
+      // её номер и отказывает, если редакцию сменили между чтением и запросом.
+      expect(JSON.parse(String(init.body))).toEqual({ activeRevisionId: 7 });
+      return new Response(JSON.stringify({ revision: { id: 8, editVersion: 1 } }), { status: 201 });
+    }));
+    await client.login('оператор@пример.рф', 'пароль');
+    expect(await client.createCourse({ title: 'География', grade: '5 класс' }))
+      .toEqual({ course: { id: 'geo-5' }, draft: { id: 1, editVersion: 1 } });
+    expect((await client.createDraft('geo-5', 7)).revision.id).toBe(8);
+  });
+
+  it('startBuild шлёт версию черновика, buildStatus отдаёт состояние задания', async () => {
+    let started: unknown;
+    const client = createAdminClient('https://edukator.ru', fakeFetch((url, init) => {
+      if (url.endsWith('/login')) return loggedIn.clone();
+      if (init.method === 'POST') {
+        started = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ revisionId: 8, status: 'running' }), { status: 202 });
+      }
+      return new Response(JSON.stringify({
+        revisionId: 8, job: { status: 'failed', error: 'модель не ответила' },
+      }), { status: 200 });
+    }));
+    await client.login('оператор@пример.рф', 'пароль');
+    await client.startBuild('geo-5', 8, 3);
+    // Версия обязана уехать на сервер: без неё оптимистичная блокировка
+    // черновика не сработает вовсе.
+    expect(started).toEqual({ revisionId: 8, editVersion: 3 });
+    expect((await client.buildStatus('geo-5')).job?.error).toBe('модель не ответила');
+  });
+
   describe('источники: настоящая форма ответа сервера', () => {
     let dir: string;
 
@@ -100,6 +139,28 @@ describe('createAdminClient', () => {
       const file = seenBody?.get('source');
       expect(file).toBeInstanceOf(Blob);
       expect((file as Blob).type).toBe('application/pdf');
+    });
+
+    it('listSources отдаёт отпечаток и номер редакции каждого источника', async () => {
+      let seenUrl: string | undefined;
+      const client = createAdminClient('https://edukator.ru', fakeFetch((url) => {
+        if (url.endsWith('/login')) return loggedIn.clone();
+        seenUrl = url;
+        return new Response(JSON.stringify({
+          sources: [{
+            id: 5, courseId: 'geo-5', revisionId: 7, uploadName: 'programme.pdf',
+            sha256: 'a'.repeat(64), pageCount: 12, status: 'ready', error: null,
+            createdAt: '2026-08-30T00:00:00.000Z',
+          }],
+        }), { status: 200 });
+      }));
+      await client.login('оператор@пример.рф', 'пароль');
+      const sources = await client.listSources('geo-5');
+      expect(seenUrl).toBe('https://edukator.ru/api/admin/courses/geo-5/sources');
+      // Обе колонки, на которых держится пропуск уже импортированного курса:
+      // отпечаток куска и номер редакции, которой он принадлежит.
+      expect(sources[0]?.sha256).toBe('a'.repeat(64));
+      expect(sources[0]?.revisionId).toBe(7);
     });
 
     it('sourceStatus отдаёт настоящую форму маршрута целиком, включая причину отказа OCR', async () => {

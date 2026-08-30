@@ -23,6 +23,7 @@
     "admin": "tsx scripts/admin.ts",
     "backup": "tsx scripts/backup.ts",
     "adopt": "tsx scripts/adopt-single-user.ts",
+    "import-frp": "tsx scripts/import-frp.ts",
     "test": "npm run build:web && vitest run",
     "test:e2e": "npm run build:web && playwright test",
     "test:ocr": "EDUKATOR_OCR_SMOKE=1 vitest run tests/ocr-smoke.test.ts",
