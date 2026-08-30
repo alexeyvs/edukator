@@ -64,6 +64,8 @@ interface CatalogCourseRow {
 }
 
 interface FakeState {
+  /** Сервер отвечает на заведение курса другим идентификатором. */
+  renamesOnCreate?: boolean;
   /** Курсы, уже лежащие в каталоге оператора. */
   courses?: CatalogCourseRow[];
   /** Источники по курсам — то, что отдаёт `listSources`. */
@@ -175,7 +177,8 @@ function fakeClient(state: FakeState = {}): AdminClient {
       // Идентификатор курса называет запрос, а не сервер: маршрут
       // `POST /api/admin/courses` принимает `id` и заводит курс под ним.
       if (input.id === undefined) throw new Error('курс заведён без идентификатора');
-      return { course: { id: input.id }, draft: { id: 1, editVersion: 1 } };
+      const id = state.renamesOnCreate === true ? `иной-${input.id}` : input.id;
+      return { course: { id }, draft: { id: 1, editVersion: 1 } };
     },
     createDraft: async (courseId, activeRevisionId) => {
       calls.createDraft.push({ courseId, activeRevisionId });
@@ -456,6 +459,14 @@ describe('importCourses', () => {
     expect(calls.createCourse).toEqual([
       { id: 'frp-geografiya-5', title: 'География', grade: '5 класс' },
     ]);
+  });
+
+  it('курс, заведённый сервером под другим именем, отказывает прогону', async () => {
+    // Такого курса следующий прогон не найдёт: он ищет ровно по названному
+    // идентификатору, а молчаливое согласие оставило бы дубль навсегда.
+    const report = await importCourses(options({ renamesOnCreate: true }));
+    expect(calls.publish).toHaveLength(0);
+    expect(report.failed[0]?.reason).toMatch(/иной-frp-geografiya-5/u);
   });
 
   it('документ качается один раз на все классы уровня', async () => {

@@ -328,7 +328,6 @@ async function importCourse(
     const existing = courses.find((item) => item.id === course);
     let catalogSources: CourseSource[] = [];
     if (existing !== undefined) {
-      course = existing.id;
       catalogSources = await run.client.listSources(course);
       if (alreadyImported(catalogSources, existing.activeRevisionId, cutSha)) {
         run.log(`${course}: уже собран из этого куска программы`);
@@ -354,6 +353,11 @@ async function importCourse(
         title: source.title,
         grade: gradeLabel(grade),
       });
+      // Курс, заведённый под другим идентификатором, — это курс, которого
+      // следующий прогон не найдёт: он ищет ровно по названному.
+      if (created.course.id !== course) {
+        throw new Error(`сервер завёл курс под именем «${created.course.id}» вместо «${course}»`);
+      }
       draft = created.draft;
     } else {
       previousTopicIds = await publishedTopicIds(run, course, existing.activeRevisionId);
