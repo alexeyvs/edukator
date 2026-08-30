@@ -74,8 +74,19 @@ export function sliceFrp(pages: readonly FrpPage[]): FrpSlice[] {
       if (courseTitle === undefined || !inContent || grade === undefined) return;
       onPage.set(`${courseTitle} ${String(grade)}`, { courseTitle, grade });
     };
-    remember();
     const pageMarkers = markers(page.text);
+    // Унаследованное состояние засчитывается странице, только если перед первым маркером
+    // вида 'course' или 'other' есть непробельный текст (или таких маркеров вообще нет).
+    // Если страница начинается с такого маркера, унаследованное состояние не применяется.
+    // 'content' маркер унаследованное состояние не гасит — это важно для случаев, когда
+    // граница классов приходится на середину «СОДЕРЖАНИЕ ОБУЧЕНИЯ» раздела.
+    const firstCourseOrOther = pageMarkers.find((m) => m.kind === 'course' || m.kind === 'other');
+    const hasTextBeforeFirstCourseOrOther =
+      firstCourseOrOther === undefined || page.text.slice(0, firstCourseOrOther.at).trim() !== '';
+
+    if (hasTextBeforeFirstCourseOrOther) {
+      remember();
+    }
     for (const marker of pageMarkers) {
       if (marker.kind === 'course') {
         courseTitle = marker.value;
@@ -91,11 +102,6 @@ export function sliceFrp(pages: readonly FrpPage[]): FrpSlice[] {
         grade = Number(marker.value);
       }
       remember();
-    }
-    // Если на странице есть маркеры и мы закончили вне содержания обучения,
-    // страница переходит в другой раздел. Не включаем её.
-    if (pageMarkers.length > 0 && !inContent) {
-      onPage.clear();
     }
     for (const [key, state] of onPage) {
       const entry = collected.get(key) ?? { ...state, pages: [] };
