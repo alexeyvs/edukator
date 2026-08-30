@@ -66,6 +66,45 @@ describe('createAdminClient', () => {
     expect(await client.readDraft('math')).toBeUndefined();
   });
 
+  it('readCourse отдаёт темы опубликованной редакции, а не только черновика', async () => {
+    const client = createAdminClient('https://edukator.ru', fakeFetch((url) =>
+      url.endsWith('/login') ? loggedIn.clone()
+        : new Response(JSON.stringify({
+          course: { id: 'math', title: 'Математика', grade: '7 класс', activeRevisionId: 4 },
+          revisions: [
+            { id: 4, status: 'published', topics: [{ id: 'math.fractions' }, { id: 'math.angles' }] },
+            { id: 8, status: 'draft', topics: [] },
+          ],
+        }), { status: 200 })));
+    await client.login('оператор@пример.рф', 'пароль');
+    const card = await client.readCourse('math');
+    // Именно эти идентификаторы и есть накопленный прогресс детей: `readDraft`
+    // их уже не покажет, если черновик собран заново.
+    expect(card?.revisions.find((revision) => revision.id === 4)?.topics.map((topic) => topic.id))
+      .toEqual(['math.fractions', 'math.angles']);
+  });
+
+  it('readCourse на несуществующем курсе возвращает undefined, а не бросает', async () => {
+    const client = createAdminClient('https://edukator.ru', fakeFetch((url) =>
+      url.endsWith('/login') ? loggedIn.clone()
+        : new Response(JSON.stringify({ error: 'Курс не найден' }), { status: 404 })));
+    await client.login('оператор@пример.рф', 'пароль');
+    expect(await client.readCourse('geo-5')).toBeUndefined();
+  });
+
+  it('retrySource шлёт объект тела: пустое маршрут отвергает', async () => {
+    let seen: { url?: string; body?: unknown } = {};
+    const client = createAdminClient('https://edukator.ru', fakeFetch((url, init) => {
+      if (url.endsWith('/login')) return loggedIn.clone();
+      seen = { url, body: JSON.parse(String(init.body)) };
+      return new Response(JSON.stringify({ jobId: 12 }), { status: 200 });
+    }));
+    await client.login('оператор@пример.рф', 'пароль');
+    await client.retrySource('geo-5', 5);
+    expect(seen.url).toBe('https://edukator.ru/api/admin/courses/geo-5/sources/5/retry');
+    expect(seen.body).toEqual({});
+  });
+
   it('createCourse и createDraft называют сервером назначенные номера редакций', async () => {
     const client = createAdminClient('https://edukator.ru', fakeFetch((url, init) => {
       if (url.endsWith('/login')) return loggedIn.clone();

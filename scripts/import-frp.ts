@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAdminClient, type AdminClient } from './admin-client.js';
+import type { CourseSource } from '../server/course-artifacts.js';
 import { readFrpManifest, type FrpSource } from './frp-manifest.js';
 import { rangesForGrade, sliceFrp, type FrpSlice, type PageRange } from './frp-outline.js';
 import { cutPdf, readPdfPages, DEFAULT_PDF_TOOLS, type PdfTools } from './frp-pdf.js';
@@ -227,15 +228,31 @@ async function awaitBuild(run: Run, courseId: string): Promise<void> {
  * прерванный между загрузкой и публикацией, выглядел бы завершённым и остался
  * бы незавершённым навсегда.
  */
-async function alreadyImported(
-  run: Run,
-  course: { id: string; activeRevisionId: number | null },
+function alreadyImported(
+  sources: readonly CourseSource[],
+  activeRevisionId: number | null,
   cutSha: string,
-): Promise<boolean> {
-  const active = course.activeRevisionId;
-  if (active === null) return false;
-  const sources = await run.client.listSources(course.id);
-  return sources.some((item) => item.sha256 === cutSha && item.revisionId === active);
+): boolean {
+  if (activeRevisionId === null) return false;
+  return sources.some((item) => item.sha256 === cutSha && item.revisionId === activeRevisionId);
+}
+
+/**
+ * Прежние темы читаются у **активной** редакции, а не у черновика: черновик к
+ * моменту проверки уже собран — своим прогоном или прошлым, — и сравнение его
+ * тем с ними же всегда даёт единицу, то есть порог `MIN_KEPT_TOPIC_IDS` не
+ * срабатывал бы никогда. Курс без активной редакции защищать не от чего:
+ * прогресса детей на нём ещё нет.
+ */
+async function publishedTopicIds(
+  run: Run,
+  courseId: string,
+  activeRevisionId: number | null,
+): Promise<string[] | undefined> {
+  if (activeRevisionId === null) return undefined;
+  const card = await run.client.readCourse(courseId);
+  const active = card?.revisions.find((revision) => revision.id === activeRevisionId);
+  return active?.topics.map((topic) => topic.id);
 }
 
 /** Девять шагов прогона на один курс. Наружу не бросает: отказ — это исход. */
@@ -272,9 +289,11 @@ async function importCourse(
     const existing = wantedId === undefined
       ? courses.find((item) => item.title === source.title && item.grade === gradeLabel(grade))
       : courses.find((item) => item.id === wantedId);
+    let catalogSources: CourseSource[] = [];
     if (existing !== undefined) {
       course = existing.id;
-      if (await alreadyImported(run, existing, cutSha)) {
+      catalogSources = await run.client.listSources(course);
+      if (alreadyImported(catalogSources, existing.activeRevisionId, cutSha)) {
         run.log(`${course}: уже собран из этого куска программы`);
         return { status: 'skipped', course };
       }
@@ -291,7 +310,7 @@ async function importCourse(
     // Шаг 4: открыть черновик. Незакрытый черновик прошлого прогона
     // продолжается, а не заводится заново: второй черновик курсу запрещён.
     let draft: { id: number; editVersion: number };
-    let previousTopicIds: string[] = [];
+    let previousTopicIds: string[] | undefined;
     if (existing === undefined) {
       const created = await run.client.createCourse({
         ...(wantedId === undefined ? {} : { id: wantedId }),
@@ -301,38 +320,59 @@ async function importCourse(
       course = created.course.id;
       draft = created.draft;
     } else {
+      previousTopicIds = await publishedTopicIds(run, course, existing.activeRevisionId);
       const open = await run.client.readDraft(course);
       if (open === undefined) {
         if (existing.activeRevisionId === null) {
           throw new Error(`у курса «${course}» нет ни черновика, ни активной редакции`);
         }
         await run.client.createDraft(course, existing.activeRevisionId);
+        const opened = await run.client.readDraft(course);
+        if (opened === undefined) throw new Error(`черновик курса «${course}» не открылся`);
+        draft = opened.revision;
+      } else {
+        // Черновик с темами, но без нашего куска, завёл человек: сборка
+        // заменила бы все его темы, а публикация выложила бы результат без
+        // него. Курс уезжает в `failed[]` — это верный исход, разберётся
+        // оператор.
+        if (open.topics.length > 0 && !catalogSources.some((item) => item.sha256 === cutSha)) {
+          throw new Error(
+            `у курса «${course}» открыт черновик, собранный не этим прогоном: ` +
+              'его темы были бы заменены сборкой. Разберитесь в админке',
+          );
+        }
+        draft = open.revision;
       }
-      // Черновик перечитывается и после создания: он заводится копией активной
-      // редакции, и её темы — единственное, чем меряется сохранность прогресса
-      // детей. Читать опубликованные темы напрямую нечем.
-      const opened = await run.client.readDraft(course);
-      if (opened === undefined) throw new Error(`черновик курса «${course}» не открылся`);
-      draft = opened.revision;
-      previousTopicIds = opened.topics.map((topic) => topic.id);
     }
 
     // Шаг 5: загрузить кусок.
     const uploaded = await run.client.uploadSource(course, cutPath);
 
-    // Шаг 6: дождаться готовности источника.
+    // Шаг 6: дождаться готовности источника. Загрузка дубликата в очередь OCR
+    // не ставит (маршрут ставит только `!duplicate`), поэтому источник,
+    // оставленный прошлым прогоном в отказе, надо переставить руками: иначе он
+    // не обработается никогда, а прогон выдал бы вчерашнюю причину за
+    // сегодняшнюю и курс выпадал бы из «перезапусти прогон» навсегда.
+    if (uploaded.duplicate) {
+      const before = await run.client.sourceStatus(course, uploaded.source.id);
+      if (before.sourceStatus === 'failed') {
+        run.log(`${course}: источник ${String(uploaded.source.id)} в отказе, ставлю в очередь заново`);
+        await run.client.retrySource(course, uploaded.source.id);
+      }
+    }
     await awaitSource(run, course, uploaded.source.id);
 
     // Шаг 7: запустить сборку и дождаться её.
     let starting = true;
     if (uploaded.duplicate) {
-      // Дубликат означает, что кусок загрузил прошлый прогон: сборка ему уже
-      // заказана. Перезапускать её по отказавшему заданию нельзя — `buildStatus`
-      // не называет номер задания, и первый же опрос после старта не отличил бы
-      // новое от прежнего отказавшего, то есть прогон объявил бы отказ по
-      // вчерашней причине. Отказавшая сборка называется в отчёте, и её
-      // перезапускает оператор из админки.
-      starting = (await run.client.buildStatus(course)).job === null;
+      // Дубликат означает, что кусок загрузил прошлый прогон: идущей сборке
+      // второй старт не нужен. А вот отказавшую и отменённую перезапускаем —
+      // иначе ожидание сразу отдаёт вчерашнюю причину как сегодняшнюю. Гонки с
+      // прежней строкой задания нет: `CourseDraftBuildRunner.start` зовёт
+      // сборку синхронно, и она переводит задание в `running` до первого
+      // `await`, то есть уже к моменту ответа 202.
+      const job = (await run.client.buildStatus(course)).job;
+      starting = job === null || job.status === 'failed' || job.status === 'cancelled';
     }
     if (starting) await run.client.startBuild(course, draft.id, draft.editVersion);
     await awaitBuild(run, course);
@@ -345,8 +385,9 @@ async function importCourse(
       courseId: course,
       topics: built.topics,
       source: { id: uploaded.source.id, pages },
-      // Сохранность прогресса меряется только там, где было что терять.
-      ...(previousTopicIds.length === 0 ? {} : { previousTopicIds }),
+      // Сохранность прогресса меряется только там, где было что терять:
+      // у курса, который ещё ни разу не публиковался, прежних тем нет вовсе.
+      ...(previousTopicIds === undefined ? {} : { previousTopicIds }),
     });
     if (!review.ok) throw new Error(`черновик не прошёл отбраковку: ${review.problems.join('; ')}`);
 

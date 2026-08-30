@@ -12,7 +12,7 @@
  */
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
-import type { CatalogRevisionTopic } from '../server/course-catalog.js';
+import type { CatalogCourse, CatalogRevision, CatalogRevisionTopic } from '../server/course-catalog.js';
 import type { SourceProcessingStatus } from '../server/catalog-worker.js';
 import type { CourseSource } from '../server/course-artifacts.js';
 
@@ -25,6 +25,14 @@ export interface AdminClient {
   createCourse(input: { id?: string; title: string; grade: string }): Promise<{ course: { id: string }; draft: { id: number; editVersion: number } }>;
   readDraft(courseId: string): Promise<{ revision: { id: number; editVersion: number }; topics: CatalogRevisionTopic[] } | undefined>;
   createDraft(courseId: string, activeRevisionId: number): Promise<{ revision: { id: number; editVersion: number } }>;
+  /**
+   * Карточка курса: сам курс и все его редакции **вместе с темами**
+   * (`courseCard`, `server/routes/admin/courses.ts`). Единственный способ
+   * прочитать темы уже **опубликованной** редакции — а ими, и только ими,
+   * меряется сохранность прогресса детей: темы черновика к моменту проверки
+   * уже заменены сборкой, и сравнение их с самими собой всегда даёт единицу.
+   */
+  readCourse(courseId: string): Promise<CourseCard | undefined>;
   /**
    * Источники курса: у черновика, а если черновика нет — у активной редакции
    * (`CourseArtifactStore.list`). Единственный способ узнать, что активная
@@ -42,9 +50,22 @@ export interface AdminClient {
    * готовым не стал, а не только «не дождались».
    */
   sourceStatus(courseId: string, sourceId: number): Promise<SourceProcessingStatus>;
+  /**
+   * Повторная постановка источника в очередь OCR. Нужна потому, что загрузка
+   * дубликата в очередь не ставит (`server/routes/admin/courses.ts` ставит
+   * только `!duplicate`): источник, оставленный прошлым прогоном в отказе, без
+   * этого не обработается никогда.
+   */
+  retrySource(courseId: string, sourceId: number): Promise<void>;
   startBuild(courseId: string, revisionId: number, editVersion: number): Promise<void>;
   buildStatus(courseId: string): Promise<{ revisionId: number; job: { status: string; error: string | null } | null }>;
   publish(courseId: string, revisionId: number, editVersion: number, idempotencyKey: string): Promise<{ idempotent?: boolean }>;
+}
+
+/** Ответ `GET /api/admin/courses/:courseId`: курс и его редакции с темами. */
+export interface CourseCard {
+  course: CatalogCourse;
+  revisions: Array<CatalogRevision & { topics: CatalogRevisionTopic[] }>;
 }
 
 type JsonBody = Record<string, unknown>;
@@ -137,6 +158,12 @@ export function createAdminClient(baseUrl: string, fetchImpl: typeof fetch = fet
       return data as unknown as { course: { id: string }; draft: { id: number; editVersion: number } };
     },
 
+    async readCourse(courseId) {
+      const data = await callOptional('GET', `/api/admin/courses/${encodeURIComponent(courseId)}`);
+      if (data === undefined) return undefined;
+      return data as unknown as CourseCard;
+    },
+
     async readDraft(courseId) {
       const data = await callOptional('GET', `/api/admin/courses/${encodeURIComponent(courseId)}/draft`);
       if (data === undefined) return undefined;
@@ -175,6 +202,16 @@ export function createAdminClient(baseUrl: string, fetchImpl: typeof fetch = fet
         `/api/admin/courses/${encodeURIComponent(courseId)}/sources/${String(sourceId)}/status`,
       );
       return data as unknown as SourceProcessingStatus;
+    },
+
+    async retrySource(courseId, sourceId) {
+      // Тело обязано быть объектом: маршрут разбирает его `objectBody`, и
+      // отсутствующее тело он отвергает как некорректное.
+      await call(
+        'POST',
+        `/api/admin/courses/${encodeURIComponent(courseId)}/sources/${String(sourceId)}/retry`,
+        {},
+      );
     },
 
     async startBuild(courseId, revisionId, editVersion) {

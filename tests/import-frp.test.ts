@@ -49,6 +49,7 @@ interface Calls {
   createDraft: unknown[];
   uploadSource: unknown[];
   startBuild: unknown[];
+  retrySource: unknown[];
   publish: unknown[];
 }
 
@@ -66,6 +67,12 @@ interface FakeState {
   sources?: Record<string, CourseSource[]>;
   /** У курса уже есть незакрытый черновик прошлого прогона. */
   draft?: boolean;
+  /** Темы активной редакции курса — то, что отдаёт `readCourse`. */
+  activeTopics?: CatalogRevisionTopic[];
+  /** Задание сборки, оставшееся от прошлого прогона. */
+  staleJob?: { status: string; error: string | null };
+  /** Повторная попытка OCR чинит источник. */
+  ocrRetryFixes?: boolean;
   /** Загрузка источника отвечает `duplicate`. */
   duplicate?: boolean;
   /** Курсы, у которых сборка черновика заканчивается отказом. */
@@ -121,10 +128,44 @@ function fakeClient(state: FakeState = {}): AdminClient {
   // Черновик у курса либо остался от прошлого прогона, либо заводится этим:
   // второй черновик курсу запрещён, и `readDraft` обязан это отражать.
   let hasDraft = state.draft === true;
+  // Состояние источника и задания сборки живёт между запросами: повторная
+  // попытка OCR и перезапуск сборки только так и проверяются.
+  let sourceReady = state.ocrError === undefined;
+  let job: { status: string; error: string | null } | null = state.staleJob ?? null;
   return {
     login: async () => undefined,
     listCourses: async () => state.courses ?? [],
     listSources: async (courseId) => state.sources?.[courseId] ?? [],
+    readCourse: async (courseId) => {
+      const course = (state.courses ?? []).find((item) => item.id === courseId);
+      if (course === undefined) return undefined;
+      return {
+        course: {
+          id: course.id,
+          title: course.title,
+          grade: course.grade,
+          status: 'published' as const,
+          activeRevisionId: course.activeRevisionId,
+          createdAt: '2026-08-30T00:00:00.000Z',
+          updatedAt: '2026-08-30T00:00:00.000Z',
+          archivedAt: null,
+        },
+        revisions: course.activeRevisionId === null ? [] : [{
+          id: course.activeRevisionId,
+          courseId: course.id,
+          revisionNumber: 1,
+          status: 'published' as const,
+          basedOnRevisionId: null,
+          editVersion: 1,
+          title: course.title,
+          grade: course.grade,
+          publishedBy: 'admin-1',
+          createdAt: '2026-08-30T00:00:00.000Z',
+          publishedAt: '2026-08-30T00:00:00.000Z',
+          topics: state.activeTopics ?? draftTopics(state),
+        }],
+      };
+    },
     createCourse: async (input) => {
       calls.createCourse.push(input);
       hasDraft = true;
@@ -148,7 +189,7 @@ function fakeClient(state: FakeState = {}): AdminClient {
     // Настоящая форма ответа маршрута: готовность читается из `sourceStatus`,
     // причина отказа — из `job.error`. Список `pages` пуст намеренно — число
     // страниц куска обязано происходить из диапазонов нарезки, а не отсюда.
-    sourceStatus: async (_courseId, sourceId) => (state.ocrError === undefined
+    sourceStatus: async (_courseId, sourceId) => (sourceReady
       ? {
         sourceId,
         sourceStatus: 'ready',
@@ -158,18 +199,20 @@ function fakeClient(state: FakeState = {}): AdminClient {
       : {
         sourceId,
         sourceStatus: 'failed',
-        job: { id: 1, status: 'failed' as const, attempts: 1, currentPage: 3, error: state.ocrError },
+        job: { id: 1, status: 'failed' as const, attempts: 1, currentPage: 3, error: state.ocrError ?? null },
         pages: [],
       }),
+    retrySource: async (courseId, sourceId) => {
+      calls.retrySource.push({ courseId, sourceId });
+      if (state.ocrRetryFixes === true) sourceReady = true;
+    },
     startBuild: async (courseId, revisionId, editVersion) => {
       calls.startBuild.push({ courseId, revisionId, editVersion });
-    },
-    buildStatus: async (courseId) => ({
-      revisionId: 2,
-      job: (state.buildFails ?? []).includes(courseId)
+      job = (state.buildFails ?? []).includes(courseId)
         ? { status: 'failed', error: 'модель не ответила' }
-        : { status: 'succeeded', error: null },
-    }),
+        : { status: 'succeeded', error: null };
+    },
+    buildStatus: async () => ({ revisionId: 2, job }),
     publish: async (courseId, revisionId, editVersion, idempotencyKey) => {
       calls.publish.push({ courseId, revisionId, editVersion, idempotencyKey });
       return {};
@@ -194,7 +237,9 @@ function options(state: FakeState = {}, overrides: Partial<ImportOptions> = {}):
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'import-frp-'));
-  calls = { createCourse: [], createDraft: [], uploadSource: [], startBuild: [], publish: [] };
+  calls = {
+    createCourse: [], createDraft: [], uploadSource: [], startBuild: [], retrySource: [], publish: [],
+  };
   tools = {
     // `pdftotext -layout <файл> -`: заглушка печатает файл как есть, документ
     // в тесте — уже текст с разделителями страниц.
@@ -274,7 +319,10 @@ describe('importCourses', () => {
   });
 
   it('источник, ответивший duplicate, не запускает вторую сборку', async () => {
-    await importCourses(options({ duplicate: true }));
+    await importCourses(options({
+      duplicate: true,
+      staleJob: { status: 'succeeded', error: null },
+    }));
     expect(calls.startBuild).toHaveLength(0);
     expect(calls.publish).toHaveLength(1);
   });
@@ -327,6 +375,59 @@ describe('importCourses', () => {
     const report = await importCourses(options({ ocrError: 'скан страницы 3 нечитаем' }));
     expect(calls.startBuild).toHaveLength(0);
     expect(report.failed[0]?.reason).toMatch(/скан страницы 3 нечитаем/u);
+  });
+
+  it('сохранность прогресса меряется темами активной редакции, а не черновика', async () => {
+    // Прошлый прогон собрал черновик и умер до публикации, поэтому в черновике
+    // лежат уже ФРП-темы. Считая прежними их, проверка сравнивала бы карту саму
+    // с собой и не срабатывала бы никогда — а теряется при этом накопленный
+    // `topic_state` детей на legacy-курсе.
+    const legacy: FrpSource = { ...source, courseId: { '5': 'math' } };
+    const report = await importCourses(options({
+      draft: true,
+      courses: [{ id: 'math', title: 'Математика', grade: '5 класс', activeRevisionId: 4 }],
+      sources: { 'math': [courseSource({ courseId: 'math', revisionId: 8 })] },
+      activeTopics: Array.from({ length: 10 }, (_, index) => ({
+        ...draftTopics({})[0] as CatalogRevisionTopic,
+        id: `math.legacy-${String(index + 1)}`,
+      })),
+    }, { sources: [legacy] }));
+    expect(calls.publish).toHaveLength(0);
+    expect(report.failed[0]?.reason).toMatch(/прежних тем/u);
+  });
+
+  it('отказавшая сборка прошлого прогона перезапускается, а не выдаётся за сегодняшнюю', async () => {
+    const report = await importCourses(options({
+      duplicate: true,
+      staleJob: { status: 'failed', error: 'модель не ответила вчера' },
+    }));
+    expect(calls.startBuild).toHaveLength(1);
+    expect(report.published).toEqual(['geo-5']);
+  });
+
+  it('отказавший OCR прошлого прогона ставится в очередь повторно', async () => {
+    // Загрузка дубликата в очередь не ставит (маршрут ставит только `!duplicate`),
+    // поэтому без явной повторной попытки такой источник не обработается никогда.
+    const report = await importCourses(options({
+      duplicate: true,
+      staleJob: { status: 'succeeded', error: null },
+      ocrError: 'скан страницы 3 нечитаем',
+      ocrRetryFixes: true,
+    }));
+    expect(calls.retrySource).toEqual([{ courseId: 'geo-5', sourceId: 1 }]);
+    expect(report.published).toEqual(['geo-5']);
+  });
+
+  it('чужой черновик оператора не переписывается', async () => {
+    // Черновик с темами, но без нашего куска, завёл человек: сборка заменила бы
+    // все его темы, а публикация выложила бы результат без него.
+    const report = await importCourses(options({
+      draft: true,
+      courses: [{ id: 'geo-5', title: 'География', grade: '5 класс', activeRevisionId: 7 }],
+      sources: { 'geo-5': [] },
+    }));
+    expect(calls.uploadSource).toHaveLength(0);
+    expect(report.failed[0]?.reason).toMatch(/черновик/u);
   });
 
   it('документ качается один раз на все классы уровня', async () => {
