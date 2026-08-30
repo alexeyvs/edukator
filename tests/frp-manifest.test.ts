@@ -57,3 +57,34 @@ describe('readFrpManifest', () => {
     expect(new Set(named.map(([, id]) => id))).toEqual(new Set(['math', 'russian', 'english']));
   });
 });
+
+describe('полнота манифеста', () => {
+  /**
+   * Известное исключение, а не забытая строка: у обществознания на edsoo.ru
+   * кнопка скачивания программы основного общего образования есть, а адреса за
+   * ней нет — сломан сам источник. Названное здесь поимённо, оно перестаёт
+   * прикрывать собой следующую потерю: счёт предметов проходил и с девятью
+   * записями `ooo` вместо десяти.
+   */
+  const MISSING_OOO = new Set(['obshhestvoznanie']);
+
+  it('у каждого предмета есть обе записи, кроме названного исключения', () => {
+    const levels = new Map<string, Set<string>>();
+    for (const source of readFrpManifest()) {
+      const known = levels.get(source.subject) ?? new Set<string>();
+      known.add(source.level);
+      levels.set(source.subject, known);
+    }
+    const expected = new Map(
+      [...levels.keys()].map((subject) => [
+        subject,
+        MISSING_OOO.has(subject) ? new Set(['soo']) : new Set(['ooo', 'soo']),
+      ]),
+    );
+    expect(levels).toEqual(expected);
+    // Пар считается ровно столько, сколько строк в файле: запись, потерянная
+    // вместе со всем предметом, не меняет ни одного множества выше.
+    const pairs = [...levels.values()].reduce((sum, known) => sum + known.size, 0);
+    expect(pairs).toBe(19);
+  });
+});
