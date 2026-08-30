@@ -1,0 +1,157 @@
+[
+  {
+    "subject": "matematika",
+    "title": "Математика",
+    "level": "ooo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_ooo_frp_matematika-5-9_baza.pdf",
+    "sha256": "a7afed6d5b67bea7b22ec680a2a736473e408b7835f927659d0e0cc840203d4f",
+    "grades": [5, 6, 7, 8, 9],
+    "courseId": { "7": "math" }
+  },
+  {
+    "subject": "matematika",
+    "title": "Математика",
+    "level": "soo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_soo_frp_matematika_10_11_baz.pdf",
+    "sha256": "631e85f6cd8c03d4d23160f8a06fae985b0439ef1958f15eccb6b9c2fe4f4b22",
+    "grades": [10, 11]
+  },
+  {
+    "subject": "russkij-yazyk",
+    "title": "Русский язык",
+    "level": "ooo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/09/01_frp_russkij-yazyk_5-9-klassy_itog-na-sajt_1-2.pdf",
+    "sha256": "1d2f68b5e77e7b67fccd52ce0fed36d84141dc719e50db7b225f40b1313eeb0d",
+    "grades": [5, 6, 7, 8, 9],
+    "courseId": { "7": "russian" }
+  },
+  {
+    "subject": "russkij-yazyk",
+    "title": "Русский язык",
+    "level": "soo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_soo_frp_russkij-yazyk_10_11.pdf",
+    "sha256": "6be6b29f4512627c5a9510a0fb6ff6e6e5b7d81718564f19e361eaab4ef00bd6",
+    "grades": [10, 11]
+  },
+  {
+    "subject": "anglijskij-yazyk",
+    "title": "Английский язык",
+    "level": "ooo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_ooo_frp_angl_5-9.pdf",
+    "sha256": "52b80d38c62ca9545bb2cbecad31a1c545677f21aee09bb3ef66344059c2b24d",
+    "grades": [5, 6, 7, 8, 9],
+    "courseId": { "7": "english" }
+  },
+  {
+    "subject": "anglijskij-yazyk",
+    "title": "Английский язык",
+    "level": "soo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_soo_frp_angl-yaz_10-11_baz.pdf",
+    "sha256": "b4d89304e0537b8f6802d7ce68fe9c0bb7955f568c7fecb1da47ef8bceeac8c3",
+    "grades": [10, 11]
+  },
+  {
+    "subject": "fizika",
+    "title": "Физика",
+    "level": "ooo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_ooo_frp_fizika-7-9_baz.pdf",
+    "sha256": "80047c7ae0fe2a3e35d54546a0c3aec478df7cdfca1d8333769cc101502321dc",
+    "grades": [7, 8, 9]
+  },
+  {
+    "subject": "fizika",
+    "title": "Физика",
+    "level": "soo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_soo_frp_fizika_10_11_baz.pdf",
+    "sha256": "cf07842f1c6784a972bac8bb57fa9a031cc1f8bdaaf7016a725b474485aab82c",
+    "grades": [10, 11]
+  },
+  {
+    "subject": "himiya",
+    "title": "Химия",
+    "level": "ooo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_ooo_frp_himiya_8-9_baza.pdf",
+    "sha256": "35a0283e8128b81190805bc682034d63456b909a2a80c46524505bdc31985e15",
+    "grades": [8, 9]
+  },
+  {
+    "subject": "himiya",
+    "title": "Химия",
+    "level": "soo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_soo_frp_himiya_10_11_baz.pdf",
+    "sha256": "2a6d6ef9d9824d8b2b910b9e21d8efd7e1c943d71ba7c6815cffce8246f2b9dd",
+    "grades": [10, 11]
+  },
+  {
+    "subject": "biologiya",
+    "title": "Биология",
+    "level": "ooo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_ooo_frp_biologiya_5-9_baza.pdf",
+    "sha256": "16470854fd537ebdfc6cc193c0f30fda1336cd7b6eb76f906266ea49caaaf35f",
+    "grades": [5, 6, 7, 8, 9]
+  },
+  {
+    "subject": "biologiya",
+    "title": "Биология",
+    "level": "soo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_soo_frp_biologiya_10_11_baz.pdf",
+    "sha256": "3bfc06ba21cae082a759d14713c9f86a2796d25a86ce342d549c523a1d8e9842",
+    "grades": [10, 11]
+  },
+  {
+    "subject": "geografiya",
+    "title": "География",
+    "level": "ooo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_ooo_frp_geografiya-5-9.pdf",
+    "sha256": "bf7739f713faea9064618ebe04e10ef9e7359e35978dbd457421b93094c7ac7c",
+    "grades": [5, 6, 7, 8, 9]
+  },
+  {
+    "subject": "geografiya",
+    "title": "География",
+    "level": "soo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_soo_frp_geografiya_10_11_baz.pdf",
+    "sha256": "e29b1a0fbe587345517e04db36b834c75fc3fcbd252e07887c3d466c553f11f5",
+    "grades": [10, 11]
+  },
+  {
+    "subject": "informatika",
+    "title": "Информатика",
+    "level": "ooo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_ooo_frp_informatika-7-9_baza.pdf",
+    "sha256": "ee4b4518f7cd8903139c109bfe21d0541dc299281b182b6c9f6d0763c5733cd0",
+    "grades": [7, 8, 9]
+  },
+  {
+    "subject": "informatika",
+    "title": "Информатика",
+    "level": "soo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_soo_frp_informatika_10_11_baz.pdf",
+    "sha256": "447813cd1c337569c25a36430ecb236c44a210562a98efd23e0c0a0d10b0b3c7",
+    "grades": [10, 11]
+  },
+  {
+    "subject": "istoriya",
+    "title": "История",
+    "level": "ooo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_ooo_frp_istoriya_5-9.pdf",
+    "sha256": "b31d053cd5b8484faff58f4c6c40b0dff18a733c9e191a424918d3d89f11d489",
+    "grades": [5, 6, 7, 8, 9]
+  },
+  {
+    "subject": "istoriya",
+    "title": "История",
+    "level": "soo",
+    "url": "https://edsoo.ru/wp-content/uploads/2025/07/2025_soo_frp_istoriya_10_11_baza.pdf",
+    "sha256": "3d3ba537958e082e4d8c7f6085355e2bc63b678b819aea3f4bd0e1a261cc4598",
+    "grades": [10, 11]
+  },
+  {
+    "subject": "obshhestvoznanie",
+    "title": "Обществознание",
+    "level": "soo",
+    "url": "https://edsoo.ru/wp-content/uploads/2023/09/frp_obshhestvoznanie-10-11-klassy_baza.pdf",
+    "sha256": "d6c181f2e8fbe685e3d1f648ecf6f686ffe59d5a6e86616610f21fbbd94b20df",
+    "grades": [10, 11]
+  }
+]
