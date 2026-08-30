@@ -44,7 +44,17 @@ export async function readPdfPages(path: string, tools: PdfTools = DEFAULT_PDF_T
   // Пустой документ даёт пустую строку, а не один пустой кусок: `''.split` уже
   // вернул бы `['']`, то есть одну несуществующую страницу.
   if (result.stdout === '') return [];
-  return result.stdout.split(PAGE_BREAK).map((text, index) => ({ num: index + 1, text }));
+  // Настоящий pdftotext дописывает перевод страницы и после последней
+  // страницы, а не только между страницами: документ из N страниц даёт N
+  // символов `\f`, а не N−1. Наивное разбиение оставило бы фантомную (N+1)-ю
+  // страницу с пустым текстом — а её номер уехал бы дальше, в `cutPdf`, как
+  // диапазон, которого в файле нет. Срезается ровно один завершающий разделитель:
+  // подлинно пустая последняя страница документа даёт `\f\f` в конце и после
+  // среза одного `\f` остаётся ровно её собственный пустой кусок.
+  const text = result.stdout.endsWith(PAGE_BREAK)
+    ? result.stdout.slice(0, -PAGE_BREAK.length)
+    : result.stdout;
+  return text.split(PAGE_BREAK).map((pageText, index) => ({ num: index + 1, text: pageText }));
 }
 
 /**
