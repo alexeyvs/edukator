@@ -40,6 +40,15 @@ export const IMPORT_POLL_MS = 5_000;
  * мешает остальным пятидесяти.
  */
 export const IMPORT_WAIT_TIMEOUT_MS = 30 * 60_000;
+/**
+ * Срок одного скачивания. Единственное ожидание конвейера, у которого сети не
+ * видно изнутри: у `runChild` срок обязателен, у опроса очередей он свой, а
+ * зависшее соединение без срока держит **весь** ночной прогон вечно и молча —
+ * ни отказа, ни строки в `failed[]`, ни кода возврата; утром оператор видит
+ * процесс, стоящий на первом предмете. Десять минут — с запасом на сто
+ * мегабайт программы по узкому каналу.
+ */
+export const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
 
 export interface ImportOptions {
   client: AdminClient;
@@ -540,13 +549,37 @@ export function parseImportArgs(argv: readonly string[]): ImportArgs {
   };
 }
 
-/** Скачивание одной программы. Живая сеть — только здесь и только в CLI. */
-async function downloadToFile(url: string, target: string): Promise<void> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`скачивание ${url} отклонено кодом ${String(response.status)}`);
+/**
+ * Скачивание одной программы. Живая сеть — только здесь и только в CLI.
+ *
+ * Срок держит и заголовки, и тело: один `AbortSignal.timeout` уезжает в
+ * `fetch`, а тело читается тем же ответом — прерванный сигналом поток
+ * отказывает, а не висит.
+ */
+export async function downloadToFile(
+  url: string,
+  target: string,
+  timeoutMs: number = DOWNLOAD_TIMEOUT_MS,
+): Promise<void> {
+  const signal = AbortSignal.timeout(timeoutMs);
+  let response: Response;
+  let body: ArrayBuffer;
+  try {
+    response = await fetch(url, { signal });
+    if (!response.ok) {
+      throw new Error(`скачивание ${url} отклонено кодом ${String(response.status)}`);
+    }
+    body = await response.arrayBuffer();
+  } catch (error) {
+    // Отказ по сроку называется сроком: `TimeoutError` от `fetch` приходит
+    // словами «This operation was aborted», по которым причину не узнать, а
+    // отказ уезжает в `failed[]` и читается человеком утром.
+    if (signal.aborted) {
+      throw new Error(`скачивание ${url} не уложилось в срок ${String(timeoutMs)} мс`);
+    }
+    throw error;
   }
-  await writeFile(target, Buffer.from(await response.arrayBuffer()));
+  await writeFile(target, Buffer.from(body));
 }
 
 async function main(): Promise<void> {

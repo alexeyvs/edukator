@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { createServer, type Server } from 'node:http';
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  frpCourseId, IMPORT_POLL_MS, IMPORT_WAIT_TIMEOUT_MS, importCourses, parseImportArgs,
-  type ImportOptions,
+  DOWNLOAD_TIMEOUT_MS, downloadToFile, frpCourseId, IMPORT_POLL_MS, IMPORT_WAIT_TIMEOUT_MS,
+  importCourses, parseImportArgs, type ImportOptions,
 } from '../scripts/import-frp.js';
 import { readFrpManifest } from '../scripts/frp-manifest.js';
 import { isCourseId } from '../server/db.js';
@@ -503,6 +505,47 @@ describe('паузы прогона', () => {
     // боевая пауза от опечатки неотличима.
     expect(IMPORT_POLL_MS).toBe(5_000);
     expect(IMPORT_WAIT_TIMEOUT_MS).toBe(30 * 60 * 1000);
+    expect(DOWNLOAD_TIMEOUT_MS).toBe(10 * 60 * 1000);
+  });
+});
+
+describe('downloadToFile', () => {
+  let server: Server;
+  let base: string;
+  /** Соединения, которым ответ не отдаётся: их закрывает `afterEach`. */
+  let hanging: Array<() => void>;
+
+  beforeEach(async () => {
+    hanging = [];
+    server = createServer((request, response) => {
+      if (request.url === '/hang') {
+        // Заголовки отданы, тело — никогда: ровно то зависшее соединение,
+        // которое до срока держало ночной прогон вечно и молча.
+        response.writeHead(200, { 'content-type': 'application/pdf' });
+        hanging.push(() => { response.end(); });
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'application/pdf' });
+      response.end('программа');
+    });
+    await new Promise<void>((ready) => { server.listen(0, '127.0.0.1', ready); });
+    base = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`;
+  });
+
+  afterEach(async () => {
+    for (const finish of hanging) finish();
+    await new Promise<void>((closed) => { server.close(() => { closed(); }); });
+  });
+
+  it('скачивает документ в указанный файл', async () => {
+    const target = join(dir, 'ok.pdf');
+    await downloadToFile(`${base}/frp.pdf`, target, 5_000);
+    expect(readFileSync(target, 'utf8')).toBe('программа');
+  });
+
+  it('молчащее соединение отказывает по сроку, а не держит прогон вечно', async () => {
+    await expect(downloadToFile(`${base}/hang`, join(dir, 'hang.pdf'), 30))
+      .rejects.toThrow(/срок|timeout|abort/iu);
   });
 });
 
