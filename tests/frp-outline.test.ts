@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { rangesForGrade, sliceFrp, type FrpPage } from '../scripts/frp-outline.js';
+import { DEFAULT_COURSE_TITLE, rangesForGrade, sliceFrp, type FrpPage } from '../scripts/frp-outline.js';
 
 function pages(...texts: string[]): FrpPage[] {
   return texts.map((text, index) => ({ num: index + 1, text }));
@@ -66,8 +66,28 @@ describe('sliceFrp', () => {
     ]);
   });
 
-  it('игнорирует класс до первого заголовка учебного курса', () => {
-    expect(sliceFrp(pages('СОДЕРЖАНИЕ ОБУЧЕНИЯ\n7 КЛАСС\nтекст'))).toEqual([]);
+  // Заголовок учебного курса есть только там, где предмет разбит на несколько
+  // курсов, — из десяти предметов манифеста это одна математика. У географии,
+  // биологии, истории и всех прочих такого заголовка в документе нет вовсе, и
+  // требовать его значило бы не находить в этих программах ни одного отрезка.
+  // Именно на этом первый боевой прогон отбраковал 53 курса из 58.
+  it('документ без заголовков учебного курса сам считается одним курсом', () => {
+    const slices = sliceFrp(pages(
+      'СОДЕРЖАНИЕ ОБУЧЕНИЯ\n5 КЛАСС\nИстория открытия Земли',
+      'ТЕМАТИЧЕСКОЕ ПЛАНИРОВАНИЕ\n5 КЛАСС\nИстория открытия Земли, 6 часов',
+    ));
+    expect(slices).toEqual([
+      { courseTitle: DEFAULT_COURSE_TITLE, grade: 5, ranges: [{ from: 1, to: 2 }] },
+    ]);
+  });
+
+  it('в документе без заголовков курса находятся все классы уровня', () => {
+    const slices = sliceFrp(pages(
+      'СОДЕРЖАНИЕ ОБУЧЕНИЯ\n5 КЛАСС\nтекст',
+      'ПРЕДМЕТНЫЕ РЕЗУЛЬТАТЫ\nвыпускник научится',
+      'ТЕМАТИЧЕСКОЕ ПЛАНИРОВАНИЕ\n9 КЛАСС\nтекст',
+    ));
+    expect(slices.map((slice) => slice.grade)).toEqual([5, 9]);
   });
 
   it('последняя страница раздела с заголовком следующего курса остаётся в срезе', () => {

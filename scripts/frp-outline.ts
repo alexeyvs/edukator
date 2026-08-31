@@ -27,7 +27,14 @@ export interface FrpSlice {
   ranges: PageRange[];
 }
 
-const COURSE_HEADING = /ФЕДЕРАЛЬНАЯ\s+РАБОЧАЯ\s+ПРОГРАММА\s+УЧЕБНОГО\s+КУРСА\s*«([^»]+)»/gu;
+/**
+ * Название учебного курса для документа, в котором своих заголовков курса нет.
+ * В отрезках оно служит только ключом группировки — `rangesForGrade` смотрит на
+ * класс, — поэтому значение важно лишь тем, что оно одно на весь документ.
+ */
+export const DEFAULT_COURSE_TITLE = 'ПРОГРАММА';
+
+const COURSE_HEADING =/ФЕДЕРАЛЬНАЯ\s+РАБОЧАЯ\s+ПРОГРАММА\s+УЧЕБНОГО\s+КУРСА\s*«([^»]+)»/gu;
 const CONTENT_SECTION = /(СОДЕРЖАНИЕ\s+ОБУЧЕНИЯ|ТЕМАТИЧЕСКОЕ\s+ПЛАНИРОВАНИЕ)(?!\p{L})/gu;
 const OTHER_SECTION = /(ПЛАНИРУЕМЫЕ\s+РЕЗУЛЬТАТЫ|ПРЕДМЕТНЫЕ\s+РЕЗУЛЬТАТЫ|ПОЯСНИТЕЛЬНАЯ\s+ЗАПИСКА)(?!\p{L})/gu;
 // Граница слова здесь обязана быть `(?!\p{L})`: `\b` в JS считает словом только
@@ -64,14 +71,19 @@ function markers(text: string): Marker[] {
  */
 export function sliceFrp(pages: readonly FrpPage[]): FrpSlice[] {
   const collected = new Map<string, { courseTitle: string; grade: number; pages: number[] }>();
-  let courseTitle: string | undefined;
+  // Документ, в котором заголовка учебного курса нет ни одного, сам и есть один
+  // учебный курс. Заголовок появляется только там, где предмет разбит на
+  // несколько курсов, — из десяти предметов манифеста это одна математика.
+  // Требовать его от всех значило не находить в остальных девяти ни одного
+  // отрезка: ровно на этом первый боевой прогон отбраковал 53 курса из 58.
+  let courseTitle = DEFAULT_COURSE_TITLE;
   let inContent = false;
   let grade: number | undefined;
 
   for (const page of pages) {
     const onPage = new Map<string, { courseTitle: string; grade: number }>();
     const remember = (): void => {
-      if (courseTitle === undefined || !inContent || grade === undefined) return;
+      if (!inContent || grade === undefined) return;
       onPage.set(`${courseTitle} ${String(grade)}`, { courseTitle, grade });
     };
     const pageMarkers = markers(page.text);
