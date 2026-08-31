@@ -81,10 +81,29 @@ function errorFrom(data: JsonBody, fallback: string): Error {
   return new Error(message);
 }
 
-export function createAdminClient(baseUrl: string, fetchImpl: typeof fetch = fetch): AdminClient {
+/** Сколько раз повторить запрос, оборвавшийся на связи, прежде чем сдаться. */
+export const NETWORK_RETRIES = 3;
+/** Пауза перед первым повтором; каждый следующий ждёт кратно дольше. */
+export const NETWORK_RETRY_DELAY_MS = 2_000;
+
+export interface AdminClientOptions {
+  /** Пауза между повторами. Своё значение нужно только тестам. */
+  retryDelayMs?: number;
+}
+
+export function createAdminClient(
+  baseUrl: string,
+  fetchImpl: typeof fetch = fetch,
+  options: AdminClientOptions = {},
+): AdminClient {
   // Хвостовой слэш не влияет на настоящий вход, но ломает сравнение конкатенацией.
   const origin = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+  const retryDelayMs = options.retryDelayMs ?? NETWORK_RETRY_DELAY_MS;
   let cookie: string | undefined;
+  // Учётные данные переживают вход намеренно: импорт идёт часами, а сессия
+  // оператора гаснет через 8 часов жизни или 30 минут простоя, и без
+  // переподключения остаток прогона получает «Нужно войти» на каждый запрос.
+  let credentials: { email: string; password: string } | undefined;
 
   /**
    * Единственное место, где собирается запрос. `Origin` ставится на **каждый**
@@ -92,7 +111,7 @@ export function createAdminClient(baseUrl: string, fetchImpl: typeof fetch = fet
    * схему вместе с хостом, и без `Origin` каждый POST вернёт 403 — браузерных
    * заголовков у скрипта нет, и подставить их больше некому.
    */
-  async function send(method: string, path: string, body?: JsonBody | FormData): Promise<Response> {
+  async function sendOnce(method: string, path: string, body?: JsonBody | FormData): Promise<Response> {
     const headers = new Headers();
     headers.set('origin', origin);
     if (cookie !== undefined) headers.set('cookie', cookie);
@@ -113,9 +132,68 @@ export function createAdminClient(baseUrl: string, fetchImpl: typeof fetch = fet
     });
   }
 
+  /**
+   * Обрыв связи — не приговор курсу. Одна моргнувшая сеть посреди
+   * многочасового прогона иначе уносит курс в `failed[]`, хотя ни сервер, ни
+   * документ ни при чём. Повторяется только брошенный запрос (сеть не дала
+   * ответа вовсе); ответ с любым статусом возвращается как есть — за него
+   * отвечают `call` и `callOptional`.
+   */
+  async function send(method: string, path: string, body?: JsonBody | FormData): Promise<Response> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= NETWORK_RETRIES; attempt += 1) {
+      try {
+        return await sendOnce(method, path, body);
+      } catch (error) {
+        lastError = error;
+        if (attempt < NETWORK_RETRIES) {
+          await new Promise((done) => setTimeout(done, retryDelayMs * (attempt + 1)));
+        }
+      }
+    }
+    throw lastError;
+  }
+
+  /**
+   * Вход как таковой: ходит через `send`, а не через `sendWithSession`, —
+   * иначе отказ входа сам бы вызывал переподключение и уходил в рекурсию.
+   */
+  async function authenticate(email: string, password: string): Promise<void> {
+    const response = await send('POST', '/api/auth/admin/login', { email, password });
+    const data = await readJsonBody(response);
+    if (!response.ok) throw errorFrom(data, `вход отклонён: код ответа ${String(response.status)}`);
+    // Вход, не получивший cookie, обязан быть отказом, а не молчаливым
+    // успехом: иначе первая же настоящая операция упрётся в 401, а причиной
+    // будет назван не вход.
+    const setCookie = response.headers.get('set-cookie');
+    const found = setCookie === null
+      ? undefined
+      : new RegExp(`${ADMIN_COOKIE_NAME}=[^;]+`, 'u').exec(setCookie)?.[0];
+    if (found === undefined) {
+      throw new Error(`Вход не выдал cookie ${ADMIN_COOKIE_NAME}: сервер не подтвердил сессию`);
+    }
+    cookie = found;
+  }
+
+  /**
+   * Истёкшую сессию переоткрываем один раз и повторяем запрос. Ровно один:
+   * второй отказ означает, что дело не в сроке сессии, и доносить его надо
+   * вызывающему, а не крутить вход по кругу.
+   */
+  async function sendWithSession(
+    method: string,
+    path: string,
+    body?: JsonBody | FormData,
+  ): Promise<Response> {
+    const response = await send(method, path, body);
+    if (response.status !== 401 || credentials === undefined) return response;
+    await authenticate(credentials.email, credentials.password);
+    return send(method, path, body);
+  }
+
   /** Обычный вызов: ненулевой статус превращает в ошибку с текстом из тела. */
   async function call(method: string, path: string, body?: JsonBody | FormData): Promise<JsonBody> {
-    const response = await send(method, path, body);
+    const response = await sendWithSession(method, path, body);
     const data = await readJsonBody(response);
     if (!response.ok) throw errorFrom(data, `${method} ${path}: код ответа ${String(response.status)}`);
     return data;
@@ -123,7 +201,7 @@ export function createAdminClient(baseUrl: string, fetchImpl: typeof fetch = fet
 
   /** Как `call`, но 404 — состояние («у курса нет черновика»), а не поломка. */
   async function callOptional(method: string, path: string): Promise<JsonBody | undefined> {
-    const response = await send(method, path);
+    const response = await sendWithSession(method, path);
     const data = await readJsonBody(response);
     if (response.status === 404) return undefined;
     if (!response.ok) throw errorFrom(data, `${method} ${path}: код ответа ${String(response.status)}`);
@@ -132,20 +210,10 @@ export function createAdminClient(baseUrl: string, fetchImpl: typeof fetch = fet
 
   return {
     async login(email, password) {
-      const response = await send('POST', '/api/auth/admin/login', { email, password });
-      const data = await readJsonBody(response);
-      if (!response.ok) throw errorFrom(data, `вход отклонён: код ответа ${String(response.status)}`);
-      // Вход, не получивший cookie, обязан быть отказом, а не молчаливым
-      // успехом: иначе первая же настоящая операция упрётся в 401, а причиной
-      // будет назван не вход.
-      const setCookie = response.headers.get('set-cookie');
-      const found = setCookie === null
-        ? undefined
-        : new RegExp(`${ADMIN_COOKIE_NAME}=[^;]+`, 'u').exec(setCookie)?.[0];
-      if (found === undefined) {
-        throw new Error(`Вход не выдал cookie ${ADMIN_COOKIE_NAME}: сервер не подтвердил сессию`);
-      }
-      cookie = found;
+      await authenticate(email, password);
+      // Запоминаются только после удачного входа: неверный пароль не должен
+      // превращаться в бесконечные попытки переподключения на каждом 401.
+      credentials = { email, password };
     },
 
     async listCourses() {

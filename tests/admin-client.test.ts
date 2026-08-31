@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createAdminClient } from '../scripts/admin-client.js';
+import { createAdminClient, NETWORK_RETRIES, NETWORK_RETRY_DELAY_MS } from '../scripts/admin-client.js';
 
 function fakeFetch(handler: (url: string, init: RequestInit) => Response): typeof fetch {
   return vi.fn(async (input: string | URL | Request, init?: RequestInit) =>
@@ -222,6 +222,74 @@ describe('createAdminClient', () => {
       expect(status.job?.error).toBe('скан страницы 3 нечитаем');
       expect(status.sourceStatus).toBe('failed');
       expect(status.pages).toHaveLength(3);
+    });
+  });
+
+  // Импорт шестидесяти курсов идёт часами, а сессия оператора живёт 8 часов и
+  // гаснет после 30 минут простоя. Первый боевой прогон потерял на этом 13
+  // курсов: клиент входил один раз в начале, и с какого-то момента каждый
+  // запрос получал «Нужно войти».
+  describe('живучесть сессии и связи', () => {
+    const okLogin = (n: number): Response => new Response('{}', {
+      status: 200,
+      headers: { 'set-cookie': `__Host-edu_admin=t${String(n)}; Path=/` },
+    });
+
+    it('истёкшая сессия переоткрывается, и запрос повторяется', async () => {
+      let logins = 0;
+      let asked = 0;
+      const client = createAdminClient('https://edukator.ru', fakeFetch((url) => {
+        if (url.endsWith('/api/auth/admin/login')) return okLogin((logins += 1));
+        asked += 1;
+        return asked === 1
+          ? new Response(JSON.stringify({ error: 'Нужно войти' }), { status: 401 })
+          : new Response(JSON.stringify({ courses: [] }), { status: 200 });
+      }), { retryDelayMs: 1 });
+      await client.login('оператор@пример.рф', 'пароль');
+
+      await expect(client.listCourses()).resolves.toEqual([]);
+      expect(logins).toBe(2);
+    });
+
+    it('повторный вход не зацикливается: второй отказ доносится', async () => {
+      let logins = 0;
+      const client = createAdminClient('https://edukator.ru', fakeFetch((url) => {
+        if (url.endsWith('/api/auth/admin/login')) return okLogin((logins += 1));
+        return new Response(JSON.stringify({ error: 'Нужно войти' }), { status: 401 });
+      }), { retryDelayMs: 1 });
+      await client.login('оператор@пример.рф', 'пароль');
+
+      await expect(client.listCourses()).rejects.toThrow(/Нужно войти/u);
+      expect(logins).toBe(2);
+    });
+
+    it('сетевой обрыв повторяется, а не уносит курс в отказ', async () => {
+      let attempts = 0;
+      const client = createAdminClient('https://edukator.ru', fakeFetch((url) => {
+        if (url.endsWith('/api/auth/admin/login')) return okLogin(1);
+        attempts += 1;
+        if (attempts === 1) throw new TypeError('fetch failed');
+        return new Response(JSON.stringify({ courses: [] }), { status: 200 });
+      }), { retryDelayMs: 1 });
+      await client.login('оператор@пример.рф', 'пароль');
+
+      await expect(client.listCourses()).resolves.toEqual([]);
+      expect(attempts).toBe(2);
+    });
+
+    it('держит калибровочные константы повторов', () => {
+      expect(NETWORK_RETRIES).toBe(3);
+      expect(NETWORK_RETRY_DELAY_MS).toBe(2_000);
+    });
+
+    it('обрыв, переживший все повторы, доносится', async () => {
+      const client = createAdminClient('https://edukator.ru', fakeFetch((url) => {
+        if (url.endsWith('/api/auth/admin/login')) return okLogin(1);
+        throw new TypeError('fetch failed');
+      }), { retryDelayMs: 1 });
+      await client.login('оператор@пример.рф', 'пароль');
+
+      await expect(client.listCourses()).rejects.toThrow(/fetch failed/u);
     });
   });
 });
