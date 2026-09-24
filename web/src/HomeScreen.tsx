@@ -106,6 +106,8 @@ function AccessCard({ gate }: { gate: DayPlanResponse['gate'] }) {
     note = 'Доступ временно закрыт родителем до следующего дня.';
   } else if (gate.unlocked) {
     note = 'План выполнен. Доступ открыт до следующего дня.';
+  } else if (gate.mode === 'parent_topics') {
+    note = `Получи зачёт по всем темам, назначенным родителем: ${gate.completed} из ${gate.required}.`;
   } else if (gate.remaining === 0 && gate.learning.required && !gate.learning.passed) {
     note = 'Обычные забеги завершены. Для доступа нужен зачёт за разбор темы.';
   } else if (gate.learning.required && !gate.learning.passed) {
@@ -129,7 +131,8 @@ function AccessCard({ gate }: { gate: DayPlanResponse['gate'] }) {
       </div>
       <div className="access-card-progress">
         <div className="access-condition">
-          <span>Обычные забеги:{' '}</span><strong>{gate.completed}/{gate.required}</strong>
+          <span>{gate.mode === 'parent_topics' ? 'Темы из школы:' : 'Обычные забеги:'}{' '}</span>
+          <strong>{gate.completed}/{gate.required}</strong>
         </div>
         <div
           className="access-progress-track"
@@ -141,9 +144,9 @@ function AccessCard({ gate }: { gate: DayPlanResponse['gate'] }) {
         >
           <span style={{ width: `${progress}%` }} />
         </div>
-        <div className="access-condition">
+        {gate.mode !== 'parent_topics' && <div className="access-condition">
           <span>Разбор темы:{' '}</span><strong>{learningStatus}</strong>
-        </div>
+        </div>}
       </div>
     </section>
   );
@@ -306,10 +309,12 @@ export function HomeScreen({
       <section className="home-intro">
         <div>
           <p className="home-kicker">План на сегодня</p>
-          <h1>{courses.length === 0
+          <h1>{plan?.gate.mode === 'parent_topics' ? 'Темы из школы на сегодня' : courses.length === 0
             ? 'Курсы пока не назначены'
             : anySubjectCalibrated ? 'Выбирай первый забег' : 'Сначала сверим карту знаний'}</h1>
-          <p>{courses.length === 0
+          <p>{plan?.gate.mode === 'parent_topics'
+            ? 'Родитель выбрал темы, которые ты проходил в школе. Разбери каждую и проверь себя.'
+            : courses.length === 0
             ? 'Попроси родителя выбрать курсы в семейном кабинете.'
             : anySubjectCalibrated
             ? 'Короткие забеги держат темп и показывают, что уже стало увереннее.'
@@ -325,7 +330,30 @@ export function HomeScreen({
 
       {plan === null && problem === null ? (
         <section className="home-loading" aria-label="Загрузка плана">Собираю план дня…</section>
-      ) : plan === null ? null : courses.length === 0 ? (
+      ) : plan === null ? null : plan.gate.mode === 'parent_topics' ? (
+        <section className="learning-offer daily-learning-offer" aria-labelledby="daily-learning-title">
+          <div className="section-heading"><p>Назначено родителем</p><h2 id="daily-learning-title">Все темы на сегодня</h2></div>
+          <div className="learning-cards">{(plan.dailyTopics ?? []).map((item) => (
+            <article className="learning-card learning-card-required" key={item.id}
+              style={{ '--subject-accent': courseColor(item.subject) } as CSSProperties}>
+              <span className="learning-card-mark">{courseInitials(item.courseTitle)}</span>
+              <div className="learning-card-copy">
+                <span className="learning-required-badge">Обязательный разбор</span>
+                <small>{item.courseTitle}</small>
+                <h3>{item.topic.title}</h3>
+                <p>{item.status === 'passed' ? 'Зачтено'
+                  : item.firstTotal !== null
+                    ? `Первая попытка: ${item.firstScore}/${item.firstTotal}. Повтори разбор до зачёта.`
+                    : 'Прочитай разбор и ответь на пять вопросов.'}</p>
+              </div>
+              {item.status !== 'passed' && item.materialId !== null && <button className="primary" type="button"
+                onClick={() => navigate(`/?learningId=${item.materialId}`)}>
+                {item.status === 'active' ? 'Продолжить разбор' : 'Разобрать тему'}
+              </button>}
+            </article>
+          ))}</div>
+        </section>
+      ) : courses.length === 0 ? (
         <section className="home-empty-courses" aria-labelledby="empty-courses-title">
           <span aria-hidden="true">○</span>
           <div><h2 id="empty-courses-title">Здесь появится учебный план</h2>
@@ -471,7 +499,7 @@ export function HomeScreen({
         </>
       )}
 
-      {plan !== null && (
+      {plan !== null && plan.gate.mode !== 'parent_topics' && (
         <section className="topic-map" aria-labelledby="topic-map-title">
           <div className="section-heading">
             <p>Путь к боссам</p>

@@ -39,6 +39,7 @@ import {
   failAuth,
 } from '../server/routes/tenant-context.js';
 import { recordingFailureLog } from './server-harness.js';
+import { activateDailyTopicSet, confirmDailyTopics } from '../server/daily-topics.js';
 
 const NOW = new Date('2026-08-19T09:00:00.000Z');
 const PASSWORD = 'пароль-подлиннее';
@@ -181,6 +182,36 @@ describe('контекст арендатора', () => {
   ): Promise<Injected> {
     return app.inject({ method: 'PUT', url, headers: headers[bearer], payload });
   }
+
+  it('закрывает остальные занятия ребёнка при активных темах и оставляет родителю сводку', async () => {
+    const db = tenants.open(childId).db;
+    const set = confirmDailyTopics(db, GRAPH, {
+      sourceText: 'Тема math.a', requestKey: 'tenant-context-daily',
+      items: [{ title: 'Тема math.a', subjectId: 'math', subjectTitle: 'Математика', topicId: 'math.a' }],
+    }, NOW);
+    const materialId = Number(db.prepare(
+      `INSERT INTO learning_materials
+         (subject, topic_id, status, recommendation_reason, mastery_before,
+          daily_item_id, created_at, updated_at, ready_at)
+       VALUES ('math', 'math.a', 'ready', 'Родитель', 0, ?, ?, ?, ?)`,
+    ).run(set.items[0]?.id, NOW.toISOString(), NOW.toISOString(), NOW.toISOString()).lastInsertRowid);
+    db.prepare("UPDATE daily_topic_items SET status = 'ready', material_id = ? WHERE id = ?")
+      .run(materialId, set.items[0]?.id);
+    expect(activateDailyTopicSet(db, set.id, NOW)).toBe(true);
+
+    expect((await get('/api/run/plan', 'browser')).statusCode).toBe(200);
+    expect((await get('/api/gate/status', 'agent')).statusCode).toBe(200);
+    expect((await get(`/api/parents/${childId}`, 'parent')).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: '/api/triage/start', headers: headers.browser,
+      payload: { subject: 'math' } })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'POST', url: '/api/run/start', headers: headers.browser,
+      payload: { subject: 'math' } })).statusCode).toBe(403);
+    expect((await get('/api/learning/999', 'browser')).statusCode).toBe(403);
+    expect((await get('/api/integrity/1', 'browser')).statusCode).toBe(403);
+    expect((await get('/api/session/next?runId=1', 'browser')).statusCode).toBe(403);
+    expect((await app.inject({ method: 'POST', url: '/api/session/dispute', headers: headers.browser,
+      payload: { attempt_id: 1 } })).statusCode).toBe(403);
+  });
 
   describe('матрица допуска', () => {
     // Ожидание выписано руками, а не выведено из `ROUTE_ACCESS`: тест, который

@@ -11,6 +11,7 @@ import {
 } from '../learning.js';
 import { runProgress } from '../run.js';
 import { readDailyGate } from '../daily-gate.js';
+import { dailyMaterialAllowed } from '../daily-topics.js';
 import {
   ROUTE_ACCESS,
   failAuth,
@@ -52,9 +53,12 @@ function fail(reply: FastifyReply, error: unknown): FastifyReply {
   return failAuth(reply, error);
 }
 
-function materialJson(tenant: Tenant, materialId: number): Record<string, unknown> {
+function materialJson(tenant: Tenant, materialId: number, at: Date): Record<string, unknown> {
   const material = readLearningMaterial(tenant.db, materialId);
-  const currentRevision = tenant.curriculum.revisionIds.get(material.subject);
+  if (!dailyMaterialAllowed(tenant.db, materialId, at)) {
+    throw new LearningError('learning-not-ready', 'Этот разбор сейчас не назначен');
+  }
+  const currentRevision = tenant.curriculum.revisionIds.get(material.subject) ?? null;
   const graph = material.courseRevisionId === currentRevision
     ? tenant.curriculum.graph
     : material.latestRunId !== null && material.latestRunFinishedAt === null
@@ -98,6 +102,7 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
       return reply.send(materialJson(
         context.tenant,
         readPathId(request.params.id, 'Идентификатор материала'),
+        now(),
       ));
     } catch (error) {
       return fail(reply, error);
@@ -111,9 +116,9 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
       const materialId = readPathId(request.params.id, 'Идентификатор материала');
-      materialJson(context.tenant, materialId);
+      materialJson(context.tenant, materialId, now());
       const opened = openLearningMaterial(db, materialId, { now: now() });
-      return reply.send({ ...opened, material: materialJson(context.tenant, materialId) });
+      return reply.send({ ...opened, material: materialJson(context.tenant, materialId, now()) });
     } catch (error) {
       return fail(reply, error);
     }
@@ -126,7 +131,7 @@ export function registerLearningRoutes(app: FastifyInstance, options: LearningRo
       const stopped = unavailable(context, reply);
       if (stopped !== undefined) return stopped;
       const materialId = readPathId(request.params.id, 'Идентификатор материала');
-      materialJson(context.tenant, materialId);
+      materialJson(context.tenant, materialId, now());
       const started = startLearningRun(
         db,
         materialId,

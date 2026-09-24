@@ -5,7 +5,7 @@ import { LEARNING_TASK_COUNT } from './learning-constants.js';
  * Версия схемы. Хранится в `PRAGMA user_version`; миграция сравнивает её со
  * своей и пропускает работу, если база уже актуальна.
  */
-export const SCHEMA_VERSION = 19;
+export const SCHEMA_VERSION = 20;
 
 /** Таблицы приложения. Тесты сверяют состав базы именно с этим списком. */
 export const TABLES = [
@@ -24,6 +24,10 @@ export const TABLES = [
   'computer_access_override',
   'integrity_reviews',
   'integrity_items',
+  'personal_courses',
+  'personal_topics',
+  'daily_topic_sets',
+  'daily_topic_items',
 ] as const;
 
 /** Legacy-курсы, импортируемые при первом запуске каталога. Это не allow-list. */
@@ -466,6 +470,81 @@ const INTEGRITY_SCHEMA = `
     ON integrity_items (run_id, status, id);
 `;
 
+/** Личные темы и родительское назначение живут только в базе ребёнка. */
+function ensureDailyTopicSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS personal_courses (
+      id         TEXT PRIMARY KEY,
+      title      TEXT NOT NULL CHECK (length(title) > 0),
+      grade      TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (${NOW_ISO})
+    );
+    CREATE TABLE IF NOT EXISTS personal_topics (
+      id            TEXT PRIMARY KEY,
+      subject       TEXT NOT NULL,
+      title         TEXT NOT NULL CHECK (length(title) > 0),
+      prompt_seed   TEXT NOT NULL,
+      difficulty    INTEGER NOT NULL DEFAULT 2 CHECK (difficulty BETWEEN 1 AND 3),
+      exam_weight   INTEGER NOT NULL DEFAULT 1 CHECK (exam_weight BETWEEN 1 AND 3),
+      answer_format TEXT NOT NULL DEFAULT 'text'
+                         CHECK (answer_format IN ('number', 'text', 'choice')),
+      active        INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0, 1)),
+      created_at    TEXT NOT NULL DEFAULT (${NOW_ISO})
+    );
+    CREATE INDEX IF NOT EXISTS personal_topics_subject
+      ON personal_topics (subject, active, id);
+    CREATE TABLE IF NOT EXISTS daily_topic_sets (
+      id           INTEGER PRIMARY KEY,
+      day          TEXT NOT NULL,
+      status       TEXT NOT NULL DEFAULT 'preparing'
+                        CHECK (status IN ('preparing', 'active', 'cancelled')),
+      source_text  TEXT NOT NULL,
+      request_key  TEXT NOT NULL UNIQUE,
+      created_at   TEXT NOT NULL DEFAULT (${NOW_ISO}),
+      activated_at TEXT,
+      cancelled_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS daily_topic_sets_active_day
+      ON daily_topic_sets (day) WHERE status = 'active';
+    CREATE INDEX IF NOT EXISTS daily_topic_sets_preparing
+      ON daily_topic_sets (day, status, id);
+    CREATE TABLE IF NOT EXISTS daily_topic_items (
+      id                 INTEGER PRIMARY KEY,
+      set_id             INTEGER NOT NULL REFERENCES daily_topic_sets (id) ON DELETE CASCADE,
+      position           INTEGER NOT NULL CHECK (position > 0),
+      topic_id           TEXT NOT NULL REFERENCES topic_state (topic_id),
+      subject            TEXT NOT NULL,
+      title              TEXT NOT NULL,
+      course_revision_id INTEGER,
+      status             TEXT NOT NULL DEFAULT 'preparing'
+                               CHECK (status IN ('preparing', 'ready', 'error')),
+      material_id        INTEGER REFERENCES learning_materials (id),
+      last_error         TEXT,
+      UNIQUE (set_id, position)
+    );
+    CREATE INDEX IF NOT EXISTS daily_topic_items_set
+      ON daily_topic_items (set_id, position);
+  `);
+  const columns = db.prepare<[], { name: string }>('PRAGMA table_info(learning_materials)')
+    .all().map((row) => row.name);
+  if (!columns.includes('daily_item_id')) {
+    db.exec('ALTER TABLE learning_materials ADD COLUMN daily_item_id INTEGER REFERENCES daily_topic_items (id)');
+  }
+  db.exec(`
+    DROP INDEX IF EXISTS learning_materials_live_topic;
+    CREATE UNIQUE INDEX learning_materials_live_topic
+      ON learning_materials (topic_id, COALESCE(course_revision_id, -1))
+      WHERE daily_item_id IS NULL AND status IN ('preparing', 'ready', 'active');
+    DROP INDEX IF EXISTS learning_materials_live_subject;
+    CREATE UNIQUE INDEX learning_materials_live_subject
+      ON learning_materials (subject, COALESCE(course_revision_id, -1))
+      WHERE daily_item_id IS NULL AND status IN ('preparing', 'ready', 'active');
+    CREATE UNIQUE INDEX IF NOT EXISTS learning_materials_daily_item
+      ON learning_materials (daily_item_id)
+      WHERE daily_item_id IS NOT NULL AND status IN ('preparing', 'ready', 'active', 'passed');
+  `);
+}
+
 /**
  * Номер версии схемы базы. База новее кода отвергается, а не считается
  * мигрированной: пропустить её молча значило бы работать с чужой схемой и
@@ -518,6 +597,7 @@ export function migrate(db: Database.Database): void {
       db.exec(REVISION_SCOPE_INDEXES_SCHEMA);
       db.exec(COMPUTER_ACCESS_SCHEMA);
       db.exec(INTEGRITY_SCHEMA);
+      ensureDailyTopicSchema(db);
       db.pragma(`user_version = ${SCHEMA_VERSION}`);
       return;
     }
@@ -1148,6 +1228,7 @@ export function migrate(db: Database.Database): void {
     db.exec(REVISION_SCOPE_INDEXES_SCHEMA);
     db.exec(COMPUTER_ACCESS_SCHEMA);
     db.exec(INTEGRITY_SCHEMA);
+    ensureDailyTopicSchema(db);
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   }).immediate();
 }
@@ -1162,12 +1243,16 @@ const REQUIRED_COLUMNS: Readonly<Record<(typeof TABLES)[number], readonly string
   forecast_snapshots: ['id', 'subject', 'score', 'band', 'created_at'],
   boss_batches: ['id', 'topic_id', 'run_id', 'course_revision_id', 'status', 'created_at', 'activated_at', 'finished_at'],
   boss_tasks: ['batch_id', 'task_id', 'position'],
-  learning_materials: ['id', 'subject', 'topic_id', 'course_revision_id', 'status', 'content', 'recommendation_reason', 'estimated_minutes', 'mastery_before', 'created_at', 'updated_at', 'ready_at', 'opened_at', 'finished_at'],
+  learning_materials: ['id', 'subject', 'topic_id', 'course_revision_id', 'daily_item_id', 'status', 'content', 'recommendation_reason', 'estimated_minutes', 'mastery_before', 'created_at', 'updated_at', 'ready_at', 'opened_at', 'finished_at'],
   learning_runs: ['material_id', 'run_id', 'attempt_number'],
   learning_tasks: ['material_id', 'task_id', 'position'],
   computer_access_override: ['id', 'mode', 'changed_at', 'expires_at'],
   integrity_reviews: ['run_id', 'status', 'last_error', 'created_at', 'updated_at'],
   integrity_items: ['id', 'run_id', 'task_id', 'attempt_id', 'status', 'decision', 'confidence', 'reason', 'reviewed_by', 'created_at', 'updated_at'],
+  personal_courses: ['id', 'title', 'grade', 'created_at'],
+  personal_topics: ['id', 'subject', 'title', 'prompt_seed', 'difficulty', 'exam_weight', 'answer_format', 'active', 'created_at'],
+  daily_topic_sets: ['id', 'day', 'status', 'source_text', 'request_key', 'created_at', 'activated_at', 'cancelled_at'],
+  daily_topic_items: ['id', 'set_id', 'position', 'topic_id', 'subject', 'title', 'course_revision_id', 'status', 'material_id', 'last_error'],
 };
 
 const REQUIRED_AUXILIARY_OBJECTS = [
@@ -1182,6 +1267,11 @@ const REQUIRED_AUXILIARY_OBJECTS = [
   'boss_batches_live_topic',
   'learning_materials_live_topic',
   'learning_materials_live_subject',
+  'learning_materials_daily_item',
+  'daily_topic_sets_active_day',
+  'daily_topic_sets_preparing',
+  'daily_topic_items_set',
+  'personal_topics_subject',
   'learning_material_ready_at_insert',
   'learning_material_ready_at_update',
   'learning_material_ready_at_immutable',
@@ -1207,6 +1297,9 @@ const REQUIRED_SCHEMA_FRAGMENTS = {
   computer_access_override: ["id = 1", "'blocked', 'unlocked'", 'expires_at > changed_at'],
   integrity_reviews: ["'screening', 'reviewing', 'needs_retry', 'passed'"],
   integrity_items: ["'pending', 'retry_required', 'approved'", "'meaningful', 'doubtful', 'junk'", "'codex', 'parent', 'heuristic'", 'UNIQUE'],
+  personal_topics: ['difficulty BETWEEN 1 AND 3', 'exam_weight BETWEEN 1 AND 3'],
+  daily_topic_sets: ["'preparing', 'active', 'cancelled'", 'request_key'],
+  daily_topic_items: ["'preparing', 'ready', 'error'", 'UNIQUE (set_id, position)'],
 } as const;
 
 /** Не даёт базе с актуальным номером версии скрыть удалённую или чужую схему. */

@@ -121,7 +121,7 @@ function retireResolvedMaterials(
   const states = readTopicStates(db);
   const rows = db.prepare<[], { id: number; topic_id: string }>(
     `SELECT id, topic_id FROM learning_materials
-      WHERE status IN ('preparing', 'ready') ORDER BY id`,
+      WHERE status IN ('preparing', 'ready') AND daily_item_id IS NULL ORDER BY id`,
   ).all();
   const retired: number[] = [];
   for (const row of rows) {
@@ -142,7 +142,7 @@ function liveMaterials(db: Database, graph: TopicGraph): Map<Subject, LiveMateri
     subject: Subject; topic_id: string; status: LiveMaterial['status']; course_revision_id: number | null;
   }>(
     `SELECT subject, topic_id, status, course_revision_id FROM learning_materials
-      WHERE status IN ('preparing', 'ready', 'active') ORDER BY id`,
+      WHERE status IN ('preparing', 'ready', 'active') AND daily_item_id IS NULL ORDER BY id`,
   ).all().filter((row) =>
     row.course_revision_id === (graph.courses.get(row.subject)?.revisionId ?? null))
     .map((row) => [row.subject, {

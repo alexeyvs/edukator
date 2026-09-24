@@ -470,7 +470,8 @@ sudo ./scripts/install-ocr-dependencies.sh       # Ubuntu 22.04+; отдельн
   detail/approve всегда называют `:childId` и используют координатор этой аренды.
 - `server/daily-gate.ts` — единственный расчёт дневного доступа: `automaticUnlocked`
   требует три завершённых обычных забега и зачёт первого обязательного
-  персонального разбора, активный `blocked | unlocked` override действует до
+  персонального разбора; активное родительское назначение тем заменяет это условие
+  зачётом каждого назначенного разбора. Активный `blocked | unlocked` override действует до
   следующей московской полуночи, а `unlocked` содержит эффективный итог. Материал
   выбирается по `ready_at`, затем `id`, но публикация после третьего забега
   переносится на следующие московские сутки. Триаж, boss и lesson не считаются;
@@ -621,12 +622,13 @@ sudo ./scripts/install-ocr-dependencies.sh       # Ubuntu 22.04+; отдельн
   файл, `fsync`, `rename`. Такой файл пишется только через `writeFileAtomic` —
   оборванная запись оставила бы вместо снимка битый JSON. Уборка в `catch`
   обёрнута своими `try`: отказ закрытия не имеет права заслонить причину.
-- Схема **детской** базы версии 19 содержит пятнадцать таблиц: `profile`, `topic_state`, `task_bank`,
+- Схема **детской** базы версии 20 содержит девятнадцать таблиц: `profile`, `topic_state`, `task_bank`,
   `runs`, `attempts`, `disputes`, `forecast_snapshots`, `boss_batches` и
   `boss_tasks`, `learning_materials`, `learning_runs`, `learning_tasks`,
-  `computer_access_override`, `integrity_reviews`, `integrity_items`. Последние
-  две хранят состояние проверки занятия и решения по его ответам в пределах
-  одной аренды. `computer_access_override` хранит не больше одной ручной команды
+  `computer_access_override`, `integrity_reviews`, `integrity_items`,
+  `personal_courses`, `personal_topics`, `daily_topic_sets`, `daily_topic_items`.
+  `integrity_reviews` и `integrity_items` хранят состояние проверки занятия и
+  решения по его ответам в пределах одной аренды. `computer_access_override` хранит не больше одной ручной команды
   `blocked | unlocked` до следующей московской полуночи. `topic_state.closed_at`
   закрывает тему постоянно;
   `task_bank.status = 'boss_reserved'` не виден обычной выдаче, а порядок боя

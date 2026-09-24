@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items"],
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["index", "title", "subject_id", "subject_title", "topic_id"],
+        "properties": {
+          "index": { "type": "integer" },
+          "title": { "type": "string" },
+          "subject_id": { "type": ["string", "null"] },
+          "subject_title": { "type": "string" },
+          "topic_id": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}

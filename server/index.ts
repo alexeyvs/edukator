@@ -62,6 +62,7 @@ import {
   type AdminCoursesRoutesOptions,
 } from './routes/admin/courses.js';
 import { registerFamilyRoutes, registerUnavailableFamily } from './routes/family.js';
+import { registerDailyTopicRoutes, registerUnavailableDailyTopics } from './routes/daily-topics.js';
 import { codexConcurrency, disputeConcurrency, type CodexConcurrency } from './codex/concurrency.js';
 import { createQuotedRunner } from './codex/quota.js';
 import { WarmupDispatcher, type DispatcherWorkerOptions } from './codex/dispatcher.js';
@@ -591,6 +592,13 @@ export function buildServer(
         ...(pinPepper === undefined ? {} : { pinPepper }),
         ...(options.now === undefined ? {} : { now: options.now }),
       });
+      registerDailyTopicRoutes(app, {
+        context,
+        control: controlDb,
+        budget: codexConcurrency,
+        ...(workerSettings?.run === undefined ? {} : { run: workerSettings.run }),
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
       registerSessionRoutes(app, {
         context,
         log,
@@ -667,6 +675,7 @@ export function buildServer(
       registerUnavailableAdminCourses(app, reason);
       registerUnavailableAdminParents(app, reason);
       registerUnavailableFamily(app, reason);
+      registerUnavailableDailyTopics(app, reason);
       registerUnavailableSession(app, reason);
       registerUnavailableRun(app, reason);
       registerUnavailableTriage(app, reason);

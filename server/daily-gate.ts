@@ -4,6 +4,7 @@ import {
   type ComputerAccessOverride,
 } from './computer-access.js';
 import { moscowDate, moscowDayBounds } from './moscow-time.js';
+import { activeDailyTopicSet } from './daily-topics.js';
 
 /** Число обычных забегов, после которого компьютер можно разблокировать. */
 export const DAILY_RUN_TARGET = 3;
@@ -15,6 +16,7 @@ export interface DailyLearningGateState {
 }
 
 export interface DailyGateState {
+  mode?: 'parent_topics';
   day: string;
   required: number;
   completed: number;
@@ -51,6 +53,24 @@ export function readDailyGate(
   now: Date = new Date(),
   revisions?: ReadonlyMap<string, number>,
 ): DailyGateState {
+  const daily = activeDailyTopicSet(db, now);
+  if (daily !== null) {
+    const required = daily.items.length;
+    const completed = daily.items.filter((item) => item.materialStatus === 'passed').length;
+    const automaticUnlocked = completed === required;
+    const override = readComputerAccessOverride(db, now);
+    return {
+      mode: 'parent_topics',
+      day: moscowDate(now),
+      required,
+      completed,
+      remaining: required - completed,
+      learning: { materialId: null, required: false, passed: false },
+      automaticUnlocked,
+      override,
+      unlocked: override === null ? automaticUnlocked : override.mode === 'unlocked',
+    };
+  }
   const [start, next] = moscowDayBounds(now);
   const [previousStart] = moscowDayBounds(new Date(Date.parse(start) - 1));
   const row = db.prepare<DailyGateParams, DailyGateRow>(
@@ -78,6 +98,7 @@ export function readDailyGate(
        LEFT JOIN learning_materials ON learning_materials.id = (
          SELECT id FROM learning_materials
           WHERE ready_at IS NOT NULL
+            AND daily_item_id IS NULL
             AND (@revisionScope = 0 OR EXISTS (
               SELECT 1 FROM json_each(@revisionsJson) revision
                WHERE revision.key = learning_materials.subject

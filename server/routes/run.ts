@@ -22,6 +22,7 @@ import { bossTopicState } from '../boss.js';
 import { bossProgress } from '../boss-rules.js';
 import { learningMaterialCards } from '../learning.js';
 import { readDailyGate } from '../daily-gate.js';
+import { activeDailyTopicSet } from '../daily-topics.js';
 import { readSubjectCalibrations } from '../subject-calibration.js';
 import {
   ROUTE_ACCESS,
@@ -125,6 +126,42 @@ function readPathId(value: string): number {
 function planResponse(tenant: Tenant, at: Date): Record<string, unknown> {
   const { db, curriculum } = tenant;
   const { graph } = curriculum;
+  const daily = activeDailyTopicSet(db, at);
+  if (daily !== null) {
+    const cards = daily.items.map((item) => ({
+      id: item.id,
+      materialId: item.materialId,
+      subject: item.subject,
+      ...courseJson(graph, item.subject),
+      topic: { id: item.topicId, title: item.title },
+      status: item.materialStatus,
+      firstScore: item.firstScore,
+      firstTotal: item.firstTotal,
+    }));
+    return {
+      plan: [],
+      learning: cards.filter((item) => item.status === 'ready' || item.status === 'active')
+        .map((item) => ({
+          id: item.materialId,
+          subject: item.subject,
+          courseId: item.courseId,
+          courseTitle: item.courseTitle,
+          grade: item.grade,
+          topic: item.topic,
+          recommendationReason: 'Назначено родителем по школьным темам',
+          estimatedMinutes: 12,
+          status: item.status,
+        })),
+      dailyTopics: cards,
+      forecasts: [],
+      triage: [],
+      streak: readStreak(db, at),
+      topics: [],
+      gate: readDailyGate(db, at, curriculum.revisionIds),
+      courses: curriculum.courses.map(({ revisionId, ...course }) => ({ ...course, revision: revisionId })),
+      empty: false,
+    };
+  }
   const calibrations = readSubjectCalibrations(db, graph);
   const triaged = new Set<Subject>(
     graph.subjects.filter((subject) => calibrations.get(subject)?.triagePassed),

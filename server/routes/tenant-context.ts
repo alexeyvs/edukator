@@ -13,6 +13,7 @@
  */
 import type Database from 'better-sqlite3';
 import type { FastifyReply, FastifyRequest } from 'fastify';
+import { activeDailyTopicSet, dailyMaterialAllowed, dailyRunAllowed } from '../daily-topics.js';
 import {
   AUTH_MESSAGE,
   AUTH_STATUS,
@@ -128,19 +129,53 @@ export interface CreateTenantContextOptions {
 /** Рабочее разрешение: предъявитель из заголовков, ребёнок из управляющей базы. */
 export function createTenantContext(options: CreateTenantContextOptions): TenantContextResolver {
   const now = options.now ?? ((): Date => new Date());
-  return (request, context) =>
-    resolveTenant({
+  return (request, context) => {
+    const at = now();
+    const resolved = resolveTenant({
       control: options.control,
       tenants: options.tenants,
       headers: request.headers,
       method: request.method,
-      now: now(),
+      now: at,
       allow: context.allow,
       insecureOrigin: options.insecureCookies === true,
       ...(options.onReadOnly === undefined ? {} : { onReadOnly: options.onReadOnly }),
       ...(context.childId === undefined ? {} : { childId: context.childId }),
       ...(context.mutating === undefined ? {} : { mutating: context.mutating }),
     });
+    if (resolved.bearer.kind === 'browser' && activeDailyTopicSet(resolved.tenant.db, at) !== null) {
+      const path = request.url.split('?', 1)[0] ?? '';
+      const body = typeof request.body === 'object' && request.body !== null && !Array.isArray(request.body)
+        ? request.body as Record<string, unknown> : {};
+      const query = typeof request.query === 'object' && request.query !== null && !Array.isArray(request.query)
+        ? request.query as Record<string, unknown> : {};
+      let allowed = true;
+      if (path === '/api/run/plan') allowed = true;
+      else if (path.startsWith('/api/run/') || path.startsWith('/api/triage/') || path.startsWith('/api/boss/')) {
+        allowed = false;
+      } else if (path.startsWith('/api/learning/run/')) {
+        const id = Number(path.match(/^\/api\/learning\/run\/(\d+)\/finish$/u)?.[1]);
+        allowed = Number.isSafeInteger(id) && dailyRunAllowed(resolved.tenant.db, id, at);
+      } else if (path.startsWith('/api/learning/')) {
+        const id = Number(path.match(/^\/api\/learning\/(\d+)(?:\/(?:open|test))?$/u)?.[1]);
+        allowed = Number.isSafeInteger(id) && dailyMaterialAllowed(resolved.tenant.db, id, at);
+      } else if (path.startsWith('/api/integrity/')) {
+        const id = Number(path.match(/^\/api\/integrity\/(\d+)(?:\/retry\/\d+)?$/u)?.[1]);
+        allowed = Number.isSafeInteger(id) && dailyRunAllowed(resolved.tenant.db, id, at);
+      } else if (path.startsWith('/api/session/')) {
+        let id = path === '/api/session/next' ? Number(query['runId']) : Number(body['runId']);
+        if (path === '/api/session/dispute') {
+          const attemptId = Number(body['attempt_id']);
+          id = resolved.tenant.db.prepare<[number], { run_id: number }>(
+            'SELECT run_id FROM attempts WHERE id = ?',
+          ).get(attemptId)?.run_id ?? 0;
+        }
+        allowed = Number.isSafeInteger(id) && id > 0 && dailyRunAllowed(resolved.tenant.db, id, at);
+      }
+      if (!allowed) throw new AuthError('forbidden', 'Сегодня доступны только темы, назначенные родителем');
+    }
+    return resolved;
+  };
 }
 
 /** Кто пришёл в админку. Аренды здесь нет: ребёнка админский маршрут не называет. */

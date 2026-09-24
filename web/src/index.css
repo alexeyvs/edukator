@@ -44,6 +44,12 @@ input:focus-visible {
   outline-offset: 3px;
 }
 
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid rgb(11 124 93 / 32%);
+  outline-offset: 3px;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -3198,6 +3204,112 @@ input:focus-visible {
   padding: 1rem;
   border-radius: .9rem;
   background: #f4f8f5;
+}
+
+.family-daily-topics {
+  padding: 1rem;
+  border: 1px solid #c8ddd0;
+  border-radius: .9rem;
+  background: #f9fcf9;
+}
+
+.family-daily-topics > summary {
+  color: var(--evergreen);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.family-daily-topics > p {
+  margin: .7rem 0 1rem;
+  max-width: 64ch;
+}
+
+.family-daily-topics form,
+.daily-topic-preview,
+.daily-topic-preview li {
+  display: grid;
+  gap: .7rem;
+}
+
+.family-daily-topics form {
+  margin-top: 1rem;
+}
+
+.family-daily-topics textarea,
+.daily-topic-preview input,
+.daily-topic-preview select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: .65rem .75rem;
+  border: 1px solid #b8c8bf;
+  border-radius: .6rem;
+  background: white;
+  color: var(--ink);
+}
+
+.family-daily-topics button {
+  justify-self: start;
+  margin: .25rem .5rem .25rem 0;
+  padding: .65rem .9rem;
+  border: 1px solid var(--evergreen);
+  border-radius: .65rem;
+  background: var(--evergreen);
+  color: white;
+  font-weight: 750;
+}
+
+.family-daily-topics button.secondary {
+  background: transparent;
+  color: var(--evergreen);
+}
+
+.daily-topic-set {
+  margin-top: .8rem;
+  padding: .8rem 1rem;
+  border-left: 3px solid var(--leaf);
+  border-radius: .35rem .7rem .7rem .35rem;
+  background: white;
+}
+
+.daily-topic-set ol,
+.daily-topic-preview ol {
+  margin: .6rem 0 0;
+  padding-left: 1.5rem;
+}
+
+.daily-topic-set li {
+  padding: .35rem 0;
+}
+
+.daily-topic-set li span,
+.daily-topic-set li small {
+  display: block;
+}
+
+.daily-topic-preview {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #d8e4dc;
+}
+
+.daily-topic-preview h4 {
+  margin: 0;
+}
+
+.daily-topic-preview li {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  gap: .7rem 1rem;
+  padding: .8rem 0;
+  border-bottom: 1px solid #e3ebe5;
+}
+
+.daily-topic-preview label {
+  display: grid;
+  align-content: start;
+  gap: .3rem;
+  font-size: .83rem;
+  font-weight: 700;
 }
 
 .family-courses > div:first-child,

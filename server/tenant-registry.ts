@@ -29,6 +29,12 @@ import {
 import { finishRun } from './run.js';
 import { finishLearningMaterial } from './learning.js';
 import { readDailyGate } from './daily-gate.js';
+import {
+  mergePersonalCurriculum,
+  mergePersonalRunGraph,
+  personalCurriculumKey,
+  personalOnlyGraph,
+} from './personal-curriculum.js';
 import { failureLogFor, type FailureLog, type FailureRecord } from './log.js';
 
 /**
@@ -212,6 +218,11 @@ export interface TenantRegistryOptions {
  * бы подменённый файл за прежний. Место освобождает только явный `close`.
  */
 export class TenantRegistry {
+  readonly #personalSnapshots = new Map<string, {
+    base: CurriculumSnapshot;
+    key: string;
+    snapshot: CurriculumSnapshot;
+  }>();
   readonly #control: Database.Database;
   readonly #dataDir: string;
   readonly #graph: TopicGraph;
@@ -307,7 +318,7 @@ export class TenantRegistry {
   open(childId: string): Tenant {
     const cached = this.#tenants.get(childId);
     if (cached !== undefined) {
-      const snapshot = this.#snapshot(childId);
+      const snapshot = this.#personalSnapshot(childId, cached.db, this.#snapshot(childId));
       if (snapshot !== cached.curriculum) {
         this.#syncCurriculum(childId, cached.db, snapshot.graph);
         cached.curriculum = snapshot;
@@ -369,7 +380,7 @@ export class TenantRegistry {
       }
       // Темы заводятся до посева: без строк `topic_state` вставка заданий упала
       // бы на внешнем ключе.
-      const snapshot = this.#snapshot(childId);
+      const snapshot = this.#personalSnapshot(childId, opened.db, this.#snapshot(childId));
       this.#syncCurriculum(childId, opened.db, snapshot.graph);
       this.#seedBank(childId, opened.db, snapshot.graph);
     } catch (error) {
@@ -409,7 +420,10 @@ export class TenantRegistry {
     // вместо `unavailable`.
     let tenant: Tenant;
     try {
-      tenant = this.#assemble(childId, path, opened, available, this.#snapshot(childId));
+      tenant = this.#assemble(
+        childId, path, opened, available,
+        this.#personalSnapshot(childId, opened.db, this.#snapshot(childId)),
+      );
     } catch (error) {
       this.#closeQuietly(childId, opened.db);
       this.#log(`база ребёнка ${childId} недоступна: ${(error as Error).message}`);
@@ -552,6 +566,7 @@ export class TenantRegistry {
     const tenant = this.#tenants.get(childId);
     if (tenant === undefined) return;
     this.#tenants.delete(childId);
+    this.#personalSnapshots.delete(childId);
     await Promise.allSettled([tenant.disputes.stop(), tenant.integrity.stop()]);
     this.#closeQuietly(childId, tenant.db);
   }
@@ -619,6 +634,19 @@ export class TenantRegistry {
     });
   }
 
+  #personalSnapshot(
+    childId: string,
+    db: Database.Database,
+    base: CurriculumSnapshot,
+  ): CurriculumSnapshot {
+    const key = personalCurriculumKey(db);
+    const cached = this.#personalSnapshots.get(childId);
+    if (cached?.base === base && cached.key === key) return cached.snapshot;
+    const snapshot = mergePersonalCurriculum(db, base);
+    this.#personalSnapshots.set(childId, { base, key, snapshot });
+    return snapshot;
+  }
+
   #graphForRun(db: Database.Database, runId: number): TopicGraph {
     const run = db.prepare<[number], { subject: string; course_revision_id: number | null }>(
       'SELECT subject, course_revision_id FROM runs WHERE id = ?',
@@ -626,8 +654,18 @@ export class TenantRegistry {
     if (run === undefined) throw new Error(`Забег ${String(runId)} не найден`);
     if (this.#curriculum !== undefined) {
       try {
-        return this.#curriculum.graphFor(run.subject, run.course_revision_id);
+        return mergePersonalRunGraph(
+          db,
+          this.#curriculum.graphFor(run.subject, run.course_revision_id),
+          run.subject,
+        );
       } catch (error) {
+        if (run.course_revision_id === null) {
+          const personal = db.prepare<[string], { found: number }>(
+            'SELECT 1 AS found FROM personal_topics WHERE subject = ? AND active = 1 LIMIT 1',
+          ).get(run.subject);
+          if (personal !== undefined) return personalOnlyGraph(db, run.subject);
+        }
         // Только legacy-run может откатиться к файловой карте. Явно сохранённая
         // редакция обязана существовать: иначе продолжение смешало бы контент.
         if (run.course_revision_id !== null || !this.#graph.bySubject.has(run.subject)) throw error;
@@ -636,7 +674,7 @@ export class TenantRegistry {
     if (!this.#graph.bySubject.has(run.subject)) {
       throw new Error(`Для legacy-забега ${String(runId)} нет карты курса «${run.subject}»`);
     }
-    return this.#graph;
+    return mergePersonalRunGraph(db, this.#graph, run.subject);
   }
 
   #closeQuietly(childId: string, db: Database.Database): void {

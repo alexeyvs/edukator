@@ -350,6 +350,14 @@ data/logs/app.1.jsonl    # …и дальше до app.3.jsonl
 материал на следующие московские сутки, даже если до полуночи он уже зачтён или
 автоматически снят.
 
+Родитель может в разделе ребёнка на экране «Семья» вставить темы, пройденные
+сегодня в школе. Предпросмотр определяет предметы и совпадения с курсом; каждый
+пункт можно поправить. После подтверждения сервис готовит по всем темам разборы
+и тесты. Когда готовы все пункты, они заменяют остальные занятия на этот
+московский день. Доступ откроется после зачёта каждого теста (минимум 4 из 5).
+Свободные темы сохраняются в личной карте знаний ребёнка. Действующий набор
+можно заменить или отменить; в кабинете видны первая попытка и её ошибки.
+
 Неофициальный контроллер Microsoft Family Safety устанавливается отдельно и
 не запускается обычной командой `npm start`:
 
@@ -541,6 +549,9 @@ Family Safety-контроллером и требует заданного `EDU
   обычных забегах и выполненном либо отменённом обязательстве разбора,
   `gate.override` содержит активную команду до московской полуночи или `null`,
   а `gate.unlocked` — эффективный итог с учётом этой команды;
+- `GET | PUT | DELETE /api/family/children/:childId/daily-topics`,
+  `POST .../preview` и `POST .../retry` — родительское чтение, назначение,
+  отмена, предпросмотр и повтор подготовки тем на текущий день;
 - `GET /api/learning/:id` → `{ id, subject, topic, recommendationReason,
   estimatedMinutes, status, content, progress }`; `content` содержит
   `introduction`, 1–3 `objectives`, 3–5 `sections` с блоками
@@ -842,10 +853,12 @@ PID и, только убедившись, что владельца больш�
 256-битной случайности. Открытых токенов в базе нет вовсе, поэтому показать
 выпущенную ссылку второй раз нельзя.
 
-Схема детской базы — **v19**. Основные таблицы: `profile`, `topic_state`,
+Схема детской базы — **v20**. Основные таблицы: `profile`, `topic_state`,
 `task_bank`, `runs`, `attempts`, `disputes`, `forecast_snapshots`,
 `boss_batches`, `boss_tasks`, `learning_materials`, `learning_runs`, `learning_tasks`,
-`computer_access_override`, `integrity_reviews`, `integrity_items`. Последние две
+`computer_access_override`, `integrity_reviews`, `integrity_items`,
+`personal_courses`, `personal_topics`, `daily_topic_sets`, `daily_topic_items`.
+`integrity_reviews` и `integrity_items`
 хранят состояние проверки занятия и решения по отдельным ответам в базе именно
 того ребёнка, которому принадлежат `runId` и `itemId`. `computer_access_override`
 хранит singleton-команду `blocked | unlocked`

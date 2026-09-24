@@ -19,6 +19,8 @@
  * где всем предыдущим уже нечего греть.
  */
 import type Database from 'better-sqlite3';
+import { activeDailyTopicSet, dailyTopicSets } from '../daily-topics.js';
+import { prepareDailyTopics } from '../daily-topic-prep.js';
 import {
   listServiceableChildren,
   readCodexQuota,
@@ -28,6 +30,7 @@ import {
 import type { TopicGraph } from '../curriculum.js';
 import type { FailureLog } from '../log.js';
 import type { CodexRunner } from './client.js';
+import { runCodexCli } from './client.js';
 import type { CodexConcurrency } from './concurrency.js';
 import { TopicBackoff } from './topic-backoff.js';
 import {
@@ -587,14 +590,6 @@ export class WarmupDispatcher {
     },
     sweep: SweepReport,
   ): Promise<void> {
-    // Квота спрашивается до открытия базы: у исчерпавшего её ребёнка любой заход
-    // кончится тем же отказом, и платить за него открытием базы незачем.
-    if (this.#quotaExhausted(childId)) {
-      report.skipped = 'quota';
-      this.#log(`диспетчер: суточная квота ребёнка ${childId} исчерпана, обход его пропускает`);
-      return;
-    }
-
     const db = this.#options.open(childId);
     if (db === undefined) {
       report.skipped = 'unavailable';
@@ -606,6 +601,23 @@ export class WarmupDispatcher {
     try {
       const graph = this.#options.graphFor?.(childId) ?? this.#options.graph;
       if (graph === undefined) throw new Error(`программа ребёнка ${childId} недоступна`);
+      const at = this.#now();
+      if (!phase.prepareBoss && dailyTopicSets(db, at).preparing !== null) {
+        await prepareDailyTopics({
+          db,
+          graph,
+          run: settings.run ?? runCodexCli,
+          log: this.#log,
+          ...(this.#options.budget === undefined ? {} : { budget: this.#options.budget }),
+          ...(this.#options.now === undefined ? {} : { now: this.#options.now }),
+        });
+      }
+      if (activeDailyTopicSet(db, this.#now()) !== null) return;
+      if (this.#quotaExhausted(childId)) {
+        report.skipped = 'quota';
+        this.#log(`диспетчер: суточная квота ребёнка ${childId} исчерпана, обход его пропускает`);
+        return;
+      }
       const cycle = await this.#cycle({
         ...settings,
         db,

@@ -373,7 +373,7 @@ describe('база данных', () => {
     // рабочую базу, поэтому число прибито буквально и меняется только вместе с
     // новой ступенью и её тестом обновления.
     it('держит номер версии схемы', () => {
-      expect(SCHEMA_VERSION).toBe(19);
+      expect(SCHEMA_VERSION).toBe(20);
     });
 
     it('создаёт все тринадцать таблиц на пустой базе', () => {
@@ -1174,7 +1174,7 @@ describe('база данных', () => {
       const migrated = openDatabase(path);
       try {
         expect((migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version)
-          .toBe(19);
+          .toBe(20);
         expect(migrated.prepare('SELECT * FROM computer_access_override').all()).toEqual([]);
         expect(migrated.prepare('SELECT topic_id FROM topic_state').get())
           .toEqual({ topic_id: 'math.saved' });
@@ -1193,7 +1193,7 @@ describe('база данных', () => {
       const migrated = openDatabase(path);
       try {
         expect((migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version)
-          .toBe(19);
+          .toBe(20);
         expect(tableNames(migrated)).toEqual(expect.arrayContaining([
           'integrity_reviews', 'integrity_items',
         ]));
@@ -1202,7 +1202,43 @@ describe('база данных', () => {
       }
     });
 
-    it('мигрирует v17→v19, сохраняя всю цепочку и фиксируя прежний штраф', () => {
+    it('мигрирует v19→v20, сохраняя обычные материалы и добавляя дневные таблицы', () => {
+      const path = join(tempDir, 'v19.db');
+      const legacy = openDatabase(path);
+      seedTopic(legacy, 'math.saved');
+      const materialId = Number(legacy.prepare(
+        `INSERT INTO learning_materials
+           (subject, topic_id, status, recommendation_reason, mastery_before)
+         VALUES ('math', 'math.saved', 'preparing', 'История', 0.2)`,
+      ).run().lastInsertRowid);
+      legacy.exec(`
+        DROP TABLE daily_topic_items; DROP TABLE daily_topic_sets;
+        DROP TABLE personal_topics; DROP TABLE personal_courses;
+        DROP INDEX learning_materials_daily_item;
+        DROP INDEX learning_materials_live_subject;
+        DROP INDEX learning_materials_live_topic;
+        ALTER TABLE learning_materials DROP COLUMN daily_item_id;
+        CREATE UNIQUE INDEX learning_materials_live_topic ON learning_materials (topic_id, COALESCE(course_revision_id, -1))
+          WHERE status IN ('preparing', 'ready', 'active');
+        CREATE UNIQUE INDEX learning_materials_live_subject ON learning_materials (subject, COALESCE(course_revision_id, -1))
+          WHERE status IN ('preparing', 'ready', 'active');
+        PRAGMA user_version = 19;
+      `);
+      legacy.close();
+
+      const migrated = openDatabase(path);
+      try {
+        expect((migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version).toBe(20);
+        expect(migrated.prepare('SELECT id, daily_item_id FROM learning_materials').get())
+          .toEqual({ id: materialId, daily_item_id: null });
+        expect(tableNames(migrated)).toEqual(expect.arrayContaining([
+          'personal_courses', 'personal_topics', 'daily_topic_sets', 'daily_topic_items',
+        ]));
+        expect(migrated.pragma('foreign_key_check')).toEqual([]);
+      } finally { migrated.close(); }
+    });
+
+    it('мигрирует v17→v20, сохраняя всю цепочку и фиксируя прежний штраф', () => {
       const path = join(tempDir, 'v17.db');
       const legacy = openDatabase(path);
       seedTopic(legacy, 'math.saved');
@@ -1270,7 +1306,7 @@ describe('база данных', () => {
       const migrated = openDatabase(path);
       try {
         expect((migrated.pragma('user_version') as [{ user_version: number }])[0]?.user_version)
-          .toBe(19);
+          .toBe(20);
         expect(migrated.prepare('SELECT id, status FROM task_bank ORDER BY id').all()).toEqual([
           { id: issued, status: 'used' },
           { id: historical, status: 'used' },

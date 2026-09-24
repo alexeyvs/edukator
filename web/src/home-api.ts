@@ -45,6 +45,7 @@ export interface Streak {
 }
 
 export interface DailyGateState {
+  mode?: 'parent_topics';
   day: string;
   required: number;
   completed: number;
@@ -97,6 +98,16 @@ export interface DayPlanResponse {
   empty?: boolean;
   plan: PlannedRun[];
   learning: LearningMaterialCard[];
+  dailyTopics?: Array<{
+    id: number;
+    materialId: number | null;
+    subject: Subject;
+    courseTitle: string;
+    topic: { id: string; title: string };
+    status: string | null;
+    firstScore: number | null;
+    firstTotal: number | null;
+  }>;
   forecasts: SubjectForecast[];
   triage: Array<{ subject: Subject; passed: boolean; needed: boolean }>;
   streak: Streak;

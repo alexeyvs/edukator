@@ -114,6 +114,7 @@ export interface ClaimLearningMaterialOptions {
   now?: Date;
   staleAfterMs?: number;
   courseRevisionId?: number | null;
+  dailyItemId?: number;
 }
 
 export interface LearningMaterialClaim {
@@ -130,7 +131,7 @@ function expireStaleLearningClaimsInTransaction(
   const cutoff = new Date(now.getTime() - staleAfterMs).toISOString();
   const stale = db.prepare<[string], { id: number; topic_id: string }>(
     `SELECT id, topic_id FROM learning_materials
-      WHERE status = 'preparing' AND updated_at <= ?
+      WHERE status = 'preparing' AND daily_item_id IS NULL AND updated_at <= ?
       ORDER BY updated_at, id`,
   ).all(cutoff);
   const reject = db.prepare(
@@ -207,10 +208,10 @@ export function learningMaterialCards(
     `SELECT id, subject, topic_id, status, recommendation_reason, estimated_minutes,
             course_revision_id
        FROM learning_materials
-      WHERE status IN ('ready', 'active')
+      WHERE status IN ('ready', 'active') AND daily_item_id IS NULL
       ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, created_at, id`,
   ).all().filter((row) => revisions === undefined ||
-    row.course_revision_id === revisions.get(row.subject))
+    row.course_revision_id === (revisions.get(row.subject) ?? null))
     .map((row) => ({
       id: row.id,
       subject: row.subject,
@@ -346,19 +347,21 @@ export function claimLearningMaterial(
       `SELECT id FROM learning_materials
         WHERE (topic_id = ? OR subject = ?)
           AND course_revision_id IS ?
+          AND daily_item_id IS NULL
           AND status IN ('preparing', 'ready', 'active') LIMIT 1`,
     ).get(options.topicId, options.subject, options.courseRevisionId ?? null);
-    if (live !== undefined) return undefined;
+    if (options.dailyItemId === undefined && live !== undefined) return undefined;
 
     const result = db.prepare(
       `INSERT INTO learning_materials
-         (subject, topic_id, course_revision_id, recommendation_reason, estimated_minutes,
-          mastery_before, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (subject, topic_id, course_revision_id, daily_item_id, recommendation_reason,
+          estimated_minutes, mastery_before, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       options.subject,
       options.topicId,
       options.courseRevisionId ?? null,
+      options.dailyItemId ?? null,
       options.recommendationReason.trim(),
       estimatedMinutes,
       options.masteryBefore,

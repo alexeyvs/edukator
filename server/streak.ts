@@ -49,7 +49,18 @@ function completedDays(db: Database, now: Date): number[] {
     )
     .all(now.toISOString());
 
-  return [...new Set(rows.map((row) => dayNumber(moscowDate(new Date(row.finished_at)))))]
+  const parentDays = db.prepare<[string], { day: string }>(
+    `SELECT dts.day FROM daily_topic_sets dts
+       JOIN daily_topic_items dti ON dti.set_id = dts.id
+       JOIN learning_materials lm ON lm.id = dti.material_id
+      WHERE dts.activated_at IS NOT NULL AND dts.day <= ?
+      GROUP BY dts.id
+     HAVING COUNT(*) > 0 AND SUM(CASE WHEN lm.status = 'passed' THEN 1 ELSE 0 END) = COUNT(*)`,
+  ).all(moscowDate(now));
+  return [...new Set([
+    ...rows.map((row) => dayNumber(moscowDate(new Date(row.finished_at)))),
+    ...parentDays.map((row) => dayNumber(row.day)),
+  ])]
     .sort((left, right) => left - right);
 }
 

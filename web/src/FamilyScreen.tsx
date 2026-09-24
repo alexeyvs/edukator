@@ -14,6 +14,7 @@ import { isParentPin } from './pin-format';
 import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, isParentPassword } from './password-format';
 import { BrandLink } from './BrandMark';
 import { inviteUrl } from './invite-url';
+import { ChildDailyTopics } from './ChildDailyTopics';
 
 const STATUS_NAMES: Record<FamilyChild['status'], string> = {
   provisioning: 'База заводится',
@@ -298,6 +299,8 @@ function ChildCard({
       )}
 
       <ChildCourses child={child} courses={courses} api={api} onChanged={onChanged} />
+      {child.status === 'ready' && <ChildDailyTopics childId={child.id}
+        courses={courses.filter((course) => child.courses.some((assigned) => assigned.courseId === course.courseId))} />}
 
       {child.devices.length === 0
         ? <p className="family-empty">Устройств пока нет. Выпустите ссылку — ученик войдёт по ней.</p>
