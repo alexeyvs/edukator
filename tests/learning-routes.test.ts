@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { Database } from 'better-sqlite3';
-import { startTenantServer, type TenantServer } from './server-harness.js';
+import { createAdminAccount, startTenantServer, type TenantServer } from './server-harness.js';
 import { openDatabase, SUBJECTS } from '../server/db.js';
 import { claimLearningMaterial, LEARNING_PASS_SCORE } from '../server/learning.js';
 import { reserveBossTasks, reserveLearningTasks, storeTasks } from '../server/codex/bank.js';
@@ -15,6 +15,8 @@ import { loadCurriculum } from '../server/curriculum.js';
 import { resolveDispute } from '../server/session.js';
 import { fakeContext } from './tenant-context-helper.js';
 import { createDraft, publishRevision } from '../server/course-catalog.js';
+import { startImpersonation } from '../server/control-db.js';
+import { IMPERSONATION_COOKIE } from '../server/auth.js';
 
 const NOW = new Date('2026-08-09T12:00:00.000Z');
 
@@ -211,6 +213,33 @@ describe('Learning API', () => {
     expect(second.json()).toMatchObject({ materialId, resumed: true, material: { status: 'active' } });
     expect((await app.inject({ method: 'GET', url: '/api/run/plan' })).json())
       .toMatchObject({ learning: [{ id: materialId, status: 'active' }] });
+  });
+
+  it('при заходе оператора читает готовый разбор без изменения состояния', async () => {
+    const { materialId } = readyMaterial();
+    const admin = createAdminAccount(server.control, { now: NOW });
+    const started = startImpersonation(server.control, {
+      adminId: admin.adminId, childId: server.childId, role: 'browser',
+    }, NOW);
+    if (!started.ok) throw new Error(`заход не начался: ${started.reason}`);
+    const headers = {
+      cookie: `${IMPERSONATION_COOKIE}=${started.session.token}`,
+      'sec-fetch-site': 'same-origin',
+    };
+
+    const detail = await app.inject({
+      method: 'GET', url: `/api/learning/${materialId}`, headers,
+    });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json()).toMatchObject({ id: materialId, status: 'ready', content: CONTENT });
+    expect(db.prepare('SELECT status FROM learning_materials WHERE id = ?').get(materialId))
+      .toEqual({ status: 'ready' });
+
+    const opening = await app.inject({
+      method: 'POST', url: `/api/learning/${materialId}/open`, headers,
+    });
+    expect(opening.statusCode).toBe(403);
+    expect(opening.json()).toMatchObject({ code: 'read-only' });
   });
 
   it('не выдаёт материал старой редакции, но продолжает уже начатый lesson-run', async () => {

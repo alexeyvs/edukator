@@ -69,7 +69,7 @@ export function ProfileGate({
 }
 
 /** Занятие ученика: тот же разбор адреса, что и в однопользовательской версии. */
-function ChildArea() {
+function ChildArea({ readOnly = false }: { readOnly?: boolean }) {
   const params = new URLSearchParams(window.location.search);
   const runId = Number(params.get('runId'));
   const learningId = Number(params.get('learningId'));
@@ -82,7 +82,7 @@ function ChildArea() {
         : kind === 'lesson' ? <RunScreen runId={runId} kind="lesson" />
           : <RunScreen runId={runId} />;
   } else if (Number.isSafeInteger(learningId) && learningId > 0) {
-    screen = <LearningScreen materialId={learningId} />;
+    screen = <LearningScreen materialId={learningId} readOnly={readOnly} />;
   } else if (params.get('screen') === 'profile') {
     screen = <ProfileScreen />;
   } else {
@@ -476,5 +476,5 @@ export function App({
   if (route.parents) {
     return <>{banner}{childSwitcher}<ParentsScreen childId={route.childId} /></>;
   }
-  return <>{banner}{childSwitcher}<ChildArea /></>;
+  return <>{banner}{childSwitcher}<ChildArea readOnly={route.impersonation !== undefined} /></>;
 }

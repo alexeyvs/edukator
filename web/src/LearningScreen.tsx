@@ -13,6 +13,7 @@ export interface LearningScreenProps {
   materialId: number;
   api?: LearningApi;
   navigate?: (url: string) => void;
+  readOnly?: boolean;
 }
 
 function defaultNavigate(url: string): void {
@@ -36,6 +37,7 @@ export function LearningScreen({
   materialId,
   api = browserLearningApi,
   navigate = defaultNavigate,
+  readOnly = false,
 }: LearningScreenProps) {
   const [material, setMaterial] = useState<LearningMaterialView | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -43,6 +45,14 @@ export function LearningScreen({
 
   useEffect(() => {
     let active = true;
+    if (readOnly) {
+      void api.read(materialId)
+        .then((loaded) => { if (active) setMaterial(loaded); })
+        .catch((error: unknown) => {
+          if (active) setProblem(error instanceof Error ? error.message : 'Не получилось загрузить материал');
+        });
+      return () => { active = false; };
+    }
     api.open(materialId)
       .then(async ({ material: opened }) => {
         if (!active) return;
@@ -57,7 +67,7 @@ export function LearningScreen({
         if (active) setProblem(error instanceof Error ? error.message : 'Не получилось открыть материал');
       });
     return () => { active = false; };
-  }, [api, materialId, navigate]);
+  }, [api, materialId, navigate, readOnly]);
 
   async function startTest(): Promise<void> {
     setStarting(true);
@@ -78,7 +88,9 @@ export function LearningScreen({
     return <main className="run-state" role="status"><p>Открываю разбор темы…</p></main>;
   }
   if (material.content === null) {
-    return <main className="run-state" role="status"><p>Возвращаю в тест…</p></main>;
+    return readOnly
+      ? <main className="run-state"><p>Разбор скрыт после начала теста. В режиме просмотра ответы недоступны.</p></main>
+      : <main className="run-state" role="status"><p>Возвращаю в тест…</p></main>;
   }
 
   return (
@@ -135,7 +147,9 @@ export function LearningScreen({
         </section>
 
         {problem !== null && <p className="home-error" role="alert">{problem}</p>}
-        <footer className="lesson-cta">
+        {readOnly ? <footer className="lesson-cta">
+          <div><strong>Только просмотр</strong><span>Тест проходит ученик в своей сессии.</span></div>
+        </footer> : <footer className="lesson-cta">
           <div>
             <strong>Готов проверить тему?</strong>
             <span>{material.progress.target} вопросов, зачёт — от {material.passScore} верных.</span>
@@ -143,7 +157,7 @@ export function LearningScreen({
           <button className="primary" type="button" disabled={starting} onClick={() => void startTest()}>
             {starting ? 'Открываю тест…' : 'Перейти к тесту'}
           </button>
-        </footer>
+        </footer>}
       </article>
     </main>
   );

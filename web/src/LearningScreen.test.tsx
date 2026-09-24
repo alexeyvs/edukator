@@ -76,6 +76,29 @@ describe('экран персонального разбора', () => {
     expect(navigate).toHaveBeenCalledWith('/?runId=31&kind=lesson');
   });
 
+  it('в режиме просмотра читает разбор без открытия и не предлагает тест', async () => {
+    const api = apiWith({ ...MATERIAL, status: 'ready' });
+    render(<LearningScreen materialId={21} api={api} navigate={vi.fn()} readOnly />);
+
+    expect(await screen.findByRole('heading', { name: 'Обыкновенные дроби', level: 1 }))
+      .toBeInTheDocument();
+    expect(api.read).toHaveBeenCalledWith(21);
+    expect(api.open).not.toHaveBeenCalled();
+    expect(api.startTest).not.toHaveBeenCalled();
+    expect(screen.getByText('Тест проходит ученик в своей сессии.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Перейти к тесту' })).not.toBeInTheDocument();
+  });
+
+  it('не пытается запустить уже начатый тест при просмотре', async () => {
+    const api = apiWith({ ...MATERIAL, content: null,
+      progress: { total: 1, correct: 1, target: 5, done: false } });
+    render(<LearningScreen materialId={21} api={api} navigate={vi.fn()} readOnly />);
+
+    expect(await screen.findByText(/Разбор скрыт после начала теста/u)).toBeInTheDocument();
+    expect(api.open).not.toHaveBeenCalled();
+    expect(api.startTest).not.toHaveBeenCalled();
+  });
+
   it('после первого ответа сразу возвращает активный материал только в тест', async () => {
     const material = { ...MATERIAL, progress: { total: 1, correct: 1, target: 5, done: false } };
     const api = apiWith(material);

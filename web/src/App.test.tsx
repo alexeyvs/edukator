@@ -544,6 +544,38 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: 'Перейти к тесту' })).toBeInTheDocument();
   });
 
+  it('при заходе оператора показывает разбор через GET без запуска занятия', async () => {
+    window.history.replaceState({}, '', '/?learningId=21');
+    const fetch = vi.fn((input: string | URL | Request) => Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(String(input) === '/api/learning/21' ? {
+        id: 21, subject: 'math', topic: { id: 'math.fractions', title: 'Обыкновенные дроби' },
+        recommendationReason: 'Назначено родителем', estimatedMinutes: 12, passScore: 4,
+        status: 'ready', progress: { total: 0, correct: 0, target: 5, done: false },
+        content: {
+          introduction: 'Разберём дроби.', objectives: ['Складывать дроби'],
+          sections: [{ title: 'Части', blocks: [{ type: 'paragraph', content: 'У дроби две части.' }] }],
+          summary: ['Следи за знаменателем.'],
+        },
+      } : { name: 'Тимофей', interests: [], examDate: null, partnerName: 'Кекс' }),
+    }));
+    vi.stubGlobal('fetch', fetch);
+
+    render(<App authApi={authApi({ me: vi.fn().mockResolvedValue({
+      kind: 'child', childId: 'c-1', name: 'Тимофей',
+      impersonation: { adminEmail: 'оператор@example.com', childName: 'Тимофей',
+        role: 'browser', expiresAt: '2999-01-01T00:00:00.000Z' },
+    }) })} />);
+
+    expect(await screen.findByRole('heading', { name: 'Обыкновенные дроби', level: 1 }))
+      .toBeInTheDocument();
+    expect(screen.getByText('У дроби две части.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Перейти к тесту' })).not.toBeInTheDocument();
+    expect(fetch.mock.calls.some(([input]) => String(input) === '/api/learning/21')).toBe(true);
+    expect(fetch.mock.calls.some(([input]) => String(input).includes('/api/learning/21/open'))).toBe(false);
+  });
+
   it('держит полосу захода поверх настоящего детского экрана', async () => {
     // План занятия в этом тесте не приезжает: проверяется полоса поверх экрана,
     // а не сам экран, и своя выдумка плана разъехалась бы с его тестами.
