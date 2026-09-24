@@ -115,7 +115,7 @@ describe('отбор и подготовка учебных материалов
 
   it('держит буквальные пределы материалов и истории ошибок', () => {
     expect(MAX_READY_LEARNING_MATERIALS).toBe(3);
-    expect(MAX_LEARNING_TASK_BATCHES).toBe(4);
+    expect(MAX_LEARNING_TASK_BATCHES).toBe(6);
     expect(RECENT_LEARNING_ERRORS).toBe(5);
   });
 
@@ -463,6 +463,37 @@ describe('отбор и подготовка учебных материалов
 });
 
 describe('производитель полного комплекта', () => {
+  it('переписывает материал по замечанию методиста до создания теста', async () => {
+    const generatedTasks = Array.from({ length: 5 }, (_, index) => task(`исправленный-${index}`));
+    const answers = [
+      JSON.stringify(content),
+      JSON.stringify({ accepted: false, accurate: false, complete: true, age_appropriate: true,
+        grounded: true, note: 'Неверно объяснён знак сравнения' }),
+      JSON.stringify(content),
+      JSON.stringify({ accepted: true, accurate: true, complete: true, age_appropriate: true,
+        grounded: true, note: '' }),
+      JSON.stringify({ items: generatedTasks }),
+      JSON.stringify({ items: generatedTasks.map(() => ({
+        answer: '4', unambiguous: true, natural: true, on_topic: true,
+        age_appropriate: true, hint_safe: true, hint_useful: true,
+        deep_hint_safe: true, deep_hint_useful: true, word_order_valid: true, note: '',
+      })) }),
+    ];
+    const calls: CodexRequest[] = [];
+    const producer = createLearningProducer({ run: (request) => {
+      calls.push(request);
+      return Promise.resolve(answers.shift() ?? '{}');
+    } });
+    const result = await producer({
+      topic: topic('math.best'), prerequisites: [],
+      profile: { name: 'Тимофей', interests: [], examDate: null, partnerName: 'Байт' },
+      recentErrors: [], previousApproaches: [], recent: [],
+    });
+    expect(result.tasks).toHaveLength(5);
+    expect(calls[2]?.prompt).toContain('Неверно объяснён знак сравнения');
+    expect(answers).toEqual([]);
+  });
+
   it('проверяет материал независимо и строит пять вопросов по его содержимому', async () => {
     const generatedTasks = Array.from({ length: 5 }, (_, index) => task(`codex-${index}`));
     const verdicts = generatedTasks.map(() => ({
@@ -512,8 +543,12 @@ describe('производитель полного комплекта', () => {
       JSON.stringify({ items: second }), JSON.stringify({ items: accepted(second) }),
       JSON.stringify({ items: third }), JSON.stringify({ items: accepted(third) }),
     ];
+    const calls: CodexRequest[] = [];
     const producer = createLearningProducer({
-      run: () => Promise.resolve(answers.shift() ?? '{}'),
+      run: (request) => {
+        calls.push(request);
+        return Promise.resolve(answers.shift() ?? '{}');
+      },
     });
     const result = await producer({
       topic: topic('math.best'), prerequisites: [],
@@ -522,10 +557,11 @@ describe('производитель полного комплекта', () => {
     });
     expect(result.tasks).toHaveLength(5);
     expect(new Set(result.tasks.map(({ instruction }) => instruction)).size).toBe(5);
+    expect(calls[4]?.prompt).toContain('ситуация натянута');
     expect(answers).toEqual([]);
   });
 
-  it('после четырёх батчей без новых вопросов оставляет claim чисто rejected', async () => {
+  it('после всех батчей без новых вопросов оставляет claim чисто rejected', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'edukator-learning-exhausted-'));
     const db = openDatabase(join(tempDir, 'test.db'));
     try {

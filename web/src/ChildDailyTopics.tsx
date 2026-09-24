@@ -39,17 +39,18 @@ function SetStatus({ set, courses, childId }: { set: DailyTopicSet; courses: Fam
       <progress value={ready} max={set.items.length} aria-label="Подготовка тем" />
       <p className="daily-topic-progress" aria-live="polite">
         {set.items.some((item) => item.status === 'error')
-          ? 'Некоторые темы не подготовились. Повторите ошибки после проверки списка.'
-          : 'Набор включится сразу после подготовки всех разборов и тестов.'}
+          ? 'Некоторые темы не удалось подготовить автоматически. Уточните их формулировки и назначьте список заново.'
+          : 'Проверяем материалы и исправляем замечания автоматически. Набор включится после подготовки всех разборов и тестов.'}
       </p>
     </>}
     <p className="daily-topic-source">Исходный список: {set.sourceText}</p>
     <ol>{set.items.map((item) => <li key={item.id}>
       <span>{courses.find((course) => course.courseId === item.subject)?.title ?? item.subjectTitle} · {item.title}</span>
       <small>{item.materialStatus === 'passed' ? 'Зачтено'
-        : item.status === 'error' ? `Ошибка: ${item.lastError ?? 'подготовка не удалась'}`
+        : item.status === 'error' ? `Не удалось подготовить: ${item.lastError ?? 'ошибка подготовки'}`
           : item.status === 'ready' ? 'Готово'
-            : item.materialId === null ? 'Ожидает подготовки' : 'Создаём разбор и тест'}
+            : item.lastError !== null ? 'Исправляем и повторяем автоматически'
+              : item.materialId === null ? 'Ожидает подготовки' : 'Создаём разбор и тест'}
       {item.firstTotal !== null && ` · первая попытка ${item.firstScore}/${item.firstTotal}`}</small>
       {item.firstRunId !== null && <FirstMistakes childId={childId} runId={item.firstRunId} />}
     </li>)}</ol>
@@ -69,7 +70,7 @@ export function ChildDailyTopics({
   const [state, setState] = useState<DailyTopicState | null>(null);
   const [text, setText] = useState('');
   const [preview, setPreview] = useState<DailyTopicInput[] | null>(null);
-  const [busyAction, setBusyAction] = useState<'preview' | 'confirm' | 'retry' | 'cancel' | null>(null);
+  const [busyAction, setBusyAction] = useState<'preview' | 'confirm' | 'cancel' | null>(null);
   const busy = busyAction !== null;
   const [problem, setProblem] = useState<string | null>(null);
 
@@ -121,12 +122,12 @@ export function ChildDailyTopics({
     }
   }
 
-  async function act(kind: 'retry' | 'cancel'): Promise<void> {
+  async function cancel(): Promise<void> {
     if (busy) return;
-    setBusyAction(kind);
+    setBusyAction('cancel');
     setProblem(null);
     try {
-      setState(kind === 'retry' ? await api.retry(childId) : await api.cancel(childId));
+      setState(await api.cancel(childId));
     } catch (error) {
       setProblem(error instanceof Error ? error.message : 'Не получилось изменить назначение');
     } finally {
@@ -140,10 +141,8 @@ export function ChildDailyTopics({
     <p>Подготовка начнётся сразу. Здесь будет виден прогресс по каждой теме; если наступит новый день по Москве, готовый набор включится в новом дне.</p>
     {state?.active !== null && state?.active !== undefined && <SetStatus set={state.active} courses={courses} childId={childId} />}
     {state?.preparing !== null && state?.preparing !== undefined && <SetStatus set={state.preparing} courses={courses} childId={childId} />}
-    {state?.preparing?.items.some((item) => item.status === 'error') &&
-      <button type="button" className="secondary" disabled={busy} onClick={() => void act('retry')}>Повторить ошибки подготовки</button>}
     {(state?.active !== null || state?.preparing !== null) && state !== null &&
-      <button type="button" className="secondary" disabled={busy} onClick={() => void act('cancel')}>Отменить темы на сегодня</button>}
+      <button type="button" className="secondary" disabled={busy} onClick={() => void cancel()}>Отменить темы на сегодня</button>}
     <form onSubmit={(event) => { void inspect(event); }}>
       <label htmlFor={`daily-topic-text-${childId}`}>Список тем</label>
       <textarea id={`daily-topic-text-${childId}`} value={text}

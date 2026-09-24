@@ -31,7 +31,8 @@ import { validateTaskBatch } from './codex/validate.js';
 import { calibratedSubjects } from './subject-calibration.js';
 
 export const MAX_READY_LEARNING_MATERIALS = 3;
-export const MAX_LEARNING_TASK_BATCHES = 4;
+export const MAX_LEARNING_TASK_BATCHES = 6;
+export const MAX_LEARNING_MATERIAL_REVISIONS = 3;
 export const RECENT_LEARNING_ERRORS = 5;
 
 export interface LearningTopicCandidate {
@@ -186,19 +187,31 @@ export function createLearningProducer(options: {
       ...(options.run === undefined ? {} : { run: options.run }),
       ...(options.model === undefined ? {} : { model: options.model }),
     };
-    const content = await generateLearningMaterial({
-      topic: request.topic,
-      prerequisites: request.prerequisites,
-      profile: request.profile,
-      recentErrors: request.recentErrors,
-      previousApproaches: request.previousApproaches,
-      ...common,
-    });
-    const verdict = await validateLearningMaterial({ topic: request.topic, material: content, ...common });
-    if (!verdict.accepted) throw new Error(`Материал отклонён методистом: ${verdict.reason}`);
+    let content: LearningMaterialContent | undefined;
+    let reviewFeedback: string | undefined;
+    for (let revision = 0; revision < MAX_LEARNING_MATERIAL_REVISIONS; revision += 1) {
+      const candidate = await generateLearningMaterial({
+        topic: request.topic,
+        prerequisites: request.prerequisites,
+        profile: request.profile,
+        recentErrors: request.recentErrors,
+        previousApproaches: request.previousApproaches,
+        ...(reviewFeedback === undefined ? {} : { reviewFeedback }),
+        ...common,
+      });
+      const verdict = await validateLearningMaterial({ topic: request.topic, material: candidate, ...common });
+      if (verdict.accepted) {
+        content = candidate;
+        break;
+      }
+      reviewFeedback = verdict.reason;
+      options.log?.(`воркер: исправляем материал «${request.topic.id}»: ${verdict.reason}`);
+    }
+    if (content === undefined) throw new Error(`Материал отклонён методистом: ${reviewFeedback}`);
 
     const gathered: GeneratedTask[] = [];
     const fingerprints = new Set(request.recent.map(questionFingerprint));
+    let taskFeedback: string | undefined;
     for (
       let batch = 0;
       batch < MAX_LEARNING_TASK_BATCHES && gathered.length < LEARNING_TASK_COUNT;
@@ -209,11 +222,13 @@ export function createLearningProducer(options: {
         difficulty: request.topic.difficulty,
         profile: request.profile,
         recent: [...request.recent, ...gathered.map(taskPromptText)],
-        count: LEARNING_TASK_COUNT - gathered.length,
+        count: Math.max(3, LEARNING_TASK_COUNT - gathered.length),
         lessonContent: content,
+        ...(taskFeedback === undefined ? {} : { reviewFeedback: taskFeedback }),
         ...common,
       });
       const checked = await validateTaskBatch({ topic: request.topic, tasks: generated.tasks, ...common });
+      taskFeedback = checked.rejected.map(({ reason }) => reason).slice(0, 3).join('; ') || undefined;
       for (const rejection of checked.rejected) {
         options.log?.(`воркер: вопрос материала «${request.topic.id}» отбракован (${rejection.reason})`);
       }

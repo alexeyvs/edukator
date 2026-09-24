@@ -20,9 +20,24 @@ export interface PrepareDailyTopicsOptions {
   log?: (message: string) => void;
 }
 
+/** Повторные запуски переживают рестарт сервера, поскольку считаются по claim в БД. */
+export const MAX_DAILY_TOPIC_ATTEMPTS = 4;
+
+function attemptsFor(db: Database, itemId: number): number {
+  return db.prepare<[number], { count: number }>(
+    'SELECT COUNT(*) AS count FROM learning_materials WHERE daily_item_id = ?',
+  ).get(itemId)?.count ?? 0;
+}
+
 function topicFor(db: Database, graph: TopicGraph, topicId: string): Topic {
   const known = graph.byId.get(topicId);
-  if (known !== undefined) return known;
+  if (known !== undefined) {
+    const course = graph.courses.get(known.subject);
+    const courseTitle = known.courseTitle ?? course?.title;
+    return { ...known,
+      ...(courseTitle === undefined ? {} : { courseTitle }),
+      grade: known.grade || course?.grade || '' };
+  }
   const row = db.prepare<[string], {
     id: string; subject: string; title: string; prompt_seed: string;
     difficulty: number; exam_weight: number; answer_format: Topic['answerFormat'];
@@ -34,6 +49,7 @@ function topicFor(db: Database, graph: TopicGraph, topicId: string): Topic {
       WHERE pt.id = ?`,
   ).get(topicId);
   if (row === undefined) throw new Error(`Личная тема «${topicId}» не найдена`);
+  const grades = [...new Set([...graph.courses.values()].map((course) => course.grade).filter(Boolean))];
   return {
     id: row.id,
     subject: row.subject,
@@ -44,7 +60,7 @@ function topicFor(db: Database, graph: TopicGraph, topicId: string): Topic {
     answerFormat: row.answer_format,
     prereqs: [],
     courseTitle: graph.courses.get(row.subject)?.title ?? row.course_title ?? row.subject,
-    grade: graph.courses.get(row.subject)?.grade ?? row.grade ?? '',
+    grade: graph.courses.get(row.subject)?.grade || row.grade || (grades.length === 1 ? grades[0] : '') || '',
   };
 }
 
@@ -64,7 +80,11 @@ export async function prepareDailyTopics(options: PrepareDailyTopicsOptions): Pr
   );
   for (const item of pending.items) {
     if (stillPreparing.get(pending.id) === undefined) return;
-    if (item.status !== 'preparing') continue;
+    if (item.status === 'ready' || attemptsFor(options.db, item.id) >= MAX_DAILY_TOPIC_ATTEMPTS) continue;
+    if (item.status === 'error') {
+      options.db.prepare("UPDATE daily_topic_items SET status = 'preparing', material_id = NULL WHERE id = ?")
+        .run(item.id);
+    }
     const currentRevision = options.graph.courses.get(item.subject)?.revisionId ?? null;
     if (currentRevision !== item.courseRevisionId) {
       options.db.prepare("UPDATE daily_topic_items SET status = 'error', last_error = ? WHERE id = ?")
@@ -95,7 +115,7 @@ export async function prepareDailyTopics(options: PrepareDailyTopicsOptions): Pr
       now: options.now?.() ?? new Date(),
     });
     if (claim === undefined) continue;
-    options.db.prepare('UPDATE daily_topic_items SET material_id = ?, last_error = NULL WHERE id = ?')
+    options.db.prepare('UPDATE daily_topic_items SET material_id = ? WHERE id = ?')
       .run(claim.materialId, item.id);
     try {
       const result = await budget.run(() => producer({
@@ -127,9 +147,10 @@ export async function prepareDailyTopics(options: PrepareDailyTopicsOptions): Pr
     } catch (error) {
       rejectLearningMaterial(options.db, claim.materialId, { now: options.now?.() ?? new Date() });
       const message = error instanceof Error ? error.message : String(error);
-      options.db.prepare("UPDATE daily_topic_items SET status = 'error', last_error = ? WHERE id = ?")
-        .run(message.slice(0, 1000), item.id);
-      options.log?.(`дневная тема «${topic.title}» не готова: ${message}`);
+      const retry = attemptsFor(options.db, item.id) < MAX_DAILY_TOPIC_ATTEMPTS;
+      options.db.prepare('UPDATE daily_topic_items SET status = ?, last_error = ? WHERE id = ?')
+        .run(retry ? 'preparing' : 'error', message.slice(0, 1000), item.id);
+      options.log?.(`дневная тема «${topic.title}»: ${message}; ${retry ? 'повторим автоматически' : 'попытки исчерпаны'}`);
     }
   }
   // Новый запрос родителя мог отменить этот набор во время await. Решение

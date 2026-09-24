@@ -49,6 +49,7 @@ export interface GenerateTasksOptions {
   persona?: string;
   /** Структурированная теория для самостоятельного теста lesson-run. */
   lessonContent?: unknown;
+  reviewFeedback?: string;
   courseTitle?: string;
   grade?: string;
   sourceContext?: SourceContext;
@@ -128,7 +129,8 @@ export async function generateTaskBatch(
         ...((options.courseTitle ?? topic.courseTitle) === undefined ? {} : { courseTitle: options.courseTitle ?? topic.courseTitle }),
         ...((options.grade ?? topic.grade) === undefined ? {} : { grade: options.grade ?? topic.grade }),
         ...(sourceContext === undefined ? {} : { sourceContext }),
-        ...(previousError === undefined ? {} : { previousError }),
+        ...((previousError ?? options.reviewFeedback) === undefined
+          ? {} : { previousError: previousError ?? options.reviewFeedback }),
       });
 
       try {

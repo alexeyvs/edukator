@@ -435,7 +435,10 @@ export function buildServer(
               log,
               ...(options.now === undefined ? {} : { now: options.now }),
             });
-            if (dailyTopicSets(tenant.db, options.now?.() ?? new Date()).preparing?.id === pending.id) return;
+            const current = dailyTopicSets(tenant.db, options.now?.() ?? new Date()).preparing;
+            if (current?.id === pending.id &&
+              current.items.some((item) => item.status === 'preparing' && item.lastError !== null)) continue;
+            if (current?.id === pending.id) return;
           }
         })();
         dailyPreparationJobs.set(childId, job);

@@ -27,6 +27,8 @@ describe('темы на день в кабинете родителя', () => {
     fireEvent.click(screen.getByText('Темы из школы на сегодня'));
     expect(await screen.findByText('Готовим темы · 1 из 2 готово')).toBeInTheDocument();
     expect(screen.getByRole('progressbar', { name: 'Подготовка тем' })).toHaveAttribute('value', '1');
+    expect(screen.getByText(/исправляем замечания автоматически/)).toBeInTheDocument();
+    expect(screen.queryByText('Повторить ошибки подготовки')).not.toBeInTheDocument();
     expect(screen.queryByText(/После полуночи по Москве назначение сегодня не включится/)).not.toBeInTheDocument();
   });
 

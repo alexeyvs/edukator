@@ -9,7 +9,7 @@ import {
   activateDailyTopicSet, cancelDailyTopics, confirmDailyTopics, dailyMaterialAllowed,
   dailyTopicSets, type DailyTopicInput,
 } from '../server/daily-topics.js';
-import { prepareDailyTopics } from '../server/daily-topic-prep.js';
+import { MAX_DAILY_TOPIC_ATTEMPTS, prepareDailyTopics } from '../server/daily-topic-prep.js';
 import { previewDailyTopics } from '../server/daily-topic-preview.js';
 import { readDailyGate } from '../server/daily-gate.js';
 import { mergePersonalCurriculum } from '../server/personal-curriculum.js';
@@ -80,11 +80,16 @@ describe('родительские темы на день', () => {
     expect(set.items).toHaveLength(3);
     expect(dailyTopicSets(db, at).active).toBeNull();
     expect(readDailyGate(db, at).mode).toBeUndefined();
-    await prepareDailyTopics({ db, graph, now: () => at, producer: producer() });
+    const seenGrades: Array<string | undefined> = [];
+    await prepareDailyTopics({ db, graph, now: () => at, producer: async (request) => {
+      seenGrades.push(request.topic.grade);
+      return producer()(request);
+    } });
     const active = dailyTopicSets(db, at).active;
     expect(active?.items.map((item) => item.materialStatus)).toEqual(['ready', 'ready', 'ready']);
     expect(active?.items.map((item) => item.materialId)).toHaveLength(3);
     expect(new Set(active?.items.map((item) => item.materialId)).size).toBe(3);
+    expect(seenGrades).toEqual(['5', '5', '5']);
     expect(readDailyGate(db, at)).toMatchObject({ mode: 'parent_topics', required: 3, completed: 0, unlocked: false });
     const base: CurriculumSnapshot = {
       childId: 'child', generation: { catalog: 1, child: 1 }, graph,
@@ -131,13 +136,43 @@ describe('родительские темы на день', () => {
       return producer()(request);
     } });
     expect(dailyTopicSets(db, at).active).toBeNull();
-    expect(dailyTopicSets(db, at).preparing?.items.map((item) => item.status)).toEqual(['ready', 'error']);
+    expect(dailyTopicSets(db, at).preparing?.items.map((item) => item.status)).toEqual(['ready', 'preparing']);
     expect(dailyTopicSets(db, nextDay).preparing?.id).toBe(set.id);
-    db.prepare("UPDATE daily_topic_items SET status = 'preparing' WHERE set_id = ? AND status = 'error'").run(set.id);
     await prepareDailyTopics({ db, graph, now: () => nextDay, producer: producer() });
     expect(activateDailyTopicSet(db, set.id, nextDay)).toBe(false);
     expect(dailyTopicSets(db, nextDay).active).toMatchObject({ id: set.id, day: '2026-09-24' });
     expect(readDailyGate(db, nextDay)).toMatchObject({ mode: 'parent_topics', required: 2, completed: 0 });
+  });
+
+  it('сам повторяет ошибки и останавливается после ограниченного числа неудач', async () => {
+    confirmDailyTopics(db, graph, {
+      sourceText: 'Проценты', requestKey: 'auto-retry', items: [input('Проценты')],
+    }, at);
+    let calls = 0;
+    const recover = async (request: { topic: { id: string } }) => {
+      calls += 1;
+      if (calls < 3) throw new Error('Методист нашёл ошибку');
+      return producer()(request);
+    };
+    await prepareDailyTopics({ db, graph, now: () => at, producer: recover });
+    expect(dailyTopicSets(db, at).preparing?.items[0]).toMatchObject({
+      status: 'preparing', lastError: 'Методист нашёл ошибку',
+    });
+    await prepareDailyTopics({ db, graph, now: () => at, producer: recover });
+    await prepareDailyTopics({ db, graph, now: () => at, producer: recover });
+    expect(dailyTopicSets(db, at).active?.items[0]?.status).toBe('ready');
+    expect(calls).toBe(3);
+
+    confirmDailyTopics(db, graph, {
+      sourceText: 'Луна', requestKey: 'exhausted', items: [input('Луна', null)],
+    }, at);
+    for (let attempt = 0; attempt < MAX_DAILY_TOPIC_ATTEMPTS + 1; attempt += 1) {
+      await prepareDailyTopics({ db, graph, now: () => at,
+        producer: async () => { throw new Error('Не удалось исправить'); } });
+    }
+    expect(dailyTopicSets(db, at).preparing?.items[0]).toMatchObject({ status: 'error' });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM learning_materials WHERE daily_item_id = ?')
+      .get(dailyTopicSets(db, at).preparing?.items[0]?.id)).toEqual({ count: MAX_DAILY_TOPIC_ATTEMPTS });
   });
 
   it('не публикует материал, если родитель отменил набор во время генерации', async () => {
