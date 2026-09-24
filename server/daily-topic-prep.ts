@@ -21,7 +21,7 @@ export interface PrepareDailyTopicsOptions {
 }
 
 /** Повторные запуски переживают рестарт сервера, поскольку считаются по claim в БД. */
-export const MAX_DAILY_TOPIC_ATTEMPTS = 4;
+export const MAX_DAILY_TOPIC_ATTEMPTS = 5;
 
 function attemptsFor(db: Database, itemId: number): number {
   return db.prepare<[number], { count: number }>(

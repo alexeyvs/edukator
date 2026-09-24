@@ -82,6 +82,7 @@ describe('buildGenerationPrompt: состав промпта', () => {
       topic: topic({ subject: 'geography-5' }), tasks: [], courseTitle: 'География', grade: '5 класс',
     });
     expect(validation).toContain('класса, указанного в метаданных курса');
+    expect(validation).toContain('Общее правило и термины темы называть можно');
     expect(validation).not.toContain('тринадцатилет');
   });
 

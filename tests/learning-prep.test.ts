@@ -558,6 +558,7 @@ describe('производитель полного комплекта', () => {
     expect(result.tasks).toHaveLength(5);
     expect(new Set(result.tasks.map(({ instruction }) => instruction)).size).toBe(5);
     expect(calls[4]?.prompt).toContain('ситуация натянута');
+    expect(calls[4]?.prompt).toContain(first[2]?.instruction ?? '');
     expect(answers).toEqual([]);
   });
 

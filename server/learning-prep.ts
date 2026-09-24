@@ -210,6 +210,7 @@ export function createLearningProducer(options: {
     if (content === undefined) throw new Error(`Материал отклонён методистом: ${reviewFeedback}`);
 
     const gathered: GeneratedTask[] = [];
+    const rejectedPrompts: string[] = [];
     const fingerprints = new Set(request.recent.map(questionFingerprint));
     let taskFeedback: string | undefined;
     for (
@@ -221,7 +222,7 @@ export function createLearningProducer(options: {
         topic: request.topic,
         difficulty: request.topic.difficulty,
         profile: request.profile,
-        recent: [...request.recent, ...gathered.map(taskPromptText)],
+        recent: [...request.recent, ...gathered.map(taskPromptText), ...rejectedPrompts],
         count: Math.max(3, LEARNING_TASK_COUNT - gathered.length),
         lessonContent: content,
         ...(taskFeedback === undefined ? {} : { reviewFeedback: taskFeedback }),
@@ -230,6 +231,7 @@ export function createLearningProducer(options: {
       const checked = await validateTaskBatch({ topic: request.topic, tasks: generated.tasks, ...common });
       taskFeedback = checked.rejected.map(({ reason }) => reason).slice(0, 3).join('; ') || undefined;
       for (const rejection of checked.rejected) {
+        rejectedPrompts.push(taskPromptText(rejection.task));
         options.log?.(`воркер: вопрос материала «${request.topic.id}» отбракован (${rejection.reason})`);
       }
       for (const task of checked.accepted) {
