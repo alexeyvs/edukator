@@ -166,10 +166,15 @@ describe('родительские темы на день', () => {
     confirmDailyTopics(db, graph, {
       sourceText: 'Луна', requestKey: 'exhausted', items: [input('Луна', null)],
     }, at);
+    const formats: string[] = [];
     for (let attempt = 0; attempt < MAX_DAILY_TOPIC_ATTEMPTS + 1; attempt += 1) {
       await prepareDailyTopics({ db, graph, now: () => at,
-        producer: async () => { throw new Error('Не удалось исправить'); } });
+        producer: async (request) => {
+          formats.push(request.topic.answerFormat);
+          throw new Error('Не удалось исправить');
+        } });
     }
+    expect(formats).toEqual(['text', 'text', 'text', 'choice', 'choice', 'choice']);
     expect(dailyTopicSets(db, at).preparing?.items[0]).toMatchObject({ status: 'error' });
     expect(db.prepare('SELECT COUNT(*) AS count FROM learning_materials WHERE daily_item_id = ?')
       .get(dailyTopicSets(db, at).preparing?.items[0]?.id)).toEqual({ count: MAX_DAILY_TOPIC_ATTEMPTS });

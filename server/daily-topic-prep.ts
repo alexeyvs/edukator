@@ -21,7 +21,8 @@ export interface PrepareDailyTopicsOptions {
 }
 
 /** Повторные запуски переживают рестарт сервера, поскольку считаются по claim в БД. */
-export const MAX_DAILY_TOPIC_ATTEMPTS = 5;
+export const MAX_DAILY_TOPIC_ATTEMPTS = 6;
+const CHOICE_FALLBACK_AFTER = 3;
 
 function attemptsFor(db: Database, itemId: number): number {
   return db.prepare<[number], { count: number }>(
@@ -99,6 +100,15 @@ export async function prepareDailyTopics(options: PrepareDailyTopicsOptions): Pr
     let topic: Topic;
     try {
       topic = topicFor(options.db, options.graph, item.topicId);
+      if (topic.answerFormat === 'text' && attemptsFor(options.db, item.id) >= CHOICE_FALLBACK_AFTER) {
+        const changed = options.db.prepare(
+          "UPDATE personal_topics SET answer_format = 'choice' WHERE id = ? AND answer_format = 'text' AND active = 0",
+        ).run(topic.id).changes;
+        if (changed > 0) {
+          topic = { ...topic, answerFormat: 'choice' };
+          options.log?.(`дневная тема «${topic.title}»: проверяем с однозначными вариантами ответа`);
+        }
+      }
     } catch (error) {
       options.db.prepare("UPDATE daily_topic_items SET status = 'error', last_error = ? WHERE id = ?")
         .run(error instanceof Error ? error.message : String(error), item.id);
