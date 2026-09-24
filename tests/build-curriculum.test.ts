@@ -14,6 +14,7 @@ import {
   writeCurriculumAtomic,
 } from '../scripts/build-curriculum.js';
 import {
+  CODEX_MODEL,
   CODEX_ROLE_ENV,
   CodexUnavailableError,
   type CodexRequest,
@@ -263,7 +264,7 @@ describe('buildCurriculum', () => {
     expect(written.topics).toHaveLength(20);
 
     expect(run.requests).toHaveLength(1);
-    expect(run.requests[0]?.model).toBe('gpt-5.6-sol');
+    expect(run.requests[0]?.model).toBe(CODEX_MODEL);
     // Схема уходит очищенной копией: с оригиналом структурированный вывод падает.
     expect(run.requests[0]?.schemaPath.endsWith('curriculum.codex.json')).toBe(true);
     expect(run.schemas[0]).not.toContain('"uniqueItems"');

@@ -15,7 +15,7 @@ import {
   type LearningPackage,
   type LearningProduceRequest,
 } from '../server/learning-prep.js';
-import { CodexUnavailableError, type CodexRequest } from '../server/codex/client.js';
+import { CODEX_MODEL, CodexUnavailableError, type CodexRequest } from '../server/codex/client.js';
 import { CodexConcurrency } from '../server/codex/concurrency.js';
 import type { LearningMaterialContent } from '../server/codex/learning-material-schema.js';
 import type { GeneratedTask } from '../server/codex/task-schema.js';
@@ -490,7 +490,7 @@ describe('производитель полного комплекта', () => {
     });
     expect(result.tasks).toHaveLength(5);
     expect(calls).toHaveLength(4);
-    expect(calls[1]?.model).toBe('gpt-5.6-sol');
+    expect(calls[1]?.model).toBe(CODEX_MODEL);
     expect(calls[2]?.prompt).toContain('# Учебный материал для теста');
   });
 

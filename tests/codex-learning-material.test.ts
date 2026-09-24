@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Topic } from '../server/curriculum.js';
 import { DEFAULT_PROFILE } from '../server/db.js';
 import {
+  CODEX_MODEL,
   CodexUnavailableError,
   type CodexRequest,
 } from '../server/codex/client.js';
@@ -55,7 +56,7 @@ describe('генерация и проверка учебного материа
     }));
     expect(result).toEqual(content);
     expect(calls).toHaveLength(2);
-    expect(calls[0]?.model).toBe('gpt-5.6-sol');
+    expect(calls[0]?.model).toBe(CODEX_MODEL);
     expect(calls[0]?.prompt).toContain('Minecraft');
     expect(calls[0]?.prompt).toContain('Старая подача');
     expect(calls[1]?.prompt).toContain('Ошибка прошлой попытки');

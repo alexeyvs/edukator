@@ -161,9 +161,9 @@ npm install
 CLI и OCR-зависимости; без Codex основное обучение продолжает работать на уже
 подготовленном банке и опубликованных материалах:
 
-- **`codex` в `PATH`** с доступом к модели `gpt-5.6-sol` (запасная —
+- **`codex` в `PATH`** с доступом к модели `gpt-6-sol` (запасная —
   `gpt-5.6-terra`, см. [Модель по ролям](#модель-по-ролям)) — конвейер проверен
-  с codex CLI 0.146.0 (`codex --version`); у других версий может отличаться
+  с codex CLI 0.156.1 (`codex --version`); у других версий может отличаться
   поддержка структурированного вывода. Иначе
   legacy-команда `npm run build-curriculum` падает сразу, не тратя попыток
   (`codex не найден: ожидался исполняемый файл «codex» в PATH`), а
@@ -1158,11 +1158,11 @@ npm run build-curriculum -- --subject math
 
 | Переменная | Роль | Умолчание |
 |---|---|---|
-| `EDUKATOR_MODEL_GENERATE` | генератор заданий | `gpt-5.6-sol` |
-| `EDUKATOR_MODEL_VALIDATE` | проверяющий | `gpt-5.6-sol` |
-| `EDUKATOR_MODEL_DISPUTE` | разбор спора | `gpt-5.6-sol` |
-| `EDUKATOR_MODEL_INTEGRITY` | проверка осмысленности ответов занятия | `gpt-5.6-sol` |
-| `EDUKATOR_MODEL_CURRICULUM` | сборка карты тем | `gpt-5.6-sol` |
+| `EDUKATOR_MODEL_GENERATE` | генератор заданий | `gpt-6-sol` |
+| `EDUKATOR_MODEL_VALIDATE` | проверяющий | `gpt-6-sol` |
+| `EDUKATOR_MODEL_DISPUTE` | разбор спора | `gpt-6-sol` |
+| `EDUKATOR_MODEL_INTEGRITY` | проверка осмысленности ответов занятия | `gpt-6-sol` |
+| `EDUKATOR_MODEL_CURRICULUM` | сборка карты тем | `gpt-6-sol` |
 
 Пустая переменная считается незаданной. Запасная модель — `gpt-5.6-terra`,
 автоматического отката на неё нет: её выбирают руками этими же переменными или

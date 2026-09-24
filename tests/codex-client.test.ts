@@ -42,7 +42,7 @@ function fakeCodexBin(name: string, body: string): string {
 
 describe('константы клиента', () => {
   it('держит модели и сроки из спеки', () => {
-    expect(CODEX_MODEL).toBe('gpt-5.6-sol');
+    expect(CODEX_MODEL).toBe('gpt-6-sol');
     expect(CODEX_FALLBACK_MODEL).toBe('gpt-5.6-terra');
     expect(DEFAULT_ATTEMPTS).toBe(3);
     expect(CODEX_TIMEOUT_MS).toBe(600_000);
@@ -208,7 +208,7 @@ describe('codexArgs', () => {
       '--cd',
       '/',
       '-m',
-      'gpt-5.6-sol',
+      CODEX_MODEL,
       '--output-schema',
       '/s.json',
       '-o',
@@ -220,7 +220,7 @@ describe('codexArgs', () => {
 
   it('берёт рабочую модель, когда запрос её не назвал', () => {
     const args = codexArgs({ prompt: 'p', schemaPath: '/s.json', outPath: '/o.json' });
-    expect(args[args.indexOf('-m') + 1]).toBe('gpt-5.6-sol');
+    expect(args[args.indexOf('-m') + 1]).toBe(CODEX_MODEL);
   });
 
   it('уходит на запасную модель, когда она указана явно', () => {
