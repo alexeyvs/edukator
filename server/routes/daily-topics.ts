@@ -16,6 +16,8 @@ export interface DailyTopicRoutesOptions {
   now?: () => Date;
   run?: CodexRunner;
   budget?: CodexConcurrency;
+  prepare?: (childId: string) => Promise<void>;
+  log?: (message: string) => void;
 }
 
 function bodyObject(body: unknown): Record<string, unknown> {
@@ -99,6 +101,8 @@ export function registerDailyTopicRoutes(app: FastifyInstance, options: DailyTop
       );
       options.control.prepare('UPDATE children SET last_activity_at = ? WHERE id = ?')
         .run(now().toISOString(), child.id);
+      void options.prepare?.(child.id).catch((error: unknown) =>
+        options.log?.(`подготовка дневных тем: ${error instanceof Error ? error.message : String(error)}`));
       return reply.code(202).send({ set });
     } catch (error) {
       return fail(reply, error);
@@ -117,6 +121,8 @@ export function registerDailyTopicRoutes(app: FastifyInstance, options: DailyTop
       ).run(pending.id);
       options.control.prepare('UPDATE children SET last_activity_at = ? WHERE id = ?')
         .run(now().toISOString(), child.id);
+      void options.prepare?.(child.id).catch((error: unknown) =>
+        options.log?.(`повтор подготовки дневных тем: ${error instanceof Error ? error.message : String(error)}`));
       return reply.send(dailyTopicSets(tenant.db, now()));
     } catch (error) {
       return fail(reply, error);

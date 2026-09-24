@@ -8,6 +8,28 @@ import './test-setup';
 afterEach(cleanup);
 
 describe('темы на день в кабинете родителя', () => {
+  it('показывает ход подготовки без ограничения московской полуночью', async () => {
+    const api: DailyTopicsApi = {
+      read: vi.fn().mockResolvedValue({ active: null, preparing: {
+        id: 1, day: '2026-09-23', status: 'preparing', sourceText: 'Дроби\nЛуна',
+        items: [
+          { id: 1, position: 1, topicId: 'math.fractions', subject: 'math', subjectTitle: 'Математика',
+            courseRevisionId: 1, title: 'Дроби', materialId: 1, status: 'ready', materialStatus: 'ready',
+            lastError: null, firstScore: null, firstTotal: null, firstRunId: null },
+          { id: 2, position: 2, topicId: 'personal-moon', subject: 'astronomy', subjectTitle: 'Астрономия',
+            courseRevisionId: null, title: 'Луна', materialId: null, status: 'preparing', materialStatus: null,
+            lastError: null, firstScore: null, firstTotal: null, firstRunId: null },
+        ],
+      } }),
+      preview: vi.fn(), confirm: vi.fn(), retry: vi.fn(), cancel: vi.fn(),
+    };
+    render(<ChildDailyTopics childId="child-1" courses={[]} api={api} />);
+    fireEvent.click(screen.getByText('Темы из школы на сегодня'));
+    expect(await screen.findByText('Готовим темы · 1 из 2 готово')).toBeInTheDocument();
+    expect(screen.getByRole('progressbar', { name: 'Подготовка тем' })).toHaveAttribute('value', '1');
+    expect(screen.queryByText(/После полуночи по Москве назначение сегодня не включится/)).not.toBeInTheDocument();
+  });
+
   it('показывает предпросмотр, разрешает исправить предмет и отправляет весь набор', async () => {
     const preview = vi.fn().mockResolvedValue([
       { title: 'Дроби', subjectId: 'math', subjectTitle: 'Математика', topicId: 'math.fractions' },

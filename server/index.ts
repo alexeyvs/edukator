@@ -88,6 +88,9 @@ import { createTenantOpener } from './tenant-opener.js';
 import { bootstrapLegacyCourses } from './course-catalog.js';
 import { CurriculumProvider } from './curriculum-provider.js';
 import { CatalogWorker, type CatalogWorkerOptions } from './catalog-worker.js';
+import { dailyTopicSets } from './daily-topics.js';
+import { prepareDailyTopics } from './daily-topic-prep.js';
+import { runCodexCli } from './codex/client.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '..');
@@ -411,6 +414,38 @@ export function buildServer(
       // тела вложенной функции, а обёртка квоты берёт `run` именно оттуда.
       const workerSettings = options.worker === false ? undefined : options.worker ?? {};
 
+      // Родительский запрос начинает подготовку сразу. Фоновый обход использует
+      // тот же запуск для восстановления после рестарта, не дублируя генерацию.
+      const dailyPreparationJobs = new Map<string, Promise<void>>();
+      const prepareDailyTopicsForChild = (childId: string): Promise<void> => {
+        const running = dailyPreparationJobs.get(childId);
+        if (running !== undefined) return running;
+        const job = (async (): Promise<void> => {
+          while (true) {
+            const tenant = tenants.open(childId);
+            if (!tenant.available()) return;
+            const at = options.now?.() ?? new Date();
+            const pending = dailyTopicSets(tenant.db, at).preparing;
+            if (pending === null) return;
+            await prepareDailyTopics({
+              db: tenant.db,
+              graph: curriculumProvider.get(childId).graph,
+              run: workerSettings?.run ?? runCodexCli,
+              budget,
+              log,
+              ...(options.now === undefined ? {} : { now: options.now }),
+            });
+            if (dailyTopicSets(tenant.db, options.now?.() ?? new Date()).preparing?.id === pending.id) return;
+          }
+        })();
+        dailyPreparationJobs.set(childId, job);
+        void job.then(
+          () => { dailyPreparationJobs.delete(childId); },
+          () => { dailyPreparationJobs.delete(childId); },
+        );
+        return job;
+      };
+
       // Прогрев на весь процесс один, а не на каждую открытую базу: бюджет codex
       // процессный, и свой цикл у каждого ребёнка означал бы гонку за два слота, в
       // которой занимающийся ученик стоит наравне с тем, кто ушёл спать. Порядок
@@ -453,6 +488,7 @@ export function buildServer(
                   ...(workerSettings.run === undefined ? {} : { run: workerSettings.run }),
                   ...(options.now === undefined ? {} : { now: options.now }),
                 }),
+              prepareDailyTopicsForChild,
               worker: workerSettings,
               ...(options.now === undefined ? {} : { now: options.now }),
             });
@@ -596,6 +632,8 @@ export function buildServer(
         context,
         control: controlDb,
         budget: codexConcurrency,
+        prepare: prepareDailyTopicsForChild,
+        log,
         ...(workerSettings?.run === undefined ? {} : { run: workerSettings.run }),
         ...(options.now === undefined ? {} : { now: options.now }),
       });
@@ -650,6 +688,7 @@ export function buildServer(
       app.addHook('onClose', async () => {
         await catalogWorker?.stop();
         await dispatcher?.stop();
+        await Promise.allSettled([...dailyPreparationJobs.values()]);
         await draftBuildRunner.stop();
         // Соединения имперсонации первыми: они ничего не пишут и никого не
         // ждут, а держат дескриптор той же базы, которую сейчас закроет реестр.

@@ -126,7 +126,7 @@ export function dailyTopicSets(db: Database, at: Date = new Date()): {
 } {
   const rows = db.prepare<[string], { id: number; status: string }>(
     `SELECT id, status FROM daily_topic_sets
-      WHERE day = ? AND status IN ('active', 'preparing')
+      WHERE (day = ? AND status = 'active') OR status = 'preparing'
       ORDER BY id DESC`,
   ).all(moscowDate(at));
   const active = rows.find((row) => row.status === 'active');
@@ -173,10 +173,10 @@ export function confirmDailyTopics(
     ).get(requestKey);
     if (existing !== undefined) return readSet(db, existing.id);
     const day = moscowDate(at);
-    db.prepare<[string, string]>(
+    db.prepare<[string]>(
       `UPDATE daily_topic_sets SET status = 'cancelled', cancelled_at = ?
-        WHERE day = ? AND status = 'preparing'`,
-    ).run(at.toISOString(), day);
+        WHERE status = 'preparing'`,
+    ).run(at.toISOString());
     const inserted = db.prepare(
       `INSERT INTO daily_topic_sets (day, source_text, request_key, created_at)
        VALUES (?, ?, ?, ?)`,
@@ -243,7 +243,7 @@ export function confirmDailyTopics(
 export function cancelDailyTopics(db: Database, at: Date = new Date()): void {
   db.prepare<[string, string]>(
     `UPDATE daily_topic_sets SET status = 'cancelled', cancelled_at = ?
-      WHERE day = ? AND status IN ('active', 'preparing')`,
+      WHERE (day = ? AND status = 'active') OR status = 'preparing'`,
   ).run(at.toISOString(), moscowDate(at));
 }
 
@@ -251,7 +251,7 @@ export function cancelDailyTopics(db: Database, at: Date = new Date()): void {
 export function activateDailyTopicSet(db: Database, setId: number, at: Date = new Date()): boolean {
   return db.transaction((): boolean => {
     const set = readSet(db, setId);
-    if (set.status !== 'preparing' || set.day !== moscowDate(at) || set.items.length === 0) return false;
+    if (set.status !== 'preparing' || set.items.length === 0) return false;
     if (set.items.some((item) => item.status !== 'ready' || item.materialId === null ||
       !['ready', 'active', 'passed'].includes(item.materialStatus ?? ''))) return false;
     const mismatch = db.prepare<[number], { id: number }>(
@@ -264,11 +264,11 @@ export function activateDailyTopicSet(db: Database, setId: number, at: Date = ne
     db.prepare<[string, string]>(
       `UPDATE daily_topic_sets SET status = 'cancelled', cancelled_at = ?
         WHERE day = ? AND status = 'active'`,
-    ).run(at.toISOString(), set.day);
-    db.prepare<[string, number]>(
-      `UPDATE daily_topic_sets SET status = 'active', activated_at = ?
+    ).run(at.toISOString(), moscowDate(at));
+    db.prepare<[string, string, number]>(
+      `UPDATE daily_topic_sets SET status = 'active', day = ?, activated_at = ?
         WHERE id = ? AND status = 'preparing'`,
-    ).run(at.toISOString(), setId);
+    ).run(moscowDate(at), at.toISOString(), setId);
     db.prepare<[number]>(
       `UPDATE personal_topics SET active = 1
         WHERE id IN (SELECT topic_id FROM daily_topic_items WHERE set_id = ?)`,

@@ -31,14 +31,25 @@ function FirstMistakes({ childId, runId }: { childId: string; runId: number }) {
 
 function SetStatus({ set, courses, childId }: { set: DailyTopicSet; courses: FamilyCourse[]; childId: string }) {
   const passed = set.items.filter((item) => item.materialStatus === 'passed').length;
+  const ready = set.items.filter((item) => item.status === 'ready').length;
   return <div className="daily-topic-set">
-    <strong>{set.status === 'active' ? 'Действует сегодня' : 'Готовится замена'} · {passed}/{set.items.length} зачтено</strong>
+    <strong>{set.status === 'active' ? `Действует сегодня · ${passed}/${set.items.length} зачтено`
+      : `Готовим темы · ${ready} из ${set.items.length} готово`}</strong>
+    {set.status === 'preparing' && <>
+      <progress value={ready} max={set.items.length} aria-label="Подготовка тем" />
+      <p className="daily-topic-progress" aria-live="polite">
+        {set.items.some((item) => item.status === 'error')
+          ? 'Некоторые темы не подготовились. Повторите ошибки после проверки списка.'
+          : 'Набор включится сразу после подготовки всех разборов и тестов.'}
+      </p>
+    </>}
     <p className="daily-topic-source">Исходный список: {set.sourceText}</p>
     <ol>{set.items.map((item) => <li key={item.id}>
       <span>{courses.find((course) => course.courseId === item.subject)?.title ?? item.subjectTitle} · {item.title}</span>
       <small>{item.materialStatus === 'passed' ? 'Зачтено'
         : item.status === 'error' ? `Ошибка: ${item.lastError ?? 'подготовка не удалась'}`
-          : item.status === 'ready' ? 'Готово' : 'Готовится'}
+          : item.status === 'ready' ? 'Готово'
+            : item.materialId === null ? 'Ожидает подготовки' : 'Создаём разбор и тест'}
       {item.firstTotal !== null && ` · первая попытка ${item.firstScore}/${item.firstTotal}`}</small>
       {item.firstRunId !== null && <FirstMistakes childId={childId} runId={item.firstRunId} />}
     </li>)}</ol>
@@ -58,7 +69,8 @@ export function ChildDailyTopics({
   const [state, setState] = useState<DailyTopicState | null>(null);
   const [text, setText] = useState('');
   const [preview, setPreview] = useState<DailyTopicInput[] | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState<'preview' | 'confirm' | 'retry' | 'cancel' | null>(null);
+  const busy = busyAction !== null;
   const [problem, setProblem] = useState<string | null>(null);
 
   useEffect(() => {
@@ -72,21 +84,21 @@ export function ChildDailyTopics({
       });
     };
     refresh();
-    const timer = window.setInterval(refresh, 10_000);
+    const timer = window.setInterval(refresh, state?.preparing === null || state?.preparing === undefined ? 10_000 : 1_000);
     return () => { current = false; window.clearInterval(timer); };
-  }, [api, childId, open]);
+  }, [api, childId, open, state?.preparing?.id]);
 
   async function inspect(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (busy) return;
-    setBusy(true);
+    setBusyAction('preview');
     setProblem(null);
     try {
       setPreview(await api.preview(childId, text));
     } catch (error) {
       setProblem(error instanceof Error ? error.message : 'Не получилось разобрать темы');
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   }
 
@@ -96,7 +108,7 @@ export function ChildDailyTopics({
 
   async function confirm(): Promise<void> {
     if (busy || preview === null) return;
-    setBusy(true);
+    setBusyAction('confirm');
     setProblem(null);
     try {
       await api.confirm(childId, text, crypto.randomUUID(), preview);
@@ -105,27 +117,27 @@ export function ChildDailyTopics({
     } catch (error) {
       setProblem(error instanceof Error ? error.message : 'Не получилось назначить темы');
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   }
 
   async function act(kind: 'retry' | 'cancel'): Promise<void> {
     if (busy) return;
-    setBusy(true);
+    setBusyAction(kind);
     setProblem(null);
     try {
       setState(kind === 'retry' ? await api.retry(childId) : await api.cancel(childId));
     } catch (error) {
       setProblem(error instanceof Error ? error.message : 'Не получилось изменить назначение');
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   }
 
   return <details className="family-daily-topics" onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary>Темы из школы на сегодня</summary>
     <p>Вставьте темы по одной на строку. Для каждой подготовим разбор и тест; доступ откроется после зачёта всех тем.</p>
-    <p>Большой список может готовиться долго. После полуночи по Москве назначение сегодня не включится.</p>
+    <p>Подготовка начнётся сразу. Здесь будет виден прогресс по каждой теме; если наступит новый день по Москве, готовый набор включится в новом дне.</p>
     {state?.active !== null && state?.active !== undefined && <SetStatus set={state.active} courses={courses} childId={childId} />}
     {state?.preparing !== null && state?.preparing !== undefined && <SetStatus set={state.preparing} courses={courses} childId={childId} />}
     {state?.preparing?.items.some((item) => item.status === 'error') &&
@@ -136,7 +148,7 @@ export function ChildDailyTopics({
       <label htmlFor={`daily-topic-text-${childId}`}>Список тем</label>
       <textarea id={`daily-topic-text-${childId}`} value={text}
         onChange={(event) => { setText(event.target.value); setPreview(null); }} rows={5} />
-      <button type="submit" disabled={busy || text.trim() === ''}>{busy ? 'Разбираю…' : 'Разобрать список'}</button>
+      <button type="submit" disabled={busy || text.trim() === ''}>{busyAction === 'preview' ? 'Разбираю…' : 'Разобрать список'}</button>
     </form>
     {preview !== null && <section className="daily-topic-preview" aria-label="Проверка тем">
       <h4>Проверьте темы и предметы</h4>
@@ -172,7 +184,9 @@ export function ChildDailyTopics({
               </select>
             </label>}
       </li>)}</ol>
-      <button type="button" disabled={busy} onClick={() => void confirm()}>Назначить все темы</button>
+      <button type="button" disabled={busy} onClick={() => void confirm()}>
+        {busyAction === 'confirm' ? 'Запускаю подготовку…' : 'Назначить все темы'}
+      </button>
     </section>}
     {problem !== null && <p className="auth-message error" role="alert">{problem}</p>}
   </details>;

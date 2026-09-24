@@ -59,7 +59,11 @@ export async function prepareDailyTopics(options: PrepareDailyTopicsOptions): Pr
   const budget = options.budget ?? codexConcurrency;
   const profile = readProfile(options.db);
   const states = readTopicStates(options.db);
+  const stillPreparing = options.db.prepare<[number], { id: number }>(
+    "SELECT id FROM daily_topic_sets WHERE id = ? AND status = 'preparing'",
+  );
   for (const item of pending.items) {
+    if (stillPreparing.get(pending.id) === undefined) return;
     if (item.status !== 'preparing') continue;
     const currentRevision = options.graph.courses.get(item.subject)?.revisionId ?? null;
     if (currentRevision !== item.courseRevisionId) {
@@ -105,6 +109,10 @@ export async function prepareDailyTopics(options: PrepareDailyTopicsOptions): Pr
         previousApproaches: [],
         recent: recentQuestions(options.db, topic.id, undefined, revision),
       }));
+      if (stillPreparing.get(pending.id) === undefined) {
+        rejectLearningMaterial(options.db, claim.materialId, { now: options.now?.() ?? new Date() });
+        return;
+      }
       const published = reserveLearningTasks(
         options.db,
         claim.materialId,

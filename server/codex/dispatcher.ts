@@ -107,6 +107,8 @@ export interface WarmupDispatcherOptions {
   budget?: CodexConcurrency;
   /** Обёртка вызова модели на ребёнка: суточная квота своя у каждого. */
   runFor?: (childId: string) => CodexRunner;
+  /** Общий с родительским маршрутом запуск подготовки, чтобы не готовить набор дважды. */
+  prepareDailyTopicsForChild?: (childId: string) => Promise<void>;
   now?: () => Date;
   log?: WorkerLog;
   /**
@@ -603,7 +605,9 @@ export class WarmupDispatcher {
       if (graph === undefined) throw new Error(`программа ребёнка ${childId} недоступна`);
       const at = this.#now();
       if (!phase.prepareBoss && dailyTopicSets(db, at).preparing !== null) {
-        await prepareDailyTopics({
+        if (this.#options.prepareDailyTopicsForChild !== undefined) {
+          await this.#options.prepareDailyTopicsForChild(childId);
+        } else await prepareDailyTopics({
           db,
           graph,
           run: settings.run ?? runCodexCli,

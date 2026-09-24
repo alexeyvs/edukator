@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,12 +20,14 @@ describe('родительский API тем на день', () => {
   let bearer: 'parent' | 'browser';
   let available: boolean;
   let modelFails: boolean;
+  const prepare = vi.fn(async () => undefined);
 
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'edukator-daily-routes-'));
     db = openDatabase(join(dir, 'child.db'));
     available = true;
     modelFails = false;
+    prepare.mockClear();
     const tenant = fakeTenant(db, { available: () => available });
     bearer = 'parent';
     app = Fastify();
@@ -38,6 +40,7 @@ describe('родительский API тем на день', () => {
       },
       control: { prepare: () => ({ run: () => undefined }) } as unknown as Database,
       now: () => at,
+      prepare,
       run: async () => {
         if (modelFails) throw new Error('Модель недоступна');
         return JSON.stringify({ items: [
@@ -58,11 +61,13 @@ describe('родительский API тем на день', () => {
       sourceText: 'Проценты', requestKey: 'request-1', items,
     } });
     expect(confirmed.statusCode).toBe(202);
+    expect(prepare).toHaveBeenCalledWith(FAKE_CHILD_ID);
     expect((await app.inject({ method: 'GET', url: base })).json().preparing.items).toHaveLength(1);
     const itemId = confirmed.json().set.items[0].id;
     db.prepare("UPDATE daily_topic_items SET status = 'error', last_error = 'Сбой' WHERE id = ?").run(itemId);
     expect((await app.inject({ method: 'POST', url: `${base}/retry` })).json().preparing.items[0].status)
       .toBe('preparing');
+    expect(prepare).toHaveBeenCalledTimes(2);
     expect((await app.inject({ method: 'DELETE', url: base })).json()).toEqual({ active: null, preparing: null });
     expect((await app.inject({ method: 'POST', url: `${base}/retry` })).statusCode).toBe(400);
   });

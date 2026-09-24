@@ -120,7 +120,7 @@ describe('родительские темы на день', () => {
     expect(dailyMaterialAllowed(db, materialId as number, at)).toBe(false);
   });
 
-  it('не включает неполный или вчерашний набор', async () => {
+  it('не включает неполный набор и переносит готовую подготовку через полночь', async () => {
     const set = confirmDailyTopics(db, graph, {
       sourceText: 'Проценты\nЛуна', requestKey: 'unfinished', items: [input('Проценты'), input('Луна', null)],
     }, at);
@@ -132,9 +132,29 @@ describe('родительские темы на день', () => {
     } });
     expect(dailyTopicSets(db, at).active).toBeNull();
     expect(dailyTopicSets(db, at).preparing?.items.map((item) => item.status)).toEqual(['ready', 'error']);
+    expect(dailyTopicSets(db, nextDay).preparing?.id).toBe(set.id);
     db.prepare("UPDATE daily_topic_items SET status = 'preparing' WHERE set_id = ? AND status = 'error'").run(set.id);
     await prepareDailyTopics({ db, graph, now: () => nextDay, producer: producer() });
     expect(activateDailyTopicSet(db, set.id, nextDay)).toBe(false);
-    expect(dailyTopicSets(db, nextDay).active).toBeNull();
+    expect(dailyTopicSets(db, nextDay).active).toMatchObject({ id: set.id, day: '2026-09-24' });
+    expect(readDailyGate(db, nextDay)).toMatchObject({ mode: 'parent_topics', required: 2, completed: 0 });
+  });
+
+  it('не публикует материал, если родитель отменил набор во время генерации', async () => {
+    confirmDailyTopics(db, graph, {
+      sourceText: 'Проценты', requestKey: 'cancel-during-prep', items: [input('Проценты')],
+    }, at);
+    let finish: (() => void) | undefined;
+    const waiting = new Promise<void>((resolve) => { finish = resolve; });
+    const preparation = prepareDailyTopics({ db, graph, now: () => at, producer: async (request) => {
+      await waiting;
+      return producer()(request);
+    } });
+    cancelDailyTopics(db, at);
+    finish?.();
+    await preparation;
+    expect(dailyTopicSets(db, at)).toEqual({ active: null, preparing: null });
+    expect(db.prepare("SELECT status FROM learning_materials WHERE daily_item_id IS NOT NULL").get())
+      .toEqual({ status: 'rejected' });
   });
 });

@@ -551,7 +551,9 @@ Family Safety-контроллером и требует заданного `EDU
   а `gate.unlocked` — эффективный итог с учётом этой команды;
 - `GET | PUT | DELETE /api/family/children/:childId/daily-topics`,
   `POST .../preview` и `POST .../retry` — родительское чтение, назначение,
-  отмена, предпросмотр и повтор подготовки тем на текущий день;
+  отмена, предпросмотр и повтор подготовки тем. Подтверждение запускает подготовку
+  сразу; `GET` отдаёт прогресс по каждому пункту. Подготовка, пересёкшая
+  московскую полночь, включает готовый набор в наступивший день;
 - `GET /api/learning/:id` → `{ id, subject, topic, recommendationReason,
   estimatedMinutes, status, content, progress }`; `content` содержит
   `introduction`, 1–3 `objectives`, 3–5 `sections` с блоками
