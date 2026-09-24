@@ -96,6 +96,7 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
         `[[ "\${http_proxy:-}" == ${JSON.stringify(proxy)} ]] || exit 51`,
         'printf \'npm %s %s\\n\' "$PWD" "$*" >> "$EDUKATOR_DEPLOY_TEST_LOG"',
         'if [[ "$1 $2 $3" == "run backup --" ]]; then',
+        '  printf \'releases-before-backup %s\\n\' "$(find "$EDUKATOR_DEPLOY_APP_ROOT/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)" >> "$EDUKATOR_DEPLOY_TEST_LOG"',
         '  mkdir -p "$5"',
         '  cp "$EDUKATOR_DATA_DIR/control.db" "$5/control.db"',
         '  cp -a "$EDUKATOR_DATA_DIR/children" "$5/children"',
@@ -157,6 +158,31 @@ describe('remote-helper деплоя', { timeout: 30_000 }, () => {
     expect(readFileSync(commandLog, 'utf8')).toContain('start edukator-test normal');
     expect(existsSync(join(root, 'data', '.maintenance'))).toBe(false);
     expect(`${result.stdout}${result.stderr}`).not.toContain('deploy-secret');
+  });
+
+  it('до снимка удаляет старые релизы, оставляет один предыдущий и три снимка', () => {
+    const oldReleaseIds = [
+      '20260818T120000Z-aaaaaaaaaaaa',
+      '20260819T120000Z-bbbbbbbbbbbb',
+      '20260820T120000Z-cccccccccccc',
+    ];
+    for (const id of oldReleaseIds) {
+      mkdirSync(join(appRoot, 'releases', `${id}-previous`), { recursive: true });
+      mkdirSync(join(root, 'home', 'deploy-backups', id), { recursive: true });
+    }
+
+    const result = deploy('ok');
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(commandLog, 'utf8')).toMatch(/releases-before-backup\s+0/u);
+    for (const id of oldReleaseIds) {
+      expect(existsSync(join(appRoot, 'releases', `${id}-previous`))).toBe(false);
+    }
+    expect(existsSync(join(appRoot, 'releases', `${releaseId}-previous`))).toBe(true);
+    expect(existsSync(join(root, 'home', 'deploy-backups', oldReleaseIds[0]!))).toBe(false);
+    expect(existsSync(join(root, 'home', 'deploy-backups', oldReleaseIds[1]!))).toBe(true);
+    expect(existsSync(join(root, 'home', 'deploy-backups', oldReleaseIds[2]!))).toBe(true);
+    expect(existsSync(join(root, 'home', 'deploy-backups', releaseId))).toBe(true);
   });
 
   it('после stop удаляет оставшийся замок остановленного процесса', () => {

@@ -11,7 +11,8 @@ app_root="${EDUKATOR_DEPLOY_APP_ROOT:-/opt/edukator}"
 service="${EDUKATOR_DEPLOY_SERVICE:-edukator}"
 env_file="${EDUKATOR_DEPLOY_ENV_FILE:-/etc/edukator/edukator.env}"
 health_url="${EDUKATOR_DEPLOY_HEALTH_URL:-http://127.0.0.1:3000/api/health}"
-keep_releases="${EDUKATOR_DEPLOY_KEEP_RELEASES:-3}"
+keep_releases="${EDUKATOR_DEPLOY_KEEP_RELEASES:-1}"
+keep_backups="${EDUKATOR_DEPLOY_KEEP_BACKUPS:-3}"
 target="${deploy_user}@${deploy_host}"
 ssh_options=(-o BatchMode=yes -o ConnectTimeout=10)
 
@@ -31,6 +32,7 @@ require_command() {
 [[ "$env_file" =~ ^/[A-Za-z0-9._/-]+$ ]] || die 'недопустимый EDUKATOR_DEPLOY_ENV_FILE'
 [[ "$health_url" =~ ^http://[A-Za-z0-9._:/-]+$ ]] || die 'health URL должен быть внутренним HTTP-адресом'
 [[ "$keep_releases" =~ ^[1-9][0-9]*$ ]] || die 'EDUKATOR_DEPLOY_KEEP_RELEASES должен быть положительным числом'
+[[ "$keep_backups" =~ ^[1-9][0-9]*$ ]] || die 'EDUKATOR_DEPLOY_KEEP_BACKUPS должен быть положительным числом'
 
 for command_name in git npm ssh scp tar; do
   require_command "$command_name"
@@ -108,7 +110,7 @@ scp "${ssh_options[@]}" "$archive" scripts/deploy-release.sh \
   "$target:$remote_dir/"
 
 ssh "${ssh_options[@]}" "$target" /bin/bash -s -- \
-  "$app_root" "$env_file" "$service" "$health_url" "$keep_releases" \
+  "$app_root" "$env_file" "$service" "$health_url" "$keep_releases" "$keep_backups" \
   "$remote_dir" "$release_id" <<'REMOTE_DEPLOY'
 set -euo pipefail
 app_root="$1"
@@ -116,14 +118,16 @@ env_file="$2"
 service="$3"
 health_url="$4"
 keep_releases="$5"
-remote_dir="$6"
-release_id="$7"
+keep_backups="$6"
+remote_dir="$7"
+release_id="$8"
 
 export EDUKATOR_DEPLOY_APP_ROOT="$app_root"
 export EDUKATOR_DEPLOY_ENV_FILE="$env_file"
 export EDUKATOR_DEPLOY_SERVICE="$service"
 export EDUKATOR_DEPLOY_HEALTH_URL="$health_url"
 export EDUKATOR_DEPLOY_KEEP_RELEASES="$keep_releases"
+export EDUKATOR_DEPLOY_KEEP_BACKUPS="$keep_backups"
 
 exec flock -n "$app_root/.deploy.lock" \
   /bin/bash "$remote_dir/deploy-release.sh" \

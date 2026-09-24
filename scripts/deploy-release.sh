@@ -8,7 +8,8 @@ app_root="${EDUKATOR_DEPLOY_APP_ROOT:-/opt/edukator}"
 env_file="${EDUKATOR_DEPLOY_ENV_FILE:-/etc/edukator/edukator.env}"
 service="${EDUKATOR_DEPLOY_SERVICE:-edukator}"
 health_url="${EDUKATOR_DEPLOY_HEALTH_URL:-http://127.0.0.1:3000/api/health}"
-keep_releases="${EDUKATOR_DEPLOY_KEEP_RELEASES:-3}"
+keep_releases="${EDUKATOR_DEPLOY_KEEP_RELEASES:-1}"
+keep_backups="${EDUKATOR_DEPLOY_KEEP_BACKUPS:-3}"
 run_user="${EDUKATOR_DEPLOY_RUN_USER:-edukator}"
 owner="${EDUKATOR_DEPLOY_OWNER:-edukator:edukator}"
 home_dir="${EDUKATOR_DEPLOY_HOME:-/var/lib/edukator}"
@@ -39,6 +40,7 @@ die() {
 app_root="${app_root%/}"
 [[ "$service" =~ ^[A-Za-z0-9_.@-]+$ ]] || die 'недопустимое имя сервиса'
 [[ "$keep_releases" =~ ^[1-9][0-9]*$ ]] || die 'число хранимых релизов должно быть положительным'
+[[ "$keep_backups" =~ ^[1-9][0-9]*$ ]] || die 'число хранимых снимков должно быть положительным'
 [[ "$health_attempts" =~ ^[1-9][0-9]*$ ]] || die 'число health-попыток должно быть положительным'
 [[ "$health_delay" =~ ^[0-9]+$ ]] || die 'пауза health-check должна быть целым числом секунд'
 [[ "$cgroup_root" == /* ]] || die 'корень cgroup должен быть абсолютным путём'
@@ -236,6 +238,29 @@ export npm_config_cache="$home_dir/.npm"
   /bin/bash -c 'cd -- "$1" && exec "$2" ci --include=dev --no-audit --no-fund' \
   _ "$stage_dir" "$npm_bin"
 
+# Текущий app станет единственным предыдущим релизом после переключения.
+# Убираем лишние старые каталоги до полного снимка данных: иначе на небольшом
+# диске сам снимок может упереться в занятое прежними node_modules место.
+prune_releases() {
+  local keep="$1" strict="${2:-1}" index release_to_remove
+  local -a old_releases=()
+  while IFS= read -r old_release; do
+    old_releases+=("$old_release")
+  done < <(
+    find "$releases_dir" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | LC_ALL=C sort -r
+  )
+  for ((index = keep; index < ${#old_releases[@]}; index += 1)); do
+    release_to_remove="$releases_dir/${old_releases[index]}"
+    if ! rm -rf -- "${release_to_remove:?}"; then
+      if [[ "$strict" == 1 ]]; then
+        die "не удалось удалить старый релиз $release_to_remove"
+      fi
+      printf 'deploy: не удалось удалить старый релиз %s\n' "$release_to_remove" >&2
+    fi
+  done
+}
+prune_releases "$((keep_releases - 1))"
+
 mkdir -p "$backup_root"
 "$chown_bin" "$owner" "$backup_root"
 # Снимок снимает ещё текущая версия приложения до начала миграций новой.
@@ -359,22 +384,13 @@ fi
 deploy_succeeded=1
 data_may_be_modified=0
 
-old_releases=()
-while IFS= read -r old_release; do
-  old_releases+=("$old_release")
-done < <(
-  find "$releases_dir" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | LC_ALL=C sort -r
-)
-for ((index = keep_releases; index < ${#old_releases[@]}; index += 1)); do
-  release_to_remove="$releases_dir/${old_releases[index]}"
-  rm -rf -- "${release_to_remove:?}" || printf 'deploy: не удалось удалить старый релиз %s\n' "$release_to_remove" >&2
-done
+prune_releases "$keep_releases" 0
 
 old_backups=()
 while IFS= read -r old_backup; do
   old_backups+=("$old_backup")
 done < <(find "$backup_root" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | LC_ALL=C sort -r)
-for ((index = keep_releases; index < ${#old_backups[@]}; index += 1)); do
+for ((index = keep_backups; index < ${#old_backups[@]}; index += 1)); do
   backup_to_remove="$backup_root/${old_backups[index]}"
   rm -rf -- "${backup_to_remove:?}" || printf 'deploy: не удалось удалить старый снимок %s\n' "$backup_to_remove" >&2
 done
